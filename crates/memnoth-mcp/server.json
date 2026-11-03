@@ -1,0 +1,137 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "_meta": {
+    "io.modelcontextprotocol.registry/publisher-provided": {
+      "//": "Profile costs are published here so a host can size the surface before installing. They are asserted against the server's own profile table by crates/memnoth-mcp/src/lib.rs::tests::registry_manifest_profile_counts_match_the_table, so this metadata cannot drift from the code.",
+      "extensions": [
+        "io.modelcontextprotocol/tasks"
+      ],
+      "profiles": {
+        "agent": {
+          "toolCount": 6,
+          "transport": "http"
+        },
+        "code": {
+          "toolCount": 23
+        },
+        "coord": {
+          "toolCount": 11
+        },
+        "full": {
+          "toolCount": 48
+        },
+        "memory": {
+          "includes": [
+            "vault_history",
+            "vault_asof",
+            "vault_contradictions",
+            "vault_top",
+            "mem_supersede",
+            "mem_forget"
+          ],
+          "toolCount": 21
+        },
+        "micro": {
+          "toolCount": 4
+        }
+      },
+      "protocolVersions": [
+        "2026-07-28",
+        "2024-11-05"
+      ],
+      "retrievalTierCost": {
+        "//": "The retrieval half of the context tax: what one query costs at each recall tier, beside the tools/list half above. Values come from crates/memnoth-mcp/src/recall_budget.rs::tier_cost_rows and cannot drift (registry_manifest_retrieval_cost_cannot_drift).",
+        "rows": [
+          {
+            "charsPerTokenJson": 4.009,
+            "charsPerTokenProse": 4.239,
+            "packTokens": 7000,
+            "recallBudget": 100,
+            "rerankCap": 300,
+            "spineMinChars": 700,
+            "tier": "low"
+          },
+          {
+            "charsPerTokenJson": 4.009,
+            "charsPerTokenProse": 4.239,
+            "packTokens": 7000,
+            "recallBudget": 300,
+            "rerankCap": 300,
+            "spineMinChars": 700,
+            "tier": "mid"
+          },
+          {
+            "charsPerTokenJson": 4.009,
+            "charsPerTokenProse": 4.239,
+            "packTokens": 7000,
+            "recallBudget": 1000,
+            "rerankCap": 300,
+            "spineMinChars": 700,
+            "tier": "high"
+          }
+        ]
+      },
+      "toolSchemaCost": {
+        "//": "Bytes of the tools/list payload each profile makes a host pay - the context tax, published instead of asserted. Every rival in this category publishes this number (1.9K / ~7K / 11.6K / 170 tokens); memnoth published none. Filled in by `cargo test -p memnoth-mcp -- --ignored regenerate_manifest_schema_cost` after a build, and a test fails if these ever drift from the shipping definitions.",
+        "bytesPerProfile": {
+          "agent": 3396,
+          "code": 15280,
+          "coord": 5772,
+          "full": 33743,
+          "memory": 17446,
+          "micro": 3199
+        }
+      },
+      "writeApproval": {
+        "//": "Bulk or identity-changing writes (mem_ingest, mem_merge, mem_supersede, mem_forget) are confirmed before they run, using multi-round-trip elicitation (SEP-2322). Elicitation is a core client capability, NOT an extension id, so it is named here rather than in `extensions`. Hosts that do not declare it are never asked and keep the old synchronous behaviour. Set MEMNOTH_MCP_WRITE_APPROVAL=off to answer without asking.",
+        "confirmedTools": [
+          "mem_ingest",
+          "mem_merge",
+          "mem_supersede",
+          "mem_forget"
+        ],
+        "requiresClientCapability": "elicitation"
+      }
+    }
+  },
+  "description": "Memory, coordination and code intelligence for coding agents. A bi-temporal knowledge-graph vault (history, as-of queries, contradiction detection), a code graph that answers a flow question with verbatim line-numbered source in one call, and first-writer-wins path claims so parallel agents stop colliding.",
+  "name": "ai.astrivya.memnoth",
+  "packages": [
+    {
+      "environmentVariables": [
+        {
+          "description": "Path to the memnoth binary when it is not on PATH. The npm package bundles the binary under vendor/<platform>-<arch>/; set this to override the bundled copy.",
+          "isRequired": false,
+          "name": "MEMNOTH_BIN"
+        },
+        {
+          "choices": [
+            "micro",
+            "memory",
+            "code",
+            "coord",
+            "full"
+          ],
+          "default": "full",
+          "description": "Tool surface to expose: micro (4 tools), memory (21), code (23), coord (11), full (48), agent (6, HTTP only). Default: full.",
+          "name": "MEMNOTH_MCP_PROFILE"
+        }
+      ],
+      "identifier": "@astrivya/mcp",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "registryType": "npm",
+      "runtimeHint": "npx",
+      "transport": {
+        "type": "stdio"
+      },
+      "version": "0.1.0-beta.1"
+    }
+  ],
+  "repository": {
+    "source": "github",
+    "url": "https://github.com/amruthjakku/memnoth"
+  },
+  "title": "Memnoth",
+  "version": "0.1.0-beta.1",
+  "websiteUrl": "https://memnoth.astrivya.ai"
+}

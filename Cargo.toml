@@ -1,0 +1,112 @@
+# memnoth — the local product: one binary for the session, the temporal vault,
+# the code graph and the MCP server.
+#
+# This manifest is both the CLI package and the workspace root. Members inherit
+# `license.workspace`, so a root without `[workspace.package]` made every crate
+# unparseable; the binary lives here (not in `crates/`) because that is the
+# layout the MCP crate's own version test reads: it resolves
+# `crates/memnoth-mcp/../../Cargo.toml` and expects a `[package] version` there.
+#
+# `crates/memnoth-mcp` was excluded because five of its path dependencies
+# (`memnoth-codegraph`, `memnoth-ingest`, `memnoth-embedding`,
+# `memnoth-harness-api`, `memnoth-transport`) were not published in this repo.
+# Those crates are now vendored (minimal viable versions) and `memnoth-mcp` is
+# back in the workspace members list.
+
+[package]
+name = "memnoth"
+version = "0.1.0-beta.1"
+edition = "2024"
+license = "Apache-2.0"
+description = "Terminal agent, bi-temporal vault, code graph and MCP server"
+repository = "https://github.com/astrivya/memnoth"
+homepage = "https://memnoth.astrivya.ai"
+default-run = "memnoth"
+
+[[bin]]
+name = "memnoth"
+path = "src/main.rs"
+
+[[bin]]
+name = "mn"
+path = "src/main.rs"
+
+[lib]
+name = "memnoth"
+path = "src/lib.rs"
+
+[dependencies]
+atty = "0.2"
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
+crossterm = "0.28"
+dirs = "6"
+memnoth-update = { path = "crates/memnoth-update" }
+ratatui = "0.29"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = [
+    "blocking",
+    "json",
+    "rustls-tls",
+    "rustls-tls-native-roots",
+] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"] }
+walkdir = "2"
+memnoth-capability = { path = "crates/memnoth-capability" }
+memnoth-context = { path = "crates/memnoth-context" }
+memnoth-coord = { path = "crates/memnoth-coord" }
+memnoth-engine = { path = "crates/memnoth-engine" }
+memnoth-mcp-client = { path = "crates/memnoth-mcp-client" }
+memnoth-sandbox = { path = "crates/memnoth-sandbox" }
+memnoth-search = { path = "crates/memnoth-search" }
+memnoth-session = { path = "crates/memnoth-session" }
+memnoth-cloud-client = { path = "crates/memnoth-cloud-client" }
+memnoth-ui = { path = "crates/memnoth-ui" }
+memnoth-auth = { path = "crates/memnoth-auth" }
+memnoth-provider-config = { path = "crates/memnoth-provider-config" }
+memnoth-skills = { path = "crates/memnoth-skills" }
+
+[dev-dependencies]
+tempfile = "3"
+
+[workspace]
+resolver = "3"
+members = [
+    "crates/memnoth-capability",
+    "crates/memnoth-codegraph",
+    "crates/memnoth-context",
+    "crates/memnoth-coord",
+    "crates/memnoth-embedding",
+    "crates/memnoth-engine",
+    "crates/memnoth-harness-api",
+    "crates/memnoth-ingest",
+    "crates/memnoth-mcp",
+    "crates/memnoth-mcp-auth",
+    "crates/memnoth-mcp-client",
+    "crates/memnoth-protocol-v2",
+    "crates/memnoth-sandbox",
+    "crates/memnoth-search",
+    "crates/memnoth-ui",
+    "crates/memnoth-update",
+    "crates/memnoth-cloud-client",
+    "crates/memnoth-command",
+    "crates/memnoth-auth",
+    "crates/memnoth-provider-config",
+    "crates/memnoth-skills",
+    "crates/memnoth-provider-registry",
+]
+default-members = ["."]
+exclude = []
+
+[workspace.package]
+license = "Apache-2.0"
+version = "0.1.0-beta.1"
+edition = "2024"
+repository = "https://github.com/astrivya/memnoth"
+homepage = "https://memnoth.astrivya.ai"

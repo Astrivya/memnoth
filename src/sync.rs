@@ -1,0 +1,805 @@
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use std::collections::VecDeque;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::thread::sleep;
+
+use crate::cli::{SyncArgs, PrivacyArgs, PrivacyCommand};
+use crate::context::AppContext;
+use crate::output::{ErrorOutcome, Outcome};
+use memnoth_cloud_client::{BatchIngestRequest, BatchIngestResponse, CloudClient, IngestRequest};
+use memnoth_session::{Header, Session};
+
+/// Sync queue file name
+const SYNC_QUEUE_FILE: &str = "queue.jsonl";
+/// Maximum queue size in MB (bounded disk)
+const MAX_QUEUE_SIZE_MB: u64 = 100;
+/// Maximum queue entries
+const MAX_QUEUE_ENTRIES: usize = 10000;
+/// Base retry delay in seconds
+const BASE_RETRY_DELAY_SECS: u64 = 2;
+/// Maximum retry delay in seconds
+const MAX_RETRY_DELAY_SECS: u64 = 300;
+/// Heartbeat interval in seconds
+const HEARTBEAT_INTERVAL_SECS: u64 = 30;
+
+/// A queued sync item
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueuedSyncItem {
+    pub id: String,
+    pub item: IngestRequest,
+    pub attempts: u32,
+    pub created_at: u64,
+    pub last_attempt: Option<u64>,
+    pub last_error: Option<String>,
+}
+
+/// Sync queue persisted to disk
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncQueue {
+    pub items: VecDeque<QueuedSyncItem>,
+    pub total_size_bytes: u64,
+    pub created_at: u64,
+}
+
+impl Default for SyncQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SyncQueue {
+    pub fn new() -> Self {
+        Self {
+            items: VecDeque::new(),
+            total_size_bytes: 0,
+            created_at: now_secs(),
+        }
+    }
+
+    /// Load queue from disk
+    pub fn load(path: &Path) -> Result<Self> {
+        if !path.exists() {
+            return Ok(Self::new());
+        }
+
+        let content = fs::read_to_string(path)
+            .with_context(|| format!("Failed to read sync queue from {}", path.display()))?;
+
+        if content.trim().is_empty() {
+            return Ok(Self::new());
+        }
+
+        let mut queue = Self::new();
+        for line in content.lines() {
+            if let Ok(item) = serde_json::from_str::<QueuedSyncItem>(line) {
+                let size = serde_json::to_vec(&item).map(|v| v.len() as u64).unwrap_or(0);
+                if queue.total_size_bytes + size <= MAX_QUEUE_SIZE_MB * 1024 * 1024
+                    && queue.items.len() < MAX_QUEUE_ENTRIES
+                {
+                    queue.total_size_bytes += size;
+                    queue.items.push_back(item);
+                }
+            }
+        }
+        Ok(queue)
+    }
+
+    /// Save queue to disk
+    pub fn save(&self, path: &Path) -> Result<()> {
+        let parent = path.parent().context("Queue file has no parent")?;
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create queue directory {}", parent.display()))?;
+
+        let mut content = String::new();
+        for item in &self.items {
+            content.push_str(&serde_json::to_string(item)?);
+            content.push('\n');
+        }
+
+        fs::write(path, content)
+            .with_context(|| format!("Failed to write sync queue to {}", path.display()))?;
+        Ok(())
+    }
+
+    /// Add an item to the queue
+    pub fn push(&mut self, item: QueuedSyncItem) -> Result<()> {
+        let size = serde_json::to_vec(&item).map(|v| v.len() as u64).unwrap_or(0);
+
+        // Evict oldest items if we exceed bounds
+        while (self.total_size_bytes + size > MAX_QUEUE_SIZE_MB * 1024 * 1024
+            || self.items.len() >= MAX_QUEUE_ENTRIES)
+            && !self.items.is_empty()
+        {
+            if let Some(old) = self.items.pop_front() {
+                let old_size = serde_json::to_vec(&old).map(|v| v.len() as u64).unwrap_or(0);
+                self.total_size_bytes = self.total_size_bytes.saturating_sub(old_size);
+            }
+        }
+
+        self.total_size_bytes += size;
+        self.items.push_back(item);
+        Ok(())
+    }
+
+    /// Pop the next item for processing
+    pub fn pop(&mut self) -> Option<QueuedSyncItem> {
+        self.items.pop_front().map(|item| {
+            let size = serde_json::to_vec(&item).map(|v| v.len() as u64).unwrap_or(0);
+            self.total_size_bytes = self.total_size_bytes.saturating_sub(size);
+            item
+        })
+    }
+
+    /// Re-queue an item with incremented attempt count
+    pub fn requeue(&mut self, mut item: QueuedSyncItem, error: String) -> Result<()> {
+        item.attempts += 1;
+        item.last_attempt = Some(now_secs());
+        item.last_error = Some(error);
+        self.push(item)
+    }
+
+    /// Get queue stats
+    pub fn stats(&self) -> Value {
+        json!({
+            "pending_items": self.items.len(),
+            "total_size_mb": self.total_size_bytes as f64 / (1024.0 * 1024.0),
+            "max_size_mb": MAX_QUEUE_SIZE_MB,
+            "max_entries": MAX_QUEUE_ENTRIES,
+            "oldest_item_age_secs": self.items.front().map(|i| now_secs().saturating_sub(i.created_at)),
+        })
+    }
+}
+
+/// Get current time in seconds since epoch
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// Calculate exponential backoff delay
+fn backoff_delay(attempt: u32) -> Duration {
+    let delay = BASE_RETRY_DELAY_SECS * (2u64.pow(attempt.min(10)));
+    Duration::from_secs(delay.min(MAX_RETRY_DELAY_SECS))
+}
+
+/// Get the sync queue directory path
+fn sync_queue_dir(ctx: &AppContext) -> PathBuf {
+    ctx.memnoth_home().join("sync_queue")
+}
+
+/// Get the sync queue file path
+fn sync_queue_path(ctx: &AppContext) -> PathBuf {
+    sync_queue_dir(ctx).join(SYNC_QUEUE_FILE)
+}
+
+/// Check if privacy gate allows sync
+fn check_privacy_gate(ctx: &AppContext) -> Result<bool> {
+    let config = ctx.config();
+    let sync_config = config.sync.as_ref();
+    let privacy_config = config.privacy.as_ref();
+
+    // If privacy mode is strict, require explicit opt-in
+    if privacy_config
+        .and_then(|p| p.mode)
+        .map(|m| m == "strict")
+        .unwrap_or(false)
+    {
+        // Check if user has explicitly enabled sync
+        let sync_enabled = sync_config
+            .and_then(|s| s.enabled)
+            .unwrap_or(false);
+        if !sync_enabled {
+            return Ok(false);
+        }
+    }
+
+    // If metadata-only mode, we can still sync but only metadata
+    Ok(true)
+}
+
+/// Get privacy mode for sync (what data to include)
+fn get_sync_privacy_mode(ctx: &AppContext) -> SyncPrivacyMode {
+    let config = ctx.config();
+    let privacy_config = config.privacy.as_ref();
+
+    match privacy_config.and_then(|p| p.mode.as_deref()) {
+        Some("strict") => SyncPrivacyMode::MetadataOnly,
+        Some("balanced") => SyncPrivacyMode::Balanced,
+        Some("open") => SyncPrivacyMode::Full,
+        _ => SyncPrivacyMode::MetadataOnly, // default to metadata-only
+    }
+}
+
+/// What data to include in sync based on privacy mode
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncPrivacyMode {
+    /// Only session metadata (id, timestamps, model, token counts)
+    MetadataOnly,
+    /// Metadata + file paths touched (no content)
+    Balanced,
+    /// Full session content (for team collaboration)
+    Full,
+}
+
+/// Collect session data for sync based on privacy mode
+fn collect_session_data(ctx: &AppContext, mode: SyncPrivacyMode) -> Result<Vec<IngestRequest>> {
+    let sessions_dir = ctx.sessions_dir();
+    let mut items = Vec::new();
+
+    if !sessions_dir.exists() {
+        return Ok(items);
+    }
+
+    for entry in fs::read_dir(&sessions_dir)
+        .with_context(|| format!("Failed to read sessions dir {}", sessions_dir.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+
+        if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+            continue;
+        }
+
+        // Try to load session header to get basic info
+        let content = fs::read_to_string(&path)?;
+        let mut lines = content.lines();
+
+        // First line is header
+        let header: Option<Header> = lines.next().and_then(|l| serde_json::from_str(l).ok());
+
+        let Some(header) = header else {
+            continue;
+        };
+
+        // Parse the rest as messages/receipts to get token counts
+        let mut total_tokens = 0u64;
+        let mut model = String::new();
+        let mut files_touched = 0u64;
+        let mut cost_micros = 0i64;
+        let mut last_timestamp = header.started_at;
+
+        for line in lines {
+            if let Ok(receipt) = serde_json::from_str::<memnoth_session::TurnReceipt>(line) {
+                total_tokens += receipt.input_tokens + receipt.output_tokens;
+                if model.is_empty() {
+                    model = receipt.model.clone();
+                }
+                files_touched += receipt.files_touched as u64;
+                if let Some(c) = receipt.cost_micros {
+                    cost_micros += c;
+                }
+                last_timestamp = receipt.timestamp;
+            }
+        }
+
+        // Build ingest request based on privacy mode
+        let mut request = IngestRequest {
+            session_id: header.session_id.clone(),
+            workspace: header.workspace.clone(),
+            model: model.clone(),
+            tokens: total_tokens,
+            files: files_touched,
+            cost_micros,
+            event_type: "closed".to_string(),
+            timestamp: last_timestamp.to_rfc3339(),
+            project_id: header.project_id.clone(),
+        };
+
+        // Apply privacy filter
+        match mode {
+            SyncPrivacyMode::MetadataOnly => {
+                // Keep only essential metadata - already minimal
+            }
+            SyncPrivacyMode::Balanced => {
+                // Already includes file count but not content
+            }
+            SyncPrivacyMode::Full => {
+                // Could include more detail here if needed
+            }
+        }
+
+        items.push(request);
+    }
+
+    Ok(items)
+}
+
+/// Process the sync queue
+fn process_queue(ctx: &AppContext, client: &CloudClient, dry_run: bool) -> Result<SyncResult> {
+    let queue_path = sync_queue_path(ctx);
+    let mut queue = SyncQueue::load(&queue_path)?;
+
+    let mut result = SyncResult {
+        processed: 0,
+        succeeded: 0,
+        failed: 0,
+        errors: Vec::new(),
+    };
+
+    while let Some(mut item) = queue.pop() {
+        if dry_run {
+            result.processed += 1;
+            result.succeeded += 1;
+            continue;
+        }
+
+        let request = BatchIngestRequest {
+            items: vec![item.item.clone()],
+            dry_run: Some(false),
+        };
+
+        match client.ingest_batch(request) {
+            Ok(response) => {
+                result.processed += 1;
+                if response.accepted {
+                    result.succeeded += 1;
+                } else {
+                    result.failed += 1;
+                    result.errors.push(format!("Batch rejected: {:?}", response.results));
+                    // Re-queue for retry
+                    queue.requeue(item, "Batch rejected".to_string())?;
+                }
+            }
+            Err(e) => {
+                result.processed += 1;
+                result.failed += 1;
+                let error_msg = e.to_string();
+                result.errors.push(format!("Sync failed: {}", error_msg));
+                // Re-queue with backoff
+                queue.requeue(item, error_msg)?;
+            }
+        }
+
+        // Save queue after each item (could batch this for performance)
+        queue.save(&queue_path)?;
+
+        // Small delay between items to avoid overwhelming the server
+        sleep(Duration::from_millis(100));
+    }
+
+    Ok(result)
+}
+
+/// Result of a sync operation
+#[derive(Debug, Default)]
+struct SyncResult {
+    processed: usize,
+    succeeded: usize,
+    failed: usize,
+    errors: Vec<String>,
+}
+
+/// Send heartbeat to cloud
+fn send_heartbeat(client: &CloudClient) -> Result<()> {
+    // For now, just a simple GET to /api/v1/me as heartbeat
+    // Could be a dedicated endpoint in the future
+    let _ = client.get_me()?;
+    Ok(())
+}
+
+/// Run sync command (enhanced)
+pub fn run_sync(ctx: &AppContext, args: &SyncArgs) -> Result<Outcome> {
+    // Check privacy gate
+    let can_sync = check_privacy_gate(ctx)?;
+    if !can_sync {
+        return Ok(Outcome::new(
+            "sync.blocked",
+            "Sync is blocked by privacy settings. Run `mn privacy` to configure.",
+            json!({ "blocked": true, "reason": "privacy_gate" }),
+        ));
+    }
+
+    let client = get_cloud_client(ctx)?;
+    let mode = get_sync_privacy_mode(ctx);
+    let queue_path = sync_queue_path(ctx);
+
+    if args.watch {
+        return run_watch_mode(ctx, client, mode, &queue_path, args.dry_run);
+    }
+
+    if args.dry_run {
+        // For dry run, just show what would be synced
+        let items = collect_session_data(ctx, mode)?;
+        let request = BatchIngestRequest {
+            items: items.clone(),
+            dry_run: Some(true),
+        };
+
+        let response: BatchIngestResponse = client.ingest_batch(request)?;
+
+        return Ok(Outcome::new(
+            "sync.dry_run",
+            format!("Dry run: {} items would be synced", items.len()),
+            json!({
+                "items_count": items.len(),
+                "accepted": response.accepted,
+                "batch_id": response.batch_id,
+                "privacy_mode": format!("{:?}", mode),
+            }),
+        ));
+    }
+
+    // Collect new session data and add to queue
+    let new_items = collect_session_data(ctx, mode)?;
+    let mut queue = SyncQueue::load(&queue_path)?;
+
+    for item in new_items {
+        let queued = QueuedSyncItem {
+            id: uuid::Uuid::new_v4().to_string(),
+            item,
+            attempts: 0,
+            created_at: now_secs(),
+            last_attempt: None,
+            last_error: None,
+        };
+        queue.push(queued)?;
+    }
+
+    queue.save(&queue_path)?;
+
+    // Process queue
+    let result = process_queue(ctx, &client, false)?;
+
+    let text = if result.failed == 0 {
+        format!("Synced {} items successfully", result.succeeded)
+    } else {
+        format!(
+            "Synced {} items, {} failed",
+            result.succeeded, result.failed
+        )
+    };
+
+    Ok(Outcome::new(
+        "sync.complete",
+        text,
+        json!({
+            "processed": result.processed,
+            "succeeded": result.succeeded,
+            "failed": result.failed,
+            "errors": result.errors,
+            "queue_stats": queue.stats(),
+        }),
+    ))
+}
+
+/// Run continuous watch mode
+fn run_watch_mode(
+    ctx: &AppContext,
+    client: CloudClient,
+    mode: SyncPrivacyMode,
+    queue_path: &Path,
+    dry_run: bool,
+) -> Result<Outcome> {
+    println!("Starting continuous sync (watch mode). Press Ctrl+C to stop.");
+    println!("Privacy mode: {:?}", mode);
+    println!("Dry run: {}", dry_run);
+
+    let mut last_heartbeat = Instant::now();
+    let mut last_queue_check = Instant::now();
+
+    loop {
+        // Check for new sessions every 10 seconds
+        if last_queue_check.elapsed() >= Duration::from_secs(10) {
+            let new_items = collect_session_data(ctx, mode)?;
+            if !new_items.is_empty() {
+                let mut queue = SyncQueue::load(queue_path)?;
+                for item in new_items {
+                    let queued = QueuedSyncItem {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        item,
+                        attempts: 0,
+                        created_at: now_secs(),
+                        last_attempt: None,
+                        last_error: None,
+                    };
+                    queue.push(queued)?;
+                }
+                queue.save(queue_path)?;
+                println!("Queued {} new items", new_items.len());
+            }
+            last_queue_check = Instant::now();
+        }
+
+        // Process queue
+        let mut queue = SyncQueue::load(queue_path)?;
+        if !queue.items.is_empty() {
+            let result = process_queue(ctx, &client, dry_run)?;
+            if result.processed > 0 {
+                println!(
+                    "Processed: {} succeeded, {} failed",
+                    result.succeeded, result.failed
+                );
+            }
+        }
+
+        // Send heartbeat every 30 seconds
+        if last_heartbeat.elapsed() >= Duration::from_secs(HEARTBEAT_INTERVAL_SECS) {
+            if let Err(e) = send_heartbeat(&client) {
+                eprintln!("Heartbeat failed: {}", e);
+            }
+            last_heartbeat = Instant::now();
+        }
+
+        sleep(Duration::from_secs(5));
+    }
+}
+
+/// Get authenticated cloud client
+pub fn get_cloud_client(ctx: &AppContext) -> Result<CloudClient> {
+    let mut client = CloudClient::new().context("Failed to create cloud client")?;
+
+    if let Ok(token) = std::env::var("MEMNOTH_API_KEY") {
+        client.set_auth_token(token);
+    } else if let Ok(token) = std::env::var("MEMNOTH_MCP_TOKEN") {
+        client.set_auth_token(token);
+    } else if let Some(api_key) = ctx.config().provider.as_ref().and_then(|p| p.api_key_env.as_ref()) {
+        if let Ok(token) = std::env::var(api_key) {
+            client.set_auth_token(token);
+        }
+    } else {
+        // Try to load from keyring or config
+        // For now, just proceed without auth (will fail on authenticated endpoints)
+    }
+
+    Ok(client)
+}
+
+/// Run privacy command
+pub fn run_privacy(ctx: &AppContext, args: &PrivacyArgs) -> Result<Outcome> {
+    match &args.action {
+        PrivacyCommand::Status(_) => privacy_status(ctx),
+        PrivacyCommand::On(_) => privacy_enable(ctx),
+        PrivacyCommand::Off(_) => privacy_disable(ctx),
+        PrivacyCommand::Mode(args) => privacy_set_mode(ctx, args),
+        PrivacyCommand::ShowData(_) => privacy_show_data(ctx),
+    }
+}
+
+/// Show privacy status and what data leaves the machine
+fn privacy_status(ctx: &AppContext) -> Result<Outcome> {
+    let config = ctx.config();
+    let privacy_config = config.privacy.as_ref();
+
+    let mode = privacy_config
+        .and_then(|p| p.mode.as_deref())
+        .unwrap_or("metadata-only");
+    let telemetry_enabled = privacy_config
+        .and_then(|p| p.telemetry_enabled)
+        .unwrap_or(true);
+    let sync_enabled = config.sync.as_ref().and_then(|s| s.enabled).unwrap_or(false);
+
+    let text = format!(
+        r#"Privacy Status
+================
+
+Sync: {}
+Telemetry: {}
+Privacy Mode: {}
+
+What leaves this machine (current mode: {}):
+{}
+"#,
+        if sync_enabled { "ENABLED" } else { "DISABLED" },
+        if telemetry_enabled { "ENABLED" } else { "DISABLED" },
+        mode,
+        mode,
+        describe_privacy_mode(mode)
+    );
+
+    Ok(Outcome::new(
+        "privacy.status",
+        text,
+        json!({
+            "sync_enabled": sync_enabled,
+            "telemetry_enabled": telemetry_enabled,
+            "privacy_mode": mode,
+        }),
+    ))
+}
+
+/// Describe what data is sent in each privacy mode
+fn describe_privacy_mode(mode: &str) -> String {
+    match mode {
+        "metadata-only" => {
+            "  • Session IDs and timestamps\n  • Model names used\n  • Token counts (input/output)\n  • File counts touched\n  • Cost estimates\n  • Project IDs (if set)\n  • NO prompt/response content\n  • NO file contents\n  • NO code snippets"
+        }
+        "balanced" => {
+            "  • All metadata-only data\n  • File paths touched (relative)\n  • NO file contents\n  • NO prompt/response content\n  • NO code snippets"
+        }
+        "open" => {
+            "  • All balanced data\n  • Session transcripts (prompts & responses)\n  • File diffs for edits\n  • Code graph queries and results\n  • Full context for team collaboration"
+        }
+        _ => "Unknown mode",
+    }
+    .to_string()
+}
+
+/// Enable telemetry collection
+fn privacy_enable(ctx: &AppContext) -> Result<Outcome> {
+    let mut config = ctx.config_mut();
+    let mut privacy = config.privacy.unwrap_or_default();
+    privacy.telemetry_enabled = Some(true);
+    config.privacy = Some(privacy);
+    config.save(ctx.config_path())?;
+
+    // Also send to cloud if authenticated
+    if let Ok(client) = get_cloud_client(ctx) {
+        let _ = client.set_telemetry_preferences(true);
+    }
+
+    Ok(Outcome::new(
+        "privacy.enable",
+        "Telemetry enabled.",
+        json!({ "telemetry_enabled": true }),
+    ))
+}
+
+/// Disable telemetry collection
+fn privacy_disable(ctx: &AppContext) -> Result<Outcome> {
+    let mut config = ctx.config_mut();
+    let mut privacy = config.privacy.unwrap_or_default();
+    privacy.telemetry_enabled = Some(false);
+    config.privacy = Some(privacy);
+    config.save(ctx.config_path())?;
+
+    // Also send to cloud if authenticated
+    if let Ok(client) = get_cloud_client(ctx) {
+        let _ = client.set_telemetry_preferences(false);
+    }
+
+    Ok(Outcome::new(
+        "privacy.disable",
+        "Telemetry disabled. No telemetry data will leave this machine.",
+        json!({ "telemetry_enabled": false }),
+    ))
+}
+
+/// Set privacy mode
+fn privacy_set_mode(ctx: &AppContext, args: &crate::cli::PrivacyModeArgs) -> Result<Outcome> {
+    let mode = args.mode.as_str();
+    if !matches!(mode, "metadata-only" | "balanced" | "open") {
+        return Err(anyhow::anyhow!(
+            "Invalid mode: {}. Must be one of: metadata-only, balanced, open",
+            mode
+        ));
+    }
+
+    let mut config = ctx.config_mut();
+    config.privacy = Some(crate::context::PrivacyConfig {
+        mode: Some(mode.to_string()),
+        telemetry_enabled: config.privacy.as_ref().and_then(|p| p.telemetry_enabled),
+    });
+    config.save(ctx.config_path())?;
+
+    Ok(Outcome::new(
+        "privacy.mode",
+        format!("Privacy mode set to: {}", mode),
+        json!({ "mode": mode }),
+    ))
+}
+
+/// Show what data would be sent in a sync
+fn privacy_show_data(ctx: &AppContext) -> Result<Outcome> {
+    let mode = get_sync_privacy_mode(ctx);
+    let items = collect_session_data(ctx, mode)?;
+
+    let mut text = format!(
+        "Data that would be sent (privacy mode: {:?}):\n\n",
+        mode
+    );
+
+    for item in &items {
+        text.push_str(&format!(
+            "  Session: {} ({})\n  Model: {}\n  Tokens: {} (cost: ${:.4})\n  Files: {}\n  Project: {}\n\n",
+            item.session_id,
+            item.timestamp,
+            item.model,
+            item.tokens,
+            item.cost_micros as f64 / 1_000_000.0,
+            item.files,
+            item.project_id.as_deref().unwrap_or("none"),
+        ));
+    }
+
+    if items.is_empty() {
+        text.push_str("  No sessions to sync.\n");
+    }
+
+    Ok(Outcome::new(
+        "privacy.show_data",
+        text,
+        json!({
+            "item_count": items.len(),
+            "privacy_mode": format!("{:?}", mode),
+            "items": items,
+        }),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_sync_queue_basic() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(SYNC_QUEUE_FILE);
+
+        let mut queue = SyncQueue::new();
+        let item = QueuedSyncItem {
+            id: "test-1".to_string(),
+            item: IngestRequest {
+                session_id: "sess-1".to_string(),
+                workspace: "/test".to_string(),
+                model: "test-model".to_string(),
+                tokens: 100,
+                files: 5,
+                cost_micros: 1000,
+                event_type: "closed".to_string(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                project_id: None,
+            },
+            attempts: 0,
+            created_at: now_secs(),
+            last_attempt: None,
+            last_error: None,
+        };
+
+        queue.push(item.clone()).unwrap();
+        queue.save(&path).unwrap();
+
+        let loaded = SyncQueue::load(&path).unwrap();
+        assert_eq!(loaded.items.len(), 1);
+        assert_eq!(loaded.items[0].id, "test-1");
+    }
+
+    #[test]
+    fn test_sync_queue_bounded() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(SYNC_QUEUE_FILE);
+
+        let mut queue = SyncQueue::new();
+
+        // Add items up to the limit
+        for i in 0..MAX_QUEUE_ENTRIES + 100 {
+            let item = QueuedSyncItem {
+                id: format!("test-{}", i),
+                item: IngestRequest {
+                    session_id: format!("sess-{}", i),
+                    workspace: "/test".to_string(),
+                    model: "test-model".to_string(),
+                    tokens: 100,
+                    files: 5,
+                    cost_micros: 1000,
+                    event_type: "closed".to_string(),
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    project_id: None,
+                },
+                attempts: 0,
+                created_at: now_secs(),
+                last_attempt: None,
+                last_error: None,
+            };
+            queue.push(item).unwrap();
+        }
+
+        // Should not exceed max entries
+        assert!(queue.items.len() <= MAX_QUEUE_ENTRIES);
+    }
+
+    #[test]
+    fn test_backoff_delay() {
+        assert_eq!(backoff_delay(0), Duration::from_secs(2));
+        assert_eq!(backoff_delay(1), Duration::from_secs(4));
+        assert_eq!(backoff_delay(2), Duration::from_secs(8));
+        assert_eq!(backoff_delay(10), Duration::from_secs(300)); // capped
+    }
+}

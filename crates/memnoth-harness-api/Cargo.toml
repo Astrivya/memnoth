@@ -1,0 +1,12 @@
+[package]
+name = "memnoth-harness-api"
+version = "0.1.0-beta.1"
+edition = "2024"
+license = "Apache-2.0"
+description = "Harness API protocol types for memnoth"
+repository = "https://github.com/astrivya/memnoth"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"

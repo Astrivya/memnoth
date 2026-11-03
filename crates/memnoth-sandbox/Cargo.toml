@@ -1,0 +1,26 @@
+[package]
+name = "memnoth-sandbox"
+version = "0.1.0-beta.1"
+edition = "2024"
+publish = false
+
+# Lane F (sandbox): OS-aware sandbox profiles + fail-closed deny-globs +
+# rule-language v1 + denial tracking.
+#
+# Policy engine only (no kernel enforcement in v1): it resolves profiles,
+# validates/expands deny-globs fail-closed, compiles text rules to decisions,
+# and describes per-OS backend plans. Enforcement at the tool layer uses
+# `Backend::decide` + the rule engine on every OS (including Windows).
+# Kernel backends (Landlock/bwrap, Seatbelt, Windows job objects) are phase 2.
+
+[dependencies]
+anyhow = "1"
+dunce = "1"
+globset = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+walkdir = "2"
+
+[dev-dependencies]
+tempfile = "3"

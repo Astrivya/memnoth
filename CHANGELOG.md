@@ -1,0 +1,139 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.1.0-beta.1] - 2026-11-02
+
+### Added - Core Product
+
+**Terminal Agent (`memnoth` / `mn`)**
+- One binary for session, bi-temporal vault, and code graph — local SQLite, no daemon
+- Same brain over MCP for Cursor, Claude Code, Codex, and Zed
+- Interactive TUI session with slash commands
+- Session resume by name: `memnoth --resume <name>`
+- Model provider support: Anthropic, OpenAI-compatible endpoints
+- Config-driven provider/model/endpoint with environment variable overrides
+- Every command prints transcript of tool calls (show your work)
+- JSON output mode (`--json`) for all query commands
+- Global flags: `--root`, `--vault`, `--namespace`, `--json`, `--quiet`, `--resume`
+
+### Added - Bi-Temporal Vault
+
+**Core Vault Operations**
+- `memnoth vault init` — create vault (idempotent, once per machine)
+- `memnoth vault status` — path, size, namespace, counts
+- `memnoth vault remember <name> -- <fact>` — record fact, decision, lesson, gotcha, or correction (confidence defaults to 0.9)
+- `memnoth vault recall <query>` — hybrid FTS + graph search across temporal windows
+- `memnoth vault asof --at <when>` — reconstruct beliefs at any instant (RFC 3339, date, or epoch ms)
+- `memnoth vault history <name>` — every version of one belief with close reasons
+- `memnoth vault contradictions` — explicitly revoked beliefs, both sides kept
+
+**Temporal Semantics**
+- Entities and relations carry `valid_from` / `valid_to`
+- Observations carry the date they became true
+- Correcting a belief closes old window and opens new one — nothing overwritten
+- Repeating same fact on same day is idempotent — no duplicate corroboration
+- Unknown fact kinds are refused rather than stored
+
+### Added - Code Graph (Knowledge Graph)
+
+**Indexing & Status**
+- `memnoth kg index` — incremental build/update from workspace (by file size + mtime)
+- `memnoth kg status` — what was built, when, staleness info
+- Derived artifact: deleting `.memnoth/graph.db` is always safe
+
+**Query & Impact**
+- `memnoth kg impact <symbol>` — definitions, references, tests, blast radius (1-hop)
+- `memnoth kg search <query>` — symbols by name (lexical)
+- Structural index: line/regex extraction, lexical search, textual references
+- Incremental indexing for fast subsequent runs
+
+### Added - MCP Server
+
+**Server & Profiles**
+- `memnoth mcp serve` — serve vault and graph over MCP (stdio; `--http` for loopback HTTP)
+- `memnoth mcp doctor` — registered clients, profiles, binary paths, selftest
+- `memnoth mcp add --clients cursor,codex` — write client MCP config (preserves existing)
+- `memnoth mcp call <tool> --args '{...}'` — single tool through dispatcher
+- `memnoth mcp selftest` — server's own initialize/tools/list probe
+
+**Profiles (tool subsets)**
+- `micro` (4 tools) — smallest useful set
+- `memory` (21 tools) — vault including temporal quartet
+- `code` (23 tools) — code graph + filesystem/git toolbox
+- `coord` (11 tools) — multi-agent claims, tasks, messaging
+- `full` (48 tools) — everything
+- `agent` (6 tools) — agent session management, HTTP transport only
+
+**NPM Package**: `@astrivya/mcp@0.3.0` (published with `--tag beta`)
+- Bundles the server binary via npx launcher
+- `npx -y @astrivya/mcp` — fastest way to get MCP server
+
+### Added - Diagnostics
+
+- `memnoth doctor` — complete system report: paths, stores, model, server, instructions, sandbox policy
+- Prints actual paths (not names) so moved binaries show as missing paths
+
+### Added - Architecture & Infrastructure
+
+**Single Binary Distribution**
+- Vendors 5 previously-external dependencies
+- Includes `memnoth-mcp` in workspace (no separate binary needed for CLI)
+- 5 release targets: linux-x64, linux-arm64, macos-x64, macos-arm64, windows-x64
+- Installer verifies checksums, installs `memnoth` + `mn` symlink
+- `MEMNOTH_INSTALL_BASE`, `MEMNOTH_VERSION`, `MEMNOTH_INSTALL_DIR` overrides
+
+**Telemetry (ON by default)**
+- `memnoth privacy` — toggle telemetry on/off
+- Default ON for product improvement
+- Transparent about what is collected
+
+**Configuration**
+- `~/.memnoth/config.toml` — provider, model, endpoints, cost estimates
+- Environment overrides: `MEMNOTH_API_KEY`, `MEMNOTH_PROVIDER`, `MEMNOTH_MODEL`, `MEMNOTH_PROVIDER_BASE_URL`, `MEMNOTH_MCP_TOKEN`
+- Per-machine vault (`~/.memnoth/vault.db`), per-workspace graph (`<workspace>/.memnoth/graph.db`)
+- Sessions at `~/.memnoth/sessions/*.jsonl` (append-only)
+- Namespace support for multiple vaults
+
+**Security & Sandboxing**
+- Approval-gated state changes: `vault_remember` and `edit_file` require confirmation
+- File edits: workspace-relative only, exact byte-for-byte replacement, UTF-8 only, 256 KB max
+- Deny globs for `.git/`, `.memnoth/`, and configurable patterns
+
+### Added - Library Crates (11 published)
+
+- `memnoth-engine` — temporal graph + hybrid search
+- `memnoth-session` — JSONL turn log
+- `memnoth-search` — lexical code search
+- `memnoth-coord` — multi-agent claims and tasks
+- `memnoth-context` — instructions, budgets, compaction
+- `memnoth-capability` — one tool registry for every surface
+- `memnoth-sandbox` — deny-globs and policy plans
+- `memnoth-mcp-auth` — static bearer / HS256 / RS256
+- `memnoth-mcp-client` — MCP client (stdio + HTTP)
+- `memnoth-protocol-v2` — length-prefixed framing
+- `memnoth-embedding-wasm` — ONNX inference for WASM
+
+### Changed
+
+- Product renamed from "memnoth" to **memnoth** (mn = alias only)
+- Version scheme: `memnoth` binary at `0.1.0-beta.1`, `@astrivya/mcp` at `0.3.0` (beta tag)
+- MCP server crate moved back into workspace (vendored deps)
+- All crate versions aligned to `0.1.0-beta.1` in workspace
+
+### Infrastructure
+
+- GitHub Actions CI on Linux, macOS, Windows
+- Release workflow: builds 5 targets → dist.sh bundles → GitHub Release
+- dist.sh produces: `dist/install.sh`, versioned archives + checksums, `latest/` copy, `SHA256SUMS`
+- Website serves bundle at `https://memnoth.astrivya.ai/dist`
+
+### Known Gaps (Documented)
+
+- Production codegraph (tree-sitter parsing, resolved call edges, communities, semantic search) not in this repo
+- Embeddings not built here; `kg search` stays lexical
+- MCP server was separate binary; now included via vendored deps
+- Control plane in `memnoth-cloud/` is separate and proprietary

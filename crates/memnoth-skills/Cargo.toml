@@ -1,0 +1,27 @@
+[package]
+name = "memnoth-skills"
+version = "0.1.0-beta.1"
+edition = "2024"
+publish = false
+license.workspace = true
+description = "Skill system for memnoth CLI - SKILL.md parsing, argument templating, slash command exposure"
+
+[lib]
+name = "memnoth_skills"
+path = "src/lib.rs"
+
+[dependencies]
+memnoth-command = { path = "../memnoth-command" }
+memnoth-capability = { path = "../memnoth-capability" }
+memnoth-context = { path = "../memnoth-context" }
+regex = "1"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+dirs = "6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+walkdir = "2"
+
+[dev-dependencies]
+tempfile = "3"

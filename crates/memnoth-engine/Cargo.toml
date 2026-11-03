@@ -1,0 +1,21 @@
+[package]
+name = "memnoth-engine"
+version = "0.1.0-beta.1"
+license.workspace = true
+edition = "2024"
+description = "memnoth temporal property-graph memory engine: schema v2, supersede/revoke/as-of semantics"
+
+[dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+# The temporal-window arm (R2) parses calendar forms at runtime, so this is a
+# runtime dependency, not a test one: month_bounds_ms and friends build dates
+# with it. The workspace-wide dependency sweep dropped the entry while that
+# code still needed it, which left the crate unable to compile at all.
+chrono = { version = "0.4", features = ["serde"] }
+# Hash-chained audit trail (`audit.rs`). Same versions the rest of the
+# workspace pins, so this adds no new resolution.
+sha2 = "0.10"
+hex = "0.4"
