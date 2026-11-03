@@ -25,8 +25,9 @@ pub struct PermissionsOverlay {
     mode: PermissionMode,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum PermissionMode {
+    #[default]
     Browse,
     ConfirmAllow,
     ConfirmDeny,
@@ -99,6 +100,15 @@ impl PermissionsOverlay {
             list_state: state,
             ..Default::default()
         }
+    }
+
+    /// The tab the cursor is on. `active_tab` stays an index because `Tabs`
+    /// takes one; this is where that index becomes a variant.
+    fn tab(&self) -> PermissionTab {
+        self.tabs
+            .get(self.active_tab)
+            .copied()
+            .unwrap_or(PermissionTab::Tools)
     }
 
     fn load_mock_data(&mut self) {
@@ -488,7 +498,7 @@ impl Overlay for PermissionsOverlay {
             }
             KeyCode::Down => {
                 if !self.detail_view {
-                    let len = match self.active_tab {
+                    let len = match self.tab() {
                         PermissionTab::Tools => self.tools.len(),
                         PermissionTab::Policies => self.policies.len(),
                         PermissionTab::Requests => self.requests.len(),
@@ -508,7 +518,7 @@ impl Overlay for PermissionsOverlay {
             }
             KeyCode::PageDown => {
                 if !self.detail_view {
-                    let len = match self.active_tab {
+                    let len = match self.tab() {
                         PermissionTab::Tools => self.tools.len(),
                         PermissionTab::Policies => self.policies.len(),
                         PermissionTab::Requests => self.requests.len(),
@@ -526,7 +536,7 @@ impl Overlay for PermissionsOverlay {
             }
             KeyCode::End => {
                 if !self.detail_view {
-                    let len = match self.active_tab {
+                    let len = match self.tab() {
                         PermissionTab::Tools => self.tools.len(),
                         PermissionTab::Policies => self.policies.len(),
                         PermissionTab::Requests => self.requests.len(),
@@ -539,7 +549,7 @@ impl Overlay for PermissionsOverlay {
             KeyCode::Enter => {
                 if !self.detail_view {
                     self.detail_view = true;
-                    match self.active_tab {
+                    match self.tab() {
                         PermissionTab::Tools => {
                             if let Some(t) = self.tools.get(self.selected) {
                                 self.detail_content = format!(
@@ -574,7 +584,7 @@ impl Overlay for PermissionsOverlay {
             KeyCode::Char('a') => {
                 // Allow / Approve
                 if !self.detail_view {
-                    match self.active_tab {
+                    match self.tab() {
                         PermissionTab::Tools => {
                             if let Some(t) = self.tools.get_mut(self.selected) {
                                 t.allowed = PermissionState::Allow;
@@ -597,7 +607,7 @@ impl Overlay for PermissionsOverlay {
             KeyCode::Char('d') => {
                 // Deny
                 if !self.detail_view {
-                    match self.active_tab {
+                    match self.tab() {
                         PermissionTab::Tools => {
                             if let Some(t) = self.tools.get_mut(self.selected) {
                                 t.allowed = PermissionState::Deny;
@@ -619,7 +629,7 @@ impl Overlay for PermissionsOverlay {
             }
             KeyCode::Char('k') => {
                 // Ask
-                if !self.detail_view && self.active_tab == PermissionTab::Tools {
+                if !self.detail_view && self.tab() == PermissionTab::Tools {
                     if let Some(t) = self.tools.get_mut(self.selected) {
                         t.allowed = PermissionState::Ask;
                         app.push(crate::tui::app::EntryRole::Info, format!("Set to ask: {}", t.name));
@@ -629,7 +639,7 @@ impl Overlay for PermissionsOverlay {
             KeyCode::Char('c') if ctrl => {
                 // Copy
                 if !self.detail_view {
-                    match self.active_tab {
+                    match self.tab() {
                         PermissionTab::Tools => if let Some(t) = self.tools.get(self.selected) {
                             app.push(crate::tui::app::EntryRole::Info, format!("Copied tool: {}", t.name));
                         },
@@ -645,7 +655,7 @@ impl Overlay for PermissionsOverlay {
             }
             KeyCode::Char('e') => {
                 // Enable/disable policy
-                if !self.detail_view && self.active_tab == PermissionTab::Policies {
+                if !self.detail_view && self.tab() == PermissionTab::Policies {
                     if let Some(p) = self.policies.get_mut(self.selected) {
                         p.enabled = !p.enabled;
                         app.push(crate::tui::app::EntryRole::Info, format!("Policy {}: {}", p.name, if p.enabled { "enabled" } else { "disabled" }));
@@ -700,7 +710,7 @@ impl Overlay for PermissionsOverlay {
                 .wrap(Wrap { trim: true });
             frame.render_widget(detail, chunks[1]);
         } else {
-            match self.active_tab {
+            match self.tab() {
                 PermissionTab::Tools => self.render_tools(frame, chunks[1]),
                 PermissionTab::Policies => self.render_policies(frame, chunks[1]),
                 PermissionTab::Requests => self.render_requests(frame, chunks[1]),
@@ -714,7 +724,7 @@ impl Overlay for PermissionsOverlay {
         } else if self.detail_view {
             "esc: back · c: copy"
         } else {
-            match self.active_tab {
+            match self.tab() {
                 PermissionTab::Tools => "↑↓: navigate · a: allow · d: deny · k: ask · c: copy · tab: next · esc: close",
                 PermissionTab::Policies => "↑↓: navigate · e: toggle · c: copy · tab: next · esc: close",
                 PermissionTab::Requests => "↑↓: navigate · a: approve · d: deny · c: copy · tab: next · esc: close",

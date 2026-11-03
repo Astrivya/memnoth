@@ -9,7 +9,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
 use crate::tui::app::App;
 use crate::tui::overlays::{Overlay, OverlayAction, OverlayKind};
-use memnoth_ui::diff::{DiffViewer, DiffAction, DiffConfig, parse_unified_diff};
+use memnoth_ui::diff::{DiffLine, DiffViewer, DiffAction, DiffConfig, parse_unified_diff};
 
 #[derive(Debug, Default)]
 pub struct DiffOverlay {
@@ -137,37 +137,37 @@ impl Overlay for DiffOverlay {
             KeyCode::Char('a') => {
                 // Accept current hunk
                 if let Some(action) = self.viewer.handle_action(DiffAction::Accept) {
-                    app.push(crate::tui::app::EntryRole::Info, format!("Accepted hunk: {}", action));
+                    app.push(crate::tui::app::EntryRole::Info, format!("Accepted hunk: {action:?}"));
                 }
             }
             KeyCode::Char('r') => {
                 // Reject current hunk
                 if let Some(action) = self.viewer.handle_action(DiffAction::Reject) {
-                    app.push(crate::tui::app::EntryRole::Info, format!("Rejected hunk: {}", action));
+                    app.push(crate::tui::app::EntryRole::Info, format!("Rejected hunk: {action:?}"));
                 }
             }
             KeyCode::Char('A') => {
                 // Accept all hunks
                 if let Some(action) = self.viewer.handle_action(DiffAction::AcceptAll) {
-                    app.push(crate::tui::app::EntryRole::Info, format!("Accepted all: {}", action));
+                    app.push(crate::tui::app::EntryRole::Info, format!("Accepted all: {action:?}"));
                 }
             }
             KeyCode::Char('R') => {
                 // Reject all hunks
                 if let Some(action) = self.viewer.handle_action(DiffAction::RejectAll) {
-                    app.push(crate::tui::app::EntryRole::Info, format!("Rejected all: {}", action));
+                    app.push(crate::tui::app::EntryRole::Info, format!("Rejected all: {action:?}"));
                 }
             }
             KeyCode::Char('c') if ctrl => {
                 // Copy current hunk
-                if let Some(hunk) = self.viewer.current_hunk() {
-                    app.push(crate::tui::app::EntryRole::Info, format!("Copied hunk from {}", hunk.file_path));
+                if self.viewer.current_hunk().is_some() {
+                    app.push(crate::tui::app::EntryRole::Info, format!("Copied hunk from {}", self.file_path));
                 }
             }
             KeyCode::Char('p') => {
                 // Pin current hunk
-                if let Some(hunk) = self.viewer.current_hunk() {
-                    app.push(crate::tui::app::EntryRole::Info, format!("Pinned hunk from {}", hunk.file_path));
+                if self.viewer.current_hunk().is_some() {
+                    app.push(crate::tui::app::EntryRole::Info, format!("Pinned hunk from {}", self.file_path));
                 }
             }
             KeyCode::Char('n') => {
@@ -222,9 +222,22 @@ impl Overlay for DiffOverlay {
         } else {
             &self.file_path
         };
-        let (hunk_idx, hunk_count, added, removed) = self.viewer.current_hunk().map(|h| {
-            (self.viewer.current_hunk_index() + 1, self.viewer.hunk_count(), h.added_lines, h.removed_lines)
-        }).unwrap_or((0, 0, 0, 0));
+        // A hunk carries its lines rather than running counters, so the totals
+        // shown in the header are counted from the hunk the cursor is on.
+        let hunk_index = self.viewer.current_hunk_index();
+        let hunk_count = self.viewer.hunk_count();
+        let mut added = 0;
+        let mut removed = 0;
+        if let Some(hunk) = self.viewer.current_hunk() {
+            for line in &hunk.lines {
+                match line {
+                    DiffLine::Added(_) => added += 1,
+                    DiffLine::Removed(_) => removed += 1,
+                    DiffLine::Context(_) => {}
+                }
+            }
+        }
+        let hunk_idx = hunk_index.map(|index| index + 1).unwrap_or(0);
         let hunk_info = if hunk_count > 0 {
             format!("Hunk {}/{}  (+{} -{})", hunk_idx, hunk_count, added, removed)
         } else {
@@ -244,8 +257,8 @@ impl Overlay for DiffOverlay {
         frame.render_widget(header, chunks[0]);
 
         // Diff viewer
-        let config = DiffConfig::default();
-        self.viewer.render(frame, chunks[1], &config);
+        self.viewer.set_config(DiffConfig::default());
+        self.viewer.render(frame, chunks[1]);
 
         // Help footer
         let help_text = "↑↓: hunk · ←→: scroll · a: accept · r: reject · A: accept all · R: reject all · n/N: conflict · s: side-by-side · w: whitespace · l: line nums · ?: help · esc: close";

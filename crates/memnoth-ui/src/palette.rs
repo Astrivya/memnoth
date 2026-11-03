@@ -38,7 +38,8 @@ pub struct PaletteRow {
 /// The palette widget state
 #[derive(Debug, Default)]
 pub struct Palette {
-    config: PaletteConfig,
+    /// The palette's content, exposed so an overlay can render its own chrome.
+    pub config: PaletteConfig,
     filter: String,
     selected_index: usize,
 }
@@ -62,6 +63,19 @@ impl Palette {
     pub fn set_filter(&mut self, filter: String) {
         self.filter = filter;
         self.selected_index = 0;
+    }
+
+    /// The index of the highlighted item.
+    pub fn selected_index(&self) -> usize {
+        self.selected_index
+    }
+
+    /// Move the highlight to an explicit item, clamped to the filtered list.
+    pub fn select(&mut self, index: usize) {
+        let len = self.filtered_items().len();
+        if len > 0 {
+            self.selected_index = index.min(len - 1);
+        }
     }
 
     /// Get the current filter

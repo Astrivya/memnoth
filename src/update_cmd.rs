@@ -1,27 +1,32 @@
 //! Update, install, and uninstall commands for memnoth.
 
-use anyhow::{Context, Result, anyhow, bail};
-use memnoth_update::{
-    Channel, UpdateCheckResult, UpdateConfig, apply_update, check_for_update,
-    detect_managed_install, fetch_manifest, load_cache,
-};
+use anyhow::{Result, anyhow};
+use memnoth_update::{Channel, UpdateConfig, check_for_update, detect_managed_install};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::cli::{InstallArgs, UninstallArgs, UpdateArgs, Verb};
-use crate::output::{ErrorOutcome, ExitCode, Outcome, emit};
+use crate::output::{ErrorOutcome, ExitCode, Outcome};
+
+/// Map an engine or I/O failure into the CLI's error envelope.
+///
+/// The update engine returns its own error type and the download path returns
+/// `std::io::Error`; both reach the user as the message they carry rather than
+/// collapsing into a generic failure.
+fn failure(error: impl std::fmt::Display) -> ErrorOutcome {
+    ErrorOutcome::new(ExitCode::Unexpected, error.to_string())
+}
 
 /// Execute update verb.
 pub fn execute_update(
     ctx: &crate::context::AppContext,
     args: &UpdateArgs,
 ) -> Result<Outcome, ErrorOutcome> {
-    let channel = if let Some(ref c) = args.channel {
-        Channel::parse(c).map_err(|e| ErrorOutcome::usage(&e.to_string()))?
-    } else {
-        Channel::Stable
+    let channel = match args.channel.as_deref() {
+        Some(name) => Channel::parse(name).map_err(|e| ErrorOutcome::usage(e.to_string()))?,
+        None => Channel::Stable,
     };
 
     let current_version = env!("CARGO_PKG_VERSION");
@@ -35,7 +40,7 @@ pub fn execute_update(
         return check_update(&config);
     }
 
-    if let Some(ref version) = args.version {
+    if let Some(version) = args.version.as_deref() {
         return install_specific_version(&config, version, args.no_verify);
     }
 
@@ -52,7 +57,7 @@ pub fn execute_update(
                 )))
             }
         }
-        Err(e) => Err(ErrorOutcome::from_anyhow(&e)),
+        Err(e) => Err(failure(e)),
     }
 }
 
@@ -102,11 +107,11 @@ pub fn execute_uninstall(
     ctx: &crate::context::AppContext,
     args: &UninstallArgs,
 ) -> Result<Outcome, ErrorOutcome> {
-    let current_exe = env::current_exe().map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+    let current_exe = env::current_exe().map_err(|e| failure(e))?;
 
     // Check for managed install
     if let Some(manager) = detect_managed_install() {
-        return Err(ErrorOutcome::usage(&format!(
+        return Err(ErrorOutcome::usage(format!(
             "memnoth is managed by {}. Use {} to uninstall.",
             manager, manager
         )));
@@ -123,11 +128,11 @@ pub fn execute_uninstall(
 
     let mut removed = Vec::new();
     if memnoth_bin.exists() {
-        fs::remove_file(&memnoth_bin).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+        fs::remove_file(&memnoth_bin).map_err(|e| failure(e))?;
         removed.push("memnoth");
     }
     if mn_bin.exists() {
-        fs::remove_file(&mn_bin).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+        fs::remove_file(&mn_bin).map_err(|e| failure(e))?;
         removed.push("mn");
     }
 
@@ -139,7 +144,7 @@ pub fn execute_uninstall(
 
         if let Some(state_dir) = state_dir {
             if state_dir.exists() {
-                fs::remove_dir_all(&state_dir).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                fs::remove_dir_all(&state_dir).map_err(|e| failure(e))?;
                 removed.push("state directory");
             }
         }
@@ -150,7 +155,7 @@ pub fn execute_uninstall(
 
         if let Some(config_dir) = config_dir {
             if config_dir.exists() {
-                fs::remove_dir_all(&config_dir).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                fs::remove_dir_all(&config_dir).map_err(|e| failure(e))?;
                 removed.push("config directory");
             }
         }
@@ -184,7 +189,7 @@ fn check_update(config: &UpdateConfig) -> Result<Outcome, ErrorOutcome> {
                 )))
             }
         }
-        Err(e) => Err(ErrorOutcome::from_anyhow(&e)),
+        Err(e) => Err(failure(e)),
     }
 }
 
@@ -203,12 +208,12 @@ fn install_specific_version(
     let manifest_url = format!("{}/manifest.json", dist_url);
 
     let manifest: memnoth_update::Manifest = reqwest::blocking::get(&manifest_url)
-        .map_err(|e| ErrorOutcome::from_anyhow(&anyhow!("Failed to fetch manifest: {}", e)))?
+        .map_err(|e| failure(anyhow!("Failed to fetch manifest: {}", e)))?
         .json()
-        .map_err(|e| ErrorOutcome::from_anyhow(&anyhow!("Failed to parse manifest: {}", e)))?;
+        .map_err(|e| failure(anyhow!("Failed to parse manifest: {}", e)))?;
 
     if manifest.version != version {
-        return Err(ErrorOutcome::usage(&format!(
+        return Err(ErrorOutcome::usage(format!(
             "Version mismatch: manifest has {}, requested {}",
             manifest.version, version
         )));
@@ -228,14 +233,14 @@ fn apply_update_with_config(
     // Check for managed install
     if let Some(manager) = detect_managed_install() {
         if !no_verify {
-            return Err(ErrorOutcome::usage(&format!(
+            return Err(ErrorOutcome::usage(format!(
                 "memnoth is managed by {}. Use {} to update, or pass --no-verify to override.",
                 manager, manager
             )));
         }
     }
 
-    let current_exe = env::current_exe().map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+    let current_exe = env::current_exe().map_err(|e| failure(e))?;
 
     // Find matching target for current platform
     let target_triple = format!("{}-{}", env::consts::ARCH, env::consts::OS);
@@ -244,7 +249,7 @@ fn apply_update_with_config(
         .iter()
         .find(|t| t.triple == target_triple)
         .ok_or_else(|| {
-            ErrorOutcome::usage(&format!(
+            ErrorOutcome::usage(format!(
                 "No release artifact for target: {}",
                 target_triple
             ))
@@ -263,13 +268,13 @@ fn apply_update_with_config(
     // Download with progress
     println!("Downloading {}...", download_url);
     download_file_with_progress(&download_url, &temp_exe)
-        .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+        .map_err(|e| failure(e))?;
 
     // Verify checksum unless --no-verify
     if !no_verify {
         println!("Verifying checksum...");
         memnoth_update::verify_checksum(&temp_exe, &manifest.checksums.sha256)
-            .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+            .map_err(|e| failure(e))?;
         println!("Checksum OK");
     } else {
         println!("WARNING: Skipping verification (--no-verify)");
@@ -278,13 +283,13 @@ fn apply_update_with_config(
     // Atomic swap
     println!("Applying update...");
     memnoth_update::atomic_swap(&current_exe, &temp_exe)
-        .map_err(|e| ErrorOutcome::from_anyhow(&anyhow!("Update failed: {}", e)))?;
+        .map_err(|e| failure(anyhow!("Update failed: {}", e)))?;
 
     // Verify the new binary runs
     let new_version_output = Command::new(&current_exe)
         .arg("--version")
         .output()
-        .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+        .map_err(|e| failure(e))?;
 
     let version_str = String::from_utf8_lossy(&new_version_output.stdout)
         .trim()

@@ -20,8 +20,10 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 /// What a verb produced.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Outcome {
+    /// Process exit code this outcome should produce.
+    pub exit_code: u8,
     /// Dotted command name (`vault.asof`), stable enough to branch on.
     pub command: &'static str,
     /// For a person.
@@ -35,8 +37,20 @@ impl Outcome {
     pub fn new(command: &'static str, text: impl Into<String>, data: Value) -> Self {
         Self {
             command,
+            exit_code: 0,
             text: text.into(),
             data,
+        }
+    }
+
+    /// Build an outcome that is prose only. The envelope still carries a
+    /// command name, so a caller parsing it never sees a missing field.
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            command: "memnoth",
+            exit_code: 0,
+            text: text.into(),
+            data: json!({}),
         }
     }
 
@@ -46,6 +60,7 @@ impl Outcome {
         let data = json!({ "text": text });
         Self {
             command,
+            exit_code: 0,
             text,
             data,
         }
@@ -165,6 +180,26 @@ impl ErrorOutcome {
     /// Create cancelled error.
     pub fn cancelled(message: impl Into<String>) -> Self {
         Self::new(ExitCode::Cancelled, message)
+    }
+}
+
+impl std::fmt::Display for ErrorOutcome {
+    /// The three-part failure a person reads: what failed, why, and the fix.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "memnoth: {}", self.message)?;
+        if let Some(cause) = &self.cause {
+            write!(f, "
+  cause: {cause}")?;
+        }
+        if let Some(fix) = &self.fix {
+            write!(f, "
+  fix: {fix}")?;
+        }
+        if let Some(docs) = &self.docs_url {
+            write!(f, "
+  docs: {docs}")?;
+        }
+        Ok(())
     }
 }
 
@@ -338,7 +373,7 @@ pub fn human_count(value: usize) -> String {
     if value < 1_000 {
         return value.to_string();
     }
-    let units = ["k", "M", "B", "T"];
+    let units = ["", "k", "M", "B", "T"];
     let mut v = value as f64;
     let mut i = 0;
     while v >= 1_000.0 && i < units.len() - 1 {

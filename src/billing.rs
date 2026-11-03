@@ -9,18 +9,30 @@ use memnoth_cloud_client::{BillingResponse, CloudClient, CreditsResponse};
 
 /// Execute billing-related commands.
 pub fn run(ctx: &AppContext, args: &crate::cli::BillingCommands) -> Result<Outcome> {
-    match args {
-        crate::cli::BillingCommands::Invoices(_) => invoices(ctx),
-        crate::cli::BillingCommands::Plan(_) => plan(ctx),
-        crate::cli::BillingCommands::Limits(_) => limits(ctx),
+    match &args.action {
+        crate::cli::BillingCommand::Invoices(_) => invoices(ctx),
+        crate::cli::BillingCommand::Plan(_) => plan(ctx),
+        crate::cli::BillingCommand::Limits(_) => limits(ctx),
     }
+}
+
+/// Micros to whole currency units. The cloud bills in millionths, so every
+/// human-facing number goes through here rather than being printed raw.
+fn units(micros: i64) -> f64 {
+    micros as f64 / 1_000_000.0
+}
+
+/// Micros per million tokens to "per million" money.
+fn per_million(micros: i64) -> String {
+    format!("${:.2}", units(micros))
 }
 
 /// `mn invoices` — show billing history / invoices link.
 fn invoices(ctx: &AppContext) -> Result<Outcome> {
     let client = get_cloud_client(ctx)?;
 
-    // Try to get billing info which includes invoice data
+    // Billing carries the credit balance and the price list; invoices
+    // themselves live on the web console.
     let billing = client.billing().ok();
 
     let text = if let Some(b) = &billing {
@@ -45,28 +57,52 @@ fn render_invoices(billing: &BillingResponse) -> String {
     out.push_str("Billing & Invoices\n");
     out.push_str("==================\n\n");
 
-    out.push_str(&format!("Current Balance: ${:.2}\n", billing.credits.balance));
-    out.push_str(&format!("Total Granted: ${:.2}\n", billing.credits.total_granted));
-    out.push_str(&format!("Total Consumed: ${:.2}\n", billing.credits.total_consumed));
-
-    if !billing.credits.grants.is_empty() {
-        out.push_str("\nCredit Grants:\n");
-        for grant in &billing.credits.grants {
-            out.push_str(&format!(
-                "  • ${:.2} — {} (expires: {})\n",
-                grant.amount_usd,
-                grant.description,
-                grant.expires_at.map(|d| d.to_string()).unwrap_or_else(|| "never".to_string())
-            ));
+    let credits = &billing.credits;
+    out.push_str(&format!(
+        "Current Balance: {} {:.2}\n",
+        credits.currency,
+        units(credits.balance_micros)
+    ));
+    out.push_str(&format!(
+        "Auto-recharge: {}\n",
+        if credits.auto_recharge {
+            "enabled"
+        } else {
+            "disabled"
         }
+    ));
+    if let Some(threshold) = credits.recharge_threshold_micros {
+        out.push_str(&format!(
+            "  Threshold: {} {:.2}\n",
+            credits.currency,
+            units(threshold)
+        ));
+    }
+    if let Some(amount) = credits.recharge_amount_micros {
+        out.push_str(&format!(
+            "  Top-up: {} {:.2}\n",
+            credits.currency,
+            units(amount)
+        ));
+    }
+    if let Some(date) = &credits.next_billing_date {
+        out.push_str(&format!("Next billing date: {date}\n"));
     }
 
-    if !billing.credits.expiring.is_empty() {
-        out.push_str("\nExpiring Soon:\n");
-        for exp in &billing.credits.expiring {
+    if !billing.pricing.models.is_empty() {
+        out.push_str("\nPriced models:\n");
+        for pricing in billing.pricing.models.iter().take(10) {
             out.push_str(&format!(
-                "  • ${:.2} expires {}\n",
-                exp.amount_usd, exp.expires_at
+                "  • {} — {} in / {} out per 1M tokens\n",
+                pricing.model_id,
+                per_million(pricing.input_price_per_million_micros),
+                per_million(pricing.output_price_per_million_micros)
+            ));
+        }
+        if billing.pricing.models.len() > 10 {
+            out.push_str(&format!(
+                "  ... and {} more\n",
+                billing.pricing.models.len() - 10
             ));
         }
     }
@@ -87,18 +123,19 @@ fn plan(ctx: &AppContext) -> Result<Outcome> {
     let credits = client.credits().ok();
     let billing = client.billing().ok();
 
-    let text = if let (Some(c), Some(b)) = (credits, billing) {
-        render_plan(&c, &b)
+    let text = if let (Some(c), Some(b)) = (&credits, &billing) {
+        render_plan(c, b)
     } else {
         render_plan_unavailable()
     };
 
     let data = json!({
-        "plan": credits.map(|c| json!({
-            "balance": c.balance,
-            "total_granted": c.total_granted,
+        "plan": credits.as_ref().map(|c| json!({
+            "balance_micros": c.balance_micros,
+            "currency": c.currency,
+            "auto_recharge": c.auto_recharge,
         })),
-        "quotas": billing.map(|b| json!({
+        "quotas": billing.as_ref().map(|b| json!({
             "models": b.pricing.models.len(),
         })),
     });
@@ -111,19 +148,29 @@ fn render_plan(credits: &CreditsResponse, billing: &BillingResponse) -> String {
     out.push_str("Current Plan\n");
     out.push_str("============\n\n");
 
-    // Determine plan tier from credits
-    let plan_name = if credits.balance >= 100.0 {
+    // Determine plan tier from the balance
+    let balance = units(credits.balance_micros);
+    let plan_name = if balance >= 100.0 {
         "Pro"
-    } else if credits.balance > 0.0 {
+    } else if balance > 0.0 {
         "Starter"
     } else {
         "Free"
     };
 
-    out.push_str(&format!("Plan: {}\n", plan_name));
-    out.push_str(&format!("Balance: ${:.2}\n", credits.balance));
-    out.push_str(&format!("Total Granted: ${:.2}\n", credits.total_granted));
-    out.push_str(&format!("Total Consumed: ${:.2}\n", credits.total_consumed));
+    out.push_str(&format!("Plan: {plan_name}\n"));
+    out.push_str(&format!(
+        "Balance: {} {:.2}\n",
+        credits.currency, balance
+    ));
+    out.push_str(&format!(
+        "Auto-recharge: {}\n",
+        if credits.auto_recharge {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    ));
 
     out.push_str("\nQuotas:\n");
     out.push_str("  • Models available: unlimited\n");
@@ -137,15 +184,18 @@ fn render_plan(credits: &CreditsResponse, billing: &BillingResponse) -> String {
     out.push_str("\nModel Pricing (sample):\n");
     for (i, pricing) in billing.pricing.models.iter().take(5).enumerate() {
         out.push_str(&format!(
-            "  {}. {} — ${:.4}/1K in, ${:.4}/1K out\n",
+            "  {}. {} — {} in, {} out (per 1M)\n",
             i + 1,
             pricing.model_id,
-            pricing.input_per_1k_tokens,
-            pricing.output_per_1k_tokens
+            per_million(pricing.input_price_per_million_micros),
+            per_million(pricing.output_price_per_million_micros)
         ));
     }
     if billing.pricing.models.len() > 5 {
-        out.push_str(&format!("  ... and {} more\n", billing.pricing.models.len() - 5));
+        out.push_str(&format!(
+            "  ... and {} more\n",
+            billing.pricing.models.len() - 5
+        ));
     }
 
     out
@@ -162,8 +212,8 @@ fn limits(ctx: &AppContext) -> Result<Outcome> {
     let credits = client.credits().ok();
     let billing = client.billing().ok();
 
-    let text = if let (Some(c), Some(b)) = (credits, billing) {
-        render_limits(&c, &b)
+    let text = if let (Some(c), Some(b)) = (&credits, &billing) {
+        render_limits(c, b)
     } else {
         render_limits_unavailable()
     };
@@ -203,10 +253,17 @@ fn render_limits(credits: &CreditsResponse, billing: &BillingResponse) -> String
     out.push_str("  • Session history: 1,000 turns\n\n");
 
     out.push_str("Model Access:\n");
-    out.push_str(&format!("  • Available models: {}\n", billing.pricing.models.len()));
+    out.push_str(&format!(
+        "  • Available models: {}\n",
+        billing.pricing.models.len()
+    ));
     out.push_str("  • Custom models: not available\n\n");
 
-    out.push_str(&format!("Current Balance: ${:.2}\n", credits.balance));
+    out.push_str(&format!(
+        "Current Balance: {} {:.2}\n",
+        credits.currency,
+        units(credits.balance_micros)
+    ));
     out.push_str("Monitor usage: `mn usage`\n");
 
     out

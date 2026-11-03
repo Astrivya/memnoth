@@ -330,12 +330,19 @@ fn format_number(n: i64) -> String {
     }
 }
 
+/// Truncate to `max` display columns, ending in `…` when it had to cut.
+///
+/// The ellipsis is inside the budget, so a truncated value never overflows the
+/// column it is drawn in, and cutting on a character boundary cannot panic on
+/// multi-byte text.
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}…", &s[..max - 1])
+    if s.chars().count() <= max {
+        return s.to_string();
     }
+    let keep = max.saturating_sub(1);
+    let mut out: String = s.chars().take(keep).collect();
+    out.push('…');
+    out
 }
 
 #[cfg(test)]
@@ -352,6 +359,6 @@ mod tests {
     #[test]
     fn test_truncate() {
         assert_eq!(truncate("short", 10), "short");
-        assert_eq!(truncate("very long string", 10), "very long …");
+        assert_eq!(truncate("very long string", 10), "very long…");
     }
 }

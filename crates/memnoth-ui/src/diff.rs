@@ -86,6 +86,14 @@ pub struct DiffViewer {
     state: ListState,
     scroll_offset: u16,
     decided_count: usize,
+    /// Side-by-side layout requested by the viewer.
+    side_by_side: bool,
+    /// Hide differences that are whitespace only.
+    ignore_whitespace: bool,
+    /// Line numbers beside each line.
+    show_line_numbers: bool,
+    /// Horizontal scroll, in columns.
+    scroll_x: u16,
 }
 
 impl DiffViewer {
@@ -172,6 +180,132 @@ impl DiffViewer {
 
     pub fn selected_hunk_mut(&mut self) -> Option<&mut DiffHunk> {
         self.state.selected().and_then(|i| self.hunks.get_mut(i))
+    }
+
+    /// The hunk the cursor is on.
+    pub fn current_hunk(&self) -> Option<&DiffHunk> {
+        self.selected_hunk()
+    }
+
+    /// Index of the hunk the cursor is on.
+    pub fn current_hunk_index(&self) -> Option<usize> {
+        self.state.selected()
+    }
+
+    /// Move to the next hunk.
+    pub fn next_hunk(&mut self) {
+        self.select_next();
+    }
+
+    /// Move to the previous hunk.
+    pub fn previous_hunk(&mut self) {
+        self.select_previous();
+    }
+
+    /// Jump to the first hunk.
+    pub fn select_first_hunk(&mut self) {
+        if !self.hunks.is_empty() {
+            self.state.select(Some(0));
+        }
+    }
+
+    /// Jump to the last hunk.
+    pub fn select_last_hunk(&mut self) {
+        if !self.hunks.is_empty() {
+            self.state.select(Some(self.hunks.len() - 1));
+        }
+    }
+
+    /// Whether a hunk still carries conflict markers.
+    fn is_conflict(hunk: &DiffHunk) -> bool {
+        hunk.lines.iter().any(|line| {
+            let text = match line {
+                DiffLine::Context(t) | DiffLine::Removed(t) | DiffLine::Added(t) => t,
+            };
+            text.starts_with("<<<<<<<")
+                || text.starts_with("=======")
+                || text.starts_with(">>>>>>>")
+        })
+    }
+
+    /// Next hunk containing conflict markers.
+    pub fn next_conflict(&mut self) {
+        let start = self.state.selected().map(|s| s + 1).unwrap_or(0);
+        if let Some(offset) = self.hunks[start..]
+            .iter()
+            .position(Self::is_conflict)
+        {
+            self.state.select(Some(start + offset));
+        }
+    }
+
+    /// Previous hunk containing conflict markers.
+    pub fn previous_conflict(&mut self) {
+        let end = self.state.selected().unwrap_or(self.hunks.len());
+        if let Some(offset) = self.hunks[..end].iter().rposition(Self::is_conflict) {
+            self.state.select(Some(offset));
+        }
+    }
+
+    /// Toggle side-by-side rendering.
+    pub fn toggle_side_by_side(&mut self) {
+        self.side_by_side = !self.side_by_side;
+    }
+
+    /// Toggle whitespace-only differences.
+    pub fn toggle_whitespace(&mut self) {
+        self.ignore_whitespace = !self.ignore_whitespace;
+    }
+
+    /// Toggle line numbers.
+    pub fn toggle_line_numbers(&mut self) {
+        self.show_line_numbers = !self.show_line_numbers;
+    }
+
+    /// Scroll the diff body left.
+    pub fn scroll_left(&mut self) {
+        self.scroll_x = self.scroll_x.saturating_sub(4);
+    }
+
+    /// Scroll the diff body right.
+    pub fn scroll_right(&mut self) {
+        self.scroll_x = self.scroll_x.saturating_add(4);
+    }
+
+    /// Apply a viewer action and report the action it produced, if any.
+    ///
+    /// This is the single entry point the diff overlay drives; it keeps the
+    /// overlay free of the decide-then-report bookkeeping.
+    pub fn handle_action(&mut self, action: DiffAction) -> Option<DiffAction> {
+        match action {
+            DiffAction::Accept => {
+                self.accept_current();
+                Some(DiffAction::AcceptedCurrent)
+            }
+            DiffAction::Reject => {
+                self.reject_current();
+                Some(DiffAction::RejectedCurrent)
+            }
+            DiffAction::AcceptAll => {
+                for hunk in self.hunks.iter_mut() {
+                    if !hunk.is_decided() {
+                        hunk.accepted = true;
+                    }
+                }
+                self.decided_count = self.hunks.iter().filter(|h| h.is_decided()).count();
+                Some(DiffAction::AcceptAll)
+            }
+            DiffAction::RejectAll => {
+                for hunk in self.hunks.iter_mut() {
+                    if !hunk.is_decided() {
+                        hunk.rejected = true;
+                    }
+                }
+                self.decided_count = self.hunks.iter().filter(|h| h.is_decided()).count();
+                Some(DiffAction::RejectAll)
+            }
+            other => Some(other),
+        }
     }
 
     pub fn hunk_count(&self) -> usize {
@@ -328,6 +462,10 @@ impl DiffViewer {
 /// Actions the diff viewer can request
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiffAction {
+    /// Request a decision on the current hunk.
+    Accept,
+    /// Refuse the current hunk.
+    Reject,
     Cancel,
     Accepted,
     AcceptedCurrent,

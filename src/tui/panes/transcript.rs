@@ -112,7 +112,7 @@ impl TranscriptPane {
     }
 
     /// Render the transcript pane
-    pub fn render(&mut self, frame: &mut Frame, area: Rect, app: &mut App) {
+    pub fn render(&mut self, frame: &mut Frame, area: Rect, app: &App) {
         if !self.visible {
             return;
         }
@@ -143,12 +143,12 @@ impl TranscriptPane {
                     lines.push(Line::from(vec![
                         Span::styled(role_glyph, role_style),
                         Span::styled(" ", Style::default()),
-                        Span::styled(line, style),
+                        Span::styled(line.to_string(), style),
                     ]));
                 } else {
                     lines.push(Line::from(vec![
                         Span::styled("  ", Style::default()),
-                        Span::styled(line, style),
+                        Span::styled(line.to_string(), style),
                     ]));
                 }
             }
@@ -193,11 +193,9 @@ impl TranscriptPane {
 fn style_for(role: EntryRole) -> (Style, &'static str) {
     match role {
         EntryRole::User => (Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD), "▶"),
-        EntryRole::Assistant => (Style::default().fg(Color::Green).add_modifier(Modifier::BOLD), "▶"),
-        EntryRole::Tool => (Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD), "⚙"),
+        EntryRole::Answer => (Style::default().fg(Color::Green).add_modifier(Modifier::BOLD), "▶"),
         EntryRole::Info => (Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD), "ℹ"),
         EntryRole::Error => (Style::default().fg(Color::Red).add_modifier(Modifier::BOLD), "✗"),
-        EntryRole::System => (Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD), "◆"),
     }
 }
 

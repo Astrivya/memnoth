@@ -428,4 +428,6 @@ fn build_summary_text(state: &SetupState, ctx: &AppContext) -> String {
     text.push_str("\nnext steps:\n");
     text.push_str("  memnoth              # open the session\n");
     text.push_str("  memnoth doctor       # verify everything is wired\n");
+
+    text
 }

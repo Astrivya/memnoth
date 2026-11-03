@@ -43,12 +43,32 @@ fn open_coord(ctx: &AppContext) -> Result<Coord> {
 /// Get or create a session ID for the current user.
 fn get_session_id(coord: &Coord, ctx: &AppContext) -> Result<String> {
     // Generate a session ID based on current user/machine
-    let name = whoami::username();
+    let name = current_user();
     let pid = std::process::id();
     let project_root = ctx.root.to_string_lossy().to_string();
     coord
         .join(&name, pid, &project_root)
         .context("failed to join coordination room")
+}
+
+/// The local account name, from the environment.
+///
+/// The CLI deliberately carries no user-account dependency: the name is only a
+/// label on the coordination board, and an unset variable degrades to a stable
+/// default rather than failing a `team` command.
+fn current_user() -> String {
+    ["MEMNOTH_USER", "USER", "LOGNAME", "USERNAME"]
+        .iter()
+        .find_map(|key| std::env::var(key).ok())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| "memnoth".to_string())
+}
+
+/// A connection to the coordination database for the statements `memnoth-coord`
+/// does not expose yet (releasing a task claim, and the audit reads).
+fn coord_connection(ctx: &AppContext) -> Result<rusqlite::Connection> {
+    rusqlite::Connection::open(coord_db_path(ctx))
+        .context("failed to open coordination database")
 }
 
 /// Get the cloud client with auth token.
@@ -128,7 +148,7 @@ pub fn release(ctx: &AppContext, args: &crate::cli::TeamReleaseArgs) -> Result<O
         .task_update_status(&args.task_id, TaskStatus::Pending)
         .with_context(|| format!("failed to release task {}", args.task_id))?;
     // Also clear the claimed_by field
-    let conn = coord.conn();
+    let conn = coord_connection(ctx)?;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -274,16 +294,25 @@ pub fn presence(ctx: &AppContext, args: &crate::cli::TeamPresenceArgs) -> Result
     let mut cloud_synced = false;
     let mut cloud_sessions: Vec<Value> = Vec::new();
     if args.sync {
-        if let Ok(mut client) = get_cloud_client(ctx) {
-            // Try to get organization info which includes members
-            if let Ok(org) = client.org() {
+        if let Ok(client) = get_cloud_client(ctx) {
+            // The cloud API reports the authenticated account and its
+            // organizations; it has no member roster yet, so the account itself
+            // is the one presence entry that is known to be online.
+            if let Ok(me) = client.me() {
                 cloud_synced = true;
-                cloud_sessions = org.members.iter().map(|m| json!({
-                    "user_id": m.user_id,
-                    "name": m.name,
-                    "role": m.role,
-                    "online": m.online.unwrap_or(false),
-                })).collect();
+                let role = me
+                    .organizations
+                    .as_ref()
+                    .and_then(|organizations| organizations.first())
+                    .map(|organization| organization.role.clone())
+                    .unwrap_or_else(|| "member".to_string());
+                let name = me.name.clone().unwrap_or_else(|| me.email.clone());
+                cloud_sessions = vec![json!({
+                    "user_id": me.id,
+                    "name": name,
+                    "role": role,
+                    "online": true,
+                })];
             }
         }
     }
@@ -407,7 +436,7 @@ pub fn handoff(ctx: &AppContext, args: &crate::cli::TeamHandoffArgs) -> Result<O
     coord
         .task_update_status(&args.task_id, TaskStatus::Pending)
         .with_context(|| format!("failed to release task {}", args.task_id))?;
-    let conn = coord.conn();
+    let conn = coord_connection(ctx)?;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -512,7 +541,7 @@ pub fn audit(ctx: &AppContext, args: &crate::cli::TeamAuditArgs) -> Result<Outco
         .collect();
 
     // Get all claims
-    let conn = coord.conn();
+    let conn = coord_connection(ctx)?;
     let mut stmt = conn.prepare(
         "SELECT id, session_id, path_glob, created_at, expires_at
          FROM coord_claims WHERE created_at >= ?1 ORDER BY created_at DESC",

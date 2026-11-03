@@ -28,7 +28,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use memnoth_capability::Profile;
-use memnoth_mcp_client::{Client, ServerConfig, StdioTransport};
+use memnoth_mcp_client::{Client, StdioTransport};
 
 use crate::context::AppContext;
 
@@ -287,19 +287,24 @@ pub fn doctor(ctx: &AppContext) -> Result<DoctorReport> {
         None => Vec::new(),
     };
 
-    // Try to get token expiry from cloud API if authenticated
+    // Try to get token expiry from cloud API if authenticated. The typed client
+    // publishes the account endpoints, not this one, so this is the same single
+    // POST `mcp token` makes — through the HTTP surface rather than private fields.
     let token_expires_at_ms = ctx.auth_token().and_then(|api_key| {
-        use memnoth_cloud_client::CloudClient;
-        let mut client = CloudClient::new().ok()?;
-        client.set_auth_token(api_key);
-        let url = client.base_url.join("mcp/token").ok()?;
-        let response = client
-            .client
-            .post(url)
-            .headers(client.headers())
-            .send()
+        const DEFAULT_API_URL: &str = "https://memnoth.astrivya.ai/api/v1";
+        let base = std::env::var("MEMNOTH_API_URL").unwrap_or_else(|_| DEFAULT_API_URL.to_string());
+        let endpoint = format!("{}/mcp/token", base.trim_end_matches('/'));
+        let http = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
             .ok()?;
-        let text = response.text().ok()?;
+        let text = http
+            .post(&endpoint)
+            .bearer_auth(api_key)
+            .send()
+            .ok()?
+            .text()
+            .ok()?;
         let token_response: memnoth_cloud_client::types::McpTokenResponse =
             serde_json::from_str(&text).ok()?;
         let now = chrono::Utc::now().timestamp_millis();
@@ -378,6 +383,8 @@ pub fn add(
                     path: kind.config_path(&home).display().to_string(),
                     present: true,
                     registered: false,
+                    found: false,
+                    ok: false,
                     detail,
                 });
             }
@@ -456,6 +463,8 @@ fn add_with_host_cli(
             path: binary.display().to_string(),
             present: true,
             registered: false,
+            found: false,
+            ok: true,
             detail: format!("would run `{displayed}`"),
         };
     }
@@ -466,6 +475,8 @@ fn add_with_host_cli(
             path: binary.display().to_string(),
             present: true,
             registered: true,
+            found: true,
+            ok: true,
             detail: "registered via `claude mcp add`".to_string(),
         },
         Ok(output) => {
@@ -476,6 +487,8 @@ fn add_with_host_cli(
                 path: binary.display().to_string(),
                 present: true,
                 registered: false,
+                found: false,
+                ok: false,
                 detail: format!(
                     "`claude mcp add` failed (exit {}): {}",
                     output
@@ -496,6 +509,8 @@ fn add_with_host_cli(
             path: binary.display().to_string(),
             present: true,
             registered: false,
+            found: false,
+            ok: false,
             detail: format!("cannot run `claude`: {error}"),
         },
     }
@@ -647,6 +662,9 @@ pub fn remove(
                         ClientStatus {
                             client: "claude".into(),
                             ok: true,
+                            present: true,
+                            registered: true,
+                            found: true,
                             detail: "dry run".into(),
                             path: String::new(),
                         }
@@ -655,6 +673,9 @@ pub fn remove(
                             Ok(output) => ClientStatus {
                                 client: "claude".into(),
                                 ok: output.status.success(),
+                                present: true,
+                                registered: false,
+                                found: false,
                                 detail: if output.status.success() {
                                     "removed via claude CLI".into()
                                 } else {
@@ -665,6 +686,9 @@ pub fn remove(
                             Err(e) => ClientStatus {
                                 client: "claude".into(),
                                 ok: false,
+                                present: true,
+                                registered: true,
+                                found: true,
                                 detail: format!("failed to run claude CLI: {e}"),
                                 path: String::new(),
                             },
@@ -675,34 +699,38 @@ pub fn remove(
                     ClientStatus {
                         client: "claude".into(),
                         ok: true,
+                        present: true,
+                        registered: true,
+                        found: true,
                         detail: "manual removal required".into(),
                         path: String::new(),
                     }
                 }
             }
             _ => {
-                match clients::write(kind, &home, &entry, dry_run) {
-                    Ok(status) => {
-                        // For remove, we want to clear the entry, so we check if it was present
-                        let detail = if dry_run {
-                            "dry run: would remove".into()
-                        } else if status.found {
-                            "removed".into()
-                        } else {
-                            "not configured".into()
-                        };
-                        ClientStatus {
-                            client: status.client,
-                            ok: true,
-                            detail,
-                            path: status.path,
-                        }
-                    }
-                    Err(e) => ClientStatus {
-                        client: kind.name().into(),
-                        ok: false,
-                        detail: format!("error: {e}"),
-                        path: String::new(),
+                // This build can write a client's config but has no shape-aware
+                // deleter for it. Reporting the registration as untouched and
+                // handing back the snippet is honest; re-writing the entry (the
+                // previous behaviour) made `remove` register the server again.
+                let current = clients::status(kind, &home, &url);
+                let was_registered = current.registered;
+                if was_registered {
+                    snippets.push(clients::snippet(kind, &entry));
+                }
+                ClientStatus {
+                    client: kind.name().to_string(),
+                    path: current.path,
+                    present: current.present,
+                    registered: was_registered,
+                    found: was_registered,
+                    ok: !was_registered,
+                    detail: if was_registered {
+                        format!(
+                            "not removed: apply the `{}` snippet by hand (dry run: {dry_run})",
+                            kind.name()
+                        )
+                    } else {
+                        "not configured".to_string()
                     },
                 }
             }
@@ -740,39 +768,57 @@ pub fn test(ctx: &AppContext, tool: Option<&str>, profile: Option<Profile>) -> R
 
     let tool_name = tool.unwrap_or("vault_status");
 
-    // Use memnoth-mcp-client to connect and test
-    use memnoth_mcp_client::{Client, ServerConfig, StdioTransport};
-    use std::collections::BTreeMap;
-    use tokio::runtime::Runtime;
-
-    let mut config = ServerConfig {
-        name: "memnoth-test".to_string(),
-        command: ctx.mcp_binary().map(|p| p.to_string_lossy().to_string()),
-        args: vec!["--db".to_string(), ctx.vault_path.display().to_string()],
-        env: BTreeMap::from([(
-            "MEMNOTH_MCP_PROFILE".to_string(),
-            profile.name().to_string(),
-        )]),
-        ..Default::default()
+    // The probe talks to the same server process a host would: stdio, the
+    // vault, and the profile under test. `Client::connect` performs the
+    // handshake, so a failed initialize is the first honest failure.
+    let Some(binary) = ctx.mcp_binary() else {
+        return Ok(TestReport {
+            tools_list_ok: false,
+            tool_count: 0,
+            call_ok: false,
+            tool_called: tool_name.to_string(),
+            call_result: json!({
+                "error": "no `memnoth-mcp` binary found; build `crates/memnoth-mcp` or set MEMNOTH_MCP_BIN"
+            }),
+            url,
+            profile: profile.name().to_string(),
+        });
     };
-    if let Some(t) = token {
-        config.env.insert("MEMNOTH_MCP_TOKEN".to_string(), t);
+
+    let mut env = BTreeMap::new();
+    env.insert(
+        "MEMNOTH_MCP_PROFILE".to_string(),
+        profile.name().to_string(),
+    );
+    if let Some(token) = token {
+        env.insert("MEMNOTH_MCP_TOKEN".to_string(), token);
     }
+    let args = vec!["--db".to_string(), ctx.vault_path.display().to_string()];
 
-    let transport = StdioTransport::new(config);
-    let mut client = Client::new(transport);
-
-    let rt = Runtime::new().context("failed to create tokio runtime")?;
-
-    let _server_info = match rt.block_on(client.initialize()) {
-        Ok(info) => info,
-        Err(e) => {
+    let transport = match StdioTransport::spawn(&binary.display().to_string(), &args, &env) {
+        Ok(transport) => transport,
+        Err(error) => {
             return Ok(TestReport {
                 tools_list_ok: false,
                 tool_count: 0,
                 call_ok: false,
                 tool_called: tool_name.to_string(),
-                call_result: json!({ "error": format!("initialize failed: {e}") }),
+                call_result: json!({ "error": format!("initialize failed: {error:#}") }),
+                url,
+                profile: profile.name().to_string(),
+            });
+        }
+    };
+
+    let mut client = match Client::connect(Box::new(transport), CALL_TIMEOUT) {
+        Ok(client) => client,
+        Err(error) => {
+            return Ok(TestReport {
+                tools_list_ok: false,
+                tool_count: 0,
+                call_ok: false,
+                tool_called: tool_name.to_string(),
+                call_result: json!({ "error": format!("initialize failed: {error:#}") }),
                 url,
                 profile: profile.name().to_string(),
             });
@@ -780,70 +826,69 @@ pub fn test(ctx: &AppContext, tool: Option<&str>, profile: Option<Profile>) -> R
     };
 
     // Run tools/list
-    let tools = match rt.block_on(client.list_tools()) {
-        Ok(tools) => tools,
-        Err(e) => {
+    let tool_count = match client.refresh_tools() {
+        Ok(tools) => tools.len(),
+        Err(error) => {
             return Ok(TestReport {
                 tools_list_ok: false,
                 tool_count: 0,
                 call_ok: false,
                 tool_called: tool_name.to_string(),
-                call_result: json!({ "error": format!("tools/list failed: {e}") }),
+                call_result: json!({ "error": format!("tools/list failed: {error:#}") }),
                 url,
                 profile: profile.name().to_string(),
             });
         }
     };
 
-    // Call the test tool
-    let call_result = match rt.block_on(client.call_tool(tool_name, json!({}))) {
-        Ok(result) => {
-            let result_value = serde_json::to_value(&result).unwrap_or_else(|_| json!(result));
-            TestReport {
+    // Call the test tool. A tool that answers "no such file" is a working wire
+    // and a failed question, which is exactly what `call_ok` distinguishes.
+    match client.call(tool_name, json!({})) {
+        Ok(outcome) => {
+            let call_ok = !outcome.is_error;
+            let text = outcome.text();
+            Ok(TestReport {
                 tools_list_ok: true,
-                tool_count: tools.len(),
-                call_ok: true,
+                tool_count,
+                call_ok,
                 tool_called: tool_name.to_string(),
-                call_result: result_value,
+                call_result: decode_content(outcome.content, text),
                 url,
                 profile: profile.name().to_string(),
-            }
+            })
         }
-        Err(e) => TestReport {
+        Err(error) => Ok(TestReport {
             tools_list_ok: true,
-            tool_count: tools.len(),
+            tool_count,
             call_ok: false,
             tool_called: tool_name.to_string(),
-            call_result: json!({ "error": format!("tools/call failed: {e}") }),
+            call_result: json!({ "error": format!("tools/call failed: {error:#}") }),
             url,
             profile: profile.name().to_string(),
-        },
-    };
-
-    Ok(call_result)
+        }),
+    }
 }
 
 /// `memnoth mcp token`.
 pub fn token(ctx: &AppContext) -> Result<TokenReport> {
-    use memnoth_cloud_client::CloudClient;
+    const DEFAULT_API_URL: &str = "https://memnoth.astrivya.ai/api/v1";
 
     let api_key = ctx
         .auth_token()
         .context("not authenticated; run `memnoth auth login` first")?;
 
-    let mut client = CloudClient::new().context("failed to create cloud client")?;
-    client.set_auth_token(api_key);
+    // Minting an MCP token is one POST to the same endpoint the hosted client
+    // calls. It is issued here rather than through the typed client because
+    // that surface publishes the account endpoints, not this one.
+    let base = std::env::var("MEMNOTH_API_URL").unwrap_or_else(|_| DEFAULT_API_URL.to_string());
+    let url = format!("{}/mcp/token", base.trim_end_matches('/'));
 
-    // Call POST /api/v1/mcp/token
-    let url = client
-        .base_url
-        .join("mcp/token")
-        .map_err(|e| anyhow::anyhow!("invalid URL: {e}"))?;
-
-    let response = client
-        .client
-        .post(url)
-        .headers(client.headers())
+    let response = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|e| anyhow::anyhow!("cannot build the HTTP client: {e}"))?
+        .post(&url)
+        .bearer_auth(api_key)
         .send()
         .map_err(|e| anyhow::anyhow!("network error: {e}"))?;
 
@@ -929,59 +974,59 @@ fn profile_source(ctx: &AppContext) -> String {
 
 /// `memnoth mcp logs`.
 /// `memnoth mcp logs` implementation.
-pub fn logs_impl(ctx: &AppContext, session: Option<String>, tail: usize, json_output: bool) -> Result<LogsReport> {
-    let binary = require_server(ctx)?;
+pub fn logs_impl(
+    ctx: &AppContext,
+    session: Option<String>,
+    tail: usize,
+    _json_output: bool,
+) -> Result<LogsReport> {
+    // A log query is a tool call; it needs a server to answer it.
+    require_server(ctx)?;
     let profile_name = ctx.profile();
     let profile = Profile::from_name(&profile_name).unwrap_or(Profile::Full);
     let url = ctx.mcp_url();
-    
-    // For HTTP servers, we can connect and call agent_events
-    // For stdio servers, we need to check if there's a running process
-    // This implementation calls the agent_events tool via the MCP client
-    use memnoth_mcp_client::{Client, ServerConfig};
-    use memnoth_mcp_client::transport::HttpTransport;
+
+    use memnoth_mcp_client::HttpTransport;
     
     let mut sessions_log = Vec::new();
     
     // If URL is set (HTTP), we can connect and query
     if let Ok(http_url) = reqwest::Url::parse(&url) {
         let transport = HttpTransport::new(http_url.to_string())?;
-        let mut client = Client::connect(transport).context("failed to connect to MCP server")?;
-        
-        // Call agent_events tool
+        let mut client = Client::connect(Box::new(transport), CALL_TIMEOUT)
+            .context("failed to connect to MCP server")?;
+
+        // Call the agent_events tool and read its single JSON payload.
         let args = if let Some(sess) = session {
             json!({ "session": sess, "tail": tail })
         } else {
             json!({ "tail": tail })
         };
-        
-        match client.call_tool("agent_events", args) {
-            Ok(result) => {
-                // Parse the result
-                if let Some(content) = result.content.first() {
-                    if let Some(text) = content.text.as_deref() {
-                        if let Ok(events_json) = serde_json::from_str::<serde_json::Value>(text) {
-                            if let Some(events) = events_json["events"].as_array() {
-                                let session_log = SessionLogEntry {
-                                    session: events_json["session"].as_str().unwrap_or("unknown").to_string(),
-                                    status: events_json["status"].as_str().unwrap_or("unknown").to_string(),
-                                    events: events.iter().map(|e| LogEvent {
-                                        at: e["at"].as_str().unwrap_or("").to_string(),
-                                        source: e["source"].as_str().unwrap_or("").to_string(),
-                                        transcript: e["transcript"].as_str().map(String::from),
-                                    }).collect(),
-                                };
-                                sessions_log.push(session_log);
-                            }
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                // If tool not available, return empty with error info
-                if json_output {
-                    // Just return empty
-                }
+
+        if let Ok(outcome) = client.call("agent_events", args) {
+            let text = outcome.text();
+            if let Ok(events_json) = serde_json::from_str::<Value>(&text)
+                && let Some(events) = events_json["events"].as_array()
+            {
+                let session_log = SessionLogEntry {
+                    session: events_json["session"]
+                        .as_str()
+                        .unwrap_or("unknown")
+                        .to_string(),
+                    status: events_json["status"]
+                        .as_str()
+                        .unwrap_or("unknown")
+                        .to_string(),
+                    events: events
+                        .iter()
+                        .map(|event| LogEvent {
+                            at: event["at"].as_str().unwrap_or("").to_string(),
+                            source: event["source"].as_str().unwrap_or("").to_string(),
+                            transcript: event["transcript"].as_str().map(String::from),
+                        })
+                        .collect(),
+                };
+                sessions_log.push(session_log);
             }
         }
     }

@@ -70,6 +70,14 @@ impl ContextOverlay {
         }
     }
 
+    /// The tab the overlay is showing.
+    fn tab(&self) -> ContextTab {
+        self.tabs
+            .get(self.active_tab)
+            .cloned()
+            .unwrap_or(ContextTab::Beliefs)
+    }
+
     fn load_mock_data(&mut self) {
         // Mock data - replace with actual vault/coordination reads
         self.vault_beliefs = vec![
@@ -335,10 +343,10 @@ impl Overlay for ContextOverlay {
             }
             KeyCode::Down => {
                 if !self.detail_view {
-                    let len = match self.active_tab {
-                        0 => self.vault_beliefs.len(),
-                        1 => self.coordination.len(),
-                        _ => 0,
+                    let len = match self.tab() {
+                        ContextTab::Beliefs => self.vault_beliefs.len(),
+                        ContextTab::Coordination => self.coordination.len(),
+                        ContextTab::History => 0,
                     };
                     if self.selected + 1 < len {
                         self.selected += 1;
@@ -354,10 +362,10 @@ impl Overlay for ContextOverlay {
             }
             KeyCode::PageDown => {
                 if !self.detail_view {
-                    let len = match self.active_tab {
-                        0 => self.vault_beliefs.len(),
-                        1 => self.coordination.len(),
-                        _ => 0,
+                    let len = match self.tab() {
+                        ContextTab::Beliefs => self.vault_beliefs.len(),
+                        ContextTab::Coordination => self.coordination.len(),
+                        ContextTab::History => 0,
                     };
                     self.selected = (self.selected + 10).min(len.saturating_sub(1));
                     self.list_state.select(Some(self.selected));
@@ -371,10 +379,10 @@ impl Overlay for ContextOverlay {
             }
             KeyCode::End => {
                 if !self.detail_view {
-                    let len = match self.active_tab {
-                        0 => self.vault_beliefs.len(),
-                        1 => self.coordination.len(),
-                        _ => 0,
+                    let len = match self.tab() {
+                        ContextTab::Beliefs => self.vault_beliefs.len(),
+                        ContextTab::Coordination => self.coordination.len(),
+                        ContextTab::History => 0,
                     };
                     self.selected = len.saturating_sub(1);
                     self.list_state.select(Some(self.selected));
@@ -383,8 +391,8 @@ impl Overlay for ContextOverlay {
             KeyCode::Enter => {
                 if !self.detail_view {
                     self.detail_view = true;
-                    match self.active_tab {
-                        0 => {
+                    match self.tab() {
+                        ContextTab::Beliefs => {
                             if let Some(b) = self.vault_beliefs.get(self.selected) {
                                 self.detail_content = format!(
                                     "Name: {}\nKind: {}\nVersion: {}\nUpdated: {}\nContradicted: {}\n\n{}",
@@ -397,7 +405,7 @@ impl Overlay for ContextOverlay {
                                 );
                             }
                         }
-                        1 => {
+                        ContextTab::Coordination => {
                             if let Some(c) = self.coordination.get(self.selected) {
                                 self.detail_content = format!(
                                     "Agent: {}\nRole: {}\nLast seen: {}\nStatus: {:?}",
@@ -412,8 +420,8 @@ impl Overlay for ContextOverlay {
             KeyCode::Char('c') if ctrl => {
                 // Copy current entry
                 if !self.detail_view {
-                    match self.active_tab {
-                        0 => {
+                    match self.tab() {
+                        ContextTab::Beliefs => {
                             if let Some(b) = self.vault_beliefs.get(self.selected) {
                                 app.push(
                                     crate::tui::app::EntryRole::Info,
@@ -421,7 +429,7 @@ impl Overlay for ContextOverlay {
                                 );
                             }
                         }
-                        1 => {
+                        ContextTab::Coordination => {
                             if let Some(c) = self.coordination.get(self.selected) {
                                 app.push(
                                     crate::tui::app::EntryRole::Info,
@@ -436,8 +444,8 @@ impl Overlay for ContextOverlay {
             KeyCode::Char('p') => {
                 // Pin current entry
                 if !self.detail_view {
-                    match self.active_tab {
-                        0 => {
+                    match self.tab() {
+                        ContextTab::Beliefs => {
                             if let Some(b) = self.vault_beliefs.get(self.selected) {
                                 app.push(
                                     crate::tui::app::EntryRole::Info,
@@ -445,7 +453,7 @@ impl Overlay for ContextOverlay {
                                 );
                             }
                         }
-                        1 => {
+                        ContextTab::Coordination => {
                             if let Some(c) = self.coordination.get(self.selected) {
                                 app.push(
                                     crate::tui::app::EntryRole::Info,
@@ -522,11 +530,10 @@ impl Overlay for ContextOverlay {
                 .wrap(Wrap { trim: true });
             frame.render_widget(detail, chunks[1]);
         } else {
-            match self.active_tab {
-                0 => self.render_beliefs(frame, chunks[1]),
-                1 => self.render_coordination(frame, chunks[1]),
-                2 => self.render_history(frame, chunks[1]),
-                _ => {}
+            match self.tab() {
+                ContextTab::Beliefs => self.render_beliefs(frame, chunks[1]),
+                ContextTab::Coordination => self.render_coordination(frame, chunks[1]),
+                ContextTab::History => self.render_history(frame, chunks[1]),
             }
         }
 

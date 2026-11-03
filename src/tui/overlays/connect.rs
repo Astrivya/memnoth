@@ -40,12 +40,18 @@ struct ProviderCard {
     has_key: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ProviderStatus {
     Connected,
     Disconnected,
     Testing,
     Error(String),
+}
+
+impl Default for ProviderStatus {
+    fn default() -> Self {
+        Self::Disconnected
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -62,8 +68,10 @@ struct InfoPopup {
     details: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum EditField {
+    /// The model id is the field a person edits most often.
+    #[default]
     Model,
     BaseUrl,
     ApiKey,
@@ -82,7 +90,7 @@ impl ConnectOverlay {
         // Define all supported providers
         let all_providers = vec![
             (Kind::Anthropic, "Anthropic", "🤖", "https://api.anthropic.com"),
-            (Kind::OpenAI, "OpenAI", "🧠", "https://api.openai.com"),
+            (Kind::OpenAi, "OpenAI", "🧠", "https://api.openai.com"),
             (Kind::Memnoth, "Memnoth", "✨", "https://api.memnoth.astrivya.ai"),
         ];
 
@@ -90,13 +98,11 @@ impl ConnectOverlay {
             .into_iter()
             .map(|(kind, display_name, icon, default_url)| {
                 let has_key = self.check_api_key(&kind, &app.config);
-                let base_url = settings.as_ref().and_then(|s| {
-                    if s.kind == kind {
-                        s.base_url.clone()
-                    } else {
-                        None
-                    }
-                }).or_else(|| Some(default_url.to_string()));
+                let base_url = settings
+                    .as_ref()
+                    .filter(|s| s.kind == kind)
+                    .map(|s| s.base_url.clone())
+                    .or_else(|| Some(default_url.to_string()));
 
                 let model = settings.as_ref().and_then(|s| {
                     if s.kind == kind {
@@ -131,19 +137,15 @@ impl ConnectOverlay {
         self.list_state.select(Some(0));
     }
 
-    fn check_api_key(&self, kind: &Kind, config: &crate::Config) -> bool {
+    fn check_api_key(&self, kind: &Kind, _config: &crate::Config) -> bool {
         match kind {
             Kind::Anthropic => {
                 std::env::var("ANTHROPIC_API_KEY").is_ok()
-                    || config.provider.as_ref().and_then(|p| p.api_key_env.as_ref())
-                        .map(|env| std::env::var(env).is_ok())
-                        .unwrap_or(false)
+                    || std::env::var(kind.key_env()).is_ok()
             }
-            Kind::OpenAI => {
+            Kind::OpenAi => {
                 std::env::var("OPENAI_API_KEY").is_ok()
-                    || config.provider.as_ref().and_then(|p| p.api_key_env.as_ref())
-                        .map(|env| std::env::var(env).is_ok())
-                        .unwrap_or(false)
+                    || std::env::var(kind.key_env()).is_ok()
             }
             Kind::Memnoth => {
                 // Check memnoth-auth credential store
@@ -156,7 +158,7 @@ impl ConnectOverlay {
     fn default_model_for(&self, kind: &Kind) -> String {
         match kind {
             Kind::Anthropic => "claude-3-5-sonnet-20241022".to_string(),
-            Kind::OpenAI => "gpt-4o".to_string(),
+            Kind::OpenAi => "gpt-4o".to_string(),
             Kind::Memnoth => "memnoth-default".to_string(),
         }
     }
@@ -242,20 +244,18 @@ impl ConnectOverlay {
         });
     }
 
-    fn get_api_key(&self, kind: &Kind, config: &crate::Config) -> Option<String> {
+    fn get_api_key(&self, kind: &Kind, _config: &crate::Config) -> Option<String> {
         match kind {
             Kind::Anthropic => {
                 std::env::var("ANTHROPIC_API_KEY").ok()
-                    .or_else(|| config.provider.as_ref().and_then(|p| p.api_key_env.as_ref())
-                        .and_then(|env| std::env::var(env).ok()))
+                    .or_else(|| std::env::var(kind.key_env()).ok())
             }
-            Kind::OpenAI => {
+            Kind::OpenAi => {
                 std::env::var("OPENAI_API_KEY").ok()
-                    .or_else(|| config.provider.as_ref().and_then(|p| p.api_key_env.as_ref())
-                        .and_then(|env| std::env::var(env).ok()))
+                    .or_else(|| std::env::var(kind.key_env()).ok())
             }
             Kind::Memnoth => {
-                memnoth_auth::get_credential_sync("memnoth").ok()
+                memnoth_auth::get_credential_sync("memnoth").ok().flatten()
                     .or_else(|| std::env::var("MEMNOTH_API_KEY").ok())
             }
         }
@@ -268,7 +268,7 @@ impl ConnectOverlay {
             } else {
                 ProviderStatus::Error(message.clone())
             };
-            self.providers[index].last_tested = Some(timestamp);
+            self.providers[index].last_tested = Some(timestamp.clone());
             self.providers[index].model_count = model_count;
             self.test_results.push(TestResult {
                 provider: self.providers[index].kind,

@@ -3,11 +3,18 @@ use serde_json::json;
 use std::collections::HashSet;
 use std::fs;
 
-use crate::AppContext;
-use crate::context::Config;
+use crate::{AppContext, Config};
 use crate::output::Outcome;
 use memnoth_auth::get_credential_sync;
 use memnoth_cloud_client::CloudClient;
+
+/// The provider a catalog entry belongs to.
+///
+/// A catalog entry carries an id, name and description only, so the provider is
+/// read from the id exactly the way the tables read it.
+fn model_provider(m: &memnoth_cloud_client::ModelEntry) -> String {
+    parse_model_info(&m.id, &m.description).0
+}
 
 /// Execute `mn models` or `mn model`.
 pub fn run(ctx: &AppContext, args: &crate::cli::ModelsArgs) -> Result<Outcome> {
@@ -22,17 +29,11 @@ fn models_list(ctx: &AppContext, args: &crate::cli::ModelsListArgs) -> Result<Ou
     let client = CloudClient::new()?;
     let list = client.models()?;
 
-    // Load config to check for connected providers
-    let config_path = ctx.config_path()?;
-    let config: Config = if config_path.exists() {
-        let content = fs::read_to_string(&config_path)?;
-        toml::from_str(&content).context("Failed to parse config.toml")?
-    } else {
-        Config::default()
-    };
+    // The context already loaded config.toml for this invocation.
+    let config = &ctx.config;
 
     // Determine which providers are "connected" (have API keys configured)
-    let connected_providers = get_connected_providers(&config);
+    let connected_providers = get_connected_providers(config);
 
     // Filter models
     let mut models: Vec<_> = list.data.into_iter().collect();
@@ -40,14 +41,15 @@ fn models_list(ctx: &AppContext, args: &crate::cli::ModelsListArgs) -> Result<Ou
     // Filter by provider name if specified
     if let Some(provider_filter) = &args.provider {
         models.retain(|m| {
-            m.provider.eq_ignore_ascii_case(provider_filter)
+            let provider = model_provider(m);
+            provider.eq_ignore_ascii_case(provider_filter)
                 || m.id.to_lowercase().contains(&provider_filter.to_lowercase())
         });
     }
 
     // Filter by connected providers if --connected flag is set
     if args.connected {
-        models.retain(|m| connected_providers.contains(&m.provider.to_lowercase()));
+        models.retain(|m| connected_providers.contains(&model_provider(m).to_lowercase()));
     }
 
     // Handle compare mode
@@ -75,7 +77,7 @@ fn models_list(ctx: &AppContext, args: &crate::cli::ModelsListArgs) -> Result<Ou
         "models": models.iter().map(|m| json!({
             "id": m.id,
             "name": m.name,
-            "provider": m.provider,
+            "provider": model_provider(m),
             "description": m.description,
         })).collect::<Vec<_>>(),
         "format": format!("{:?}", args.format).to_lowercase(),
@@ -149,26 +151,25 @@ fn render_models_wide(models: &[memnoth_cloud_client::ModelEntry]) -> String {
 
     let mut rows = Vec::new();
     rows.push(
-        "ID                              PROVIDER        NAME                    CONTEXT   MAX OUT  PRICING (IN/OUT)      CAPABILITIES".to_string(),
+        "ID                              PROVIDER        NAME                    CONTEXT  PRICING (IN/OUT)      CAPABILITIES".to_string(),
     );
     rows.push(
-        "────────────────────────────────  ──────────────  ──────────────────────  ───────  ──────  ───────────────────  ──────────────────────"
+        "────────────────────────────────  ──────────────  ──────────────────────  ───────  ───────────────────  ──────────────────────"
             .to_string(),
     );
 
     for m in models {
-        let (provider, context, pricing, caps) = parse_model_info(&m.id, &m.description);
+        let (provider, context, _pricing, caps) = parse_model_info(&m.id, &m.description);
 
         // Extract pricing from description more thoroughly
         let pricing_detail = extract_pricing_detail(&m.description);
 
         rows.push(format!(
-            "{:<34} {:<14} {:<22} {:>7}  {:>6}  {:<19}  {}",
+            "{:<34} {:<14} {:<22} {:>7}  {:<19}  {}",
             truncate(&m.id, 32),
             truncate(&provider, 12),
             truncate(&m.name, 20),
             context,
-            format!("{}", m.max_output_tokens),
             pricing_detail,
             truncate(&caps, 50)
         ));
@@ -261,7 +262,7 @@ fn render_compare(
     rows.push(format!("{:<25} {:<35} {:<35}", "Name", truncate(&m1.name, 33), truncate(&m2.name, 33)));
     rows.push(format!("{:<25} {:<35} {:<35}", "Provider", p1, p2));
     rows.push(format!("{:<25} {:<35} {:<35}", "Context Window", c1, c2));
-    rows.push(format!("{:<25} {:<35} {:<35}", "Max Output Tokens", m1.max_output_tokens.to_string(), m2.max_output_tokens.to_string()));
+    rows.push(format!("{:<25} {:<35} {:<35}", "Max Output Tokens", "unreported", "unreported"));
     rows.push(format!("{:<25} {:<35} {:<35}", "Pricing (in/out)", prd1, prd2));
     rows.push(format!("{:<25} {:<35} {:<35}", "Capabilities", truncate(&cap1, 33), truncate(&cap2, 33)));
     rows.push(format!(""));
@@ -283,7 +284,7 @@ fn render_compare(
 
 /// Convert model to full JSON representation.
 fn model_to_json(m: &memnoth_cloud_client::ModelEntry) -> serde_json::Value {
-    let (provider, context, pricing, caps) = parse_model_info(&m.id, &m.description);
+    let (provider, context, _pricing, caps) = parse_model_info(&m.id, &m.description);
     let pricing_detail = extract_pricing_detail(&m.description);
 
     json!({
@@ -292,7 +293,6 @@ fn model_to_json(m: &memnoth_cloud_client::ModelEntry) -> serde_json::Value {
         "provider": provider,
         "description": m.description,
         "context_window": context,
-        "max_output_tokens": m.max_output_tokens,
         "pricing": pricing_detail,
         "capabilities": caps,
     })
@@ -304,38 +304,48 @@ fn model_use(ctx: &AppContext, args: &crate::cli::ModelUseArgs) -> Result<Outcom
     let list = client.models()?;
 
     // Verify model exists
-    let model = list.data.iter().find(|m| m.id == args.model_id);
-    if model.is_none() {
+    let Some(model) = list.data.iter().find(|m| m.id == args.model_id) else {
         anyhow::bail!("Model '{}' not found. Run `mn models` to see available models.", args.model_id);
-    }
-    let model = model.unwrap();
-
-    // Update config
-    let config_path = ctx.config_path()?;
-    let mut config: Config = if config_path.exists() {
-        let content = fs::read_to_string(&config_path)?;
-        toml::from_str(&content).context("Failed to parse config.toml")?
-    } else {
-        Config::default()
     };
 
-    // Ensure provider config exists
-    let provider = config.provider.get_or_insert_default();
-    provider.model = Some(args.model_id.clone());
+    // Update config
+    let config_path = &ctx.config_path;
+    let mut config = ctx.config.clone();
+
+    // Ensure the `[provider]` table exists. Every field is optional, so this is
+    // an empty table, not a guessed endpoint.
+    if config.provider.is_none() {
+        config.provider = Some(crate::provider::ProviderConfig {
+            kind: None,
+            model: None,
+            base_url: None,
+            max_tokens: None,
+            input_per_mtok: None,
+            output_per_mtok: None,
+        });
+    }
+    if let Some(provider) = config.provider.as_mut() {
+        provider.model = Some(args.model_id.clone());
+    }
 
     // Write back
     let content = toml::to_string_pretty(&config).context("Failed to serialize config")?;
-    fs::write(&config_path, content).context("Failed to write config.toml")?;
+    fs::write(config_path, content).context("Failed to write config.toml")?;
+
+    let provider_name = model_provider(model);
+    let (_, context_window, _, _) = parse_model_info(&model.id, &model.description);
 
     let text = format!(
         "Default model set to: {} ({})\nConfig updated: {}",
-        model.id, model.provider, config_path.display()
+        model.id,
+        provider_name,
+        config_path.display()
     );
 
     let data = json!({
         "model_id": model.id,
-        "provider": model.provider,
-        "context_window": model.context_window,
+        "provider": provider_name,
+        "context_window": context_window,
         "config_path": config_path.to_string_lossy(),
     });
 
@@ -464,12 +474,19 @@ fn extract_capabilities(desc: &str) -> Option<String> {
 }
 
 /// Truncate string to max length.
+/// Truncate to `max` display columns, ending in `…` when it had to cut.
+///
+/// The ellipsis is inside the budget, so a truncated value never overflows the
+/// column it is drawn in, and cutting on a character boundary cannot panic on
+/// multi-byte text.
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}…", &s[..max.saturating_sub(1)])
+    if s.chars().count() <= max {
+        return s.to_string();
     }
+    let keep = max.saturating_sub(1);
+    let mut out: String = s.chars().take(keep).collect();
+    out.push('…');
+    out
 }
 
 #[cfg(test)]
@@ -492,6 +509,6 @@ mod tests {
     #[test]
     fn test_truncate() {
         assert_eq!(truncate("hello", 10), "hello");
-        assert_eq!(truncate("hello world", 8), "hello wo…");
+        assert_eq!(truncate("hello world", 8), "hello w…");
     }
 }

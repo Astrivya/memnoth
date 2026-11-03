@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
 use crate::cli::{
-    KgArgs, KgCommand, McpArgs, McpCommand, TeamsArgs, TeamsCommand, TeamsJoinArgs,
+    DoctorArgs, KgArgs, KgCommand, McpArgs, McpCommand, TeamsArgs, TeamsCommand, TeamsJoinArgs,
     VaultArgs, VaultCommand, Verb,
     SkillArgs, SkillCommand, SkillAddArgs, SkillListArgs, SkillRemoveArgs, SkillRunArgs, SkillEditArgs,
 };
@@ -126,10 +126,12 @@ pub enum Parsed {
     Empty,
     /// Leave the session.
     Quit,
-    /// Print the command list.
+    /// Open the help overlay (the command list and the keybindings).
     Help,
     /// Clear the transcript.
     Clear,
+    /// `/sessions`: what is on disk, and how to come back to it.
+    Sessions,
     /// What model a turn would use, and how to configure it.
     ModelOverlay,
     /// `/connect`: open provider connections overlay.
@@ -148,6 +150,16 @@ pub enum Parsed {
     Memory,
     /// `/feedback`: open feedback overlay.
     FeedbackOverlay,
+    /// `/search` with no argument: open the search overlay.
+    SearchOverlay,
+    /// `/context`: open the context overlay.
+    ContextOverlay,
+    /// `/diff`: open the diff overlay.
+    DiffOverlay,
+    /// `/rewind`: open the checkpoint picker.
+    RewindOverlay,
+    /// `/permissions`: open the permissions overlay.
+    PermissionsOverlay,
     /// A line this parser could not read; the message is the transcript entry.
     Unknown(String),
 }
@@ -261,8 +273,12 @@ pub struct App {
     pub context_pane: ContextPane,
     /// Tasks pane
     pub tasks_pane: TasksPane,
+    /// Diff pane
+    pub diff_pane: DiffPane,
     /// Active pane focus: 0 = transcript, 1 = context, 2 = tasks, 3 = diff
     pub active_pane: u8,
+    /// Which pane layout the frame uses (0 = transcript-only, 1 = split).
+    pub pane_layout: u8,
     /// Overlay stack for modal UIs
     pub overlay_stack: crate::tui::overlays::OverlayStack,
     /// Configuration
@@ -506,93 +522,8 @@ impl App {
 
     /// Snap to the newest line.
     pub fn to_bottom(&mut self) {
+        self.scroll = self.max_scroll();
         self.follow = true;
-    }
-
-    /// Start or cycle fuzzy path completion for @file references.
-    pub fn complete_path(&mut self, root: &Path) {
-        // Find the @ prefix in the input
-        let input = &self.input;
-        let Some(at_pos) = input.rfind('@') else {
-            return;
-        };
-
-        let prefix = &input[at_pos..self.cursor.min(input.len())];
-        let query = prefix.trim_start_matches('@');
-
-        if query.is_empty() && !self.completion.active {
-            // First activation: find all candidates
-            self.completion.prefix = prefix.to_string();
-            self.completion.matches = Self::find_candidates(root, query);
-            self.completion.index = 0;
-            self.completion.workspace_root = root.to_path_buf();
-            self.completion.active = !self.completion.matches.is_empty();
-        } else if self.completion.active {
-            // Cycle to next candidate
-            if !self.completion.matches.is_empty() {
-                self.completion.index = (self.completion.index + 1) % self.completion.matches.len();
-                let candidate = &self.completion.matches[self.completion.index];
-                let replacement = format!("@{}", candidate.display());
-                let byte_start = self.cursor_byte_at_char(at_pos);
-                let byte_end = self.cursor_byte();
-                self.input.replace_range(byte_start..byte_end, &replacement);
-                self.cursor = byte_start + replacement.chars().count();
-            }
-        }
-    }
-
-    /// Find candidate paths matching the query under root.
-    fn find_candidates(root: &Path, query: &str) -> Vec<PathBuf> {
-        use std::fs;
-        let mut candidates = Vec::new();
-
-        if let Ok(entries) = fs::read_dir(root) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-
-                // Skip hidden files/dirs
-                if name.starts_with('.') {
-                    continue;
-                }
-
-                // Simple fuzzy match: query is a substring of name
-                if name.contains(query) {
-                    // Get relative path from root
-                    if let Ok(rel) = path.strip_prefix(root) {
-                        candidates.push(rel.to_path_buf());
-                    }
-                }
-
-                // Recurse into directories (limit depth for performance)
-                if path.is_dir() && candidates.len() < 100 {
-                    let mut sub = Self::find_candidates(&path, query);
-                    candidates.append(&mut sub);
-                }
-            }
-        }
-
-        candidates.sort();
-        candidates.truncate(100);
-        candidates
-    }
-
-    /// Get byte index for a character position.
-    fn cursor_byte(&self) -> usize {
-        self.input
-            .char_indices()
-            .nth(self.cursor)
-            .map(|(i, _)| i)
-            .unwrap_or(self.input.len())
-    }
-
-    /// Get byte index for a character position.
-    fn cursor_byte_at_char(&self, char_pos: usize) -> usize {
-        self.input
-            .char_indices()
-            .nth(char_pos)
-            .map(|(i, _)| i)
-            .unwrap_or(self.input.len())
     }
 
     /// The last scroll offset that still shows content.
@@ -831,9 +762,10 @@ pub fn parse_line(raw: &str) -> Parsed {
     };
     let args: Vec<String> = words.map(str::to_string).collect();
     match head {
-        "help" | "?" => Parsed::HelpOverlay,
+        "help" | "?" => Parsed::Help,
         "quit" | "exit" | "q" => Parsed::Quit,
         "clear" => Parsed::Clear,
+        "sessions" => Parsed::Sessions,
         "model" => Parsed::ModelOverlay,
         "connect" => Parsed::ConnectOverlay,
         "search" => {
@@ -848,8 +780,14 @@ pub fn parse_line(raw: &str) -> Parsed {
         "rewind" => Parsed::RewindOverlay,
         "permissions" => Parsed::PermissionsOverlay,
         "feedback" => Parsed::FeedbackOverlay,
-        "doctor" => Parsed::Run(Verb::Doctor),
+        "doctor" => Parsed::Run(Verb::Doctor(DoctorArgs {
+            fix: false,
+            yes: false,
+        })),
         "kg" => parse_kg(&args),
+        "vault" => parse_vault(&args),
+        "mcp" => parse_mcp(&args),
+        "teams" => parse_teams(&args),
         "init" => Parsed::Init,
         "memory" => Parsed::Memory,
         "theme" => {
@@ -1178,12 +1116,13 @@ fn fuzzy_find_paths(workspace_root: &Path, query: &str) -> Vec<PathBuf> {
     let mut matches = Vec::new();
 
     // Walk the workspace directory
-    if let Ok(entries) = WalkDir::new(workspace_root)
-        .into_iter()
-        .filter_map(Result::ok)
-        .filter(|e| e.file_type().is_file())
-        .collect::<Vec<_>>()
     {
+        let entries = WalkDir::new(workspace_root)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_type().is_file())
+            .collect::<Vec<_>>();
+
         for entry in entries {
             let path = entry.path();
             // Get relative path from workspace root
@@ -1335,6 +1274,7 @@ A turn may ask to record a belief or edit a file. Nothing is written until you
 answer the box: y approve · n or esc reject (a rejection is final for that turn).";
 
 const VAULT_USAGE: &str = "usage: /vault init|status|asof|history|contradictions|remember|recall";
+const SKILL_USAGE: &str = "usage: /skill add|list|remove|run|edit";
 const KG_USAGE: &str = "usage: /kg index|status|impact|search";
 
 /// Plain text search results as one answer, with the empty case said plainly.
@@ -1456,7 +1396,7 @@ mod tests {
                 action: VaultCommand::Init
             }))
         ));
-        assert!(matches!(parse_line("/doctor"), Parsed::Run(Verb::Doctor)));
+        assert!(matches!(parse_line("/doctor"), Parsed::Run(Verb::Doctor(_))));
         assert!(matches!(
             parse_line("/mcp doctor"),
             Parsed::Run(Verb::Mcp(_))
@@ -1524,8 +1464,8 @@ mod tests {
             }
             other => panic!("expected a local search, got {other:?}"),
         }
-        assert!(matches!(parse_line("/search"), Parsed::Unknown(_)));
-        assert!(matches!(parse_line("/model"), Parsed::Model));
+        assert!(matches!(parse_line("/search"), Parsed::SearchOverlay));
+        assert!(matches!(parse_line("/model"), Parsed::ModelOverlay));
     }
 
     #[test]

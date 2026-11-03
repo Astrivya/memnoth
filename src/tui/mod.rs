@@ -46,7 +46,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::Duration;
 
 use memnoth_engine::now_ms;
-use memnoth_sandbox::profiles::{SandboxProfile, load_sandbox_config};
+use memnoth_sandbox::profiles::{ProfileName, load_sandbox_config};
 use memnoth_sandbox::rules::{RuleDecision, RuleSet, decide};
 use memnoth_session::{Role, Session, TurnReceipt, WriteReceipt};
 
@@ -70,8 +70,8 @@ enum TurnEvent {
         /// `true` to do it, `false` to refuse.
         reply: mpsc::Sender<bool>,
     },
-    /// The turn finished, successfully or not.
-    Done(Box<anyhow::Result<(provider::Answer, provider::Toolbox<'static>)>>),
+    /// The turn finished, successfully or not, with what it wrote.
+    Done(Box<anyhow::Result<(provider::Answer, Vec<WriteReceipt>)>>),
 }
 
 /// A model turn that is currently in flight.
@@ -228,6 +228,14 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
 
         if event::poll(Duration::from_millis(150)).context("cannot poll the keyboard")? {
             match event::read().context("cannot read the keyboard")? {
+                // Focus, resize and paste carry no command; the panes pick up
+                // the new size on the next draw.
+                Event::FocusGained | Event::FocusLost => {}
+                Event::Paste(_) => {}
+                Event::Resize(_, _) => {}
+                Event::Mouse(_) => {}
+                // Key releases are filtered by the guarded arm above.
+                Event::Key(_) => {}
                 // Windows reports press and release; acting on both would type
                 // every character twice.
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
@@ -242,7 +250,14 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
                             }
                         };
                         if decision {
-                            execute_shell_command(app, &pending.command);
+                            // The shell was parked on the app while waiting for
+                            // this key; take it back rather than cloning it.
+                            let command = app
+                                .pending_shell
+                                .take()
+                                .map(|shell| shell.command)
+                                .unwrap_or_default();
+                            execute_shell_command(&mut app, &command);
                             app.push(EntryRole::Info, "approved".to_string());
                         } else {
                             app.push(EntryRole::Info, "declined".to_string());
@@ -274,8 +289,12 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
                             None => approval = Some(pending),
                         }
                     } else {
-                        // First let overlays handle the key
-                        let action = app.overlay_stack.handle_key(key, &mut app);
+                        // First let overlays handle the key. The stack is moved
+                        // out for the call so the overlay can borrow the app it
+                        // is acting on; modals are single-threaded by design.
+                        let mut stack = std::mem::take(&mut app.overlay_stack);
+                        let action = stack.handle_key(key, &mut app);
+                        app.overlay_stack = stack;
                         match action {
                             crate::tui::overlays::OverlayAction::Close => {
                                 app.overlay_stack.pop();
@@ -305,8 +324,8 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
                 // Queue the command instead of rejecting it
                 let line = app.take_input();
                 if !line.is_empty() {
-                    app.command_queue.push_back(line);
                     app.push(EntryRole::Info, format!("queued: {line}"));
+                    app.command_queue.push_back(line);
                 }
             } else {
                 busy = submit(&mut app, ctx, &store, &mut session);
@@ -475,23 +494,57 @@ fn submit(
             run_memory(app, ctx);
             None
         }
+        Parsed::Help => {
+            open_overlay(app, crate::tui::overlays::OverlayKind::Help);
+            None
+        }
+        Parsed::ModelOverlay => {
+            open_overlay(app, crate::tui::overlays::OverlayKind::Model);
+            None
+        }
+        Parsed::SearchOverlay => {
+            open_overlay(app, crate::tui::overlays::OverlayKind::Search);
+            None
+        }
+        Parsed::ContextOverlay => {
+            open_overlay(app, crate::tui::overlays::OverlayKind::Context);
+            None
+        }
+        Parsed::DiffOverlay => {
+            open_overlay(app, crate::tui::overlays::OverlayKind::Diff);
+            None
+        }
+        Parsed::RewindOverlay => {
+            open_overlay(app, crate::tui::overlays::OverlayKind::Rewind);
+            None
+        }
+        Parsed::PermissionsOverlay => {
+            open_overlay(app, crate::tui::overlays::OverlayKind::Permissions);
+            None
+        }
         Parsed::FeedbackOverlay => {
-            app.overlays.push(crate::tui::overlays::create_overlay(
-                crate::tui::overlays::OverlayKind::Feedback,
-            ));
+            open_overlay(app, crate::tui::overlays::OverlayKind::Feedback);
             None
         }
         Parsed::ConnectOverlay => {
-            app.overlays.push(crate::tui::overlays::create_overlay(
-                crate::tui::overlays::OverlayKind::Connect,
-            ));
+            open_overlay(app, crate::tui::overlays::OverlayKind::Connect);
             None
         }
         Parsed::Unknown(message) => {
             app.push(EntryRole::Error, message);
+            None
         }
     }
 }
+/// Put one overlay on the stack.
+///
+/// Every slash command that opens a modal comes through here, so "opening an
+/// overlay" has exactly one definition.
+fn open_overlay(app: &mut App, kind: crate::tui::overlays::OverlayKind) {
+    app.overlay_stack
+        .push(crate::tui::overlays::create_overlay(kind));
+}
+
 fn run_verb(
     app: &mut App,
     ctx: &AppContext,
@@ -611,14 +664,16 @@ fn start_turn(
     let (tx, rx) = mpsc::channel();
     let asker = tx.clone();
 
+    // Counted before the worker starts: the transcript is read on this thread.
+    let turn_id = session
+        .messages
+        .iter()
+        .filter(|m| m.role == Role::User)
+        .count();
+
     std::thread::spawn(move || {
         // Every write this turn attempts comes back through `asker` and stops
         // here until the screen answers.
-        let turn_id = session
-            .messages
-            .iter()
-            .filter(|m| m.role == Role::User)
-            .count();
         let mut tools = provider::Toolbox::new(&worker_ctx)
             .with_approver(Box::new(AskOnScreen { tx: asker }))
             .with_turn_id(turn_id);
@@ -634,7 +689,12 @@ fn start_turn(
             &mut tools,
             &mut on_note,
         );
-        let _ = tx.send(TurnEvent::Done(Box::new((result, tools))));
+        // The screen needs the answer and what was written, not the toolbox:
+        // the toolbox borrows this worker's context and cannot outlive it.
+        let writes = tools.take_writes();
+        let _ = tx.send(TurnEvent::Done(Box::new(
+            result.map(|answer| (answer, writes)),
+        )));
     });
 
     Some(Busy {
@@ -651,10 +711,10 @@ fn settle(
     store: &SessionStore,
     session: &mut Session,
     busy: &Busy,
-    result: anyhow::Result<(provider::Answer, provider::Toolbox<'static>)>,
+    result: anyhow::Result<(provider::Answer, Vec<WriteReceipt>)>,
 ) {
     match result {
-        Ok((answer, mut tools)) => {
+        Ok((answer, writes)) => {
             app.push(EntryRole::Answer, answer.text.clone());
             // The file records the model that actually answered, so a resumed
             // session does not claim a model that never ran.
@@ -671,7 +731,6 @@ fn settle(
             session.add_checkpoint(turn_id, format!("turn {}", turn_id));
 
             // Record write receipts from the turn
-            let writes = tools.take_writes();
             for write in writes {
                 session.record_write(write);
             }
@@ -685,7 +744,7 @@ fn settle(
                 // This build assembles no layered context, so there is no
                 // prefix to fingerprint and no pieces to account for.
                 prefix_hash: String::new(),
-                layer_tokens: [0; 7],
+                layer_tokens: [0; 4],
                 pieces: 0,
                 input_tokens: input,
                 output_tokens: output,
@@ -1020,12 +1079,38 @@ fn sessions_text(store: &SessionStore) -> String {
 fn run_shell(app: &mut App, ctx: &AppContext, cmd: &str) {
     app.push(EntryRole::User, format!("!{}", cmd));
 
-    // Load sandbox config and check policy
+    // Load sandbox config and check policy. A profile that cannot be resolved
+    // is a refusal, not a default: an unenforced shell is worse than none.
     let config = load_sandbox_config(&ctx.root);
-    let profile = config
-        .resolve("workspace")
-        .unwrap_or_else(|_| SandboxProfile::default());
-    let rule_set = RuleSet::with_user_rules(profile.rules);
+    let profile = match ProfileName::Workspace.resolve_profile(&ctx.root, &config) {
+        Ok(profile) => profile,
+        Err(error) => {
+            app.push(
+                EntryRole::Error,
+                format!("sandbox: {error:#}\n  the command was not run"),
+            );
+            return;
+        }
+    };
+    let rules_path = ctx.home.join("rules.txt");
+    let user_rules = match std::fs::read_to_string(&rules_path) {
+        Ok(text) => match memnoth_sandbox::rules::parse_rules(&text) {
+            Ok(rules) => rules,
+            Err(error) => {
+                app.push(
+                    EntryRole::Error,
+                    format!(
+                        "sandbox: {}: {error:#}
+  the command was not run",
+                        rules_path.display()
+                    ),
+                );
+                return;
+            }
+        },
+        Err(_) => Vec::new(),
+    };
+    let rule_set = RuleSet::with_user_rules(user_rules);
     let decision = decide(&rule_set, "Bash", cmd);
 
     match decision {
@@ -1163,6 +1248,7 @@ mod tests {
             graph_path: root.join(".memnoth").join("graph.db"),
             sessions_dir: root.join("sessions"),
             config_path: root.join("config.toml"),
+            exe_path: std::path::PathBuf::from("memnoth"),
             config: Config::default(),
             json: false,
             quiet: true,
@@ -1181,6 +1267,7 @@ mod tests {
             cache_read_tokens: 0,
             cache_write_tokens: 0,
             cost_micros: cost,
+            turn_id: None,
         }
     }
 

@@ -120,10 +120,8 @@ impl ColorScheme {
         let (base_color, glyph) = match role {
             crate::tui::app::EntryRole::User => (self.user, "▶"),
             crate::tui::app::EntryRole::Answer => (self.assistant, "▶"),
-            crate::tui::app::EntryRole::Tool => (self.tool, "⚙"),
             crate::tui::app::EntryRole::Info => (self.info, "ℹ"),
             crate::tui::app::EntryRole::Error => (self.error, "✗"),
-            crate::tui::app::EntryRole::System => (self.system, "◆"),
         };
 
         let mut style = Style::default().fg(base_color).add_modifier(Modifier::BOLD);
@@ -148,10 +146,8 @@ impl ScreenReaderOutput {
         let role_str = match entry.role {
             crate::tui::app::EntryRole::User => "[USER]",
             crate::tui::app::EntryRole::Answer => "[ASSISTANT]",
-            crate::tui::app::EntryRole::Tool => "[TOOL]",
             crate::tui::app::EntryRole::Info => "[INFO]",
             crate::tui::app::EntryRole::Error => "[ERROR]",
-            crate::tui::app::EntryRole::System => "[SYSTEM]",
         };
         format!("{} {}", role_str, entry.text)
     }

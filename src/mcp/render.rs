@@ -105,8 +105,8 @@ pub fn render_add(report: &AddReport) -> String {
         for status in &report.results {
             let status_str = if status.ok { "ok" } else { "failed" };
             text.push_str(&format!("  {:<8} {}\n", status.client, status_str));
-            if let Some(path) = &status.path {
-                text.push_str(&format!("           {}\n", path.display()));
+            if !status.path.is_empty() {
+                text.push_str(&format!("           {}\n", status.path));
             }
             text.push_str(&format!("           {}\n", status.detail));
         }
@@ -164,8 +164,8 @@ pub fn render_remove(report: &RemoveReport) -> String {
         for status in &report.results {
             let status_str = if status.ok { "ok" } else { "failed" };
             text.push_str(&format!("{}  {}", status.client, status_str));
-            if let Some(path) = &status.path {
-                text.push_str(&format!("  ({})", path.display()));
+            if !status.path.is_empty() {
+                text.push_str(&format!("  ({})", status.path));
             }
             text.push_str(&format!("  {}\n", status.detail));
         }
@@ -204,8 +204,8 @@ pub fn render_list(report: &ListReport) -> String {
                 "not configured"
             };
             text.push_str(&format!("  {}  {}\n", status.client, status_str));
-            if let Some(path) = &status.path {
-                text.push_str(&format!("    {}\n", path.display()));
+            if !status.path.is_empty() {
+                text.push_str(&format!("    {}\n", status.path));
             }
             if !status.detail.is_empty() {
                 text.push_str(&format!("    {}\n", status.detail));

@@ -25,8 +25,9 @@ pub struct RewindOverlay {
     mode: RewindMode,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum RewindMode {
+    #[default]
     Browse,
     ConfirmBranch,
 }
@@ -78,6 +79,15 @@ impl RewindOverlay {
         }
     }
 
+    /// The tab the cursor is on. `active_tab` is an index so `Tabs` can be
+    /// handed it directly; this is the one place that index becomes a variant.
+    fn tab(&self) -> RewindTab {
+        self.tabs
+            .get(self.active_tab)
+            .copied()
+            .unwrap_or(RewindTab::Sessions)
+    }
+
     fn load_mock_data(&mut self) {
         self.sessions = vec![
             SessionEntry {
@@ -104,11 +114,11 @@ impl RewindOverlay {
         ];
 
         self.turns = vec![
-            TurnEntry { index: 41, timestamp: "14:32", role: "assistant".to_string(), preview: "Implemented the search overlay with vault and graph results".to_string(), tokens: Some(1240), cost: Some(0.0024) },
-            TurnEntry { index: 40, timestamp: "14:31", role: "user".to_string(), preview: "/search event sourcing architecture".to_string(), tokens: None, cost: None },
-            TurnEntry { index: 39, timestamp: "14:30", role: "assistant".to_string(), preview: "Created decision: use event sourcing for session replay".to_string(), tokens: Some(890), cost: Some(0.0018) },
-            TurnEntry { index: 38, timestamp: "14:29", role: "user".to_string(), preview: "/vault remember architecture --kind decision \"Use event sourcing...\"".to_string(), tokens: None, cost: None },
-            TurnEntry { index: 37, timestamp: "14:25", role: "assistant".to_string(), preview: "Refactored the diff viewer to use memnoth-ui DiffViewer widget".to_string(), tokens: Some(2100), cost: Some(0.0042) },
+            TurnEntry { index: 41, timestamp: "14:32".to_string(), role: "assistant".to_string(), preview: "Implemented the search overlay with vault and graph results".to_string(), tokens: Some(1240), cost: Some(0.0024) },
+            TurnEntry { index: 40, timestamp: "14:31".to_string(), role: "user".to_string(), preview: "/search event sourcing architecture".to_string(), tokens: None, cost: None },
+            TurnEntry { index: 39, timestamp: "14:30".to_string(), role: "assistant".to_string(), preview: "Created decision: use event sourcing for session replay".to_string(), tokens: Some(890), cost: Some(0.0018) },
+            TurnEntry { index: 38, timestamp: "14:29".to_string(), role: "user".to_string(), preview: "/vault remember architecture --kind decision \"Use event sourcing...\"".to_string(), tokens: None, cost: None },
+            TurnEntry { index: 37, timestamp: "14:25".to_string(), role: "assistant".to_string(), preview: "Refactored the diff viewer to use memnoth-ui DiffViewer widget".to_string(), tokens: Some(2100), cost: Some(0.0042) },
         ];
     }
 
@@ -228,7 +238,7 @@ impl RewindOverlay {
 
             let lines = vec![
                 Line::from(vec![
-                    Span::styled(name, style),
+                    Span::styled(*name, style),
                     Span::styled(format!("  (from {})", base), style.fg(Color::Cyan)),
                     Span::styled(format!("  {}", desc), style.fg(Color::DarkGray)),
                 ]),
@@ -322,7 +332,7 @@ impl Overlay for RewindOverlay {
             }
             KeyCode::Down => {
                 if !self.detail_view {
-                    let len = match self.active_tab {
+                    let len = match self.tab() {
                         RewindTab::Sessions => self.sessions.len(),
                         RewindTab::Turns => self.turns.len(),
                         RewindTab::Checkpoints => self.checkpoints.len(),
@@ -342,7 +352,7 @@ impl Overlay for RewindOverlay {
             }
             KeyCode::PageDown => {
                 if !self.detail_view {
-                    let len = match self.active_tab {
+                    let len = match self.tab() {
                         RewindTab::Sessions => self.sessions.len(),
                         RewindTab::Turns => self.turns.len(),
                         RewindTab::Checkpoints => self.checkpoints.len(),
@@ -360,7 +370,7 @@ impl Overlay for RewindOverlay {
             }
             KeyCode::End => {
                 if !self.detail_view {
-                    let len = match self.active_tab {
+                    let len = match self.tab() {
                         RewindTab::Sessions => self.sessions.len(),
                         RewindTab::Turns => self.turns.len(),
                         RewindTab::Checkpoints => self.checkpoints.len(),
@@ -372,7 +382,7 @@ impl Overlay for RewindOverlay {
             }
             KeyCode::Enter => {
                 if !self.detail_view {
-                    match self.active_tab {
+                    match self.tab() {
                         RewindTab::Sessions => {
                             if let Some(s) = self.sessions.get(self.selected) {
                                 if !s.is_current {
@@ -410,7 +420,7 @@ impl Overlay for RewindOverlay {
             }
             KeyCode::Char('b') => {
                 // Branch from current turn
-                if !self.detail_view && self.active_tab == RewindTab::Turns {
+                if !self.detail_view && self.tab() == RewindTab::Turns {
                     self.mode = RewindMode::ConfirmBranch;
                     self.detail_view = true;
                     if let Some(t) = self.turns.get(self.selected) {
@@ -424,7 +434,7 @@ impl Overlay for RewindOverlay {
             KeyCode::Char('c') if ctrl => {
                 // Copy
                 if !self.detail_view {
-                    match self.active_tab {
+                    match self.tab() {
                         RewindTab::Sessions => if let Some(s) = self.sessions.get(self.selected) {
                             app.push(crate::tui::app::EntryRole::Info, format!("Copied session: {}", s.name));
                         },
@@ -438,7 +448,7 @@ impl Overlay for RewindOverlay {
             KeyCode::Char('p') => {
                 // Pin
                 if !self.detail_view {
-                    match self.active_tab {
+                    match self.tab() {
                         RewindTab::Sessions => if let Some(s) = self.sessions.get(self.selected) {
                             app.push(crate::tui::app::EntryRole::Info, format!("Pinned session: {}", s.name));
                         },
@@ -451,7 +461,7 @@ impl Overlay for RewindOverlay {
             }
             KeyCode::Char('r') => {
                 // Resume session
-                if !self.detail_view && self.active_tab == RewindTab::Sessions {
+                if !self.detail_view && self.tab() == RewindTab::Sessions {
                     if let Some(s) = self.sessions.get(self.selected) {
                         if !s.is_current {
                             app.push(crate::tui::app::EntryRole::Info, format!("Resuming session: {}", s.name));
@@ -462,7 +472,7 @@ impl Overlay for RewindOverlay {
             }
             KeyCode::Char('d') => {
                 // Delete session
-                if !self.detail_view && self.active_tab == RewindTab::Sessions {
+                if !self.detail_view && self.tab() == RewindTab::Sessions {
                     if let Some(s) = self.sessions.get(self.selected) {
                         if !s.is_current {
                             app.push(crate::tui::app::EntryRole::Info, format!("Deleted session: {}", s.name));
@@ -516,7 +526,7 @@ impl Overlay for RewindOverlay {
                 .wrap(Wrap { trim: true });
             frame.render_widget(detail, chunks[1]);
         } else {
-            match self.active_tab {
+            match self.tab() {
                 RewindTab::Sessions => self.render_sessions(frame, chunks[1]),
                 RewindTab::Turns => self.render_turns(frame, chunks[1]),
                 RewindTab::Checkpoints => self.render_checkpoints(frame, chunks[1]),
@@ -530,7 +540,7 @@ impl Overlay for RewindOverlay {
         } else if self.detail_view {
             "esc: back · c: copy · p: pin · b: branch from turn"
         } else {
-            match self.active_tab {
+            match self.tab() {
                 RewindTab::Sessions => "↑↓: navigate · enter: resume · r: resume · d: delete · c: copy · p: pin · tab: next tab · esc: close",
                 RewindTab::Turns => "↑↓: navigate · enter: detail · b: branch · c: copy · p: pin · tab: next tab · esc: close",
                 RewindTab::Checkpoints => "↑↓: navigate · enter: detail · c: copy · tab: next tab · esc: close",

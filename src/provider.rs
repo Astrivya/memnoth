@@ -89,6 +89,11 @@ impl Kind {
         }
     }
 
+    /// The provider's name, for reports and tables.
+    pub fn display_name(self) -> &'static str {
+        self.name()
+    }
+
     /// Where the provider lives when nothing says otherwise.
     pub fn default_base_url(self) -> &'static str {
         match self {
@@ -128,6 +133,12 @@ impl Kind {
                  (set it in `provider.kind` or MEMNOTH_PROVIDER)"
             ),
         }
+    }
+}
+
+impl std::fmt::Display for Kind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
     }
 }
 
@@ -1585,6 +1596,7 @@ mod tests {
             graph_path: root.join(".memnoth").join("graph.db"),
             sessions_dir: root.join("sessions"),
             config_path: root.join("config.toml"),
+            exe_path: std::path::PathBuf::from("memnoth"),
             config: Config::default(),
             json: false,
             quiet: true,

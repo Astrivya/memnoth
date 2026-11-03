@@ -102,16 +102,18 @@ impl serde::Serialize for ModelEntry {
 }
 
 /// Sort fields.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum SortField {
+    #[default]
     Pricing,
     Context,
     Speed,
 }
 
 /// Sort direction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum SortDirection {
+    #[default]
     Ascending,
     Descending,
 }
@@ -143,6 +145,11 @@ pub struct ModelsOverlay {
 }
 
 impl ModelsOverlay {
+    /// The tab the overlay is showing.
+    fn tab(&self) -> ModelTab {
+        self.tabs.get(self.active_tab).cloned().unwrap_or(ModelTab::All)
+    }
+
     pub fn new() -> Self {
         let mut tabs = Vec::new();
         tabs.push(ModelTab::All);
@@ -161,37 +168,54 @@ impl ModelsOverlay {
         }
     }
 
-    fn load_models(&mut self, app: &mut App) {
+    /// Fill the browser from the cloud catalogue and the built-in fallback.
+    ///
+    /// Public because the host is what knows when the overlay is pushed and it
+    /// holds the `App` the catalogue is read against — `show()` has neither.
+    pub fn load_models(&mut self, app: &mut App) {
         self.models = self.fetch_available_models(app);
         self.apply_filters();
     }
 
     fn fetch_available_models(&mut self, app: &mut App) -> Vec<ModelEntry> {
-        let config = &app.ctx.config;
-
-        // Determine base URL
-        let base_url = config
-            .provider
-            .as_ref()
-            .and_then(|p| p.base_url.as_deref())
-            .unwrap_or("https://api.memnoth.astrivya.ai");
-
+        // The catalogue lives at the API base, which is not the provider base:
+        // `CloudClient` joins `models` onto it.
+        let base_url = std::env::var("MEMNOTH_API_URL")
+            .unwrap_or_else(|_| "https://memnoth.astrivya.ai/api/v1".to_string());
         let api_key = std::env::var("MEMNOTH_API_KEY").ok();
 
-        // Try to fetch from the cloud API
-        let fetched: Vec<ModelInfo> = match CloudClient::with_base_url(base_url) {
-            Ok(mut client) => {
-                if let Some(key) = api_key {
-                    client.set_auth_token(key);
-                }
-                match client.models() {
-                    Ok(list) => list.models,
-                    Err(_) => self.builtin_models_info(),
+        // The cloud answers with the OpenAI-shaped list (id, name, description).
+        // Pricing and capabilities come from the catalogue this build ships, so a
+        // model the cloud knows but we do not still appears — unpriced, not hidden.
+        let mut fetched = self.builtin_models_info();
+        if let Ok(mut client) = CloudClient::with_base_url(&base_url) {
+            if let Some(key) = api_key {
+                client.set_auth_token(key);
+            }
+            if let Ok(list) = client.models() {
+                for entry in list.data {
+                    if fetched.iter().any(|m| m.id == entry.id) {
+                        continue;
+                    }
+                    fetched.push(ModelInfo {
+                        id: entry.id,
+                        name: entry.name,
+                        provider: "memnoth".to_string(),
+                        family: String::new(),
+                        context_window: 0,
+                        max_output_tokens: 0,
+                        input_cost_per_million_micros: -1,
+                        output_cost_per_million_micros: -1,
+                        supports_streaming: true,
+                        supports_tools: false,
+                        supports_vision: false,
+                        capabilities: None,
+                        deprecated: Some(false),
+                        deprecation_date: None,
+                    });
                 }
             }
-            Err(_) => self.builtin_models_info(),
-        };
-        let default_model = self.get_default_model(app);
+        }
 
         let default_model = self.get_default_model(app);
 
@@ -308,10 +332,10 @@ impl ModelsOverlay {
     }
 
     fn get_default_model(&self, app: &App) -> Option<String> {
-        Settings::load(&app.ctx.config).ok().and_then(|s| s.model)
+        Settings::load(&app.config).ok().map(|s| s.model)
     }
 
-    fn is_provider_connected(&self, provider: &str, app: &App) -> bool {
+    fn is_provider_connected(&self, provider: &str, _app: &App) -> bool {
         match provider {
             "anthropic" => std::env::var("ANTHROPIC_API_KEY").is_ok(),
             "openai" => std::env::var("OPENAI_API_KEY").is_ok(),
@@ -328,24 +352,23 @@ impl ModelsOverlay {
             .iter()
             .filter(|m| {
                 // Tab filter
-                match self.active_tab {
-                    0 => {} // All - no filter
-                    1 => {
+                match self.tab() {
+                    ModelTab::All => {}
+                    ModelTab::Connected => {
                         if m.status != ModelStatus::Connected {
                             return false;
                         }
                     }
-                    2 => {
+                    ModelTab::Favorites => {
                         if !m.is_favorite {
                             return false;
                         }
                     }
-                    3 => {
+                    ModelTab::Recommended => {
                         if m.speed != SpeedRating::Fast {
                             return false;
                         }
                     }
-                    _ => {}
                 }
 
                 // Provider filter
@@ -456,42 +479,39 @@ impl ModelsOverlay {
     }
 
     fn set_as_default(&mut self, app: &mut App) {
-        if let Some(m) = self.selected_model() {
-            // Clear existing default
-            for entry in &mut self.models {
-                if entry.is_default {
-                    entry.is_default = false;
-                }
-            }
-            // Set new default
-            if let Some(entry) = self.models.iter_mut().find(|e| e.id == m.id) {
-                entry.is_default = true;
-            }
+        // The selection lives in `filtered`, so take the identity out before the
+        // list is mutated — otherwise the borrow and the edit overlap.
+        let Some((id, name)) = self
+            .selected_model()
+            .map(|m| (m.id.clone(), m.name.clone()))
+        else {
+            return;
+        };
 
-            // Persist to config
-            if let Ok(mut settings) = Settings::load(&app.ctx.config) {
-                settings.model = Some(m.id.clone());
-                // Save via config
-                let config = Config {
-                    provider: Some(crate::provider::ProviderConfig {
-                        kind: settings.kind.map(|k| format!("{:?}", k).to_lowercase()),
-                        model: settings.model.clone(),
-                        base_url: Some(settings.base_url.clone()),
-                        max_tokens: Some(settings.max_tokens),
-                        input_per_mtok: settings.pricing.map(|p| p.input_per_mtok),
-                        output_per_mtok: settings.pricing.map(|p| p.output_per_mtok),
-                    }),
-                    ..Config::default()
-                };
-                let _ = config.save(&app.ctx.config_path);
-            }
-
-            self.apply_filters();
-            app.push(
-                crate::tui::app::EntryRole::Info,
-                format!("Set {} as default model", m.name),
-            );
+        for entry in &mut self.models {
+            entry.is_default = entry.id == id;
         }
+
+        // Only the `[provider]` section this overlay owns is rewritten; every
+        // other section is carried over from the config that was read.
+        let mut config = app.config.clone();
+        if let Ok(settings) = Settings::load(&app.config) {
+            config.provider = Some(crate::provider::ProviderConfig {
+                kind: Some(settings.kind.name().to_string()),
+                model: Some(id.clone()),
+                base_url: Some(settings.base_url.clone()),
+                max_tokens: Some(settings.max_tokens),
+                input_per_mtok: settings.pricing.as_ref().map(|p| p.input_per_mtok),
+                output_per_mtok: settings.pricing.as_ref().map(|p| p.output_per_mtok),
+            });
+            let _ = config.save(&app.config_path);
+        }
+
+        self.apply_filters();
+        app.push(
+            crate::tui::app::EntryRole::Info,
+            format!("Set {name} as default model"),
+        );
     }
 
     fn toggle_tab(&mut self) {
@@ -765,12 +785,11 @@ impl ModelsOverlay {
             SortDirection::Descending => " ▼",
         };
 
-        let tab_hint = match self.active_tab {
-            0 => "tab: all",
-            1 => "tab: connected",
-            2 => "tab: favorites",
-            3 => "tab: recommended",
-            _ => "tab: all",
+        let tab_hint = match self.tab() {
+            ModelTab::All => "tab: all",
+            ModelTab::Connected => "tab: connected",
+            ModelTab::Favorites => "tab: favorites",
+            ModelTab::Recommended => "tab: recommended",
         };
 
         let help_text = format!(
@@ -803,7 +822,7 @@ impl ModelsOverlay {
                 .border_style(Style::default().fg(Color::Cyan));
             frame.render_widget(block, popup);
 
-            let inner = popup.inner(&ratatui::layout::Margin {
+            let inner = popup.inner(ratatui::layout::Margin {
                 vertical: 1,
                 horizontal: 1,
             });
@@ -916,7 +935,7 @@ impl ModelsOverlay {
                     .border_style(Style::default().fg(Color::Cyan));
                 frame.render_widget(block, popup);
 
-                let inner = popup.inner(&ratatui::layout::Margin {
+                let inner = popup.inner(ratatui::layout::Margin {
                     vertical: 1,
                     horizontal: 1,
                 });

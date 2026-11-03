@@ -79,8 +79,9 @@ struct ModelSettings {
     retry_attempts: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum EditField {
+    #[default]
     Temperature,
     TopP,
     MaxTokens,
@@ -106,6 +107,15 @@ impl ModelOverlay {
             },
             ..Default::default()
         }
+    }
+
+    /// The tab the cursor is on. `active_tab` stays an index because `Tabs`
+    /// takes one; this is where that index becomes a variant.
+    fn tab(&self) -> ModelTab {
+        self.tabs
+            .get(self.active_tab)
+            .copied()
+            .unwrap_or(ModelTab::Providers)
     }
 
     fn load_mock_data(&mut self) {
@@ -254,7 +264,7 @@ impl ModelOverlay {
             let tools_mark = if m.supports_tools { " 🔧" } else { "" };
             let vision_mark = if m.supports_vision { " 👁" } else { "" };
 
-            let pricing_str = m.pricing.map_or("free".to_string(), |p| {
+            let pricing_str = m.pricing.as_ref().map_or("free".to_string(), |p| {
                 format!("${:.2}/${:.2} per M", p.input_per_m, p.output_per_m)
             });
 
@@ -370,7 +380,7 @@ impl ModelOverlay {
     }
 
     fn start_edit(&mut self) {
-        match self.active_tab {
+        match self.tab() {
             ModelTab::Settings => {
                 self.editing = true;
                 self.edit_cursor = 0;
@@ -442,7 +452,7 @@ impl ModelOverlay {
     }
 
     fn toggle_setting(&mut self) {
-        match self.active_tab {
+        match self.tab() {
             ModelTab::Providers => {
                 if let Some(p) = self.providers.get_mut(self.selected) {
                     p.enabled = !p.enabled;
@@ -543,7 +553,7 @@ impl Overlay for ModelOverlay {
                 }
             }
             KeyCode::Down => {
-                let len = match self.active_tab {
+                let len = match self.tab() {
                     ModelTab::Providers => self.providers.len(),
                     ModelTab::Models => self.models.len(),
                     ModelTab::Settings => 6,
@@ -559,7 +569,7 @@ impl Overlay for ModelOverlay {
                 self.list_state.select(Some(self.selected));
             }
             KeyCode::PageDown => {
-                let len = match self.active_tab {
+                let len = match self.tab() {
                     ModelTab::Providers => self.providers.len(),
                     ModelTab::Models => self.models.len(),
                     ModelTab::Settings => 6,
@@ -573,7 +583,7 @@ impl Overlay for ModelOverlay {
                 self.list_state.select(Some(0));
             }
             KeyCode::End => {
-                let len = match self.active_tab {
+                let len = match self.tab() {
                     ModelTab::Providers => self.providers.len(),
                     ModelTab::Models => self.models.len(),
                     ModelTab::Settings => 6,
@@ -591,7 +601,7 @@ impl Overlay for ModelOverlay {
             }
             KeyCode::Char('t') => {
                 // Test connection
-                if self.active_tab == ModelTab::Providers {
+                if self.tab() == ModelTab::Providers {
                     if let Some(p) = self.providers.get(self.selected) {
                         app.push(crate::tui::app::EntryRole::Info, format!("Testing {}...", p.name));
                     }
@@ -599,7 +609,7 @@ impl Overlay for ModelOverlay {
             }
             KeyCode::Char('d') => {
                 // Set as default
-                match self.active_tab {
+                match self.tab() {
                     ModelTab::Providers => if let Some(p) = self.providers.get(self.selected) {
                         app.push(crate::tui::app::EntryRole::Info, format!("Set {} as default provider", p.name));
                     },
@@ -611,7 +621,7 @@ impl Overlay for ModelOverlay {
             }
             KeyCode::Char('c') if ctrl => {
                 // Copy
-                match self.active_tab {
+                match self.tab() {
                     ModelTab::Providers => if let Some(p) = self.providers.get(self.selected) {
                         app.push(crate::tui::app::EntryRole::Info, format!("Copied provider: {}", p.name));
                     },
@@ -662,7 +672,7 @@ impl Overlay for ModelOverlay {
         frame.render_widget(tabs, chunks[0]);
 
         // Content
-        match self.active_tab {
+        match self.tab() {
             ModelTab::Providers => self.render_providers(frame, chunks[1]),
             ModelTab::Models => self.render_models(frame, chunks[1]),
             ModelTab::Settings => self.render_settings(frame, chunks[1]),
@@ -673,7 +683,7 @@ impl Overlay for ModelOverlay {
         let help_text = if self.editing {
             "enter: save · esc: cancel"
         } else {
-            match self.active_tab {
+            match self.tab() {
                 ModelTab::Providers => "↑↓: navigate · enter: edit · space: toggle · d: default · t: test · c: copy · r: refresh · tab: next · esc: close",
                 ModelTab::Models => "↑↓: navigate · d: default · c: copy · tab: next · esc: close",
                 ModelTab::Settings => "↑↓: navigate · enter: edit · space: toggle · tab: next · esc: close",

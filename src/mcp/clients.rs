@@ -43,6 +43,12 @@ pub struct ClientStatus {
     pub present: bool,
     /// Whether a `memnoth` entry is there.
     pub registered: bool,
+    /// The same fact as [`ClientStatus::registered`], under the name the
+    /// `list` and `remove` reports read it by.
+    pub found: bool,
+    /// Whether the operation this status reports on succeeded. A status that
+    /// only observes a client is always `true`.
+    pub ok: bool,
     /// What was found or done, in one line. Never contains a token.
     pub detail: String,
 }
@@ -182,6 +188,8 @@ pub fn status(kind: ClientKind, home: &Path, expected_url: &str) -> ClientStatus
             path: path_text,
             present: false,
             registered: false,
+            found: false,
+            ok: true,
             detail: "no config file".to_string(),
         };
     }
@@ -193,6 +201,8 @@ pub fn status(kind: ClientKind, home: &Path, expected_url: &str) -> ClientStatus
                 path: path_text,
                 present: true,
                 registered: false,
+                found: false,
+                ok: true,
                 detail: format!("unreadable: {error}"),
             };
         }
@@ -212,6 +222,8 @@ pub fn status(kind: ClientKind, home: &Path, expected_url: &str) -> ClientStatus
             path: path_text,
             present: true,
             registered: false,
+            found: false,
+            ok: true,
             detail: format!("cannot parse: {error}"),
         },
         Ok(None) => ClientStatus {
@@ -219,6 +231,8 @@ pub fn status(kind: ClientKind, home: &Path, expected_url: &str) -> ClientStatus
             path: path_text,
             present: true,
             registered: false,
+            found: false,
+            ok: true,
             detail: format!("no `{SERVER_NAME}` entry"),
         },
         Ok(Some(entry)) => {
@@ -240,6 +254,8 @@ pub fn status(kind: ClientKind, home: &Path, expected_url: &str) -> ClientStatus
                 path: path_text,
                 present: true,
                 registered,
+                found: registered,
+                ok: true,
                 detail,
             }
         }
@@ -309,6 +325,8 @@ pub fn write(kind: ClientKind, home: &Path, entry: &Entry, dry_run: bool) -> Res
         path: path_text,
         present: if dry_run { existed } else { true },
         registered: true,
+        found: true,
+        ok: true,
         detail,
     })
 }

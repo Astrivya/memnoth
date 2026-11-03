@@ -1,17 +1,16 @@
 //! Cloud commands: sync, profile, billing, credits.
 
 use anyhow::{Context, Result};
-use serde_json::{Value, json};
+use serde_json::json;
 
 use crate::cli::{
     BillingArgs, CloudArgs, CloudCommand, CreditsArgs, ProfileArgs, ProfileCommand, ProfileSetArgs,
     ProfileShowArgs, SyncArgs,
 };
 use crate::context::AppContext;
-use crate::output::{ErrorOutcome, Outcome};
+use crate::output::Outcome;
 use memnoth_cloud_client::{
     BatchIngestRequest, BatchIngestResponse, BillingResponse, CloudClient, CreditsResponse,
-    IngestRequest, ModelPricing, PricingResponse,
 };
 
 /// Run the cloud command.
@@ -28,18 +27,13 @@ pub fn run(ctx: &AppContext, args: &CloudArgs) -> Result<Outcome> {
 fn get_cloud_client(ctx: &AppContext) -> Result<CloudClient> {
     let mut client = CloudClient::new().context("Failed to create cloud client")?;
 
-    // Try to get token from environment
+    // Environment first, so an exported key wins over the stored one.
     if let Ok(token) = std::env::var("MEMNOTH_API_KEY") {
         client.set_auth_token(token);
     } else if let Ok(token) = std::env::var("MEMNOTH_MCP_TOKEN") {
         client.set_auth_token(token);
-    } else {
-        // Try to load from credential store
-        if let Ok(store) = crate::auth::create_credential_store() {
-            if let Ok(Some(token)) = store.get() {
-                client.set_auth_token(token);
-            }
-        }
+    } else if let Some(token) = ctx.auth_token() {
+        client.set_auth_token(token);
     }
 
     Ok(client)
@@ -106,25 +100,35 @@ fn profile(ctx: &AppContext, args: &ProfileArgs) -> Result<Outcome> {
 fn profile_show(ctx: &AppContext, _args: &ProfileShowArgs) -> Result<Outcome> {
     let config = &ctx.config;
 
+    // `mcp_url` and `profile` are resolved the same way every other verb
+    // resolves them, so this view never disagrees with `mcp add`.
+    let mcp_url = ctx.mcp_url();
+    let profile = ctx.profile();
+
     let data = json!({
-        "mcp_url": config.mcp_url(),
-        "profile": config.profile(),
+        "mcp_url": mcp_url,
+        "profile": profile,
         "vault": config.vault.as_ref().map(|v| v.as_str()),
         "provider": config.provider.as_ref().map(|p| json!({
-            "endpoint": p.endpoint,
+            "base_url": p.base_url,
             "model": p.model,
+            "kind": p.kind,
         })),
     });
 
     let text = format!(
         "Cloud profile:\n  mcp_url: {}\n  profile: {}\n  vault: {}\n  provider: {}",
-        config.mcp_url(),
-        config.profile(),
+        mcp_url,
+        profile,
         config.vault.as_deref().unwrap_or("default"),
         config
             .provider
             .as_ref()
-            .map(|p| format!("{} ({})", p.endpoint, p.model))
+            .map(|p| format!(
+                "{} ({})",
+                p.base_url.as_deref().unwrap_or("default endpoint"),
+                p.model.as_deref().unwrap_or("default model")
+            ))
             .unwrap_or_else(|| "not configured".to_string())
     );
 
@@ -175,17 +179,6 @@ fn billing(ctx: &AppContext, _args: &BillingArgs) -> Result<Outcome> {
             "recharge_threshold_micros": response.credits.recharge_threshold_micros,
             "recharge_amount_micros": response.credits.recharge_amount_micros,
             "next_billing_date": response.credits.next_billing_date,
-            "grants": response.credits.grants.map(|g| g.iter().map(|grant| json!({
-                "id": grant.id,
-                "amount_micros": grant.amount_micros,
-                "reason": grant.reason,
-                "created_at": grant.created_at,
-                "expires_at": grant.expires_at,
-            })).collect::<Vec<_>>()),
-            "expiry": response.credits.expiry.map(|e| json!({
-                "expires_at": e.expires_at,
-                "amount_micros": e.amount_micros,
-            })),
         },
         "pricing": {
             "currency": response.pricing.currency,
@@ -227,17 +220,6 @@ fn credits(ctx: &AppContext, _args: &CreditsArgs) -> Result<Outcome> {
         "recharge_threshold_micros": response.recharge_threshold_micros,
         "recharge_amount_micros": response.recharge_amount_micros,
         "next_billing_date": response.next_billing_date,
-        "grants": response.grants.map(|g| g.iter().map(|grant| json!({
-            "id": grant.id,
-            "amount_micros": grant.amount_micros,
-            "reason": grant.reason,
-            "created_at": grant.created_at,
-            "expires_at": grant.expires_at,
-        })).collect::<Vec<_>>()),
-        "expiry": response.expiry.map(|e| json!({
-            "expires_at": e.expires_at,
-            "amount_micros": e.amount_micros,
-        })),
     });
 
     let balance_usd = response.balance_micros as f64 / 1_000_000.0;
@@ -266,16 +248,6 @@ fn credits(ctx: &AppContext, _args: &CreditsArgs) -> Result<Outcome> {
     }
     if let Some(date) = &response.next_billing_date {
         text.push_str(&format!("\n  Next billing: {}", date));
-    }
-    if let Some(grants) = &response.grants {
-        text.push_str(&format!("\n  Grants: {}", grants.len()));
-    }
-    if let Some(expiry) = &response.expiry {
-        text.push_str(&format!(
-            "\n  Expiring: ${:.4} at {}",
-            expiry.amount_micros as f64 / 1_000_000.0,
-            expiry.expires_at
-        ));
     }
 
     Ok(Outcome::new("cloud.credits", text, data))

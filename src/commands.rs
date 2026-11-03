@@ -128,20 +128,6 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
                 *confidence,
                 reason,
             ),
-            VaultCommand::Correct {
-                name,
-                new_name,
-                summary,
-                confidence,
-                reason,
-            } => vault::correct(
-                ctx,
-                name,
-                new_name.as_deref(),
-                summary.as_deref(),
-                *confidence,
-                reason,
-            ),
             _other => Err(ErrorOutcome::usage(
                 "this `vault` subcommand is not available in this build; run `memnoth vault --help`",
             )),
@@ -256,8 +242,16 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
                 let profile_opt = profile.as_ref().and_then(|p| Profile::from_name(p));
                 mcp::serve(ctx, *http, db.clone(), profile_opt)
                     .map_err(|e| ErrorOutcome::from_anyhow(&e))
+                    .map(|()| Outcome::inline("mcp.serve", "MCP server stopped."))
             }
-            McpCommand::Doctor => mcp::doctor(ctx).map_err(|e| ErrorOutcome::from_anyhow(&e)),
+            McpCommand::Doctor => {
+                let report = mcp::doctor(ctx).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                Ok(Outcome::new(
+                    "mcp.doctor",
+                    mcp::render_doctor(&report),
+                    serde_json::to_value(&report).unwrap_or_default(),
+                ))
+            }
             McpCommand::Add {
                 clients,
                 profile,
@@ -406,10 +400,7 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
                 ))
             }
         },
-        Verb::Models(args) => match &args.action {
-            crate::cli::ModelsCommand::List(args) => models::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
-            crate::cli::ModelsCommand::Use(args) => models::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
-        },
+        Verb::Models(args) => models::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
         Verb::Usage(args) => usage::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
         Verb::Stats(args) => stats::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
         Verb::Auth(args) => match &args.action {
@@ -472,10 +463,10 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
             }
         },
         Verb::Update(args) => {
-            update_cmd::execute_update(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e))
+            update_cmd::execute_update(ctx, args)
         },
         Verb::Install(args) => {
-            update_cmd::execute_install(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e))
+            update_cmd::execute_install(ctx, args)
         }
         Verb::Uninstall(args) => update_cmd::execute_uninstall(ctx, args),
         Verb::SetTheme(theme) => {
@@ -530,7 +521,12 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
                     "elvish" => Shell::Elvish,
                     _ => Shell::Bash,
                 };
-                show_completions(shell).map_err(|e| ErrorOutcome::from_anyhow(&e))
+                show_completions(shell).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                Ok(Outcome::new(
+                    "completion.show",
+                    format!("Wrote {shell:?} completions to stdout."),
+                    serde_json::json!({ "shell": format!("{shell:?}") }),
+                ))
             }
             crate::cli::CompletionCommand::Install(install_args) => {
                 let shell = install_args
@@ -544,7 +540,16 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
                         "elvish" => Some(Shell::Elvish),
                         _ => None,
                     });
-                install(shell).map_err(|e| ErrorOutcome::from_anyhow(&e))
+                let label = shell.map(|s| format!("{s:?}"));
+                install(shell).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                Ok(Outcome::new(
+                    "completion.install",
+                    match &label {
+                        Some(name) => format!("Installed {name} completions."),
+                        None => "Installed completions for the detected shell.".to_string(),
+                    },
+                    serde_json::json!({ "shell": label }),
+                ))
             }
         },
         Verb::Setup(args) => setup::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
@@ -580,7 +585,7 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
                 .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
             Ok(Outcome::new("skill", result, serde_json::json!({})))
         },
-        Verb::Open(args) => open::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
+        Verb::Open(args) => open::run(ctx, args),
         Verb::Connect(args) => match &args.action {
             ConnectCommand::Add(args) => connect::connect_add(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
             ConnectCommand::List(args) => connect::connect_list(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
@@ -590,6 +595,14 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
         Verb::Feedback(args) => feedback::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
     }
 }
+
+/// The one-line skill summary the session shows when a `/skill` line is wrong.
+///
+/// It lives beside the dispatcher because this is the function that turns a
+/// skill command into an answer; the TUI quotes it rather than keeping a second
+/// copy that could drift.
+pub const SKILL_USAGE: &str =
+    "usage: /skill add <path> | list | remove <name> | run <name> [args] | edit <name>";
 
 /// Parse a profile name, naming the valid set on a typo.
 pub fn parse_profile(name: &str) -> anyhow::Result<Profile> {

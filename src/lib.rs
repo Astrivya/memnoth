@@ -55,7 +55,10 @@ pub mod open;
 pub mod feedback;
 pub mod stats;
 pub mod connect;
+use clap::Parser;
+use cli::{Cli, Verb};
 use context::{AppContext, DEFAULT_MCP_URL, DEFAULT_PROFILE};
+use std::process::ExitCode;
 use output::ErrorOutcome;
 /// Parse the command line, run it, and turn the outcome into an exit code.
 ///
@@ -65,7 +68,10 @@ use output::ErrorOutcome;
 pub fn run() -> ExitCode {
     let cli = Cli::parse();
     let json = cli.json;
-    let ctx = AppContext::new(&cli).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+    let ctx = match AppContext::new(&cli) {
+        Ok(ctx) => ctx,
+        Err(err) => return fail(json, &ErrorOutcome::from_anyhow(&err)),
+    };
 
     if let Some(verb) = cli.verb {
         match commands::execute(&ctx, &verb) {
@@ -75,7 +81,7 @@ pub fn run() -> ExitCode {
                 } else {
                     print!("{}", outcome.text);
                 }
-                outcome.exit_code
+                ExitCode::from(outcome.exit_code)
             }
             Err(err) => fail(json, &err),
         }
@@ -87,9 +93,9 @@ pub fn run() -> ExitCode {
 fn run_session(ctx: &AppContext, cli: &Cli, json: bool) -> ExitCode {
     let verb = Verb::Session(crate::cli::SessionArgs {
         action: crate::cli::SessionCommand::Start(crate::cli::StartArgs {
-            name: cli.session_name.clone(),
+            name: if cli.resume.is_some() { None } else { Some(cli.session_name()) },
             resume: None,
-            model: cli.model.clone(),
+            model: None,
         }),
     });
     match commands::execute(ctx, &verb) {
@@ -99,7 +105,7 @@ fn run_session(ctx: &AppContext, cli: &Cli, json: bool) -> ExitCode {
             } else {
                 print!("{}", outcome.text);
             }
-            outcome.exit_code
+            ExitCode::from(outcome.exit_code)
         }
         Err(err) => fail(json, &err),
     }
@@ -109,7 +115,7 @@ fn fail(json: bool, error: &ErrorOutcome) -> ExitCode {
     if json {
         eprintln!("{}", serde_json::to_string(error).unwrap());
     } else {
-        eprintln!("{}", error.text);
+        eprintln!("{error}");
     }
-    error.exit_code
+    ExitCode::from(error.code)
 }

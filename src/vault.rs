@@ -994,6 +994,7 @@ mod tests {
             graph_path: dir.join("graph.db"),
             sessions_dir: dir.join("home").join("sessions"),
             config_path: dir.join("home").join("config.toml"),
+            exe_path: std::path::PathBuf::from("memnoth"),
             config: crate::context::Config::default(),
             json: false,
             quiet: true,
