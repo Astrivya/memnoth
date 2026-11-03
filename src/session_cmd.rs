@@ -444,6 +444,7 @@ pub fn attach(
     let bundle_json = serde_json::to_string_pretty(&bundle)
         .context("failed to serialize bundle")?;
 
+    let size_bytes = bundle_json.len();
     std::fs::write(&bundle_path, bundle_json)
         .with_context(|| format!("failed to write bundle to {}", bundle_path.display()))?;
 
@@ -452,14 +453,14 @@ pub fn attach(
         "bundle_path": bundle_path.display().to_string(),
         "include_vault": include_vault,
         "include_kg": include_kg,
-        "size_bytes": bundle_json.len(),
+        "size_bytes": size_bytes,
     });
 
     let text = format!(
         "Session '{}' attached to bundle '{}' ({} bytes)",
         name,
         bundle_path.display(),
-        bundle_json.len()
+        size_bytes
     );
 
     Ok(Outcome::new("session.attach", text, data))
@@ -615,7 +616,7 @@ pub fn exec(
         "network": network,
         "write_outside_workspace": write_outside,
         "timeout_seconds": timeout,
-        "workspace": ctx.root.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| std::env::current_dir().unwrap().display().to_string()),
+        "workspace": ctx.root.display().to_string(),
     });
 
     // In a full implementation, this would invoke memnoth-sandbox
@@ -623,9 +624,7 @@ pub fn exec(
     let mut command = std::process::Command::new(&cmd[0]);
     command.args(&cmd[1..]);
 
-    if let Some(ws) = &ctx.root {
-        command.current_dir(ws);
-    }
+    command.current_dir(&ctx.root);
 
     // Set timeout
     let output = command.output()

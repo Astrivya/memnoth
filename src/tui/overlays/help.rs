@@ -198,6 +198,12 @@ impl HelpOverlay {
         help
     }
 
+    /// The tab the cursor is on. `active_tab` stays an index because `Tabs`
+    /// takes one; this is where that index becomes a variant.
+    fn tab(&self) -> HelpTab {
+        self.tabs.get(self.active_tab).copied().unwrap_or(HelpTab::Global)
+    }
+
     fn update_filtered(&mut self) {
         self.filtered_bindings.clear();
         if self.search_query.is_empty() {
@@ -534,7 +540,7 @@ impl Overlay for HelpOverlay {
                 self.list_state.select(Some(0));
             }
             KeyCode::Up => {
-                let len = match self.active_tab {
+                let len = match self.tab() {
                     HelpTab::Global => self.global_help.groups.iter().flat_map(|g| &g.bindings).count(),
                     HelpTab::Overlays => Self::build_overlay_help().groups.iter().flat_map(|g| &g.bindings).count(),
                     HelpTab::Commands => Self::build_command_help().groups.iter().flat_map(|g| &g.bindings).count(),
@@ -546,7 +552,7 @@ impl Overlay for HelpOverlay {
                 }
             }
             KeyCode::Down => {
-                let len = match self.active_tab {
+                let len = match self.tab() {
                     HelpTab::Global => self.global_help.groups.iter().flat_map(|g| &g.bindings).count(),
                     HelpTab::Overlays => Self::build_overlay_help().groups.iter().flat_map(|g| &g.bindings).count(),
                     HelpTab::Commands => Self::build_command_help().groups.iter().flat_map(|g| &g.bindings).count(),
@@ -562,7 +568,7 @@ impl Overlay for HelpOverlay {
                 self.list_state.select(Some(self.selected));
             }
             KeyCode::PageDown => {
-                let len = match self.active_tab {
+                let len = match self.tab() {
                     HelpTab::Global => self.global_help.groups.iter().flat_map(|g| &g.bindings).count(),
                     HelpTab::Overlays => Self::build_overlay_help().groups.iter().flat_map(|g| &g.bindings).count(),
                     HelpTab::Commands => Self::build_command_help().groups.iter().flat_map(|g| &g.bindings).count(),
@@ -576,7 +582,7 @@ impl Overlay for HelpOverlay {
                 self.list_state.select(Some(0));
             }
             KeyCode::End => {
-                let len = match self.active_tab {
+                let len = match self.tab() {
                     HelpTab::Global => self.global_help.groups.iter().flat_map(|g| &g.bindings).count(),
                     HelpTab::Overlays => Self::build_overlay_help().groups.iter().flat_map(|g| &g.bindings).count(),
                     HelpTab::Commands => Self::build_command_help().groups.iter().flat_map(|g| &g.bindings).count(),
@@ -646,7 +652,7 @@ impl Overlay for HelpOverlay {
         if self.search_mode && !self.search_query.is_empty() {
             self.render_search_results(frame, content_area);
         } else {
-            match self.active_tab {
+            match self.tab() {
                 HelpTab::Global => self.render_global_help(frame, content_area),
                 HelpTab::Overlays => self.render_overlay_help(frame, content_area),
                 HelpTab::Commands => self.render_command_help(frame, content_area),

@@ -22,8 +22,9 @@ pub struct SearchOverlay {
     loading: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum SearchMode {
+    #[default]
     Query,
     Results,
 }
@@ -53,7 +54,7 @@ impl SearchOverlay {
         }
     }
 
-    fn run_search(&mut self, app: &mut App) {
+    fn run_search(&mut self, _app: &mut App) {
         // In a real implementation, this would call the vault and graph search
         // For now, populate with mock data to demonstrate the UI
         self.loading = true;

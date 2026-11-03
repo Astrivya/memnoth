@@ -81,7 +81,7 @@ impl OverlayStack {
     }
 
     /// Push an overlay onto the stack.
-    pub fn push(&mut self, overlay: Box<dyn Overlay>) {
+    pub fn push(&mut self, mut overlay: Box<dyn Overlay>) {
         overlay.show();
         self.overlays.push(overlay);
     }
@@ -154,8 +154,9 @@ pub fn create_overlay(kind: OverlayKind) -> Box<dyn Overlay> {
         OverlayKind::Models => Box::new(ModelsOverlay::new()),
         OverlayKind::Help => Box::new(HelpOverlay::new()),
         OverlayKind::Feedback => Box::new(crate::feedback::FeedbackOverlay::new()),
-        OverlayKind::Palette => Box::new(crate::palette::PaletteOverlay::new()),
+        OverlayKind::Palette => Box::new(PaletteOverlay::new()),
         OverlayKind::Connect => Box::new(ConnectOverlay::new()),
+        OverlayKind::Permissions => Box::new(PermissionsOverlay::new()),
     }
 }
 

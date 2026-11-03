@@ -77,7 +77,7 @@ const CONFIG_KEYS: &[ConfigKey] = &[
 /// Validate that a key is known.
 fn validate_key(key: &str) -> Result<&ConfigKey> {
     CONFIG_KEYS.iter().find(|k| k.key == key).ok_or_else(|| {
-        bail!("unknown configuration key: {key}\nRun `mn config list` to see available keys")
+        anyhow::anyhow!("unknown configuration key: {key}\nRun `mn config list` to see available keys")
     })
 }
 
@@ -116,7 +116,12 @@ fn get_effective_value(config: &Config, key: &str) -> (Value, &'static str) {
             } else if let Some(v) = config.vault.clone() {
                 (json!(v), "config")
             } else {
-                let home = crate::context::memnoth_home().unwrap_or_default();
+                // The same home directory the rest of the binary resolves, read
+                // here because this view answers from the loaded config alone.
+                let home = std::env::var_os("HOME")
+                    .or_else(|| std::env::var_os("USERPROFILE"))
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_default();
                 (
                     json!(home.join("vault.db").to_string_lossy().to_string()),
                     "default",
@@ -220,7 +225,7 @@ pub fn get(ctx: &crate::context::AppContext, args: &crate::cli::ConfigGetArgs) -
         )
     };
 
-    Ok(Outcome { text, data })
+    Ok(Outcome::new("config.get", text, data))
 }
 
 /// `mn config set <key> <value>`
@@ -326,7 +331,7 @@ pub fn set(ctx: &crate::context::AppContext, args: &crate::cli::ConfigSetArgs) -
         )
     };
 
-    Ok(Outcome { text, data })
+    Ok(Outcome::new("config.set", text, data))
 }
 
 /// `mn config list [--json]`
@@ -379,7 +384,7 @@ pub fn list(
         lines.join("\n")
     };
 
-    Ok(Outcome { text, data })
+    Ok(Outcome::new("config.list", text, data))
 }
 
 /// `mn config edit [--json]`
@@ -398,10 +403,11 @@ pub fn edit(
         let data = json!({
             "config_path": ctx.config_path.to_string_lossy().to_string(),
         });
-        return Ok(Outcome {
-            text: serde_json::to_string_pretty(&data)?,
+        return Ok(Outcome::new(
+            "config.edit",
+            serde_json::to_string_pretty(&data)?,
             data,
-        });
+        ));
     }
 
     // Get editor from environment
@@ -437,7 +443,7 @@ pub fn edit(
         ctx.config_path.display()
     );
 
-    Ok(Outcome { text, data })
+    Ok(Outcome::new("config.edit", text, data))
 }
 
 #[cfg(test)]
@@ -459,6 +465,7 @@ mod tests {
             profile: Some("code".into()),
             vault: None,
             provider: None,
+            ..Default::default()
         };
 
         let (value, source) = get_effective_value(&config, "mcp_url");
@@ -489,6 +496,7 @@ mod tests {
                 input_per_mtok: Some(3.0),
                 output_per_mtok: Some(15.0),
             }),
+            ..Default::default()
         };
 
         assert_eq!(

@@ -210,6 +210,11 @@ impl AppContext {
         })
     }
 
+    /// Resolve every path for this invocation.
+    pub fn new(cli: &Cli) -> Result<Self> {
+        Self::resolve(cli)
+    }
+
     /// Open (creating if needed) this invocation's vault.
     pub fn open_vault(&self) -> Result<memnoth_engine::MemoryEngine> {
         if let Some(parent) = self.vault_path.parent() {
@@ -218,6 +223,29 @@ impl AppContext {
         }
         memnoth_engine::open_vault(&self.vault_path)
             .with_context(|| format!("cannot open the vault at {}", self.vault_path.display()))
+    }
+
+    /// The endpoint `mcp add` writes into client configs.
+    pub fn mcp_url(&self) -> String {
+        self.config
+            .mcp_url
+            .clone()
+            .unwrap_or_else(|| DEFAULT_MCP_URL.to_string())
+    }
+
+    /// The tool profile this invocation serves: `MEMNOTH_MCP_PROFILE`, then
+    /// config, then `full` — the same order the server uses.
+    pub fn profile(&self) -> String {
+        std::env::var("MEMNOTH_MCP_PROFILE")
+            .ok()
+            .or_else(|| self.config.profile.clone())
+            .unwrap_or_else(|| "full".to_string())
+    }
+
+    /// A mutable copy of the loaded config. Callers persist it with `save`;
+    /// `AppContext` itself is shared immutably for the length of a command.
+    pub fn config_mut(&self) -> Config {
+        self.config.clone()
     }
 
     /// The token the MCP client headers use, from the environment only.
@@ -273,11 +301,6 @@ impl AppContext {
     /// Get a reference to the config
     pub fn config(&self) -> &Config {
         &self.config
-    }
-
-    /// Get a mutable reference to the config
-    pub fn config_mut(&mut self) -> &mut Config {
-        &mut self.config
     }
 
     /// Get the config file path
@@ -430,6 +453,7 @@ mod tests {
             profile: Some("code".into()),
             vault: None,
             provider: None,
+            ..Default::default()
         };
         config.save(&path).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();

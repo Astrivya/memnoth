@@ -37,7 +37,7 @@ fn known_providers() -> Vec<ProviderInfo> {
         ProviderInfo {
             name: "openai",
             display_name: "OpenAI",
-            kind: Kind::OpenAI,
+            kind: Kind::OpenAi,
             default_base_url: "https://api.openai.com/v1",
             default_model: "gpt-4o",
             env_var: "OPENAI_API_KEY",
@@ -45,7 +45,7 @@ fn known_providers() -> Vec<ProviderInfo> {
         ProviderInfo {
             name: "openrouter",
             display_name: "OpenRouter",
-            kind: Kind::OpenAI,
+            kind: Kind::OpenAi,
             default_base_url: "https://openrouter.ai/api/v1",
             default_model: "anthropic/claude-3.5-sonnet",
             env_var: "OPENROUTER_API_KEY",
@@ -53,7 +53,7 @@ fn known_providers() -> Vec<ProviderInfo> {
         ProviderInfo {
             name: "custom",
             display_name: "Custom OpenAI-compatible",
-            kind: Kind::OpenAI,
+            kind: Kind::OpenAi,
             default_base_url: "",
             default_model: "",
             env_var: "",
@@ -136,14 +136,14 @@ fn connect_add_non_interactive(ctx: &AppContext, args: &crate::cli::ConnectAddAr
     
     let providers = known_providers();
     let provider_info = providers.iter()
-        .find(|p| p.name == provider_name)
+        .find(|p| p.name == provider_name.as_str())
         .context(format!("Unknown provider: {}", provider_name))?;
     
     // Store API key
     store_provider_key(provider_name, api_key)?;
     
     // Update config.toml
-    let config_path = ctx.config_path()?;
+    let config_path = &ctx.config_path;
     let mut config: Config = if config_path.exists() {
         let content = std::fs::read_to_string(&config_path)?;
         toml::from_str(&content).context("Failed to parse config.toml")?
@@ -152,10 +152,15 @@ fn connect_add_non_interactive(ctx: &AppContext, args: &crate::cli::ConnectAddAr
     };
     
     let mut provider_config = config.provider.unwrap_or_default();
-    provider_config.kind = Some(provider_info.kind.to_string());
+    provider_config.kind = Some(provider_info.kind.name().to_string());
     provider_config.model = args.model.clone().or_else(|| Some(provider_info.default_model.to_string()));
     provider_config.base_url = args.base_url.clone().or_else(|| Some(provider_info.default_base_url.to_string()));
     
+    // The report describes what was written, so it is read before the value
+    // moves into the config.
+    let model = provider_config.model.clone();
+    let base_url = provider_config.base_url.clone();
+
     config.provider = Some(provider_config);
     config.save(&config_path)?;
     
@@ -166,9 +171,9 @@ fn connect_add_non_interactive(ctx: &AppContext, args: &crate::cli::ConnectAddAr
     
     let data = json!({
         "provider": provider_name,
-        "kind": provider_info.kind.to_string(),
-        "model": provider_config.model,
-        "base_url": provider_config.base_url,
+        "kind": provider_info.kind.name(),
+        "model": model,
+        "base_url": base_url,
         "config_path": config_path.to_string_lossy(),
     });
     
@@ -210,7 +215,7 @@ fn connect_add_interactive(ctx: &AppContext, args: &crate::cli::ConnectAddArgs) 
     store_provider_key(provider_info.name, &api_key)?;
     
     // Update config.toml
-    let config_path = ctx.config_path()?;
+    let config_path = &ctx.config_path;
     let mut config: Config = if config_path.exists() {
         let content = std::fs::read_to_string(&config_path)?;
         toml::from_str(&content).context("Failed to parse config.toml")?
@@ -219,10 +224,13 @@ fn connect_add_interactive(ctx: &AppContext, args: &crate::cli::ConnectAddArgs) 
     };
     
     let mut provider_config = config.provider.unwrap_or_default();
-    provider_config.kind = Some(provider_info.kind.to_string());
+    provider_config.kind = Some(provider_info.kind.name().to_string());
     provider_config.model = args.model.clone().or_else(|| Some(provider_info.default_model.to_string()));
     provider_config.base_url = args.base_url.clone().or_else(|| Some(provider_info.default_base_url.to_string()));
     
+    let model = provider_config.model.clone();
+    let base_url = provider_config.base_url.clone();
+
     config.provider = Some(provider_config);
     config.save(&config_path)?;
     
@@ -238,9 +246,9 @@ fn connect_add_interactive(ctx: &AppContext, args: &crate::cli::ConnectAddArgs) 
     
     let data = json!({
         "provider": provider_info.name,
-        "kind": provider_info.kind.to_string(),
-        "model": provider_config.model,
-        "base_url": provider_config.base_url,
+        "kind": provider_info.kind.name(),
+        "model": model,
+        "base_url": base_url,
         "config_path": config_path.to_string_lossy(),
     });
     
@@ -380,16 +388,15 @@ fn test_connection_tui(
     let model = provider_info.default_model;
     let kind = provider_info.kind;
     
-    let mut spinner = Spinner::new("Testing connection...".to_string());
+    let mut spinner = Spinner::new().with_message("Testing connection...");
     let start = std::time::Instant::now();
     
     loop {
         terminal.draw(|f| {
             let area = f.area();
-            let elapsed = start.elapsed().as_secs_f32();
-            spinner.tick(elapsed);
-            let frame = spinner.render(area);
-            f.render_widget(frame, area);
+            let _ = start.elapsed();
+            spinner.tick();
+            spinner.render(f, area);
         })?;
         
         // Run test in background check
@@ -530,7 +537,7 @@ fn test_provider_connection(kind: Kind, base_url: &str, model: &str, api_key: &s
             });
             (url, body)
         }
-        Kind::OpenAI => {
+        Kind::OpenAi | Kind::Memnoth => {
             let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
             let body = json!({
                 "model": model,
@@ -551,7 +558,7 @@ fn test_provider_connection(kind: Kind, base_url: &str, model: &str, api_key: &s
                 .header("x-api-key", api_key)
                 .header("anthropic-version", "2023-06-01");
         }
-        Kind::OpenAI => {
+        Kind::OpenAi | Kind::Memnoth => {
             req = req.header("Authorization", format!("Bearer {}", api_key));
         }
     }
@@ -570,7 +577,7 @@ fn test_provider_connection(kind: Kind, base_url: &str, model: &str, api_key: &s
 /// Run `mn connect list` - list configured providers
 pub fn connect_list(ctx: &AppContext, args: &crate::cli::ConnectListArgs) -> Result<Outcome> {
     let stored_keys = list_provider_keys()?;
-    let config: Config = Config::load(&ctx.config_path()?)?;
+    let config: Config = Config::load(&ctx.config_path)?;
     let provider_config = config.provider;
     
     let mut rows = Vec::new();
@@ -580,7 +587,7 @@ pub fn connect_list(ctx: &AppContext, args: &crate::cli::ConnectListArgs) -> Res
         let info = providers.iter().find(|p| p.name == name);
         
         let is_active = provider_config.as_ref().and_then(|p| p.kind.as_ref())
-            .map(|k| info.map(|i| i.kind.to_string() == *k).unwrap_or(false))
+            .map(|k| info.map(|i| i.kind.name() == k.as_str()).unwrap_or(false))
             .unwrap_or(false);
         
         let model = provider_config.as_ref().and_then(|p| p.model.clone()).unwrap_or_else(|| "—".to_string());
@@ -589,7 +596,7 @@ pub fn connect_list(ctx: &AppContext, args: &crate::cli::ConnectListArgs) -> Res
         rows.push(json!({
             "name": name,
             "display_name": info.map(|i| i.display_name).unwrap_or(name),
-            "kind": info.map(|i| i.kind.to_string()).unwrap_or_else(|| "unknown".to_string()),
+            "kind": info.map(|i| i.kind.name()).unwrap_or("unknown"),
             "model": model,
             "base_url": base_url,
             "is_active": is_active,
@@ -644,7 +651,7 @@ pub fn connect_remove(ctx: &AppContext, args: &crate::cli::ConnectRemoveArgs) ->
     remove_provider_key(name)?;
     
     // If this was the active provider, clear config
-    let config_path = ctx.config_path()?;
+    let config_path = &ctx.config_path;
     let mut config: Config = if config_path.exists() {
         let content = std::fs::read_to_string(&config_path)?;
         toml::from_str(&content).context("Failed to parse config.toml")?
@@ -653,7 +660,7 @@ pub fn connect_remove(ctx: &AppContext, args: &crate::cli::ConnectRemoveArgs) ->
     };
     
     if let Some(ref provider) = config.provider {
-        if provider.kind.as_deref() == Some(name) {
+        if provider.kind.as_deref() == Some(name.as_str()) {
             config.provider = None;
             config.save(&config_path)?;
         }
@@ -666,7 +673,7 @@ pub fn connect_remove(ctx: &AppContext, args: &crate::cli::ConnectRemoveArgs) ->
 
 /// Run `mn connect test` - test connection to a provider
 pub fn connect_test(ctx: &AppContext, args: &crate::cli::ConnectTestArgs) -> Result<Outcome> {
-    let config: Config = Config::load(&ctx.config_path()?)?;
+    let config: Config = Config::load(&ctx.config_path)?;
     let provider_config = config.provider
         .context("No provider configured. Run `mn connect add` first.")?;
     
@@ -679,8 +686,9 @@ pub fn connect_test(ctx: &AppContext, args: &crate::cli::ConnectTestArgs) -> Res
         .context(format!("No API key stored for provider '{}'. Run `mn connect add` first.", provider_name))?;
     
     let providers = known_providers();
-    let provider_info = providers.iter()
-        .find(|p| p.name == provider_name)
+    let provider_info = providers
+        .iter()
+        .find(|p| p.name == provider_name.as_str())
         .context(format!("Unknown provider: {}", provider_name))?;
     
     let base_url = args.provider.as_ref().and_then(|_| provider_config.base_url.as_deref())
@@ -695,7 +703,7 @@ pub fn connect_test(ctx: &AppContext, args: &crate::cli::ConnectTestArgs) -> Res
     let text = format!("Connection to '{}' successful!", provider_info.display_name);
     let data = json!({
         "provider": provider_name,
-        "kind": kind.to_string(),
+        "kind": kind.name(),
         "model": model,
         "base_url": base_url,
         "success": true,

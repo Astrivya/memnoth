@@ -18,26 +18,25 @@ pub fn run(ctx: &AppContext, args: &crate::cli::OpenArgs) -> Result<Outcome, Err
             "project_id": args.project_id,
             "session_id": args.session_id,
         });
-        return Ok(Outcome {
-            text: url.clone(),
-            data,
-        });
+        return Ok(Outcome::new("open", url.clone(), data));
     }
 
     if args.no_browser {
         println!("{}", url);
-        return Ok(Outcome {
-            text: url,
-            data: serde_json::json!({ "opened": false }),
-        });
+        return Ok(Outcome::new(
+            "open",
+            url,
+            serde_json::json!({ "opened": false }),
+        ));
     }
 
     open_browser(&url).context("Failed to open browser")?;
 
-    Ok(Outcome {
-        text: format!("Opened {}", url),
-        data: serde_json::json!({ "opened": true, "url": url }),
-    })
+    Ok(Outcome::new(
+        "open",
+        format!("Opened {}", url),
+        serde_json::json!({ "opened": true, "url": url }),
+    ))
 }
 
 /// Get the console base URL from config or default.
@@ -89,9 +88,27 @@ fn build_console_url(base_url: &str, args: &crate::cli::OpenArgs, ctx: &AppConte
     let workspace_name = ctx.root.file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("workspace");
-    url.push_str(&format!("?workspace={}", urlencoding::encode(workspace_name)));
+    url.push_str(&format!("?workspace={}", encode_query_component(workspace_name)));
 
     Ok(url)
+}
+
+/// Percent-encode one query-string value (RFC 3986 unreserved set kept literal).
+///
+/// A workspace name is a directory name, so it can hold a space or an `&`. The
+/// console would read either as a different workspace, so the value is encoded
+/// here rather than trusted.
+fn encode_query_component(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char);
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
 }
 
 /// Open a URL in the default browser.

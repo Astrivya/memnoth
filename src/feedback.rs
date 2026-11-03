@@ -5,8 +5,11 @@ use serde_json::{Value, json};
 
 use crate::cli::{FeedbackArgs, FeedbackCommand, FeedbackSendArgs};
 use crate::context::AppContext;
-use crate::output::{ErrorOutcome, Outcome};
-use memnoth_cloud_client::{CloudClient, CloudError};
+use crate::output::Outcome;
+
+/// Where `mn feedback send` posts. The typed cloud client exposes no feedback
+/// endpoint, so this verb posts to the documented URL directly.
+const FEEDBACK_URL: &str = "https://memnoth.astrivya.ai/api/v1/feedback";
 
 /// Run the feedback command.
 pub fn run(ctx: &AppContext, args: &FeedbackArgs) -> Result<Outcome> {
@@ -15,81 +18,72 @@ pub fn run(ctx: &AppContext, args: &FeedbackArgs) -> Result<Outcome> {
     }
 }
 
-/// Get authenticated cloud client.
-fn get_cloud_client(ctx: &AppContext) -> Result<CloudClient> {
-    let mut client = CloudClient::new().context("Failed to create cloud client")?;
-
-    // Try to get token from environment
-    if let Ok(token) = std::env::var("MEMNOTH_API_KEY") {
-        client.set_auth_token(token);
-    } else if let Ok(token) = std::env::var("MEMNOTH_MCP_TOKEN") {
-        client.set_auth_token(token);
-    } else if let Some(token) = crate::auth::get_stored_token(ctx)? {
-        client.set_auth_token(token);
-    }
-
-    Ok(client)
+/// The token a feedback post authenticates with: environment first, then the
+/// credential store. Feedback is useful without an account, so a missing token
+/// is not an error here — the server decides.
+fn auth_token() -> Option<String> {
+    std::env::var("MEMNOTH_API_KEY")
+        .ok()
+        .or_else(|| std::env::var("MEMNOTH_MCP_TOKEN").ok())
+        .filter(|token| !token.trim().is_empty())
+        .or_else(|| {
+            memnoth_auth::get_credential_sync("memnoth")
+                .ok()
+                .flatten()
+                .filter(|token| !token.trim().is_empty())
+        })
 }
 
 /// `mn feedback send <message>` - POST /api/v1/feedback
-pub fn send_feedback(ctx: &AppContext, args: &FeedbackSendArgs) -> Result<Outcome> {
-    let client = get_cloud_client(ctx)?;
+pub fn send_feedback(_ctx: &AppContext, args: &FeedbackSendArgs) -> Result<Outcome> {
+    let data = post_feedback(&args.message, &args.category, args.include_context)?;
 
-    let message = &args.message;
+    let text = format!(
+        "Feedback sent successfully (ID: {})",
+        data.get("id").and_then(|v| v.as_str()).unwrap_or("unknown")
+    );
+    Ok(Outcome::new("feedback.send", text, data))
+}
 
-    // Build request body
-    let request_body = json!({
+/// POST /api/v1/feedback and return the decoded reply.
+///
+/// Feedback is a single small POST, so it goes straight to the endpoint the
+/// console serves rather than through the typed client.
+fn post_feedback(message: &str, category: &str, include_context: bool) -> Result<Value> {
+    let body = json!({
         "message": message,
-        "category": args.category,
-        "include_context": args.include_context,
+        "category": category,
+        "include_context": include_context,
     });
 
-    let url = client
-        .base_url
-        .join("feedback")
-        .map_err(|e| CloudError::InvalidUrl(e.to_string()))?;
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .context("cannot create an HTTP client")?;
 
-    let response = client
-        .client
-        .post(url)
-        .headers(client.headers())
-        .json(&request_body)
+    let mut request = client.post(FEEDBACK_URL).json(&body);
+    if let Some(token) = auth_token() {
+        request = request.bearer_auth(token);
+    }
+
+    let response = request
         .send()
-        .map_err(|e| CloudError::NetworkError(e.to_string()))?;
-
+        .context("cannot reach the feedback endpoint")?;
     let status = response.status();
-    let text = response
-        .text()
-        .map_err(|e| CloudError::NetworkError(e.to_string()))?;
+    let text = response.text().unwrap_or_default();
 
     if status.is_success() {
-        let data: Value = serde_json::from_str(&text)
-            .map_err(|e| CloudError::SerializationError(e.to_string()))?;
-
-        let text_output = format!("Feedback sent successfully (ID: {})", data.get("id").and_then(|v| v.as_str()).unwrap_or("unknown"));
-        Ok(Outcome::new("feedback.send", text_output, data))
+        // A non-JSON reply still means the server accepted the feedback.
+        Ok(serde_json::from_str(&text).unwrap_or_else(|_| json!({ "text": text })))
     } else {
-        let error = match status.as_u16() {
-            401 => CloudError::AuthError(text),
-            402 => CloudError::CreditsExhausted(text),
-            404 => CloudError::NotFound(text),
-            429 => {
-                // Try to extract Retry-After from headers, but we don't have them here
-                CloudError::RateLimited {
-                    retry_after_secs: 60,
-                    message: text,
-                }
-            }
-            500..=599 => CloudError::Transient {
-                status: status.as_u16(),
-                message: text,
-            },
-            _ => CloudError::ClientError {
-                status: status.as_u16(),
-                message: text,
-            },
-        };
-        Err(error.into())
+        Err(anyhow::anyhow!(match status.as_u16() {
+            401 => "Authentication failed. Please run `mn auth login`".to_string(),
+            402 => "Credits exhausted".to_string(),
+            404 => "Feedback endpoint not found".to_string(),
+            429 => "Rate limited. Please try again later".to_string(),
+            code @ 500..=599 => format!("Server error ({code})"),
+            code => format!("Error ({code}): {text}"),
+        }))
     }
 }
 
@@ -136,7 +130,7 @@ impl FeedbackCategory {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum FeedbackStatus {
     Editing,
     Submitting,
@@ -165,7 +159,7 @@ impl FeedbackOverlay {
         Self::default()
     }
 
-    fn submit_feedback(&mut self, app: &mut App) {
+    fn submit_feedback(&mut self, _app: &mut App) {
         if self.message.trim().is_empty() {
             self.status = FeedbackStatus::Error("Message cannot be empty".to_string());
             return;
@@ -173,82 +167,22 @@ impl FeedbackOverlay {
 
         self.status = FeedbackStatus::Submitting;
 
-        // Run submission in background - for now we'll do it synchronously
-        // In a real implementation, this would spawn a task
-        let ctx = app.context.clone();
         let message = self.message.clone();
         let category = self.category;
-        let include_context = self.include_context;
 
-        // Use blocking call for simplicity - in production this should be async
-        match submit_feedback_blocking(&ctx, &message, category, include_context) {
-            Ok(feedback_id) => {
-                self.status = FeedbackStatus::Success(format!("Feedback sent (ID: {})", feedback_id));
+        // One small blocking POST. The overlay is modal, so nothing else is
+        // waiting on the runtime while it runs.
+        match post_feedback(&message, category.as_str(), self.include_context) {
+            Ok(data) => {
+                let id = data.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
+                self.status = FeedbackStatus::Success(format!("Feedback sent (ID: {id})"));
                 self.message.clear();
                 self.cursor = 0;
             }
-            Err(e) => {
-                self.status = FeedbackStatus::Error(format!("Failed to send: {}", e));
+            Err(error) => {
+                self.status = FeedbackStatus::Error(format!("Failed to send: {error}"));
             }
         }
-    }
-}
-
-fn submit_feedback_blocking(
-    ctx: &AppContext,
-    message: &str,
-    category: FeedbackCategory,
-    include_context: bool,
-) -> Result<String> {
-    let mut client = CloudClient::new().context("Failed to create cloud client")?;
-
-    // Try to get token from environment
-    if let Ok(token) = std::env::var("MEMNOTH_API_KEY") {
-        client.set_auth_token(token);
-    } else if let Ok(token) = std::env::var("MEMNOTH_MCP_TOKEN") {
-        client.set_auth_token(token);
-    } else if let Some(token) = crate::auth::get_stored_token(ctx)? {
-        client.set_auth_token(token);
-    }
-
-    let request_body = json!({
-        "message": message,
-        "category": category.as_str(),
-        "include_context": include_context,
-    });
-
-    let url = client
-        .base_url
-        .join("feedback")
-        .map_err(|e| CloudError::InvalidUrl(e.to_string()))?;
-
-    let response = client
-        .client
-        .post(url)
-        .headers(client.headers())
-        .json(&request_body)
-        .send()
-        .map_err(|e| CloudError::NetworkError(e.to_string()))?;
-
-    let status = response.status();
-    let text = response
-        .text()
-        .map_err(|e| CloudError::NetworkError(e.to_string()))?;
-
-    if status.is_success() {
-        let data: Value = serde_json::from_str(&text)
-            .map_err(|e| CloudError::SerializationError(e.to_string()))?;
-        Ok(data.get("id").and_then(|v| v.as_str()).unwrap_or("unknown").to_string())
-    } else {
-        let error_msg = match status.as_u16() {
-            401 => "Authentication failed. Please run `mn auth login`".to_string(),
-            402 => "Credits exhausted".to_string(),
-            404 => "Feedback endpoint not found".to_string(),
-            429 => "Rate limited. Please try again later".to_string(),
-            500..=599 => format!("Server error ({})", status.as_u16()),
-            _ => format!("Error ({}): {}", status.as_u16(), text),
-        };
-        Err(anyhow::anyhow!(error_msg))
     }
 }
 
@@ -280,9 +214,8 @@ impl Overlay for FeedbackOverlay {
         }
 
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
 
-        match (self.status, key.code) {
+        match (&self.status, key.code) {
             (FeedbackStatus::Editing, KeyCode::Esc) => {
                 if !self.message.is_empty() || self.category != FeedbackCategory::default() || !self.include_context {
                     // If user has entered content, ask for confirmation? For now just close.
@@ -409,10 +342,10 @@ impl Overlay for FeedbackOverlay {
 
         // Status
         let status_text = match &self.status {
-            FeedbackStatus::Editing => " Editing... ",
-            FeedbackStatus::Submitting => " Submitting... ",
-            FeedbackStatus::Success(msg) => &format!(" ✓ {} (Esc to close) ", msg),
-            FeedbackStatus::Error(msg) => &format!(" ✗ {} (Esc to retry) ", msg),
+            FeedbackStatus::Editing => " Editing... ".to_string(),
+            FeedbackStatus::Submitting => " Submitting... ".to_string(),
+            FeedbackStatus::Success(msg) => format!(" ✓ {msg} (Esc to close) "),
+            FeedbackStatus::Error(msg) => format!(" ✗ {msg} (Esc to retry) "),
         };
         let status_style = match &self.status {
             FeedbackStatus::Error(_) => Style::default().fg(Color::Red),

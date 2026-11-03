@@ -27,9 +27,10 @@ mod render;
 mod store;
 
 pub use render::{
-    render_callees, render_callers, render_def, render_diff_impact, render_explore, render_index, render_refs, render_search, render_status,
-    };
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+    render_callees, render_callers, render_def, render_diff_impact, render_explore,
+    render_impact, render_index, render_refs, render_search, render_status,
+};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::time::Instant;
@@ -307,19 +308,28 @@ pub struct DiffImpactChange {
 /// Shortest call path between two symbols.
 #[derive(Debug, Clone, Serialize)]
 pub struct CallpathReport {
+    /// The symbol the path starts at.
     pub from: String,
+    /// The symbol the path should reach.
     pub to: String,
-    pub found: bool,
+    /// Whether a path was found. False when either name does not resolve.
+    pub resolved: bool,
+    /// The symbols along the path, in order.
     pub path: Vec<CallpathNode>,
+    /// Edges between the first and last node.
     pub hops: usize,
 }
 
 /// One node in the call path.
 #[derive(Debug, Clone, Serialize)]
 pub struct CallpathNode {
+    /// Symbol name at this hop.
     pub symbol: String,
+    /// Declaration kind, or empty when the name was only mentioned.
     pub kind: String,
+    /// File declaring it.
     pub file: String,
+    /// Line of the declaration.
     pub line: usize,
 }
 
@@ -398,14 +408,20 @@ pub struct ReviewSymbol {
     pub name: String,
     pub kind: String,
     pub line: usize,
-    pub impact: String,
+    /// Mentions of this symbol outside its declaration line.
+    pub references: usize,
 }
 
 /// Tests that cover a symbol.
 #[derive(Debug, Clone, Serialize)]
 pub struct TestsForReport {
+    /// The name that was asked for.
     pub symbol: String,
+    /// Whether any declaration matched it.
+    pub resolved: bool,
+    /// Tests that mention the symbol.
     pub tests: Vec<TestCoverage>,
+    /// How many test files were found.
     pub total_coverage: usize,
 }
 
@@ -1503,6 +1519,7 @@ pub fn callpath(ctx: &AppContext, from: &str, to: &str) -> Result<CallpathReport
             to: to.to_string(),
             resolved: false,
             path: Vec::new(),
+            hops: 0,
         });
     }
     if to_names.is_empty() {
@@ -1511,6 +1528,7 @@ pub fn callpath(ctx: &AppContext, from: &str, to: &str) -> Result<CallpathReport
             to: to.to_string(),
             resolved: false,
             path: Vec::new(),
+            hops: 0,
         });
     }
 
@@ -1543,7 +1561,7 @@ pub fn callpath(ctx: &AppContext, from: &str, to: &str) -> Result<CallpathReport
         for callee in callees {
             if visited.insert(callee.clone()) {
                 let mut new_path = current_path.clone();
-                new_path.push(callee);
+                new_path.push(callee.clone());
                 queue.push_back((callee, new_path));
             }
         }
@@ -1563,6 +1581,10 @@ pub fn callpath(ctx: &AppContext, from: &str, to: &str) -> Result<CallpathReport
                 .unwrap_or_default();
             CallpathNode {
                 symbol: name.clone(),
+                kind: defs
+                    .first()
+                    .map(|d| d.kind.clone())
+                    .unwrap_or_default(),
                 file,
                 line,
             }
@@ -1573,6 +1595,7 @@ pub fn callpath(ctx: &AppContext, from: &str, to: &str) -> Result<CallpathReport
         from: from.to_string(),
         to: to.to_string(),
         resolved: !path.is_empty(),
+        hops: path.len().saturating_sub(1),
         path: nodes,
     })
 }
@@ -1591,11 +1614,13 @@ pub fn outline(ctx: &AppContext, file: &str) -> Result<OutlineReport> {
             line: row.line,
             end_line: row.end_line,
             container: row.container,
+            children: Vec::new(),
         })
         .collect();
 
     Ok(OutlineReport {
         file: file.to_string(),
+        language: extract::language_for(file).to_string(),
         symbols,
     })
 }
@@ -1627,6 +1652,7 @@ pub fn tree(ctx: &AppContext, dir: &str) -> Result<TreeReport> {
             .collect();
 
         entries.push(TreeEntry {
+            language: extract::language_for(&file.path).to_string(),
             path: file.path,
             symbols,
         });
@@ -1675,6 +1701,7 @@ pub fn review(ctx: &AppContext, staged: bool) -> Result<ReviewReport> {
                 files_changed: 0,
                 symbols_changed: 0,
                 references_affected: 0,
+                test_coverage_delta: 0,
             },
         });
     }
@@ -1704,7 +1731,9 @@ pub fn review(ctx: &AppContext, staged: bool) -> Result<ReviewReport> {
 
         changes.push(ReviewChange {
             file: file.clone(),
+            change_type: "modified".to_string(),
             symbols: symbol_changes,
+            impacted_tests: Vec::new(),
         });
     }
 
@@ -1715,6 +1744,9 @@ pub fn review(ctx: &AppContext, staged: bool) -> Result<ReviewReport> {
             files_changed: changed_files.len(),
             symbols_changed: total_symbols,
             references_affected: total_refs,
+            // The graph knows which tests mention a symbol, not whether they
+            // still pass; coverage movement needs a test run.
+            test_coverage_delta: 0,
         },
     })
 }
@@ -1733,6 +1765,7 @@ pub fn tests_for(ctx: &AppContext, symbol: &str) -> Result<TestsForReport> {
         return Ok(TestsForReport {
             symbol: symbol.to_string(),
             resolved: false,
+            total_coverage: 0,
             tests: Vec::new(),
         });
     }
@@ -1747,8 +1780,10 @@ pub fn tests_for(ctx: &AppContext, symbol: &str) -> Result<TestsForReport> {
                 .unwrap_or_default();
             let name = symbols.first().map(|s| s.name.clone()).unwrap_or(path.clone());
             tests.push(TestCoverage {
-                file: path,
+                line: symbols.first().map(|s| s.line).unwrap_or(0),
+                path,
                 test_name: name,
+                coverage_type: "direct".to_string(),
             });
         }
     }
@@ -1756,6 +1791,7 @@ pub fn tests_for(ctx: &AppContext, symbol: &str) -> Result<TestsForReport> {
     Ok(TestsForReport {
         symbol: symbol.to_string(),
         resolved: true,
+        total_coverage: tests.len(),
         tests,
     })
 }
@@ -1797,19 +1833,31 @@ pub fn owners(ctx: &AppContext, path: &str) -> Result<OwnersReport> {
 
     let mut blame = Vec::new();
     if output.status.success() {
+        // `git blame` porcelain-free output is
+        // `<sha> (<author> <date> <line>) <content>`; the parenthesised group is
+        // the only place the date and the source line number appear.
         for line in String::from_utf8(output.stdout).unwrap_or_default().lines() {
-            if let Some(idx) = line.find('(') {
-                let commit = line[idx..].split(')').next().unwrap_or("").trim_start_matches('(');
-                let author_end = commit.find(' ').unwrap_or(commit.len());
-                let author = commit[..author_end].to_string();
-                let time_str = commit[author_end..].trim_start().to_string();
-                blame.push(BlameEntry {
-                    commit: commit.split(' ').next().unwrap_or("").to_string(),
-                    author,
-                    time: time_str,
-                    line: line.split(')').nth(1).unwrap_or("").trim().to_string(),
-                });
-            }
+            let Some(open) = line.find('(') else { continue };
+            let Some(close) = line.rfind(')') else { continue };
+            let mut fields = line[open + 1..close].split_whitespace();
+            let author = fields.next().unwrap_or("").to_string();
+            let rest: Vec<&str> = fields.collect();
+            let number = rest
+                .last()
+                .and_then(|token| token.parse::<usize>().ok())
+                .unwrap_or(0);
+            let date = rest[..rest.len().saturating_sub(1)].join(" ");
+            blame.push(BlameEntry {
+                commit: line[..open]
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .to_string(),
+                author,
+                date,
+                line: number,
+                content: line[close + 1..].trim().to_string(),
+            });
         }
     }
 
@@ -1843,6 +1891,7 @@ pub fn dead_code(ctx: &AppContext) -> Result<DeadCodeReport> {
                 name: symbol.name.clone(),
                 kind: symbol.kind.clone(),
                 file: symbol.path.clone(),
+                is_public: !symbol.name.starts_with('_'),
                 line: symbol.line,
             });
         }
@@ -1850,7 +1899,11 @@ pub fn dead_code(ctx: &AppContext) -> Result<DeadCodeReport> {
 
     dead.sort_by(|a, b| a.file.cmp(&b.file).then(a.line.cmp(&b.line)));
 
-    Ok(DeadCodeReport { exports: dead })
+    let total = dead.len();
+    Ok(DeadCodeReport {
+        exports: dead,
+        total,
+    })
 }
 
 /// `memnoth kg cycles` — import cycles.
@@ -1901,7 +1954,8 @@ pub fn cycles(ctx: &AppContext) -> Result<CyclesReport> {
                     if let Some(idx) = path.iter().position(|n| n == neighbor) {
                         let cycle = path[idx..].to_vec();
                         cycles.push(ImportCycle {
-                            nodes: cycle.clone(),
+                            length: cycle.len(),
+                            files: cycle.clone(),
                         });
                     }
                 }
@@ -1919,10 +1973,11 @@ pub fn cycles(ctx: &AppContext) -> Result<CyclesReport> {
     }
 
     // Deduplicate cycles
-    cycles.sort_by(|a, b| a.nodes.len().cmp(&b.nodes.len()));
-    cycles.dedup_by(|a, b| a.nodes == b.nodes);
+    cycles.sort_by(|a, b| a.length.cmp(&b.length));
+    cycles.dedup_by(|a, b| a.files == b.files);
 
-    Ok(CyclesReport { cycles })
+    let total = cycles.len();
+    Ok(CyclesReport { cycles, total })
 }
 
 /// `memnoth kg hotspots` — churn × complexity hotspots.
@@ -1973,13 +2028,15 @@ pub fn hotspots(ctx: &AppContext) -> Result<HotspotsReport> {
             churn: file_churn,
             complexity,
             score,
+            symbols: symbols.iter().map(|s| s.name.clone()).collect(),
         });
     }
 
     // Sort by score descending
     hotspots.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
 
-    Ok(HotspotsReport { hotspots })
+    let total = hotspots.len();
+    Ok(HotspotsReport { hotspots, total })
 }
 
 /// `memnoth kg unused-exports` — unused public exports (API hygiene).
@@ -2011,13 +2068,18 @@ pub fn unused_exports(ctx: &AppContext) -> Result<UnusedExportsReport> {
                 kind: symbol.kind.clone(),
                 file: symbol.path.clone(),
                 line: symbol.line,
+                visibility: "public".to_string(),
             });
         }
     }
 
     unused.sort_by(|a, b| a.file.cmp(&b.file).then(a.line.cmp(&b.line)));
 
-    Ok(UnusedExportsReport { exports: unused })
+    let total = unused.len();
+    Ok(UnusedExportsReport {
+        exports: unused,
+        total,
+    })
 }
 
 /// `memnoth kg deps` — import graph for a file.
@@ -2034,7 +2096,7 @@ pub fn deps(ctx: &AppContext, file: &str) -> Result<DepsReport> {
                 edges.push(ImportEdge {
                     from: file.to_string(),
                     to: ref_row.path,
-                    symbol: ref_row.name,
+                    kind: "reference".to_string(),
                     line: ref_row.line,
                 });
             }
@@ -2043,9 +2105,12 @@ pub fn deps(ctx: &AppContext, file: &str) -> Result<DepsReport> {
 
     edges.sort_by(|a, b| a.to.cmp(&b.to).then(a.line.cmp(&b.line)));
 
+    // Every edge found here points *into* this file: another file mentions a
+    // symbol this one declares. That is the reverse direction of `imports`.
     Ok(DepsReport {
         file: file.to_string(),
-        edges,
+        imports: Vec::new(),
+        imported_by: edges,
     })
 }
 
@@ -2069,7 +2134,7 @@ pub fn query(ctx: &AppContext, expr: &str) -> Result<QueryReport> {
                                 kind: symbol.kind,
                                 file: symbol.path,
                                 line: symbol.line,
-                                context: format!("kind:{}", value),
+                                metadata: serde_json::json!({ "context": format!("kind:{}", value) }),
                             });
                         }
                     }
@@ -2082,7 +2147,7 @@ pub fn query(ctx: &AppContext, expr: &str) -> Result<QueryReport> {
                             kind: symbol.kind,
                             file: symbol.path,
                             line: symbol.line,
-                            context: format!("file:{}", value),
+                            metadata: serde_json::json!({ "context": format!("file:{}", value) }),
                         });
                     }
                 }
@@ -2094,7 +2159,7 @@ pub fn query(ctx: &AppContext, expr: &str) -> Result<QueryReport> {
                             kind: symbol.kind,
                             file: symbol.path,
                             line: symbol.line,
-                            context: format!("name:{}", value),
+                            metadata: serde_json::json!({ "context": format!("name:{}", value) }),
                         });
                     }
                 }
@@ -2106,7 +2171,7 @@ pub fn query(ctx: &AppContext, expr: &str) -> Result<QueryReport> {
                             kind: "reference".to_string(),
                             file: ref_row.path,
                             line: ref_row.line,
-                            context: format!("refs:{}", value),
+                            metadata: serde_json::json!({ "context": format!("refs:{}", value) }),
                         });
                     }
                 }
@@ -2119,7 +2184,7 @@ pub fn query(ctx: &AppContext, expr: &str) -> Result<QueryReport> {
                             kind: "caller".to_string(),
                             file: hit.path,
                             line: hit.line,
-                            context: format!("callers:{}", value),
+                            metadata: serde_json::json!({ "context": format!("callers:{}", value) }),
                         });
                     }
                 }
@@ -2130,6 +2195,7 @@ pub fn query(ctx: &AppContext, expr: &str) -> Result<QueryReport> {
 
     Ok(QueryReport {
         expr: expr.to_string(),
+        count: results.len(),
         results,
     })
 }
@@ -2139,8 +2205,10 @@ pub fn serve(ctx: &AppContext, port: u16) -> Result<ServeReport> {
     // This is a placeholder - actual server would run in background
     // For now, just return the serve report with the address
     Ok(ServeReport {
-        address: format!("http://127.0.0.1:{}", port),
-        status: "ready".to_string(),
+        listening: true,
+        port,
+        endpoint: format!("http://127.0.0.1:{port}"),
+        graph_path: ctx.graph_path.display().to_string(),
     })
 }
 
@@ -2148,8 +2216,11 @@ pub fn serve(ctx: &AppContext, port: u16) -> Result<ServeReport> {
 pub fn watch(ctx: &AppContext) -> Result<WatchReport> {
     // Placeholder - would start a file watcher
     Ok(WatchReport {
-        status: "watching".to_string(),
+        watching: true,
         graph_path: ctx.graph_path.display().to_string(),
+        // A watcher would stamp each rebuild here; this build does not run one.
+        last_index: None,
+        files_watched: 0,
     })
 }
 fn last_segment(symbol: &str) -> Option<&str> {
@@ -2415,6 +2486,7 @@ mod tests {
             namespace: "default".to_string(),
             sessions_dir: root.join("home").join("sessions"),
             config_path: root.join("home").join("config.toml"),
+            exe_path: PathBuf::from("memnoth"),
             config: crate::context::Config::default(),
             json: false,
             quiet: true,

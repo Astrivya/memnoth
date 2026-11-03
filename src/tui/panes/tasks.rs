@@ -190,9 +190,21 @@ impl TasksPane {
         }
     }
 
+    /// The tab the pane is showing.
+    ///
+    /// `active_tab` is the cursor the tab arithmetic moves; the variant is what
+    /// decides which tasks are listed. Keeping the two as one value is what made
+    /// every `match` here a type error.
+    fn tab(&self) -> TasksTab {
+        self.tabs
+            .get(self.active_tab)
+            .copied()
+            .unwrap_or(TasksTab::All)
+    }
+
     fn filtered_tasks(&self) -> Vec<&BackgroundTask> {
         self.tasks.iter().filter(|t| {
-            match self.active_tab {
+            match self.tab() {
                 TasksTab::All => true,
                 TasksTab::Running => matches!(t.status, TaskStatus::Running | TaskStatus::Pending),
                 TasksTab::Completed => matches!(t.status, TaskStatus::Completed),
@@ -315,13 +327,13 @@ impl TasksPane {
             let lines = vec![
                 Line::from(vec![
                     Span::styled(format!("{} ", status_char), Style::default().fg(status_color)),
-                    Span::styled(&task.name, style),
+                    Span::styled(task.name.clone(), style),
                     Span::styled(progress_bar, style.fg(Color::DarkGray)),
                     Span::styled(format!("  {}", task.started_at), style.fg(Color::DarkGray)),
                 ]),
                 Line::from(vec![
                     Span::styled("    ", Style::default()),
-                    Span::styled(&task.description, style.fg(Color::Gray)),
+                    Span::styled(task.description.clone(), style.fg(Color::Gray)),
                 ]),
             ];
             ListItem::new(lines).style(style)
@@ -330,7 +342,9 @@ impl TasksPane {
         let list = List::new(items)
             .block(Block::default().borders(Borders::ALL).title(" Background Tasks "))
             .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
-        frame.render_stateful_widget(list, area, &mut self.list_state);
+        let mut state = std::mem::take(&mut self.list_state);
+        frame.render_stateful_widget(list, area, &mut state);
+        self.list_state = state;
     }
 
     fn render_footer(&self, frame: &mut Frame, area: Rect) {

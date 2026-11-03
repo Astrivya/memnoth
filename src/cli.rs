@@ -100,6 +100,8 @@ pub enum Verb {
     Install(InstallArgs),
     /// Uninstall memnoth.
     Uninstall(UninstallArgs),
+    /// First-run setup: vault, code graph, auth, MCP, provider, config.
+    Setup(SetupArgs),
     /// Shell completion: generate or install completions.
     Completion(CompletionArgs),
     /// Report what is wired: paths, versions, profiles, clients.
@@ -230,22 +232,6 @@ pub enum SessionCommand {
     Status(StatusArgs),
     /// Stop (save and close) a session.
     Stop(StopArgs),
-    /// Run a scripted session non-interactively.
-    Run(RunArgs),
-    /// Fork the current session at a turn (try a direction without losing thread).
-    Fork(ForkArgs),
-    /// Branch from a checkpoint (alternative to fork).
-    Branch(BranchArgs),
-    /// Enter plan mode — approve before edits.
-    Plan(PlanArgs),
-    /// Manage long-running background tasks.
-    Background(BackgroundArgs),
-    /// Fan out a task across isolated worktrees.
-    Batch(SessionBatchArgs),
-    /// Export session to Markdown/JSON/HTML.
-    Export(ExportArgs),
-    /// Share session (redacted) or file a bug with context.
-    Share(ShareArgs),
     /// Set reasoning effort budget for the session.
     Effort(EffortArgs),
     /// Deterministically replay a session from its transcript.
@@ -359,8 +345,8 @@ pub struct BranchArgs {
     #[arg(long, value_name = "LABEL")]
     pub checkpoint: String,
     /// Name for the new branch session.
-    #[arg(long, value_name = "NAME")]
-    pub name: Option<String>,
+    #[arg(long = "branch", value_name = "NAME")]
+    pub branch_name: Option<String>,
     /// Output as JSON.
     #[arg(long)]
     pub json: bool,
@@ -1399,7 +1385,7 @@ pub enum VaultCommand {
         #[arg(long, default_value = "concept")]
         entity_kind: String,
         /// The fact itself.
-        #[arg(required = true, num_args = 1.., trailing_var_arg = true)]
+        #[arg(required = true, num_args = 1..)]
         text: Vec<String>,
     },
     /// Search the vault (FTS + graph, temporal windows understood).
@@ -1411,6 +1397,7 @@ pub enum VaultCommand {
         #[arg(long, default_value_t = 10)]
         limit: usize,
         /// Answer as of this instant instead of now.
+        #[arg(long, value_name = "DATE")]
         at: Option<String>,
     },
 
@@ -2393,6 +2380,79 @@ pub struct FeedbackSendArgs {
     #[arg(long)]
     pub include_context: bool,
 }
+// `mn set-theme` and `mn set-screen-reader` take the TUI's own enums, so that
+// the CLI and the `/theme` slash command cannot disagree about the spelling.
+// clap needs a variant type to be `Args`, and these two are the only enums in
+// the crate that are neither — so the argument is defined once, here, and the
+// parse rules stay in `tui::app` where the rest of the product reads them.
+impl clap::Args for crate::tui::app::Theme {
+    fn augment_args(cmd: clap::Command) -> clap::Command {
+        cmd.arg(
+            clap::Arg::new("theme")
+                .value_name("THEME")
+                .required(true)
+                .help("default, high-contrast or no-color"),
+        )
+    }
+
+    fn augment_args_for_update(cmd: clap::Command) -> clap::Command {
+        Self::augment_args(cmd)
+    }
+}
+
+impl clap::FromArgMatches for crate::tui::app::Theme {
+    fn from_arg_matches(matches: &clap::ArgMatches) -> Result<Self, clap::Error> {
+        let value = matches.get_one::<String>("theme").ok_or_else(|| {
+            clap::Error::raw(
+                clap::error::ErrorKind::MissingRequiredArgument,
+                "a theme name is required".to_string(),
+            )
+        })?;
+        Self::parse(value).map_err(|message| {
+            clap::Error::raw(clap::error::ErrorKind::InvalidValue, message.to_string())
+        })
+    }
+
+    fn update_from_arg_matches(&mut self, matches: &clap::ArgMatches) -> Result<(), clap::Error> {
+        *self = <Self as clap::FromArgMatches>::from_arg_matches(matches)?;
+        Ok(())
+    }
+}
+
+impl clap::Args for crate::tui::app::ScreenReaderMode {
+    fn augment_args(cmd: clap::Command) -> clap::Command {
+        cmd.arg(
+            clap::Arg::new("mode")
+                .value_name("MODE")
+                .required(true)
+                .help("off or plain"),
+        )
+    }
+
+    fn augment_args_for_update(cmd: clap::Command) -> clap::Command {
+        Self::augment_args(cmd)
+    }
+}
+
+impl clap::FromArgMatches for crate::tui::app::ScreenReaderMode {
+    fn from_arg_matches(matches: &clap::ArgMatches) -> Result<Self, clap::Error> {
+        let value = matches.get_one::<String>("mode").ok_or_else(|| {
+            clap::Error::raw(
+                clap::error::ErrorKind::MissingRequiredArgument,
+                "a screen reader mode is required".to_string(),
+            )
+        })?;
+        Self::parse(value).map_err(|message| {
+            clap::Error::raw(clap::error::ErrorKind::InvalidValue, message.to_string())
+        })
+    }
+
+    fn update_from_arg_matches(&mut self, matches: &clap::ArgMatches) -> Result<(), clap::Error> {
+        *self = <Self as clap::FromArgMatches>::from_arg_matches(matches)?;
+        Ok(())
+    }
+}
+
 impl Cli {
     /// The session name this invocation refers to.
     pub fn session_name(&self) -> String {
@@ -2404,13 +2464,16 @@ impl Cli {
                         start.name.clone().unwrap_or_else(|| "session".into())
                     }
                     SessionCommand::Resume(resume) => resume.name.clone(),
-                    SessionCommand::List(_) => "session".into(),
                     SessionCommand::Status(status) => {
                         status.name.clone().unwrap_or_else(|| "session".into())
                     }
                     SessionCommand::Stop(stop) => {
                         stop.name.clone().unwrap_or_else(|| "session".into())
                     }
+                    // List, Effort, Replay, Attach, Handoff and Exec all act on
+                    // `--resume` or on the default session, never on a name of
+                    // their own.
+                    _ => "session".into(),
                 },
                 _ => "session".into(),
             },

@@ -29,10 +29,7 @@ pub fn login(ctx: &AppContext, args: &AuthLoginArgs) -> Result<Outcome> {
         .clone()
         .unwrap_or_else(|| format!("memnoth-cli"));
 
-    let request = DeviceAuthRequest {
-        client_name,
-        requested_tier: args.tier.clone(),
-    };
+    let request = DeviceAuthRequest { client_name };
 
     let auth = client
         .device_auth(request)
@@ -62,32 +59,56 @@ pub fn login(ctx: &AppContext, args: &AuthLoginArgs) -> Result<Outcome> {
     // Poll for token with backoff
     let token = poll_for_token(&client, &auth)?;
 
-    // Store the token
+    // The token response carries no identity, so identity is fetched with the
+    // token itself: the account and its default organization are what
+    // `whoami` and `auth status` read from the cache.
+    let mut authed = CloudClient::new().context("failed to create cloud client")?;
+    authed.set_auth_token(token.access_token.clone());
+    let me = authed.me().context("failed to fetch the account")?;
+    let org = authed.org().context("failed to fetch the organization")?;
+
+    let role = me
+        .organizations
+        .as_ref()
+        .and_then(|organizations| organizations.first())
+        .map(|organization| organization.role.clone())
+        .unwrap_or_else(|| org.role.clone());
+
+    let whoami = StoredWhoami {
+        account_id: me.id.clone(),
+        email: me.email.clone(),
+        name: me.name.clone(),
+        org_id: org.id.clone(),
+        org_name: org.name.clone(),
+        role,
+    };
+
     let stored_token = StoredToken {
-        api_key: token.api_key.clone(),
-        account_id: token.account_id.clone(),
-        email: token.email.clone(),
-        org_id: String::new(), // Will be filled by whoami cache
-        org_name: String::new(),
-        tier: token.tier.clone(),
-        status: token.status.clone(),
+        api_key: token.access_token.clone(),
+        account_id: whoami.account_id.clone(),
+        email: whoami.email.clone(),
+        org_id: whoami.org_id.clone(),
+        org_name: whoami.org_name.clone(),
+        // The device flow does not report the tier it granted; the tier asked
+        // for is the closest true answer, and "unknown" is honest otherwise.
+        tier: args.tier.clone().unwrap_or_else(|| "unknown".to_string()),
+        status: "active".to_string(),
     };
     store_token(ctx, &stored_token)?;
+    cache_whoami_direct(ctx, &whoami)?;
 
-    // Cache whoami info
-    cache_whoami(ctx, &token)?;
     if !ctx.json {
-        println!("Login successful! Welcome, {}", token.email);
+        println!("Login successful! Welcome, {}", whoami.email);
     }
 
     Ok(Outcome::new(
         "auth.login",
         String::new(),
         serde_json::json!({
-            "account_id": token.account_id,
-            "email": token.email,
-            "tier": token.tier,
-            "status": token.status,
+            "account_id": whoami.account_id,
+            "email": whoami.email,
+            "tier": stored_token.tier,
+            "status": stored_token.status,
         }),
     ))
 }
@@ -103,7 +124,7 @@ fn login_with_token(ctx: &AppContext, token: &str) -> Result<Outcome> {
     // Store the token
     let stored_token = StoredToken {
         api_key: token.to_string(),
-        account_id: me.account_id.clone(),
+        account_id: me.id.clone(),
         email: me.email.clone(),
         org_id: org.id.clone(),
         org_name: org.name.clone(),
@@ -113,12 +134,12 @@ fn login_with_token(ctx: &AppContext, token: &str) -> Result<Outcome> {
     store_token(ctx, &stored_token)?;
 
     let whoami = StoredWhoami {
-        account_id: me.account_id,
+        account_id: me.id,
         email: me.email,
         name: me.name,
         org_id: org.id,
         org_name: org.name,
-        role: me.role,
+        role: org.role,
     };
     cache_whoami_direct(ctx, &whoami)?;
     if !ctx.json {
@@ -210,25 +231,6 @@ fn store_token(_ctx: &AppContext, stored_token: &StoredToken) -> Result<()> {
     store.set_sync("token_metadata", metadata)?;
 
     Ok(())
-}
-
-/// Cache whoami info from a token.
-fn cache_whoami(ctx: &AppContext, token: &TokenResponse) -> Result<()> {
-    let mut client = CloudClient::new().context("failed to create cloud client")?;
-    client.set_auth_token(token.api_key.clone());
-
-    let me = client.me()?;
-    let org = client.org()?;
-
-    let whoami = StoredWhoami {
-        account_id: me.account_id,
-        email: me.email,
-        name: me.name,
-        org_id: org.id,
-        org_name: org.name,
-        role: me.role,
-    };
-    cache_whoami_direct(ctx, &whoami)
 }
 
 /// Cache whoami info directly.
@@ -363,7 +365,7 @@ pub fn get_stored_token(ctx: &AppContext) -> Result<Option<String>> {
 }
 
 /// Create the credential store (tries keyring first, falls back to file).
-fn create_credential_store() -> Result<MultiCredentialStore> {
+pub fn create_credential_store() -> Result<MultiCredentialStore> {
     let keyring = KeyringCredentialStore::new("memnoth");
     let rt = Runtime::new()?;
     let file = rt.block_on(FileCredentialStore::new())?;

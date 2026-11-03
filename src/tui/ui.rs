@@ -55,8 +55,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         draw_approval(frame, area, text);
     }
 
-    // Render overlays on top
-    app.overlay_stack.render(frame, area, app);
+    // Render overlays on top. The stack is moved out for the call because an
+    // overlay renders against the whole app: holding `&mut app.overlay_stack`
+    // while the overlay reads `app` is two borrows of one value.
+    let mut overlays = std::mem::take(&mut app.overlay_stack);
+    overlays.render(frame, area, app);
+    app.overlay_stack = overlays;
 }
 
 /// The confirmation box: what would change, and the two keys that answer.

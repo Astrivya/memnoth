@@ -10,9 +10,9 @@ use std::thread::sleep;
 
 use crate::cli::{SyncArgs, PrivacyArgs, PrivacyCommand};
 use crate::context::AppContext;
-use crate::output::{ErrorOutcome, Outcome};
+use crate::output::Outcome;
 use memnoth_cloud_client::{BatchIngestRequest, BatchIngestResponse, CloudClient, IngestRequest};
-use memnoth_session::{Header, Session};
+use memnoth_session::{Header, TurnReceipt, WriteReceipt};
 
 /// Sync queue file name
 const SYNC_QUEUE_FILE: &str = "queue.jsonl";
@@ -171,7 +171,7 @@ fn backoff_delay(attempt: u32) -> Duration {
 
 /// Get the sync queue directory path
 fn sync_queue_dir(ctx: &AppContext) -> PathBuf {
-    ctx.memnoth_home().join("sync_queue")
+    ctx.home.join("sync_queue")
 }
 
 /// Get the sync queue file path
@@ -187,7 +187,7 @@ fn check_privacy_gate(ctx: &AppContext) -> Result<bool> {
 
     // If privacy mode is strict, require explicit opt-in
     if privacy_config
-        .and_then(|p| p.mode)
+        .and_then(|p| p.mode.as_deref())
         .map(|m| m == "strict")
         .unwrap_or(false)
     {
@@ -228,16 +228,23 @@ pub enum SyncPrivacyMode {
     Full,
 }
 
+/// A millisecond epoch timestamp as RFC3339, for the ingest payload.
+fn rfc3339(ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(ms)
+        .unwrap_or_else(chrono::Utc::now)
+        .to_rfc3339()
+}
+
 /// Collect session data for sync based on privacy mode
 fn collect_session_data(ctx: &AppContext, mode: SyncPrivacyMode) -> Result<Vec<IngestRequest>> {
-    let sessions_dir = ctx.sessions_dir();
+    let sessions_dir = &ctx.sessions_dir;
     let mut items = Vec::new();
 
     if !sessions_dir.exists() {
         return Ok(items);
     }
 
-    for entry in fs::read_dir(&sessions_dir)
+    for entry in fs::read_dir(sessions_dir)
         .with_context(|| format!("Failed to read sessions dir {}", sessions_dir.display()))?
     {
         let entry = entry?;
@@ -258,38 +265,40 @@ fn collect_session_data(ctx: &AppContext, mode: SyncPrivacyMode) -> Result<Vec<I
             continue;
         };
 
-        // Parse the rest as messages/receipts to get token counts
+        // Parse the rest as turn receipts and write receipts: tokens and cost
+        // come from the former, the count of distinct edited files from the
+        // latter. Neither carries the session identity — that is the header.
         let mut total_tokens = 0u64;
-        let mut model = String::new();
-        let mut files_touched = 0u64;
         let mut cost_micros = 0i64;
-        let mut last_timestamp = header.started_at;
+        let mut files: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut last_ms = header.created_ms;
 
         for line in lines {
-            if let Ok(receipt) = serde_json::from_str::<memnoth_session::TurnReceipt>(line) {
-                total_tokens += receipt.input_tokens + receipt.output_tokens;
-                if model.is_empty() {
-                    model = receipt.model.clone();
+            if let Ok(receipt) = serde_json::from_str::<TurnReceipt>(line) {
+                total_tokens = total_tokens
+                    .saturating_add(receipt.input_tokens)
+                    .saturating_add(receipt.output_tokens);
+                if let Some(cost) = receipt.cost_micros {
+                    cost_micros = cost_micros.saturating_add(cost as i64);
                 }
-                files_touched += receipt.files_touched as u64;
-                if let Some(c) = receipt.cost_micros {
-                    cost_micros += c;
-                }
-                last_timestamp = receipt.timestamp;
+                last_ms = last_ms.max(receipt.at_ms);
+            } else if let Ok(write) = serde_json::from_str::<WriteReceipt>(line) {
+                files.insert(write.path);
+                last_ms = last_ms.max(write.at_ms);
             }
         }
 
         // Build ingest request based on privacy mode
-        let mut request = IngestRequest {
-            session_id: header.session_id.clone(),
-            workspace: header.workspace.clone(),
-            model: model.clone(),
+        let request = IngestRequest {
+            session_id: header.id,
+            workspace: ctx.root.to_string_lossy().to_string(),
+            model: header.model,
             tokens: total_tokens,
-            files: files_touched,
+            files: files.len() as u64,
             cost_micros,
             event_type: "closed".to_string(),
-            timestamp: last_timestamp.to_rfc3339(),
-            project_id: header.project_id.clone(),
+            timestamp: rfc3339(last_ms),
+            project_id: None,
         };
 
         // Apply privacy filter
@@ -380,7 +389,7 @@ struct SyncResult {
 fn send_heartbeat(client: &CloudClient) -> Result<()> {
     // For now, just a simple GET to /api/v1/me as heartbeat
     // Could be a dedicated endpoint in the future
-    let _ = client.get_me()?;
+    let _ = client.me()?;
     Ok(())
 }
 
@@ -489,6 +498,7 @@ fn run_watch_mode(
         if last_queue_check.elapsed() >= Duration::from_secs(10) {
             let new_items = collect_session_data(ctx, mode)?;
             if !new_items.is_empty() {
+                let queued_count = new_items.len();
                 let mut queue = SyncQueue::load(queue_path)?;
                 for item in new_items {
                     let queued = QueuedSyncItem {
@@ -502,7 +512,7 @@ fn run_watch_mode(
                     queue.push(queued)?;
                 }
                 queue.save(queue_path)?;
-                println!("Queued {} new items", new_items.len());
+                println!("Queued {} new items", queued_count);
             }
             last_queue_check = Instant::now();
         }
@@ -539,13 +549,10 @@ pub fn get_cloud_client(ctx: &AppContext) -> Result<CloudClient> {
         client.set_auth_token(token);
     } else if let Ok(token) = std::env::var("MEMNOTH_MCP_TOKEN") {
         client.set_auth_token(token);
-    } else if let Some(api_key) = ctx.config().provider.as_ref().and_then(|p| p.api_key_env.as_ref()) {
-        if let Ok(token) = std::env::var(api_key) {
-            client.set_auth_token(token);
-        }
-    } else {
-        // Try to load from keyring or config
-        // For now, just proceed without auth (will fail on authenticated endpoints)
+    } else if let Some(token) = memnoth_auth::get_credential_sync("api_key")? {
+        // The credential store is the same source `auth login` writes, so a
+        // logged-in machine syncs without exporting anything into the shell.
+        client.set_auth_token(token);
     }
 
     Ok(client)
@@ -624,10 +631,10 @@ fn describe_privacy_mode(mode: &str) -> String {
 /// Enable telemetry collection
 fn privacy_enable(ctx: &AppContext) -> Result<Outcome> {
     let mut config = ctx.config_mut();
-    let mut privacy = config.privacy.unwrap_or_default();
+    let mut privacy = config.privacy.take().unwrap_or_default();
     privacy.telemetry_enabled = Some(true);
     config.privacy = Some(privacy);
-    config.save(ctx.config_path())?;
+    config.save(&ctx.config_path)?;
 
     // Also send to cloud if authenticated
     if let Ok(client) = get_cloud_client(ctx) {
@@ -644,10 +651,10 @@ fn privacy_enable(ctx: &AppContext) -> Result<Outcome> {
 /// Disable telemetry collection
 fn privacy_disable(ctx: &AppContext) -> Result<Outcome> {
     let mut config = ctx.config_mut();
-    let mut privacy = config.privacy.unwrap_or_default();
+    let mut privacy = config.privacy.take().unwrap_or_default();
     privacy.telemetry_enabled = Some(false);
     config.privacy = Some(privacy);
-    config.save(ctx.config_path())?;
+    config.save(&ctx.config_path)?;
 
     // Also send to cloud if authenticated
     if let Ok(client) = get_cloud_client(ctx) {
@@ -672,11 +679,12 @@ fn privacy_set_mode(ctx: &AppContext, args: &crate::cli::PrivacyModeArgs) -> Res
     }
 
     let mut config = ctx.config_mut();
+    let telemetry_enabled = config.privacy.as_ref().and_then(|p| p.telemetry_enabled);
     config.privacy = Some(crate::context::PrivacyConfig {
         mode: Some(mode.to_string()),
-        telemetry_enabled: config.privacy.as_ref().and_then(|p| p.telemetry_enabled),
+        telemetry_enabled,
     });
-    config.save(ctx.config_path())?;
+    config.save(&ctx.config_path)?;
 
     Ok(Outcome::new(
         "privacy.mode",

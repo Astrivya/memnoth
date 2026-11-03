@@ -122,7 +122,7 @@ impl Overlay for PaletteOverlay {
         self.visible = false;
     }
 
-    fn handle_key(&mut self, key: KeyEvent, _app: &mut App) -> OverlayAction {
+    fn handle_key(&mut self, key: KeyEvent, app: &mut App) -> OverlayAction {
         if !self.visible {
             return OverlayAction::None;
         }
@@ -160,11 +160,20 @@ impl Overlay for PaletteOverlay {
                 OverlayAction::None
             }
             KeyCode::Enter => {
-                let items = self.palette.filtered_items();
-                if let Some(item) = items.get(self.palette.selected_index()) {
-                    let cmd = item.command.clone();
+                let chosen = {
+                    let items = self.palette.filtered_items();
+                    items
+                        .get(self.palette.selected_index())
+                        .map(|item| item.command.clone())
+                };
+                if let Some(cmd) = chosen {
                     if cmd.starts_with('/') || cmd.starts_with('!') || cmd.starts_with('@') {
-                        return OverlayAction::DispatchVerb(cmd);
+                        // The palette fills the line and lets the session submit it;
+                        // it never runs a command itself, so the transcript shows
+                        // the same line as if it had been typed.
+                        app.input = cmd;
+                        app.cursor = app.input.chars().count();
+                        app.pending_submit = true;
                     }
                 }
                 OverlayAction::Close
@@ -203,7 +212,7 @@ impl Overlay for PaletteOverlay {
         }
     }
 
-    fn render(&mut self, frame: &mut Frame, area: Rect, _focused: bool) {
+    fn render(&mut self, frame: &mut Frame, area: Rect, _app: &App) {
         if !self.visible {
             return;
         }

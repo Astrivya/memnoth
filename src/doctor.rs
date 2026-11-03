@@ -14,11 +14,11 @@ use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use std::io::{self, Write};
 
-use memnoth_capability::Registry;
+use memnoth_command::CommandRegistry;
 use memnoth_context::Scope;
 
-use crate::auth::{AuthLoginArgs, login};
-use crate::cli::DoctorArgs;
+use crate::auth::login;
+use crate::cli::{AuthLoginArgs, AuthStatusArgs, DoctorArgs};
 use crate::context::AppContext;
 use crate::kg;
 use crate::output::{Outcome, human_bytes};
@@ -99,7 +99,9 @@ fn fix(ctx: &AppContext, yes: bool) -> Result<Outcome> {
     // 1. Fix vault: initialize if missing
     if !ctx.vault_path.exists() {
         if confirm_or_yes("Initialize vault?", yes) {
-            let outcome = vault::init(ctx)?;
+            // `vault::init` speaks the CLI's error envelope; this function speaks
+            // `anyhow`, so the message is carried across without losing it.
+            vault::init(ctx).map_err(|error| anyhow::anyhow!("{}", error.message))?;
             fixed.push("vault init".to_string());
         } else {
             skipped.push("vault init (skipped)".to_string());
@@ -150,7 +152,7 @@ fn fix(ctx: &AppContext, yes: bool) -> Result<Outcome> {
     }
 
     // 6. Fix auth: prompt login if no token
-    let auth_status = crate::auth::auth_status(ctx, &crate::auth::AuthStatusArgs {})?;
+    let auth_status = crate::auth::auth_status(ctx, &crate::cli::AuthStatusArgs {})?;
     if !auth_status.data["authenticated"].as_bool().unwrap_or(false) {
         if confirm_or_yes("Run auth login?", yes) {
             let login_args = AuthLoginArgs {
@@ -296,7 +298,7 @@ fn install_completions() -> Result<()> {
     let home = dirs::home_dir().context("cannot find home directory")?;
     let shell = std::env::var("SHELL").unwrap_or_default();
 
-    let registry = Registry::new();
+    let registry = CommandRegistry::new();
     let shell_type = if shell.contains("fish") {
         clap_complete::Shell::Fish
     } else if shell.contains("zsh") {
@@ -562,8 +564,19 @@ fn instruction_section(ctx: &AppContext) -> Section {
     Section { text, data }
 }
 
+/// The sandbox config for this machine, read the same way the governor reads
+/// it. A missing or unparseable file is the ungoverned default, which is why
+/// this reports "0 profiles defined" rather than failing the whole report.
+fn sandbox_config(ctx: &AppContext) -> memnoth_sandbox::SandboxConfig {
+    let path = ctx.home.join("sandbox.toml");
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| toml::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
 fn sandbox_section(ctx: &AppContext) -> Section {
-    let config = ctx.sandbox();
+    let config = sandbox_config(ctx);
     let conflicts = memnoth_sandbox::profiles::sandbox_profile_conflicts(&ctx.root);
     let mut text = String::from("sandbox\n");
     text.push_str(&format!("  profiles   {} defined\n", config.profiles.len()));
