@@ -2055,7 +2055,6 @@ pub struct CiIndexArgs {
     pub json: bool,
 }
 
-
 /// `mn watch` — watch for file changes and incrementally update the code graph and vault.
 #[derive(Debug, Args)]
 pub struct WatchArgs {

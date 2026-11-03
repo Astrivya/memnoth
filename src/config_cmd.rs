@@ -77,7 +77,9 @@ const CONFIG_KEYS: &[ConfigKey] = &[
 /// Validate that a key is known.
 fn validate_key(key: &str) -> Result<&ConfigKey> {
     CONFIG_KEYS.iter().find(|k| k.key == key).ok_or_else(|| {
-        anyhow::anyhow!("unknown configuration key: {key}\nRun `mn config list` to see available keys")
+        anyhow::anyhow!(
+            "unknown configuration key: {key}\nRun `mn config list` to see available keys"
+        )
     })
 }
 

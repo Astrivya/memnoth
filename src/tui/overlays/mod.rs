@@ -114,12 +114,14 @@ impl OverlayStack {
     }
 
     /// Handle a key event for the top overlay.
-    pub fn handle_key(&mut self, key: KeyEvent, app: &mut App) -> OverlayAction {
-        if let Some(overlay) = self.top_mut() {
-            overlay.handle_key(key, app)
-        } else {
-            OverlayAction::None
-        }
+    ///
+    /// `None` means there was no overlay at all. An overlay that is open
+    /// consumes every key, even the ones it ignores: `OverlayAction::None` is a
+    /// handled key with no consequence, not a key the session may also act on.
+    /// Without that distinction, typing in a modal also typed into the prompt
+    /// behind it, and Tab in the help overlay completed a file path.
+    pub fn handle_key(&mut self, key: KeyEvent, app: &mut App) -> Option<OverlayAction> {
+        self.top_mut().map(|overlay| overlay.handle_key(key, app))
     }
 
     /// Render all overlays (bottom to top).
@@ -180,8 +182,8 @@ pub fn parse_slash_command(input: &str) -> Option<OverlayKind> {
 }
 
 // Import all overlay implementations
-mod context;
 mod connect;
+mod context;
 mod diff;
 mod help;
 mod model;
@@ -191,8 +193,8 @@ mod permissions;
 mod rewind;
 mod search;
 
-pub use context::ContextOverlay;
 pub use connect::ConnectOverlay;
+pub use context::ContextOverlay;
 pub use diff::DiffOverlay;
 pub use help::HelpOverlay;
 pub use model::ModelOverlay;

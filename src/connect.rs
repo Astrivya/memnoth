@@ -12,16 +12,20 @@ use tokio::runtime::Runtime;
 use crate::context::{AppContext, Config};
 use crate::output::Outcome;
 use crate::provider::{Kind, ProviderConfig};
-use memnoth_auth::{CredentialStore, MultiCredentialStore};
-use memnoth_cloud_client::CloudClient;
-use memnoth_ui::{confirm::ConfirmDialog, spinner::Spinner, table::{Table, Column, Row}};
-use ratatui::Terminal;
-use ratatui::backend::CrosstermBackend;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
     execute,
-    terminal::{enable_raw_mode, disable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
+use memnoth_auth::{CredentialStore, MultiCredentialStore};
+use memnoth_cloud_client::CloudClient;
+use memnoth_ui::{
+    confirm::ConfirmDialog,
+    spinner::Spinner,
+    table::{Column, Row, Table},
+};
+use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
 
 /// Known provider configurations with defaults
 fn known_providers() -> Vec<ProviderInfo> {
@@ -128,20 +132,28 @@ pub fn connect_add(ctx: &AppContext, args: &crate::cli::ConnectAddArgs) -> Resul
 }
 
 /// Non-interactive provider addition
-fn connect_add_non_interactive(ctx: &AppContext, args: &crate::cli::ConnectAddArgs) -> Result<Outcome> {
-    let provider_name = args.provider.as_ref()
+fn connect_add_non_interactive(
+    ctx: &AppContext,
+    args: &crate::cli::ConnectAddArgs,
+) -> Result<Outcome> {
+    let provider_name = args
+        .provider
+        .as_ref()
         .context("--provider is required in non-interactive mode")?;
-    let api_key = args.api_key.as_ref()
+    let api_key = args
+        .api_key
+        .as_ref()
         .context("--api-key is required in non-interactive mode")?;
-    
+
     let providers = known_providers();
-    let provider_info = providers.iter()
+    let provider_info = providers
+        .iter()
         .find(|p| p.name == provider_name.as_str())
         .context(format!("Unknown provider: {}", provider_name))?;
-    
+
     // Store API key
     store_provider_key(provider_name, api_key)?;
-    
+
     // Update config.toml
     let config_path = &ctx.config_path;
     let mut config: Config = if config_path.exists() {
@@ -150,12 +162,18 @@ fn connect_add_non_interactive(ctx: &AppContext, args: &crate::cli::ConnectAddAr
     } else {
         Config::default()
     };
-    
+
     let mut provider_config = config.provider.unwrap_or_default();
     provider_config.kind = Some(provider_info.kind.name().to_string());
-    provider_config.model = args.model.clone().or_else(|| Some(provider_info.default_model.to_string()));
-    provider_config.base_url = args.base_url.clone().or_else(|| Some(provider_info.default_base_url.to_string()));
-    
+    provider_config.model = args
+        .model
+        .clone()
+        .or_else(|| Some(provider_info.default_model.to_string()));
+    provider_config.base_url = args
+        .base_url
+        .clone()
+        .or_else(|| Some(provider_info.default_base_url.to_string()));
+
     // The report describes what was written, so it is read before the value
     // moves into the config.
     let model = provider_config.model.clone();
@@ -163,12 +181,13 @@ fn connect_add_non_interactive(ctx: &AppContext, args: &crate::cli::ConnectAddAr
 
     config.provider = Some(provider_config);
     config.save(&config_path)?;
-    
+
     let text = format!(
         "Provider '{}' configured successfully.\nConfig updated: {}",
-        provider_name, config_path.display()
+        provider_name,
+        config_path.display()
     );
-    
+
     let data = json!({
         "provider": provider_name,
         "kind": provider_info.kind.name(),
@@ -176,7 +195,7 @@ fn connect_add_non_interactive(ctx: &AppContext, args: &crate::cli::ConnectAddAr
         "base_url": base_url,
         "config_path": config_path.to_string_lossy(),
     });
-    
+
     Ok(Outcome::new("connect.add", text, data))
 }
 
@@ -188,19 +207,24 @@ fn connect_add_interactive(ctx: &AppContext, args: &crate::cli::ConnectAddArgs) 
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
-    
+
     let providers = known_providers();
-    
+
     // Step 1: Select provider
     let selected_idx = select_provider_tui(&mut terminal, &providers, args.provider.as_deref())?;
     let provider_info = &providers[selected_idx];
-    
+
     // Step 2: Get API key (masked input)
     let api_key = get_api_key_tui(&mut terminal, provider_info)?;
-    
+
     // Step 3: Test connection
-    test_connection_tui(&mut terminal, provider_info, &api_key, args.base_url.as_deref())?;
-    
+    test_connection_tui(
+        &mut terminal,
+        provider_info,
+        &api_key,
+        args.base_url.as_deref(),
+    )?;
+
     // Step 4: Confirm and save
     let confirmed = confirm_save_tui(&mut terminal, provider_info)?;
     if !confirmed {
@@ -210,10 +234,10 @@ fn connect_add_interactive(ctx: &AppContext, args: &crate::cli::ConnectAddArgs) 
         terminal.show_cursor()?;
         anyhow::bail!("Cancelled by user");
     }
-    
+
     // Store API key
     store_provider_key(provider_info.name, &api_key)?;
-    
+
     // Update config.toml
     let config_path = &ctx.config_path;
     let mut config: Config = if config_path.exists() {
@@ -222,28 +246,35 @@ fn connect_add_interactive(ctx: &AppContext, args: &crate::cli::ConnectAddArgs) 
     } else {
         Config::default()
     };
-    
+
     let mut provider_config = config.provider.unwrap_or_default();
     provider_config.kind = Some(provider_info.kind.name().to_string());
-    provider_config.model = args.model.clone().or_else(|| Some(provider_info.default_model.to_string()));
-    provider_config.base_url = args.base_url.clone().or_else(|| Some(provider_info.default_base_url.to_string()));
-    
+    provider_config.model = args
+        .model
+        .clone()
+        .or_else(|| Some(provider_info.default_model.to_string()));
+    provider_config.base_url = args
+        .base_url
+        .clone()
+        .or_else(|| Some(provider_info.default_base_url.to_string()));
+
     let model = provider_config.model.clone();
     let base_url = provider_config.base_url.clone();
 
     config.provider = Some(provider_config);
     config.save(&config_path)?;
-    
+
     // Cleanup terminal
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
-    
+
     let text = format!(
         "Provider '{}' configured successfully.\nConfig updated: {}",
-        provider_info.name, config_path.display()
+        provider_info.name,
+        config_path.display()
     );
-    
+
     let data = json!({
         "provider": provider_info.name,
         "kind": provider_info.kind.name(),
@@ -251,7 +282,7 @@ fn connect_add_interactive(ctx: &AppContext, args: &crate::cli::ConnectAddArgs) 
         "base_url": base_url,
         "config_path": config_path.to_string_lossy(),
     });
-    
+
     Ok(Outcome::new("connect.add", text, data))
 }
 
@@ -261,42 +292,60 @@ fn select_provider_tui(
     providers: &[ProviderInfo],
     preselected: Option<&str>,
 ) -> Result<usize> {
-    let mut selected = providers.iter().position(|p| Some(p.name) == preselected).unwrap_or(0);
-    
+    let mut selected = providers
+        .iter()
+        .position(|p| Some(p.name) == preselected)
+        .unwrap_or(0);
+
     loop {
         terminal.draw(|f| {
             let area = f.area();
             let title = "Select Provider";
-            let items: Vec<ratatui::text::Line> = providers.iter().enumerate().map(|(i, p)| {
-                let style = if i == selected {
-                    ratatui::style::Style::default().fg(ratatui::style::Color::Yellow).add_modifier(ratatui::style::Modifier::BOLD)
-                } else {
-                    ratatui::style::Style::default()
-                };
-                let prefix = if i == selected { "▸ " } else { "  " };
-                ratatui::text::Line::from(vec![
-                    ratatui::text::Span::styled(format!("{}{}", prefix, p.display_name), style),
-                    ratatui::text::Span::styled(format!(" ({})", p.name), ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray)),
-                ])
-            }).collect();
-            
+            let items: Vec<ratatui::text::Line> = providers
+                .iter()
+                .enumerate()
+                .map(|(i, p)| {
+                    let style = if i == selected {
+                        ratatui::style::Style::default()
+                            .fg(ratatui::style::Color::Yellow)
+                            .add_modifier(ratatui::style::Modifier::BOLD)
+                    } else {
+                        ratatui::style::Style::default()
+                    };
+                    let prefix = if i == selected { "▸ " } else { "  " };
+                    ratatui::text::Line::from(vec![
+                        ratatui::text::Span::styled(format!("{}{}", prefix, p.display_name), style),
+                        ratatui::text::Span::styled(
+                            format!(" ({})", p.name),
+                            ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray),
+                        ),
+                    ])
+                })
+                .collect();
+
             let list = ratatui::widgets::List::new(items)
-                .block(ratatui::widgets::Block::default()
-                    .title(title)
-                    .borders(ratatui::widgets::Borders::ALL))
+                .block(
+                    ratatui::widgets::Block::default()
+                        .title(title)
+                        .borders(ratatui::widgets::Borders::ALL),
+                )
                 .highlight_style(ratatui::style::Style::default());
-            
+
             f.render_widget(list, area);
         })?;
-        
+
         if let Event::Key(key) = event::read()? {
             if key.kind == KeyEventKind::Press {
                 match key.code {
                     KeyCode::Up => {
-                        if selected > 0 { selected -= 1; }
+                        if selected > 0 {
+                            selected -= 1;
+                        }
                     }
                     KeyCode::Down => {
-                        if selected < providers.len() - 1 { selected += 1; }
+                        if selected < providers.len() - 1 {
+                            selected += 1;
+                        }
                     }
                     KeyCode::Enter => return Ok(selected),
                     KeyCode::Esc => anyhow::bail!("Cancelled"),
@@ -314,56 +363,66 @@ fn get_api_key_tui(
 ) -> Result<String> {
     let mut input = String::new();
     let env_var = provider_info.env_var;
-    
+
     // Check if key exists in environment
     if !env_var.is_empty() {
         if let Ok(env_key) = std::env::var(env_var) {
             input = env_key;
         }
     }
-    
+
     loop {
         terminal.draw(|f| {
             let area = f.area();
             let title = format!("Enter API Key for {}", provider_info.display_name);
-            
+
             let masked = if input.is_empty() {
                 "".to_string()
             } else {
                 "•".repeat(input.len().min(50))
             };
-            
+
             let hint = if !env_var.is_empty() && std::env::var(env_var).is_ok() {
                 format!(" (detected from ${})", env_var)
             } else {
                 "".to_string()
             };
-            
+
             let text = vec![
                 ratatui::text::Line::from(vec![
-                    ratatui::text::Span::styled("API Key: ", ratatui::style::Style::default().fg(ratatui::style::Color::Cyan)),
+                    ratatui::text::Span::styled(
+                        "API Key: ",
+                        ratatui::style::Style::default().fg(ratatui::style::Color::Cyan),
+                    ),
                     ratatui::text::Span::raw(&masked),
-                    ratatui::text::Span::styled(hint, ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray)),
+                    ratatui::text::Span::styled(
+                        hint,
+                        ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray),
+                    ),
                 ]),
                 ratatui::text::Line::from(""),
-                ratatui::text::Line::from(vec![
-                    ratatui::text::Span::styled("Press Enter when done, Esc to cancel", ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray)),
-                ]),
+                ratatui::text::Line::from(vec![ratatui::text::Span::styled(
+                    "Press Enter when done, Esc to cancel",
+                    ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray),
+                )]),
             ];
-            
-            let paragraph = ratatui::widgets::Paragraph::new(text)
-                .block(ratatui::widgets::Block::default()
+
+            let paragraph = ratatui::widgets::Paragraph::new(text).block(
+                ratatui::widgets::Block::default()
                     .title(title)
-                    .borders(ratatui::widgets::Borders::ALL));
-            
+                    .borders(ratatui::widgets::Borders::ALL),
+            );
+
             f.render_widget(paragraph, area);
         })?;
-        
+
         if let Event::Key(key) = event::read()? {
             if key.kind == KeyEventKind::Press {
                 match key.code {
                     KeyCode::Char(c) => input.push(c),
-                    KeyCode::Backspace => { input.pop(); }
+                    KeyCode::Backspace => {
+                        input.pop();
+                    }
                     KeyCode::Enter => {
                         if !input.is_empty() {
                             return Ok(input);
@@ -387,10 +446,10 @@ fn test_connection_tui(
     let base_url = base_url_override.unwrap_or(provider_info.default_base_url);
     let model = provider_info.default_model;
     let kind = provider_info.kind;
-    
+
     let mut spinner = Spinner::new().with_message("Testing connection...");
     let start = std::time::Instant::now();
-    
+
     loop {
         terminal.draw(|f| {
             let area = f.area();
@@ -398,7 +457,7 @@ fn test_connection_tui(
             spinner.tick();
             spinner.render(f, area);
         })?;
-        
+
         // Run test in background check
         if event::poll(std::time::Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
@@ -407,7 +466,7 @@ fn test_connection_tui(
                 }
             }
         }
-        
+
         // Actually test the connection (run once)
         static mut TESTED: bool = false;
         let mut tested = false;
@@ -417,7 +476,7 @@ fn test_connection_tui(
                 tested = true;
             }
         }
-        
+
         if tested {
             let result = test_provider_connection(kind, base_url, model, api_key);
             match result {
@@ -426,21 +485,27 @@ fn test_connection_tui(
                     terminal.draw(|f| {
                         let area = f.area();
                         let text = vec![
-                            ratatui::text::Line::from(vec![
-                                ratatui::text::Span::styled("✓ Connection successful!", ratatui::style::Style::default().fg(ratatui::style::Color::Green).add_modifier(ratatui::style::Modifier::BOLD)),
-                            ]),
+                            ratatui::text::Line::from(vec![ratatui::text::Span::styled(
+                                "✓ Connection successful!",
+                                ratatui::style::Style::default()
+                                    .fg(ratatui::style::Color::Green)
+                                    .add_modifier(ratatui::style::Modifier::BOLD),
+                            )]),
                             ratatui::text::Line::from(""),
-                            ratatui::text::Line::from(vec![
-                                ratatui::text::Span::styled("Press any key to continue...", ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray)),
-                            ]),
+                            ratatui::text::Line::from(vec![ratatui::text::Span::styled(
+                                "Press any key to continue...",
+                                ratatui::style::Style::default()
+                                    .fg(ratatui::style::Color::DarkGray),
+                            )]),
                         ];
-                        let paragraph = ratatui::widgets::Paragraph::new(text)
-                            .block(ratatui::widgets::Block::default()
+                        let paragraph = ratatui::widgets::Paragraph::new(text).block(
+                            ratatui::widgets::Block::default()
                                 .title("Test Result")
-                                .borders(ratatui::widgets::Borders::ALL));
+                                .borders(ratatui::widgets::Borders::ALL),
+                        );
                         f.render_widget(paragraph, area);
                     })?;
-                    
+
                     // Wait for key press
                     loop {
                         if let Event::Key(key) = event::read()? {
@@ -456,25 +521,31 @@ fn test_connection_tui(
                     terminal.draw(|f| {
                         let area = f.area();
                         let text = vec![
-                            ratatui::text::Line::from(vec![
-                                ratatui::text::Span::styled("✗ Connection failed!", ratatui::style::Style::default().fg(ratatui::style::Color::Red).add_modifier(ratatui::style::Modifier::BOLD)),
-                            ]),
+                            ratatui::text::Line::from(vec![ratatui::text::Span::styled(
+                                "✗ Connection failed!",
+                                ratatui::style::Style::default()
+                                    .fg(ratatui::style::Color::Red)
+                                    .add_modifier(ratatui::style::Modifier::BOLD),
+                            )]),
                             ratatui::text::Line::from(""),
-                            ratatui::text::Line::from(vec![
-                                ratatui::text::Span::raw(e.to_string()),
-                            ]),
+                            ratatui::text::Line::from(vec![ratatui::text::Span::raw(
+                                e.to_string(),
+                            )]),
                             ratatui::text::Line::from(""),
-                            ratatui::text::Line::from(vec![
-                                ratatui::text::Span::styled("Press Esc to cancel, Enter to continue anyway...", ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray)),
-                            ]),
+                            ratatui::text::Line::from(vec![ratatui::text::Span::styled(
+                                "Press Esc to cancel, Enter to continue anyway...",
+                                ratatui::style::Style::default()
+                                    .fg(ratatui::style::Color::DarkGray),
+                            )]),
                         ];
-                        let paragraph = ratatui::widgets::Paragraph::new(text)
-                            .block(ratatui::widgets::Block::default()
+                        let paragraph = ratatui::widgets::Paragraph::new(text).block(
+                            ratatui::widgets::Block::default()
                                 .title("Test Result")
-                                .borders(ratatui::widgets::Borders::ALL));
+                                .borders(ratatui::widgets::Borders::ALL),
+                        );
                         f.render_widget(paragraph, area);
                     })?;
-                    
+
                     // Wait for key press
                     loop {
                         if let Event::Key(key) = event::read()? {
@@ -500,17 +571,20 @@ fn confirm_save_tui(
 ) -> Result<bool> {
     let mut dialog = ConfirmDialog::with_message(
         "Save Configuration",
-        format!("Save provider '{}' configuration?", provider_info.display_name),
+        format!(
+            "Save provider '{}' configuration?",
+            provider_info.display_name
+        ),
     );
     dialog.show();
     dialog.select_yes();
-    
+
     loop {
         terminal.draw(|f| {
             let area = f.area();
             dialog.render(f, area);
         })?;
-        
+
         if let Event::Key(key) = event::read()? {
             if key.kind == KeyEventKind::Press {
                 if let Some(response) = dialog.handle_key(key) {
@@ -526,7 +600,7 @@ fn test_provider_connection(kind: Kind, base_url: &str, model: &str, api_key: &s
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()?;
-    
+
     let (url, body) = match kind {
         Kind::Anthropic => {
             let url = format!("{}/v1/messages", base_url.trim_end_matches('/'));
@@ -547,11 +621,12 @@ fn test_provider_connection(kind: Kind, base_url: &str, model: &str, api_key: &s
             (url, body)
         }
     };
-    
-    let mut req = client.post(&url)
+
+    let mut req = client
+        .post(&url)
         .header("Content-Type", "application/json")
         .json(&body);
-    
+
     match kind {
         Kind::Anthropic => {
             req = req
@@ -562,15 +637,15 @@ fn test_provider_connection(kind: Kind, base_url: &str, model: &str, api_key: &s
             req = req.header("Authorization", format!("Bearer {}", api_key));
         }
     }
-    
+
     let response = req.send()?;
-    
+
     if !response.status().is_success() {
         let status = response.status();
         let text = response.text().unwrap_or_default();
         anyhow::bail!("API error {}: {}", status, text);
     }
-    
+
     Ok(())
 }
 
@@ -579,20 +654,28 @@ pub fn connect_list(ctx: &AppContext, args: &crate::cli::ConnectListArgs) -> Res
     let stored_keys = list_provider_keys()?;
     let config: Config = Config::load(&ctx.config_path)?;
     let provider_config = config.provider;
-    
+
     let mut rows = Vec::new();
-    
+
     for name in &stored_keys {
         let providers = known_providers();
         let info = providers.iter().find(|p| p.name == name);
-        
-        let is_active = provider_config.as_ref().and_then(|p| p.kind.as_ref())
+
+        let is_active = provider_config
+            .as_ref()
+            .and_then(|p| p.kind.as_ref())
             .map(|k| info.map(|i| i.kind.name() == k.as_str()).unwrap_or(false))
             .unwrap_or(false);
-        
-        let model = provider_config.as_ref().and_then(|p| p.model.clone()).unwrap_or_else(|| "—".to_string());
-        let base_url = provider_config.as_ref().and_then(|p| p.base_url.clone()).unwrap_or_else(|| "—".to_string());
-        
+
+        let model = provider_config
+            .as_ref()
+            .and_then(|p| p.model.clone())
+            .unwrap_or_else(|| "—".to_string());
+        let base_url = provider_config
+            .as_ref()
+            .and_then(|p| p.base_url.clone())
+            .unwrap_or_else(|| "—".to_string());
+
         rows.push(json!({
             "name": name,
             "display_name": info.map(|i| i.display_name).unwrap_or(name),
@@ -603,28 +686,32 @@ pub fn connect_list(ctx: &AppContext, args: &crate::cli::ConnectListArgs) -> Res
             "has_key": true,
         }));
     }
-    
+
     if rows.is_empty() {
         let text = "No providers configured. Run `mn connect add` to add one.".to_string();
         let data = json!({ "providers": [] });
         return Ok(Outcome::new("connect.list", text, data));
     }
-    
+
     // Render table
     let mut table_text = String::new();
-    table_text.push_str(&format!("{:<20} {:<12} {:<30} {:<40} {}\n", "NAME", "KIND", "MODEL", "BASE URL", "STATUS"));
+    table_text.push_str(&format!(
+        "{:<20} {:<12} {:<30} {:<40} {}\n",
+        "NAME", "KIND", "MODEL", "BASE URL", "STATUS"
+    ));
     table_text.push_str(&"-".repeat(120));
     table_text.push('\n');
-    
+
     for row in &rows {
         let name = row["name"].as_str().unwrap_or("");
         let kind = row["kind"].as_str().unwrap_or("");
         let model = row["model"].as_str().unwrap_or("");
         let base_url = row["base_url"].as_str().unwrap_or("");
         let is_active = row["is_active"].as_bool().unwrap_or(false);
-        
+
         let status = if is_active { "● active" } else { "○" };
-        table_text.push_str(&format!("{:<20} {:<12} {:<30} {:<40} {}\n", 
+        table_text.push_str(&format!(
+            "{:<20} {:<12} {:<30} {:<40} {}\n",
             truncate(name, 19),
             truncate(kind, 11),
             truncate(model, 29),
@@ -632,7 +719,7 @@ pub fn connect_list(ctx: &AppContext, args: &crate::cli::ConnectListArgs) -> Res
             status
         ));
     }
-    
+
     let data = json!({ "providers": rows });
     Ok(Outcome::new("connect.list", table_text, data))
 }
@@ -640,16 +727,19 @@ pub fn connect_list(ctx: &AppContext, args: &crate::cli::ConnectListArgs) -> Res
 /// Run `mn connect remove <name>` - remove a provider configuration
 pub fn connect_remove(ctx: &AppContext, args: &crate::cli::ConnectRemoveArgs) -> Result<Outcome> {
     let name = &args.name;
-    
+
     // Check if provider exists
     let stored_keys = list_provider_keys()?;
     if !stored_keys.contains(name) {
-        anyhow::bail!("Provider '{}' not found. Run `mn connect list` to see configured providers.", name);
+        anyhow::bail!(
+            "Provider '{}' not found. Run `mn connect list` to see configured providers.",
+            name
+        );
     }
-    
+
     // Remove API key
     remove_provider_key(name)?;
-    
+
     // If this was the active provider, clear config
     let config_path = &ctx.config_path;
     let mut config: Config = if config_path.exists() {
@@ -658,14 +748,14 @@ pub fn connect_remove(ctx: &AppContext, args: &crate::cli::ConnectRemoveArgs) ->
     } else {
         Config::default()
     };
-    
+
     if let Some(ref provider) = config.provider {
         if provider.kind.as_deref() == Some(name.as_str()) {
             config.provider = None;
             config.save(&config_path)?;
         }
     }
-    
+
     let text = format!("Provider '{}' removed.", name);
     let data = json!({ "provider": name, "removed": true });
     Ok(Outcome::new("connect.remove", text, data))
@@ -674,32 +764,42 @@ pub fn connect_remove(ctx: &AppContext, args: &crate::cli::ConnectRemoveArgs) ->
 /// Run `mn connect test` - test connection to a provider
 pub fn connect_test(ctx: &AppContext, args: &crate::cli::ConnectTestArgs) -> Result<Outcome> {
     let config: Config = Config::load(&ctx.config_path)?;
-    let provider_config = config.provider
+    let provider_config = config
+        .provider
         .context("No provider configured. Run `mn connect add` first.")?;
-    
-    let provider_name = args.provider.as_ref()
+
+    let provider_name = args
+        .provider
+        .as_ref()
         .or(provider_config.kind.as_ref())
         .context("No provider specified and no default configured")?;
-    
+
     // Get API key
-    let api_key = get_provider_key(provider_name)?
-        .context(format!("No API key stored for provider '{}'. Run `mn connect add` first.", provider_name))?;
-    
+    let api_key = get_provider_key(provider_name)?.context(format!(
+        "No API key stored for provider '{}'. Run `mn connect add` first.",
+        provider_name
+    ))?;
+
     let providers = known_providers();
     let provider_info = providers
         .iter()
         .find(|p| p.name == provider_name.as_str())
         .context(format!("Unknown provider: {}", provider_name))?;
-    
-    let base_url = args.provider.as_ref().and_then(|_| provider_config.base_url.as_deref())
+
+    let base_url = args
+        .provider
+        .as_ref()
+        .and_then(|_| provider_config.base_url.as_deref())
         .unwrap_or(provider_info.default_base_url);
-    let model = provider_config.model.as_deref()
+    let model = provider_config
+        .model
+        .as_deref()
         .unwrap_or(provider_info.default_model);
     let kind = provider_info.kind;
-    
+
     // Test connection
     test_provider_connection(kind, base_url, model, &api_key)?;
-    
+
     let text = format!("Connection to '{}' successful!", provider_info.display_name);
     let data = json!({
         "provider": provider_name,
@@ -708,7 +808,7 @@ pub fn connect_test(ctx: &AppContext, args: &crate::cli::ConnectTestArgs) -> Res
         "base_url": base_url,
         "success": true,
     });
-    
+
     Ok(Outcome::new("connect.test", text, data))
 }
 
@@ -723,7 +823,7 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_known_providers() {
         let providers = known_providers();
@@ -733,7 +833,7 @@ mod tests {
         assert!(providers.iter().any(|p| p.name == "openrouter"));
         assert!(providers.iter().any(|p| p.name == "custom"));
     }
-    
+
     #[test]
     fn test_truncate() {
         assert_eq!(truncate("hello", 10), "hello");

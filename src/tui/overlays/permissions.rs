@@ -1,6 +1,6 @@
 //! Permissions overlay: view and manage tool permissions, sandbox policies.
 
-use crossterm::event::{KeyEvent, KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -96,7 +96,12 @@ impl PermissionsOverlay {
         let mut state = ListState::default();
         state.select(Some(0));
         Self {
-            tabs: vec![PermissionTab::Tools, PermissionTab::Policies, PermissionTab::Requests, PermissionTab::Audit],
+            tabs: vec![
+                PermissionTab::Tools,
+                PermissionTab::Policies,
+                PermissionTab::Requests,
+                PermissionTab::Audit,
+            ],
             list_state: state,
             ..Default::default()
         }
@@ -203,9 +208,7 @@ impl PermissionsOverlay {
                 name: "full-access".to_string(),
                 description: "Full access policy for trusted sessions".to_string(),
                 enabled: false,
-                rules: vec![
-                    "Allow: all tools".to_string(),
-                ],
+                rules: vec!["Allow: all tools".to_string()],
             },
         ];
 
@@ -242,132 +245,196 @@ impl PermissionsOverlay {
     }
 
     fn render_tools(&mut self, frame: &mut Frame, area: Rect) {
-        let items: Vec<ListItem> = self.tools.iter().enumerate().map(|(i, t)| {
-            let selected = i == self.selected;
-            let style = if selected {
-                Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
+        let items: Vec<ListItem> = self
+            .tools
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let selected = i == self.selected;
+                let style = if selected {
+                    Style::default()
+                        .bg(Color::Blue)
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
 
-            let perm_char = match t.allowed {
-                PermissionState::Allow => "✓",
-                PermissionState::Deny => "✗",
-                PermissionState::Ask => "?",
-            };
-            let perm_color = match t.allowed {
-                PermissionState::Allow => Color::Green,
-                PermissionState::Deny => Color::Red,
-                PermissionState::Ask => Color::Yellow,
-            };
+                let perm_char = match t.allowed {
+                    PermissionState::Allow => "✓",
+                    PermissionState::Deny => "✗",
+                    PermissionState::Ask => "?",
+                };
+                let perm_color = match t.allowed {
+                    PermissionState::Allow => Color::Green,
+                    PermissionState::Deny => Color::Red,
+                    PermissionState::Ask => Color::Yellow,
+                };
 
-            let risk_char = match t.risk_level {
-                RiskLevel::Low => "L",
-                RiskLevel::Medium => "M",
-                RiskLevel::High => "H",
-                RiskLevel::Critical => "C",
-            };
-            let risk_color = match t.risk_level {
-                RiskLevel::Low => Color::Green,
-                RiskLevel::Medium => Color::Yellow,
-                RiskLevel::High => Color::Red,
-                RiskLevel::Critical => Color::Magenta,
-            };
+                let risk_char = match t.risk_level {
+                    RiskLevel::Low => "L",
+                    RiskLevel::Medium => "M",
+                    RiskLevel::High => "H",
+                    RiskLevel::Critical => "C",
+                };
+                let risk_color = match t.risk_level {
+                    RiskLevel::Low => Color::Green,
+                    RiskLevel::Medium => Color::Yellow,
+                    RiskLevel::High => Color::Red,
+                    RiskLevel::Critical => Color::Magenta,
+                };
 
-            let lines = vec![
-                Line::from(vec![
-                    Span::styled(format!("{} ", perm_char), Style::default().fg(perm_color)),
-                    Span::styled(&t.name, style),
-                    Span::styled(format!("  [{}]", risk_char), Style::default().fg(risk_color).add_modifier(Modifier::BOLD)),
-                    Span::styled(format!("  ({} uses)", t.use_count), style.fg(Color::DarkGray)),
-                ]),
-                Line::from(vec![
-                    Span::styled("    ", Style::default()),
-                    Span::styled(&t.description, style.fg(Color::Gray)),
-                    Span::styled(t.last_used.as_deref().map(|s| format!("  ({})", s)).unwrap_or("  (never)".to_string()), style.fg(Color::DarkGray)),
-                ]),
-            ];
-            ListItem::new(lines).style(style)
-        }).collect();
+                let lines = vec![
+                    Line::from(vec![
+                        Span::styled(format!("{} ", perm_char), Style::default().fg(perm_color)),
+                        Span::styled(&t.name, style),
+                        Span::styled(
+                            format!("  [{}]", risk_char),
+                            Style::default().fg(risk_color).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!("  ({} uses)", t.use_count),
+                            style.fg(Color::DarkGray),
+                        ),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("    ", Style::default()),
+                        Span::styled(&t.description, style.fg(Color::Gray)),
+                        Span::styled(
+                            t.last_used
+                                .as_deref()
+                                .map(|s| format!("  ({})", s))
+                                .unwrap_or("  (never)".to_string()),
+                            style.fg(Color::DarkGray),
+                        ),
+                    ]),
+                ];
+                ListItem::new(lines).style(style)
+            })
+            .collect();
 
         let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title(" Tool Permissions "))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Tool Permissions "),
+            )
             .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
         frame.render_stateful_widget(list, area, &mut self.list_state);
     }
 
     fn render_policies(&mut self, frame: &mut Frame, area: Rect) {
-        let items: Vec<ListItem> = self.policies.iter().enumerate().map(|(i, p)| {
-            let selected = i == self.selected;
-            let style = if selected {
-                Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
+        let items: Vec<ListItem> = self
+            .policies
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let selected = i == self.selected;
+                let style = if selected {
+                    Style::default()
+                        .bg(Color::Blue)
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
 
-            let enabled_char = if p.enabled { "●" } else { "○" };
-            let enabled_color = if p.enabled { Color::Green } else { Color::DarkGray };
+                let enabled_char = if p.enabled { "●" } else { "○" };
+                let enabled_color = if p.enabled {
+                    Color::Green
+                } else {
+                    Color::DarkGray
+                };
 
-            let lines = vec![
-                Line::from(vec![
-                    Span::styled(format!("{} ", enabled_char), Style::default().fg(enabled_color)),
-                    Span::styled(&p.name, style),
-                    Span::styled(if p.enabled { " (active)" } else { "" }, style.fg(Color::Green)),
-                ]),
-                Line::from(vec![
-                    Span::styled("    ", Style::default()),
-                    Span::styled(&p.description, style.fg(Color::Gray)),
-                    Span::styled(format!("  {} rules", p.rules.len()), style.fg(Color::DarkGray)),
-                ]),
-            ];
-            ListItem::new(lines).style(style)
-        }).collect();
+                let lines = vec![
+                    Line::from(vec![
+                        Span::styled(
+                            format!("{} ", enabled_char),
+                            Style::default().fg(enabled_color),
+                        ),
+                        Span::styled(&p.name, style),
+                        Span::styled(
+                            if p.enabled { " (active)" } else { "" },
+                            style.fg(Color::Green),
+                        ),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("    ", Style::default()),
+                        Span::styled(&p.description, style.fg(Color::Gray)),
+                        Span::styled(
+                            format!("  {} rules", p.rules.len()),
+                            style.fg(Color::DarkGray),
+                        ),
+                    ]),
+                ];
+                ListItem::new(lines).style(style)
+            })
+            .collect();
 
         let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title(" Sandbox Policies "))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Sandbox Policies "),
+            )
             .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
         frame.render_stateful_widget(list, area, &mut self.list_state);
     }
 
     fn render_requests(&mut self, frame: &mut Frame, area: Rect) {
-        let items: Vec<ListItem> = self.requests.iter().enumerate().map(|(i, r)| {
-            let selected = i == self.selected;
-            let style = if selected {
-                Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
+        let items: Vec<ListItem> = self
+            .requests
+            .iter()
+            .enumerate()
+            .map(|(i, r)| {
+                let selected = i == self.selected;
+                let style = if selected {
+                    Style::default()
+                        .bg(Color::Blue)
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
 
-            let status_char = match r.status {
-                RequestStatus::Pending => "⏳",
-                RequestStatus::Approved => "✓",
-                RequestStatus::Denied => "✗",
-                RequestStatus::Expired => "⌛",
-            };
-            let status_color = match r.status {
-                RequestStatus::Pending => Color::Yellow,
-                RequestStatus::Approved => Color::Green,
-                RequestStatus::Denied => Color::Red,
-                RequestStatus::Expired => Color::DarkGray,
-            };
+                let status_char = match r.status {
+                    RequestStatus::Pending => "⏳",
+                    RequestStatus::Approved => "✓",
+                    RequestStatus::Denied => "✗",
+                    RequestStatus::Expired => "⌛",
+                };
+                let status_color = match r.status {
+                    RequestStatus::Pending => Color::Yellow,
+                    RequestStatus::Approved => Color::Green,
+                    RequestStatus::Denied => Color::Red,
+                    RequestStatus::Expired => Color::DarkGray,
+                };
 
-            let lines = vec![
-                Line::from(vec![
-                    Span::styled(format!("{} ", status_char), Style::default().fg(status_color)),
-                    Span::styled(&r.tool, style),
-                    Span::styled(format!("  {}", r.id), style.fg(Color::DarkGray)),
-                    Span::styled(format!("  {}", r.timestamp), style.fg(Color::DarkGray)),
-                ]),
-                Line::from(vec![
-                    Span::styled("    ", Style::default()),
-                    Span::styled(&r.arguments, style.fg(Color::Gray)),
-                ]),
-            ];
-            ListItem::new(lines).style(style)
-        }).collect();
+                let lines = vec![
+                    Line::from(vec![
+                        Span::styled(
+                            format!("{} ", status_char),
+                            Style::default().fg(status_color),
+                        ),
+                        Span::styled(&r.tool, style),
+                        Span::styled(format!("  {}", r.id), style.fg(Color::DarkGray)),
+                        Span::styled(format!("  {}", r.timestamp), style.fg(Color::DarkGray)),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("    ", Style::default()),
+                        Span::styled(&r.arguments, style.fg(Color::Gray)),
+                    ]),
+                ];
+                ListItem::new(lines).style(style)
+            })
+            .collect();
 
         let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title(" Permission Requests "))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Permission Requests "),
+            )
             .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
         frame.render_stateful_widget(list, area, &mut self.list_state);
     }
@@ -375,7 +442,12 @@ impl PermissionsOverlay {
     fn render_audit(&mut self, frame: &mut Frame, area: Rect) {
         let audit_entries = vec![
             ("14:32:15", "file_write", "ALLOWED", "src/main.rs"),
-            ("14:29:42", "vault_write", "ALLOWED", "architecture decision"),
+            (
+                "14:29:42",
+                "vault_write",
+                "ALLOWED",
+                "architecture decision",
+            ),
             ("14:15:00", "shell_exec", "DENIED", "cargo test"),
             ("12:45:30", "network_request", "EXPIRED", "api.github.com"),
             ("12:30:00", "file_read", "ALLOWED", "Cargo.toml"),
@@ -383,31 +455,41 @@ impl PermissionsOverlay {
             ("12:20:00", "vault_read", "ALLOWED", "decisions"),
         ];
 
-        let items: Vec<ListItem> = audit_entries.iter().enumerate().map(|(i, (time, tool, result, target))| {
-            let selected = i == self.selected;
-            let style = if selected {
-                Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
+        let items: Vec<ListItem> = audit_entries
+            .iter()
+            .enumerate()
+            .map(|(i, (time, tool, result, target))| {
+                let selected = i == self.selected;
+                let style = if selected {
+                    Style::default()
+                        .bg(Color::Blue)
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
 
-            let result_color = match *result {
-                "ALLOWED" => Color::Green,
-                "DENIED" => Color::Red,
-                "EXPIRED" => Color::DarkGray,
-                _ => Color::White,
-            };
+                let result_color = match *result {
+                    "ALLOWED" => Color::Green,
+                    "DENIED" => Color::Red,
+                    "EXPIRED" => Color::DarkGray,
+                    _ => Color::White,
+                };
 
-            let lines = vec![
-                Line::from(vec![
+                let lines = vec![Line::from(vec![
                     Span::styled(*time, Style::default().fg(Color::DarkGray)),
                     Span::styled(format!("  {}", tool), style.fg(Color::Cyan)),
-                    Span::styled(format!("  {}", result), Style::default().fg(result_color).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        format!("  {}", result),
+                        Style::default()
+                            .fg(result_color)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                     Span::styled(format!("  {}", target), style.fg(Color::Gray)),
-                ]),
-            ];
-            ListItem::new(lines).style(style)
-        }).collect();
+                ])];
+                ListItem::new(lines).style(style)
+            })
+            .collect();
 
         let list = List::new(items)
             .block(Block::default().borders(Borders::ALL).title(" Audit Log "))
@@ -448,12 +530,22 @@ impl Overlay for PermissionsOverlay {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
         // Handle confirmation modes
-        if matches!(self.mode, PermissionMode::ConfirmAllow | PermissionMode::ConfirmDeny) {
+        if matches!(
+            self.mode,
+            PermissionMode::ConfirmAllow | PermissionMode::ConfirmDeny
+        ) {
             match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
                     if let Some(req) = self.requests.get(self.selected) {
-                        let action = if self.mode == PermissionMode::ConfirmAllow { "Approved" } else { "Denied" };
-                        app.push(crate::tui::app::EntryRole::Info, format!("{} request for {}", action, req.tool));
+                        let action = if self.mode == PermissionMode::ConfirmAllow {
+                            "Approved"
+                        } else {
+                            "Denied"
+                        };
+                        app.push(
+                            crate::tui::app::EntryRole::Info,
+                            format!("{} request for {}", action, req.tool),
+                        );
                     }
                     self.mode = PermissionMode::Browse;
                     self.detail_view = false;
@@ -554,7 +646,10 @@ impl Overlay for PermissionsOverlay {
                             if let Some(t) = self.tools.get(self.selected) {
                                 self.detail_content = format!(
                                     "Tool: {}\nDescription: {}\nPermission: {:?}\nRisk: {:?}\nLast used: {}\nUse count: {}",
-                                    t.name, t.description, t.allowed, t.risk_level,
+                                    t.name,
+                                    t.description,
+                                    t.allowed,
+                                    t.risk_level,
                                     t.last_used.as_deref().unwrap_or("never"),
                                     t.use_count
                                 );
@@ -564,7 +659,9 @@ impl Overlay for PermissionsOverlay {
                             if let Some(p) = self.policies.get(self.selected) {
                                 self.detail_content = format!(
                                     "Policy: {}\nDescription: {}\nEnabled: {}\n\nRules:\n{}",
-                                    p.name, p.description, p.enabled,
+                                    p.name,
+                                    p.description,
+                                    p.enabled,
                                     p.rules.join("\n")
                                 );
                             }
@@ -588,7 +685,10 @@ impl Overlay for PermissionsOverlay {
                         PermissionTab::Tools => {
                             if let Some(t) = self.tools.get_mut(self.selected) {
                                 t.allowed = PermissionState::Allow;
-                                app.push(crate::tui::app::EntryRole::Info, format!("Allowed: {}", t.name));
+                                app.push(
+                                    crate::tui::app::EntryRole::Info,
+                                    format!("Allowed: {}", t.name),
+                                );
                             }
                         }
                         PermissionTab::Requests => {
@@ -596,7 +696,10 @@ impl Overlay for PermissionsOverlay {
                                 if r.status == RequestStatus::Pending {
                                     self.mode = PermissionMode::ConfirmAllow;
                                     self.detail_view = true;
-                                    self.detail_content = format!("Allow request {} for {}?\n\ny: confirm · n: cancel", r.id, r.tool);
+                                    self.detail_content = format!(
+                                        "Allow request {} for {}?\n\ny: confirm · n: cancel",
+                                        r.id, r.tool
+                                    );
                                 }
                             }
                         }
@@ -611,7 +714,10 @@ impl Overlay for PermissionsOverlay {
                         PermissionTab::Tools => {
                             if let Some(t) = self.tools.get_mut(self.selected) {
                                 t.allowed = PermissionState::Deny;
-                                app.push(crate::tui::app::EntryRole::Info, format!("Denied: {}", t.name));
+                                app.push(
+                                    crate::tui::app::EntryRole::Info,
+                                    format!("Denied: {}", t.name),
+                                );
                             }
                         }
                         PermissionTab::Requests => {
@@ -619,7 +725,10 @@ impl Overlay for PermissionsOverlay {
                                 if r.status == RequestStatus::Pending {
                                     self.mode = PermissionMode::ConfirmDeny;
                                     self.detail_view = true;
-                                    self.detail_content = format!("Deny request {} for {}?\n\ny: confirm · n: cancel", r.id, r.tool);
+                                    self.detail_content = format!(
+                                        "Deny request {} for {}?\n\ny: confirm · n: cancel",
+                                        r.id, r.tool
+                                    );
                                 }
                             }
                         }
@@ -632,7 +741,10 @@ impl Overlay for PermissionsOverlay {
                 if !self.detail_view && self.tab() == PermissionTab::Tools {
                     if let Some(t) = self.tools.get_mut(self.selected) {
                         t.allowed = PermissionState::Ask;
-                        app.push(crate::tui::app::EntryRole::Info, format!("Set to ask: {}", t.name));
+                        app.push(
+                            crate::tui::app::EntryRole::Info,
+                            format!("Set to ask: {}", t.name),
+                        );
                     }
                 }
             }
@@ -640,15 +752,30 @@ impl Overlay for PermissionsOverlay {
                 // Copy
                 if !self.detail_view {
                     match self.tab() {
-                        PermissionTab::Tools => if let Some(t) = self.tools.get(self.selected) {
-                            app.push(crate::tui::app::EntryRole::Info, format!("Copied tool: {}", t.name));
-                        },
-                        PermissionTab::Policies => if let Some(p) = self.policies.get(self.selected) {
-                            app.push(crate::tui::app::EntryRole::Info, format!("Copied policy: {}", p.name));
-                        },
-                        PermissionTab::Requests => if let Some(r) = self.requests.get(self.selected) {
-                            app.push(crate::tui::app::EntryRole::Info, format!("Copied request: {}", r.id));
-                        },
+                        PermissionTab::Tools => {
+                            if let Some(t) = self.tools.get(self.selected) {
+                                app.push(
+                                    crate::tui::app::EntryRole::Info,
+                                    format!("Copied tool: {}", t.name),
+                                );
+                            }
+                        }
+                        PermissionTab::Policies => {
+                            if let Some(p) = self.policies.get(self.selected) {
+                                app.push(
+                                    crate::tui::app::EntryRole::Info,
+                                    format!("Copied policy: {}", p.name),
+                                );
+                            }
+                        }
+                        PermissionTab::Requests => {
+                            if let Some(r) = self.requests.get(self.selected) {
+                                app.push(
+                                    crate::tui::app::EntryRole::Info,
+                                    format!("Copied request: {}", r.id),
+                                );
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -658,14 +785,24 @@ impl Overlay for PermissionsOverlay {
                 if !self.detail_view && self.tab() == PermissionTab::Policies {
                     if let Some(p) = self.policies.get_mut(self.selected) {
                         p.enabled = !p.enabled;
-                        app.push(crate::tui::app::EntryRole::Info, format!("Policy {}: {}", p.name, if p.enabled { "enabled" } else { "disabled" }));
+                        app.push(
+                            crate::tui::app::EntryRole::Info,
+                            format!(
+                                "Policy {}: {}",
+                                p.name,
+                                if p.enabled { "enabled" } else { "disabled" }
+                            ),
+                        );
                     }
                 }
             }
             KeyCode::Char('r') => {
                 // Refresh
                 self.load_mock_data();
-                app.push(crate::tui::app::EntryRole::Info, "Permissions refreshed".to_string());
+                app.push(
+                    crate::tui::app::EntryRole::Info,
+                    "Permissions refreshed".to_string(),
+                );
             }
             _ => {}
         }
@@ -682,24 +819,36 @@ impl Overlay for PermissionsOverlay {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3),  // Tabs
-                Constraint::Min(0),     // Content
-                Constraint::Length(2),  // Help footer
+                Constraint::Length(3), // Tabs
+                Constraint::Min(0),    // Content
+                Constraint::Length(2), // Help footer
             ])
             .split(area);
 
         // Tabs
-        let tab_titles: Vec<&str> = self.tabs.iter().map(|t| match t {
-            PermissionTab::Tools => "Tools",
-            PermissionTab::Policies => "Policies",
-            PermissionTab::Requests => "Requests",
-            PermissionTab::Audit => "Audit",
-        }).collect();
+        let tab_titles: Vec<&str> = self
+            .tabs
+            .iter()
+            .map(|t| match t {
+                PermissionTab::Tools => "Tools",
+                PermissionTab::Policies => "Policies",
+                PermissionTab::Requests => "Requests",
+                PermissionTab::Audit => "Audit",
+            })
+            .collect();
         let tabs = Tabs::new(tab_titles)
-            .block(Block::default().borders(Borders::ALL).title(" Permissions "))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Permissions "),
+            )
             .select(self.active_tab)
             .style(Style::default().fg(Color::Gray))
-            .highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+            .highlight_style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            );
         frame.render_widget(tabs, chunks[0]);
 
         // Content
@@ -719,15 +868,24 @@ impl Overlay for PermissionsOverlay {
         }
 
         // Help footer
-        let help_text = if matches!(self.mode, PermissionMode::ConfirmAllow | PermissionMode::ConfirmDeny) {
+        let help_text = if matches!(
+            self.mode,
+            PermissionMode::ConfirmAllow | PermissionMode::ConfirmDeny
+        ) {
             "y: confirm · n/esc: cancel"
         } else if self.detail_view {
             "esc: back · c: copy"
         } else {
             match self.tab() {
-                PermissionTab::Tools => "↑↓: navigate · a: allow · d: deny · k: ask · c: copy · tab: next · esc: close",
-                PermissionTab::Policies => "↑↓: navigate · e: toggle · c: copy · tab: next · esc: close",
-                PermissionTab::Requests => "↑↓: navigate · a: approve · d: deny · c: copy · tab: next · esc: close",
+                PermissionTab::Tools => {
+                    "↑↓: navigate · a: allow · d: deny · k: ask · c: copy · tab: next · esc: close"
+                }
+                PermissionTab::Policies => {
+                    "↑↓: navigate · e: toggle · c: copy · tab: next · esc: close"
+                }
+                PermissionTab::Requests => {
+                    "↑↓: navigate · a: approve · d: deny · c: copy · tab: next · esc: close"
+                }
                 PermissionTab::Audit => "tab: next · esc: close",
             }
         };

@@ -1,6 +1,6 @@
 //! Model overlay: view and configure model settings, providers, parameters.
 
-use crossterm::event::{KeyEvent, KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -95,7 +95,12 @@ impl ModelOverlay {
         let mut state = ListState::default();
         state.select(Some(0));
         Self {
-            tabs: vec![ModelTab::Providers, ModelTab::Models, ModelTab::Settings, ModelTab::Status],
+            tabs: vec![
+                ModelTab::Providers,
+                ModelTab::Models,
+                ModelTab::Settings,
+                ModelTab::Status,
+            ],
             list_state: state,
             settings: ModelSettings {
                 temperature: 0.7,
@@ -158,7 +163,10 @@ impl ModelOverlay {
                 max_output: 4096,
                 supports_tools: true,
                 supports_vision: true,
-                pricing: Some(ModelPricing { input_per_m: 5.0, output_per_m: 15.0 }),
+                pricing: Some(ModelPricing {
+                    input_per_m: 5.0,
+                    output_per_m: 15.0,
+                }),
                 is_default: true,
             },
             ModelEntry {
@@ -168,7 +176,10 @@ impl ModelOverlay {
                 max_output: 4096,
                 supports_tools: true,
                 supports_vision: true,
-                pricing: Some(ModelPricing { input_per_m: 0.15, output_per_m: 0.6 }),
+                pricing: Some(ModelPricing {
+                    input_per_m: 0.15,
+                    output_per_m: 0.6,
+                }),
                 is_default: false,
             },
             ModelEntry {
@@ -178,7 +189,10 @@ impl ModelOverlay {
                 max_output: 8192,
                 supports_tools: true,
                 supports_vision: true,
-                pricing: Some(ModelPricing { input_per_m: 3.0, output_per_m: 15.0 }),
+                pricing: Some(ModelPricing {
+                    input_per_m: 3.0,
+                    output_per_m: 15.0,
+                }),
                 is_default: false,
             },
             ModelEntry {
@@ -188,7 +202,10 @@ impl ModelOverlay {
                 max_output: 4096,
                 supports_tools: true,
                 supports_vision: true,
-                pricing: Some(ModelPricing { input_per_m: 0.25, output_per_m: 1.25 }),
+                pricing: Some(ModelPricing {
+                    input_per_m: 0.25,
+                    output_per_m: 1.25,
+                }),
                 is_default: false,
             },
             ModelEntry {
@@ -205,45 +222,59 @@ impl ModelOverlay {
     }
 
     fn render_providers(&mut self, frame: &mut Frame, area: Rect) {
-        let items: Vec<ListItem> = self.providers.iter().enumerate().map(|(i, p)| {
-            let selected = i == self.selected;
-            let style = if selected {
-                Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
+        let items: Vec<ListItem> = self
+            .providers
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let selected = i == self.selected;
+                let style = if selected {
+                    Style::default()
+                        .bg(Color::Blue)
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
 
-            let status_char = match p.status {
-                ProviderStatus::Connected => "●",
-                ProviderStatus::Disconnected => "○",
-                ProviderStatus::Error => "✗",
-                ProviderStatus::Unknown => "?",
-            };
-            let status_color = match p.status {
-                ProviderStatus::Connected => Color::Green,
-                ProviderStatus::Disconnected => Color::DarkGray,
-                ProviderStatus::Error => Color::Red,
-                ProviderStatus::Unknown => Color::Yellow,
-            };
+                let status_char = match p.status {
+                    ProviderStatus::Connected => "●",
+                    ProviderStatus::Disconnected => "○",
+                    ProviderStatus::Error => "✗",
+                    ProviderStatus::Unknown => "?",
+                };
+                let status_color = match p.status {
+                    ProviderStatus::Connected => Color::Green,
+                    ProviderStatus::Disconnected => Color::DarkGray,
+                    ProviderStatus::Error => Color::Red,
+                    ProviderStatus::Unknown => Color::Yellow,
+                };
 
-            let enabled_mark = if p.enabled { "✓" } else { "✗" };
-            let default_mark = if p.default { " ★" } else { "" };
+                let enabled_mark = if p.enabled { "✓" } else { "✗" };
+                let default_mark = if p.default { " ★" } else { "" };
 
-            let lines = vec![
-                Line::from(vec![
-                    Span::styled(format!("{} ", enabled_mark), Style::default().fg(if p.enabled { Color::Green } else { Color::Red })),
-                    Span::styled(&p.name, style),
-                    Span::styled(default_mark, style.fg(Color::Yellow)),
-                    Span::styled(format!("  ({} models)", p.models), style.fg(Color::DarkGray)),
-                ]),
-                Line::from(vec![
-                    Span::styled("    ", Style::default()),
-                    Span::styled(status_char, Style::default().fg(status_color)),
-                    Span::styled(format!("  {:?}", p.status), style.fg(Color::Gray)),
-                ]),
-            ];
-            ListItem::new(lines).style(style)
-        }).collect();
+                let lines = vec![
+                    Line::from(vec![
+                        Span::styled(
+                            format!("{} ", enabled_mark),
+                            Style::default().fg(if p.enabled { Color::Green } else { Color::Red }),
+                        ),
+                        Span::styled(&p.name, style),
+                        Span::styled(default_mark, style.fg(Color::Yellow)),
+                        Span::styled(
+                            format!("  ({} models)", p.models),
+                            style.fg(Color::DarkGray),
+                        ),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("    ", Style::default()),
+                        Span::styled(status_char, Style::default().fg(status_color)),
+                        Span::styled(format!("  {:?}", p.status), style.fg(Color::Gray)),
+                    ]),
+                ];
+                ListItem::new(lines).style(style)
+            })
+            .collect();
 
         let list = List::new(items)
             .block(Block::default().borders(Borders::ALL).title(" Providers "))
@@ -252,38 +283,53 @@ impl ModelOverlay {
     }
 
     fn render_models(&mut self, frame: &mut Frame, area: Rect) {
-        let items: Vec<ListItem> = self.models.iter().enumerate().map(|(i, m)| {
-            let selected = i == self.selected;
-            let style = if selected {
-                Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
+        let items: Vec<ListItem> = self
+            .models
+            .iter()
+            .enumerate()
+            .map(|(i, m)| {
+                let selected = i == self.selected;
+                let style = if selected {
+                    Style::default()
+                        .bg(Color::Blue)
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
 
-            let default_mark = if m.is_default { " ★" } else { "" };
-            let tools_mark = if m.supports_tools { " 🔧" } else { "" };
-            let vision_mark = if m.supports_vision { " 👁" } else { "" };
+                let default_mark = if m.is_default { " ★" } else { "" };
+                let tools_mark = if m.supports_tools { " 🔧" } else { "" };
+                let vision_mark = if m.supports_vision { " 👁" } else { "" };
 
-            let pricing_str = m.pricing.as_ref().map_or("free".to_string(), |p| {
-                format!("${:.2}/${:.2} per M", p.input_per_m, p.output_per_m)
-            });
+                let pricing_str = m.pricing.as_ref().map_or("free".to_string(), |p| {
+                    format!("${:.2}/${:.2} per M", p.input_per_m, p.output_per_m)
+                });
 
-            let lines = vec![
-                Line::from(vec![
-                    Span::styled(&m.name, style),
-                    Span::styled(default_mark, style.fg(Color::Yellow)),
-                    Span::styled(format!("  [{}]", m.provider), style.fg(Color::Cyan)),
-                    Span::styled(tools_mark, style.fg(Color::Green)),
-                    Span::styled(vision_mark, style.fg(Color::Blue)),
-                ]),
-                Line::from(vec![
-                    Span::styled("    ", Style::default()),
-                    Span::styled(format!("Context: {}k  Output: {}k  {}", 
-                        m.context_window / 1000, m.max_output / 1000, pricing_str), style.fg(Color::Gray)),
-                ]),
-            ];
-            ListItem::new(lines).style(style)
-        }).collect();
+                let lines = vec![
+                    Line::from(vec![
+                        Span::styled(&m.name, style),
+                        Span::styled(default_mark, style.fg(Color::Yellow)),
+                        Span::styled(format!("  [{}]", m.provider), style.fg(Color::Cyan)),
+                        Span::styled(tools_mark, style.fg(Color::Green)),
+                        Span::styled(vision_mark, style.fg(Color::Blue)),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("    ", Style::default()),
+                        Span::styled(
+                            format!(
+                                "Context: {}k  Output: {}k  {}",
+                                m.context_window / 1000,
+                                m.max_output / 1000,
+                                pricing_str
+                            ),
+                            style.fg(Color::Gray),
+                        ),
+                    ]),
+                ];
+                ListItem::new(lines).style(style)
+            })
+            .collect();
 
         let list = List::new(items)
             .block(Block::default().borders(Borders::ALL).title(" Models "))
@@ -293,38 +339,69 @@ impl ModelOverlay {
 
     fn render_settings(&mut self, frame: &mut Frame, area: Rect) {
         let settings = vec![
-            ("Temperature", self.settings.temperature.to_string(), "0.0-2.0"),
+            (
+                "Temperature",
+                self.settings.temperature.to_string(),
+                "0.0-2.0",
+            ),
             ("Top-p", self.settings.top_p.to_string(), "0.0-1.0"),
-            ("Max Tokens", self.settings.max_tokens.map_or("unlimited".to_string(), |v| v.to_string()), "optional"),
-            ("System Prompt", if self.settings.system_prompt.len() > 50 { format!("{}...", &self.settings.system_prompt[..47]) } else { self.settings.system_prompt.clone() }, "string"),
-            ("Timeout (s)", self.settings.timeout_seconds.to_string(), "seconds"),
-            ("Retry Attempts", self.settings.retry_attempts.to_string(), "count"),
+            (
+                "Max Tokens",
+                self.settings
+                    .max_tokens
+                    .map_or("unlimited".to_string(), |v| v.to_string()),
+                "optional",
+            ),
+            (
+                "System Prompt",
+                if self.settings.system_prompt.len() > 50 {
+                    format!("{}...", &self.settings.system_prompt[..47])
+                } else {
+                    self.settings.system_prompt.clone()
+                },
+                "string",
+            ),
+            (
+                "Timeout (s)",
+                self.settings.timeout_seconds.to_string(),
+                "seconds",
+            ),
+            (
+                "Retry Attempts",
+                self.settings.retry_attempts.to_string(),
+                "count",
+            ),
         ];
 
-        let items: Vec<ListItem> = settings.iter().enumerate().map(|(i, (name, value, hint))| {
-            let selected = i == self.selected;
-            let is_editing = self.editing && self.selected == i;
-            let style = if selected {
-                Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
+        let items: Vec<ListItem> = settings
+            .iter()
+            .enumerate()
+            .map(|(i, (name, value, hint))| {
+                let selected = i == self.selected;
+                let is_editing = self.editing && self.selected == i;
+                let style = if selected {
+                    Style::default()
+                        .bg(Color::Blue)
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
 
-            let display_value = if is_editing {
-                format!("{}_", self.edit_buffer)
-            } else {
-                value.clone()
-            };
+                let display_value = if is_editing {
+                    format!("{}_", self.edit_buffer)
+                } else {
+                    value.clone()
+                };
 
-            let lines = vec![
-                Line::from(vec![
+                let lines = vec![Line::from(vec![
                     Span::styled(format!("{}: ", name), style.fg(Color::Cyan)),
                     Span::styled(display_value, style),
                     Span::styled(format!("  ({})", hint), style.fg(Color::DarkGray)),
-                ]),
-            ];
-            ListItem::new(lines).style(style)
-        }).collect();
+                ])];
+                ListItem::new(lines).style(style)
+            })
+            .collect();
 
         let list = List::new(items)
             .block(Block::default().borders(Borders::ALL).title(" Settings "))
@@ -334,9 +411,12 @@ impl ModelOverlay {
 
     fn render_status(&mut self, frame: &mut Frame, area: Rect) {
         let status_text = vec![
-            Line::from(vec![
-                Span::styled("Model Configuration Status", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            ]),
+            Line::from(vec![Span::styled(
+                "Model Configuration Status",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )]),
             Line::from(""),
             Line::from(vec![
                 Span::styled("Default Provider: ", Style::default().fg(Color::Cyan)),
@@ -344,32 +424,52 @@ impl ModelOverlay {
             ]),
             Line::from(vec![
                 Span::styled("Default Model: ", Style::default().fg(Color::Cyan)),
-                Span::styled("gpt-4o", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "gpt-4o",
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
             ]),
             Line::from(vec![
                 Span::styled("Temperature: ", Style::default().fg(Color::Cyan)),
-                Span::styled(self.settings.temperature.to_string(), Style::default().fg(Color::White)),
+                Span::styled(
+                    self.settings.temperature.to_string(),
+                    Style::default().fg(Color::White),
+                ),
             ]),
             Line::from(vec![
                 Span::styled("Top-p: ", Style::default().fg(Color::Cyan)),
-                Span::styled(self.settings.top_p.to_string(), Style::default().fg(Color::White)),
+                Span::styled(
+                    self.settings.top_p.to_string(),
+                    Style::default().fg(Color::White),
+                ),
             ]),
             Line::from(vec![
                 Span::styled("Max Tokens: ", Style::default().fg(Color::Cyan)),
-                Span::styled(self.settings.max_tokens.map_or("unlimited".to_string(), |v| v.to_string()), Style::default().fg(Color::White)),
+                Span::styled(
+                    self.settings
+                        .max_tokens
+                        .map_or("unlimited".to_string(), |v| v.to_string()),
+                    Style::default().fg(Color::White),
+                ),
             ]),
             Line::from(""),
-            Line::from(vec![
-                Span::styled("Available Providers:", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            ]),
+            Line::from(vec![Span::styled(
+                "Available Providers:",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )]),
             Line::from("  ✓ openai - Connected (6 models)"),
             Line::from("  ✓ anthropic - Connected (4 models)"),
             Line::from("  ✗ ollama - Disconnected"),
             Line::from("  ✓ groq - Connected (3 models)"),
             Line::from(""),
-            Line::from(vec![
-                Span::styled("Press 'r' to refresh, Tab for settings", Style::default().fg(Color::DarkGray)),
-            ]),
+            Line::from(vec![Span::styled(
+                "Press 'r' to refresh, Tab for settings",
+                Style::default().fg(Color::DarkGray),
+            )]),
         ];
 
         let status = Paragraph::new(status_text)
@@ -395,7 +495,10 @@ impl ModelOverlay {
                     }
                     2 => {
                         self.edit_field = EditField::MaxTokens;
-                        self.edit_buffer = self.settings.max_tokens.map_or("".to_string(), |v| v.to_string());
+                        self.edit_buffer = self
+                            .settings
+                            .max_tokens
+                            .map_or("".to_string(), |v| v.to_string());
                     }
                     3 => {
                         self.edit_field = EditField::SystemPrompt;
@@ -521,13 +624,21 @@ impl Overlay for ModelOverlay {
                     }
                 }
                 KeyCode::Left => {
-                    if self.edit_cursor > 0 { self.edit_cursor -= 1; }
+                    if self.edit_cursor > 0 {
+                        self.edit_cursor -= 1;
+                    }
                 }
                 KeyCode::Right => {
-                    if self.edit_cursor < self.edit_buffer.len() { self.edit_cursor += 1; }
+                    if self.edit_cursor < self.edit_buffer.len() {
+                        self.edit_cursor += 1;
+                    }
                 }
-                KeyCode::Home => { self.edit_cursor = 0; }
-                KeyCode::End => { self.edit_cursor = self.edit_buffer.len(); }
+                KeyCode::Home => {
+                    self.edit_cursor = 0;
+                }
+                KeyCode::End => {
+                    self.edit_cursor = self.edit_buffer.len();
+                }
                 _ => {}
             }
             return OverlayAction::None;
@@ -603,38 +714,64 @@ impl Overlay for ModelOverlay {
                 // Test connection
                 if self.tab() == ModelTab::Providers {
                     if let Some(p) = self.providers.get(self.selected) {
-                        app.push(crate::tui::app::EntryRole::Info, format!("Testing {}...", p.name));
+                        app.push(
+                            crate::tui::app::EntryRole::Info,
+                            format!("Testing {}...", p.name),
+                        );
                     }
                 }
             }
             KeyCode::Char('d') => {
                 // Set as default
                 match self.tab() {
-                    ModelTab::Providers => if let Some(p) = self.providers.get(self.selected) {
-                        app.push(crate::tui::app::EntryRole::Info, format!("Set {} as default provider", p.name));
-                    },
-                    ModelTab::Models => if let Some(m) = self.models.get(self.selected) {
-                        app.push(crate::tui::app::EntryRole::Info, format!("Set {} as default model", m.name));
-                    },
+                    ModelTab::Providers => {
+                        if let Some(p) = self.providers.get(self.selected) {
+                            app.push(
+                                crate::tui::app::EntryRole::Info,
+                                format!("Set {} as default provider", p.name),
+                            );
+                        }
+                    }
+                    ModelTab::Models => {
+                        if let Some(m) = self.models.get(self.selected) {
+                            app.push(
+                                crate::tui::app::EntryRole::Info,
+                                format!("Set {} as default model", m.name),
+                            );
+                        }
+                    }
                     _ => {}
                 }
             }
             KeyCode::Char('c') if ctrl => {
                 // Copy
                 match self.tab() {
-                    ModelTab::Providers => if let Some(p) = self.providers.get(self.selected) {
-                        app.push(crate::tui::app::EntryRole::Info, format!("Copied provider: {}", p.name));
-                    },
-                    ModelTab::Models => if let Some(m) = self.models.get(self.selected) {
-                        app.push(crate::tui::app::EntryRole::Info, format!("Copied model: {}", m.name));
-                    },
+                    ModelTab::Providers => {
+                        if let Some(p) = self.providers.get(self.selected) {
+                            app.push(
+                                crate::tui::app::EntryRole::Info,
+                                format!("Copied provider: {}", p.name),
+                            );
+                        }
+                    }
+                    ModelTab::Models => {
+                        if let Some(m) = self.models.get(self.selected) {
+                            app.push(
+                                crate::tui::app::EntryRole::Info,
+                                format!("Copied model: {}", m.name),
+                            );
+                        }
+                    }
                     _ => {}
                 }
             }
             KeyCode::Char('r') => {
                 // Refresh
                 self.load_mock_data();
-                app.push(crate::tui::app::EntryRole::Info, "Model data refreshed".to_string());
+                app.push(
+                    crate::tui::app::EntryRole::Info,
+                    "Model data refreshed".to_string(),
+                );
             }
             _ => {}
         }
@@ -651,24 +788,32 @@ impl Overlay for ModelOverlay {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3),  // Tabs
-                Constraint::Min(0),     // Content
-                Constraint::Length(2),  // Help footer
+                Constraint::Length(3), // Tabs
+                Constraint::Min(0),    // Content
+                Constraint::Length(2), // Help footer
             ])
             .split(area);
 
         // Tabs
-        let tab_titles: Vec<&str> = self.tabs.iter().map(|t| match t {
-            ModelTab::Providers => "Providers",
-            ModelTab::Models => "Models",
-            ModelTab::Settings => "Settings",
-            ModelTab::Status => "Status",
-        }).collect();
+        let tab_titles: Vec<&str> = self
+            .tabs
+            .iter()
+            .map(|t| match t {
+                ModelTab::Providers => "Providers",
+                ModelTab::Models => "Models",
+                ModelTab::Settings => "Settings",
+                ModelTab::Status => "Status",
+            })
+            .collect();
         let tabs = Tabs::new(tab_titles)
             .block(Block::default().borders(Borders::ALL).title(" Model "))
             .select(self.active_tab)
             .style(Style::default().fg(Color::Gray))
-            .highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+            .highlight_style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            );
         frame.render_widget(tabs, chunks[0]);
 
         // Content
@@ -684,9 +829,13 @@ impl Overlay for ModelOverlay {
             "enter: save · esc: cancel"
         } else {
             match self.tab() {
-                ModelTab::Providers => "↑↓: navigate · enter: edit · space: toggle · d: default · t: test · c: copy · r: refresh · tab: next · esc: close",
+                ModelTab::Providers => {
+                    "↑↓: navigate · enter: edit · space: toggle · d: default · t: test · c: copy · r: refresh · tab: next · esc: close"
+                }
                 ModelTab::Models => "↑↓: navigate · d: default · c: copy · tab: next · esc: close",
-                ModelTab::Settings => "↑↓: navigate · enter: edit · space: toggle · tab: next · esc: close",
+                ModelTab::Settings => {
+                    "↑↓: navigate · enter: edit · space: toggle · tab: next · esc: close"
+                }
                 ModelTab::Status => "tab: next · esc: close",
             }
         };

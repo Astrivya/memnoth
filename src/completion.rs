@@ -9,7 +9,6 @@ use std::path::PathBuf;
 
 pub use clap_complete::aot::Shell;
 
-
 /// Build the root clap command for generating completions.
 fn build_cli() -> clap::Command {
     crate::cli::Cli::command().bin_name("memnoth")

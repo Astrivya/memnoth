@@ -217,7 +217,10 @@ impl Overlay for FeedbackOverlay {
 
         match (&self.status, key.code) {
             (FeedbackStatus::Editing, KeyCode::Esc) => {
-                if !self.message.is_empty() || self.category != FeedbackCategory::default() || !self.include_context {
+                if !self.message.is_empty()
+                    || self.category != FeedbackCategory::default()
+                    || !self.include_context
+                {
                     // If user has entered content, ask for confirmation? For now just close.
                     return OverlayAction::Close;
                 }
@@ -228,7 +231,9 @@ impl Overlay for FeedbackOverlay {
                 self.submit_feedback(app);
                 return OverlayAction::None;
             }
-            (FeedbackStatus::Editing, KeyCode::Char(ch)) if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) => {
+            (FeedbackStatus::Editing, KeyCode::Char(ch))
+                if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) =>
+            {
                 self.message.insert(self.cursor, ch);
                 self.cursor += 1;
                 return OverlayAction::None;
@@ -269,7 +274,10 @@ impl Overlay for FeedbackOverlay {
             (FeedbackStatus::Editing, KeyCode::Tab) => {
                 // Cycle category
                 let categories = FeedbackCategory::all();
-                let current_idx = categories.iter().position(|&c| c == self.category).unwrap_or(0);
+                let current_idx = categories
+                    .iter()
+                    .position(|&c| c == self.category)
+                    .unwrap_or(0);
                 self.category = categories[(current_idx + 1) % categories.len()];
                 return OverlayAction::None;
             }
@@ -303,10 +311,10 @@ impl Overlay for FeedbackOverlay {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3),  // Message input
-                Constraint::Length(1),  // Category
-                Constraint::Length(1),  // Include context toggle
-                Constraint::Min(0),     // Status
+                Constraint::Length(3), // Message input
+                Constraint::Length(1), // Category
+                Constraint::Length(1), // Include context toggle
+                Constraint::Min(0),    // Status
             ])
             .split(inner);
 
@@ -314,15 +322,22 @@ impl Overlay for FeedbackOverlay {
         let input_style = Style::default().fg(Color::White);
         let cursor_pos = self.cursor.min(self.message.len());
         let (before_cursor, after_cursor) = self.message.split_at(cursor_pos);
-        let input_text = vec![
-            Line::from(vec![
-                Span::styled(before_cursor, input_style),
-                Span::styled("█", Style::default().fg(Color::Yellow).add_modifier(Modifier::SLOW_BLINK)),
-                Span::styled(after_cursor, input_style),
-            ]),
-        ];
+        let input_text = vec![Line::from(vec![
+            Span::styled(before_cursor, input_style),
+            Span::styled(
+                "█",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::SLOW_BLINK),
+            ),
+            Span::styled(after_cursor, input_style),
+        ])];
         let input = Paragraph::new(input_text)
-            .block(Block::default().borders(Borders::ALL).title(" Message (Ctrl+Enter to send) "))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Message (Ctrl+Enter to send) "),
+            )
             .wrap(Wrap { trim: false });
         frame.render_widget(input, chunks[0]);
 
@@ -334,7 +349,10 @@ impl Overlay for FeedbackOverlay {
         frame.render_widget(category_widget, chunks[1]);
 
         // Include context toggle
-        let context_text = format!(" Include context: {} (Ctrl+C to toggle) ", if self.include_context { "ON" } else { "OFF" });
+        let context_text = format!(
+            " Include context: {} (Ctrl+C to toggle) ",
+            if self.include_context { "ON" } else { "OFF" }
+        );
         let context_widget = Paragraph::new(context_text)
             .block(Block::default().borders(Borders::ALL))
             .style(Style::default().fg(Color::Gray));
@@ -367,12 +385,8 @@ impl Overlay for FeedbackOverlay {
                 ("Ctrl+C", "Toggle context"),
                 ("Esc", "Close"),
             ],
-            FeedbackStatus::Success(_) => vec![
-                ("Esc", "Close"),
-            ],
-            FeedbackStatus::Error(_) => vec![
-                ("Esc", "Retry"),
-            ],
+            FeedbackStatus::Success(_) => vec![("Esc", "Close")],
+            FeedbackStatus::Error(_) => vec![("Esc", "Retry")],
             FeedbackStatus::Submitting => vec![],
         }
     }

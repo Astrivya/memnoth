@@ -27,8 +27,8 @@ mod render;
 mod store;
 
 pub use render::{
-    render_callees, render_callers, render_def, render_diff_impact, render_explore,
-    render_impact, render_index, render_refs, render_search, render_status,
+    render_callees, render_callers, render_def, render_diff_impact, render_explore, render_impact,
+    render_index, render_refs, render_search, render_status,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -1552,7 +1552,8 @@ pub fn callpath(ctx: &AppContext, from: &str, to: &str) -> Result<CallpathReport
 
         // Get callees (symbols called by current)
         let callees = graph.names_in_files(
-            &graph.definitions_for(&[current.clone()])?
+            &graph
+                .definitions_for(&[current.clone()])?
                 .iter()
                 .map(|d| d.path.clone())
                 .collect::<Vec<_>>(),
@@ -1581,10 +1582,7 @@ pub fn callpath(ctx: &AppContext, from: &str, to: &str) -> Result<CallpathReport
                 .unwrap_or_default();
             CallpathNode {
                 symbol: name.clone(),
-                kind: defs
-                    .first()
-                    .map(|d| d.kind.clone())
-                    .unwrap_or_default(),
+                kind: defs.first().map(|d| d.kind.clone()).unwrap_or_default(),
                 file,
                 line,
             }
@@ -1683,7 +1681,10 @@ pub fn review(ctx: &AppContext, staged: bool) -> Result<ReviewReport> {
         .context("running git diff")?;
 
     if !output.status.success() {
-        bail!("git diff failed: {}", String::from_utf8_lossy(&output.stderr));
+        bail!(
+            "git diff failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     let changed_files: Vec<String> = String::from_utf8(output.stdout)
@@ -1775,10 +1776,11 @@ pub fn tests_for(ctx: &AppContext, symbol: &str) -> Result<TestsForReport> {
 
     for path in test_paths {
         if is_test_path(&path) {
-            let symbols = graph
-                .definitions_for(&[path.clone()])
-                .unwrap_or_default();
-            let name = symbols.first().map(|s| s.name.clone()).unwrap_or(path.clone());
+            let symbols = graph.definitions_for(&[path.clone()]).unwrap_or_default();
+            let name = symbols
+                .first()
+                .map(|s| s.name.clone())
+                .unwrap_or(path.clone());
             tests.push(TestCoverage {
                 line: symbols.first().map(|s| s.line).unwrap_or(0),
                 path,
@@ -1838,7 +1840,9 @@ pub fn owners(ctx: &AppContext, path: &str) -> Result<OwnersReport> {
         // the only place the date and the source line number appear.
         for line in String::from_utf8(output.stdout).unwrap_or_default().lines() {
             let Some(open) = line.find('(') else { continue };
-            let Some(close) = line.rfind(')') else { continue };
+            let Some(close) = line.rfind(')') else {
+                continue;
+            };
             let mut fields = line[open + 1..close].split_whitespace();
             let author = fields.next().unwrap_or("").to_string();
             let rest: Vec<&str> = fields.collect();
@@ -1883,8 +1887,10 @@ pub fn dead_code(ctx: &AppContext) -> Result<DeadCodeReport> {
     // Find unreferenced public exports (functions, structs, enums, traits, etc.)
     let mut dead = Vec::new();
     for symbol in &all_symbols {
-        if matches!(symbol.kind.as_str(), "function" | "struct" | "enum" | "trait" | "type" | "const" | "static" | "mod")
-            && !referenced.contains(&symbol.name)
+        if matches!(
+            symbol.kind.as_str(),
+            "function" | "struct" | "enum" | "trait" | "type" | "const" | "static" | "mod"
+        ) && !referenced.contains(&symbol.name)
             && symbol.name.len() >= MIN_REF_NAME_LEN
         {
             dead.push(DeadExport {
@@ -1968,7 +1974,14 @@ pub fn cycles(ctx: &AppContext) -> Result<CyclesReport> {
 
     for node in imports.keys() {
         if !visited.contains(node) {
-            dfs(node, &imports, &mut visited, &mut rec_stack, &mut path, &mut cycles);
+            dfs(
+                node,
+                &imports,
+                &mut visited,
+                &mut rec_stack,
+                &mut path,
+                &mut cycles,
+            );
         }
     }
 
@@ -2014,7 +2027,9 @@ pub fn hotspots(ctx: &AppContext) -> Result<HotspotsReport> {
         }
 
         // Complexity = number of symbols in file
-        let symbols = graph.definitions_for(&[file.path.clone()]).unwrap_or_default();
+        let symbols = graph
+            .definitions_for(&[file.path.clone()])
+            .unwrap_or_default();
         let complexity = symbols.len();
 
         if complexity == 0 {
@@ -2033,7 +2048,11 @@ pub fn hotspots(ctx: &AppContext) -> Result<HotspotsReport> {
     }
 
     // Sort by score descending
-    hotspots.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    hotspots.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let total = hotspots.len();
     Ok(HotspotsReport { hotspots, total })
@@ -2056,7 +2075,11 @@ pub fn unused_exports(ctx: &AppContext) -> Result<UnusedExportsReport> {
     for symbol in &all_symbols {
         // Check if it's a public export (pub keyword would be in container or name pattern)
         let is_pub = symbol.name.starts_with("pub ")
-            || symbol.container.as_ref().map(|c| c.contains("pub")).unwrap_or(false)
+            || symbol
+                .container
+                .as_ref()
+                .map(|c| c.contains("pub"))
+                .unwrap_or(false)
             || matches!(
                 symbol.kind.as_str(),
                 "function" | "struct" | "enum" | "trait" | "type" | "const" | "static"
@@ -2086,7 +2109,9 @@ pub fn unused_exports(ctx: &AppContext) -> Result<UnusedExportsReport> {
 pub fn deps(ctx: &AppContext, file: &str) -> Result<DepsReport> {
     let graph = open_for_read(ctx)?;
 
-    let symbols = graph.definitions_for(&[file.to_string()]).unwrap_or_default();
+    let symbols = graph
+        .definitions_for(&[file.to_string()])
+        .unwrap_or_default();
     let mut edges = Vec::new();
 
     for symbol in &symbols {
@@ -2177,7 +2202,12 @@ pub fn query(ctx: &AppContext, expr: &str) -> Result<QueryReport> {
                 }
                 "callers" => {
                     let mut line_cache = LineCache::new(&ctx.root);
-                    let callers = find_callers(&graph, &[value.to_string()], &mut line_cache, MAX_IMPACT_REFS)?;
+                    let callers = find_callers(
+                        &graph,
+                        &[value.to_string()],
+                        &mut line_cache,
+                        MAX_IMPACT_REFS,
+                    )?;
                     for hit in callers {
                         results.push(QueryResult {
                             symbol: hit.context.clone(),

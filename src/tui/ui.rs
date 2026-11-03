@@ -51,8 +51,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     // A write is waiting on the person. Drawn last, over everything, because a
     // question about changing a file must not be mistaken for transcript text.
+    // A parked shell command asks in the same box, so "waiting on you" looks
+    // the same whichever tool asked.
     if let Some(text) = &app.approval {
         draw_approval(frame, area, text);
+    } else if let Some(pending) = &app.pending_shell {
+        draw_approval(frame, area, &pending.prompt());
     }
 
     // Render overlays on top. The stack is moved out for the call because an
@@ -73,7 +77,13 @@ fn draw_approval(frame: &mut Frame, area: Rect, text: &str) {
         return;
     }
     let width = ((area.width as u32 * 3 / 4) as u16).clamp(20, area.width);
-    let height = ((area.height as u32 * 3 / 5) as u16).clamp(6, area.height);
+    // Tall enough for the text that is actually there, capped so a long diff
+    // cannot cover the screen. A one-line question used to be drawn in a box
+    // three fifths of the terminal high, which looks like a broken layout.
+    let wanted = text.lines().count() as u16 + 2; // + borders
+    let height = wanted
+        .min((area.height as u32 * 3 / 5) as u16)
+        .clamp(6, area.height);
     let popup = Rect::new(
         area.x + (area.width - width) / 2,
         area.y + (area.height - height) / 2,

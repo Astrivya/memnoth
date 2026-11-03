@@ -5,7 +5,10 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap};
+use ratatui::widgets::{
+    Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation,
+    ScrollbarState, Wrap,
+};
 
 use crate::tui::app::{App, Entry, EntryRole};
 
@@ -107,7 +110,8 @@ impl TranscriptPane {
 
     fn update_selection(&mut self, app: &App) {
         if !app.entries.is_empty() {
-            self.list_state.select(Some(self.scroll.min(app.entries.len() - 1)));
+            self.list_state
+                .select(Some(self.scroll.min(app.entries.len() - 1)));
         }
     }
 
@@ -117,51 +121,55 @@ impl TranscriptPane {
             return;
         }
 
-        let items: Vec<ListItem> = app.entries.iter().enumerate().map(|(i, entry)| {
-            let selected = i == self.scroll;
-            let style = if selected {
-                Style::default()
-                    .bg(Color::Blue)
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-
-            let (role_style, role_glyph) = style_for(entry.role);
-            let mut lines = Vec::new();
-
-            // Timestamp if enabled
-            if self.show_timestamps {
-                // TODO: Add timestamp to Entry struct when available
-            }
-
-            // Role and content
-            let content_lines = wrap_text(&entry.text, self.max_width);
-            for (line_idx, line) in content_lines.iter().enumerate() {
-                if line_idx == 0 {
-                    lines.push(Line::from(vec![
-                        Span::styled(role_glyph, role_style),
-                        Span::styled(" ", Style::default()),
-                        Span::styled(line.to_string(), style),
-                    ]));
+        let items: Vec<ListItem> = app
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(i, entry)| {
+                let selected = i == self.scroll;
+                let style = if selected {
+                    Style::default()
+                        .bg(Color::Blue)
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD)
                 } else {
-                    lines.push(Line::from(vec![
-                        Span::styled("  ", Style::default()),
-                        Span::styled(line.to_string(), style),
-                    ]));
-                }
-            }
+                    Style::default()
+                };
 
-            ListItem::new(lines).style(style)
-        }).collect();
+                let (role_style, role_glyph) = style_for(entry.role);
+                let mut lines = Vec::new();
+
+                // Timestamp if enabled
+                if self.show_timestamps {
+                    // TODO: Add timestamp to Entry struct when available
+                }
+
+                // Role and content
+                let content_lines = wrap_text(&entry.text, self.max_width);
+                for (line_idx, line) in content_lines.iter().enumerate() {
+                    if line_idx == 0 {
+                        lines.push(Line::from(vec![
+                            Span::styled(role_glyph, role_style),
+                            Span::styled(" ", Style::default()),
+                            Span::styled(line.to_string(), style),
+                        ]));
+                    } else {
+                        lines.push(Line::from(vec![
+                            Span::styled("  ", Style::default()),
+                            Span::styled(line.to_string(), style),
+                        ]));
+                    }
+                }
+
+                ListItem::new(lines).style(style)
+            })
+            .collect();
 
         let list = List::new(items)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(format!(" Transcript {} ", if self.follow { "●" } else { "○" })),
-            )
+            .block(Block::default().borders(Borders::ALL).title(format!(
+                " Transcript {} ",
+                if self.follow { "●" } else { "○" }
+            )))
             .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
 
         // Calculate scrollbar state
@@ -192,10 +200,28 @@ impl TranscriptPane {
 /// Style for entry role
 fn style_for(role: EntryRole) -> (Style, &'static str) {
     match role {
-        EntryRole::User => (Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD), "▶"),
-        EntryRole::Answer => (Style::default().fg(Color::Green).add_modifier(Modifier::BOLD), "▶"),
-        EntryRole::Info => (Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD), "ℹ"),
-        EntryRole::Error => (Style::default().fg(Color::Red).add_modifier(Modifier::BOLD), "✗"),
+        EntryRole::User => (
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+            "▶",
+        ),
+        EntryRole::Answer => (
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+            "▶",
+        ),
+        EntryRole::Info => (
+            Style::default()
+                .fg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
+            "ℹ",
+        ),
+        EntryRole::Error => (
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            "✗",
+        ),
     }
 }
 

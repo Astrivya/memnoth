@@ -64,7 +64,8 @@ impl DiffPane {
     pub fn load_diff(&mut self, diff: &str, file_path: &str) {
         self.hunks = parse_unified_diff(diff, file_path.to_string());
         self.current_hunk = 0;
-        self.list_state.select(if self.hunks.is_empty() { None } else { Some(0) });
+        self.list_state
+            .select(if self.hunks.is_empty() { None } else { Some(0) });
         self.visible = true;
     }
 
@@ -72,7 +73,8 @@ impl DiffPane {
     pub fn set_hunks(&mut self, hunks: Vec<InlineDiffHunk>) {
         self.hunks = hunks;
         self.current_hunk = 0;
-        self.list_state.select(if self.hunks.is_empty() { None } else { Some(0) });
+        self.list_state
+            .select(if self.hunks.is_empty() { None } else { Some(0) });
         self.visible = true;
     }
 
@@ -124,7 +126,10 @@ impl DiffPane {
                 // Accept current hunk
                 if let Some(hunk) = self.hunks.get_mut(self.current_hunk) {
                     hunk.accepted = Some(true);
-                    app.push(crate::tui::app::EntryRole::Info, format!("Accepted hunk in {}", hunk.file_path));
+                    app.push(
+                        crate::tui::app::EntryRole::Info,
+                        format!("Accepted hunk in {}", hunk.file_path),
+                    );
                 }
                 true
             }
@@ -132,7 +137,10 @@ impl DiffPane {
                 // Reject current hunk
                 if let Some(hunk) = self.hunks.get_mut(self.current_hunk) {
                     hunk.accepted = Some(false);
-                    app.push(crate::tui::app::EntryRole::Info, format!("Rejected hunk in {}", hunk.file_path));
+                    app.push(
+                        crate::tui::app::EntryRole::Info,
+                        format!("Rejected hunk in {}", hunk.file_path),
+                    );
                 }
                 true
             }
@@ -143,7 +151,10 @@ impl DiffPane {
                         hunk.accepted = Some(true);
                     }
                 }
-                app.push(crate::tui::app::EntryRole::Info, "Accepted all hunks".to_string());
+                app.push(
+                    crate::tui::app::EntryRole::Info,
+                    "Accepted all hunks".to_string(),
+                );
                 true
             }
             KeyCode::Char('R') => {
@@ -153,7 +164,10 @@ impl DiffPane {
                         hunk.accepted = Some(false);
                     }
                 }
-                app.push(crate::tui::app::EntryRole::Info, "Rejected all hunks".to_string());
+                app.push(
+                    crate::tui::app::EntryRole::Info,
+                    "Rejected all hunks".to_string(),
+                );
                 true
             }
             KeyCode::Char('n') => {
@@ -222,13 +236,19 @@ impl DiffPane {
                 self.current_hunk + 1,
                 self.hunks.len(),
                 status,
-                hunk.old_lines, hunk.old_start,
-                hunk.new_lines, hunk.new_start,
-                hunk.lines.iter().map(|l| match l {
-                    DiffLine::Context(s) => format!("  {}", s),
-                    DiffLine::Added(s) => format!("+ {}", s),
-                    DiffLine::Removed(s) => format!("- {}", s),
-                }).collect::<Vec<_>>().join("\n")
+                hunk.old_lines,
+                hunk.old_start,
+                hunk.new_lines,
+                hunk.new_start,
+                hunk.lines
+                    .iter()
+                    .map(|l| match l {
+                        DiffLine::Context(s) => format!("  {}", s),
+                        DiffLine::Added(s) => format!("+ {}", s),
+                        DiffLine::Removed(s) => format!("- {}", s),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
             );
         } else {
             self.detail_content = String::new();
@@ -253,9 +273,9 @@ impl DiffPane {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3),  // Header
-                Constraint::Min(0),     // Diff content
-                Constraint::Length(2),  // Help footer
+                Constraint::Length(3), // Header
+                Constraint::Min(0),    // Diff content
+                Constraint::Length(2), // Help footer
             ])
             .split(area);
 
@@ -289,15 +309,35 @@ impl DiffPane {
             let header = Paragraph::new(vec![
                 Line::from(vec![
                     Span::styled("Diff: ", Style::default().fg(Color::Cyan)),
-                    Span::styled(&hunk.file_path, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        &hunk.file_path,
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                 ]),
                 Line::from(vec![
-                    Span::styled(format!("Hunk {}/{}  ", self.current_hunk + 1, self.hunks.len()), Style::default().fg(Color::Gray)),
-                    Span::styled(status, Style::default().fg(status_color).add_modifier(Modifier::BOLD)),
-                    Span::styled(format!("  (-{} +{})", hunk.old_lines, hunk.new_lines), Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        format!("Hunk {}/{}  ", self.current_hunk + 1, self.hunks.len()),
+                        Style::default().fg(Color::Gray),
+                    ),
+                    Span::styled(
+                        status,
+                        Style::default()
+                            .fg(status_color)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("  (-{} +{})", hunk.old_lines, hunk.new_lines),
+                        Style::default().fg(Color::DarkGray),
+                    ),
                 ]),
             ])
-            .block(Block::default().borders(Borders::ALL).title(" Inline Diff "))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Inline Diff "),
+            )
             .style(Style::default().fg(Color::White));
             frame.render_widget(header, area);
         }
@@ -306,7 +346,7 @@ impl DiffPane {
     fn render_hunk_list(&mut self, frame: &mut Frame, area: Rect) {
         if let Some(hunk) = self.hunks.get(self.current_hunk) {
             let mut items = Vec::new();
-            
+
             // Show context lines before
             for line in &hunk.lines {
                 let (prefix, color) = match line {
@@ -314,19 +354,19 @@ impl DiffPane {
                     DiffLine::Added(_) => ("+ ", Color::Green),
                     DiffLine::Removed(_) => ("- ", Color::Red),
                 };
-                
+
                 let line_text = match line {
                     DiffLine::Context(s) => s,
                     DiffLine::Added(s) => s,
                     DiffLine::Removed(s) => s,
                 };
-                
+
                 let line_content = if self.show_whitespace {
                     line_text.replace(' ', "·").replace('\t', "→")
                 } else {
                     line_text.to_string()
                 };
-                
+
                 items.push(ListItem::new(Line::from(vec![
                     Span::styled(prefix, Style::default().fg(color)),
                     Span::styled(line_content, Style::default().fg(color)),
@@ -334,7 +374,11 @@ impl DiffPane {
             }
 
             let list = List::new(items)
-                .block(Block::default().borders(Borders::ALL).title(" Hunk Content "))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(" Hunk Content "),
+                )
                 .style(Style::default().fg(Color::White));
             frame.render_widget(list, area);
         }
@@ -342,7 +386,11 @@ impl DiffPane {
 
     fn render_detail(&self, frame: &mut Frame, area: Rect) {
         let detail = Paragraph::new(self.detail_content.as_str())
-            .block(Block::default().borders(Borders::ALL).title(" Hunk Detail "))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Hunk Detail "),
+            )
             .wrap(Wrap { trim: false })
             .style(Style::default().fg(Color::White));
         frame.render_widget(detail, area);
@@ -365,38 +413,38 @@ fn parse_unified_diff(diff: &str, file_path: String) -> Vec<InlineDiffHunk> {
 
     while i < lines.len() {
         let line = lines[i];
-        
+
         // Look for hunk header: @@ -old_start,old_lines +new_start,new_lines @@
         if line.starts_with("@@ ") && line.ends_with(" @@") {
             // Parse hunk header
-            let header = &line[3..line.len()-3]; // Remove "@@ " and " @@"
+            let header = &line[3..line.len() - 3]; // Remove "@@ " and " @@"
             let parts: Vec<&str> = header.split(' ').collect();
-            
+
             let mut old_start = 0;
             let mut old_lines = 1;
             let mut new_start = 0;
             let mut new_lines = 1;
-            
+
             if parts.len() >= 2 {
                 // Parse old range
                 let old_part = parts[0].trim_start_matches('-');
                 if let Some(comma) = old_part.find(',') {
                     old_start = old_part[..comma].parse().unwrap_or(0);
-                    old_lines = old_part[comma+1..].parse().unwrap_or(1);
+                    old_lines = old_part[comma + 1..].parse().unwrap_or(1);
                 } else {
                     old_start = old_part.parse().unwrap_or(0);
                 }
-                
+
                 // Parse new range
                 let new_part = parts[1].trim_start_matches('+');
                 if let Some(comma) = new_part.find(',') {
                     new_start = new_part[..comma].parse().unwrap_or(0);
-                    new_lines = new_part[comma+1..].parse().unwrap_or(1);
+                    new_lines = new_part[comma + 1..].parse().unwrap_or(1);
                 } else {
                     new_start = new_part.parse().unwrap_or(0);
                 }
             }
-            
+
             // Collect hunk lines
             let mut hunk_lines = Vec::new();
             i += 1;
@@ -415,7 +463,7 @@ fn parse_unified_diff(diff: &str, file_path: String) -> Vec<InlineDiffHunk> {
                 }
                 i += 1;
             }
-            
+
             hunks.push(InlineDiffHunk {
                 file_path: file_path.clone(),
                 old_start,
@@ -429,6 +477,6 @@ fn parse_unified_diff(diff: &str, file_path: String) -> Vec<InlineDiffHunk> {
             i += 1;
         }
     }
-    
+
     hunks
 }

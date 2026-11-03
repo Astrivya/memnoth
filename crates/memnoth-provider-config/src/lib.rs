@@ -11,7 +11,6 @@ use memnoth_auth::{MultiCredentialStore, ensure_config_dir};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-
 /// A provider configuration entry with secure API key storage.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
@@ -111,7 +110,8 @@ impl ProviderConfigManager {
                 .with_context(|| format!("cannot create {}", parent.display()))?;
         }
 
-        let content = toml::to_string_pretty(configs).context("cannot serialize provider configs")?;
+        let content =
+            toml::to_string_pretty(configs).context("cannot serialize provider configs")?;
         std::fs::write(&self.config_path, content)
             .with_context(|| format!("cannot write {}", self.config_path.display()))
     }
@@ -141,7 +141,9 @@ impl ProviderConfigManager {
         // Store API key securely if provided
         if let Some(api_key) = config.api_key.take() {
             let key_name = format!("provider.{}.api_key", config.name);
-            self.credential_store.set(&key_name, api_key).await
+            self.credential_store
+                .set(&key_name, api_key)
+                .await
                 .with_context(|| format!("failed to store API key for {}", config.name))?;
         }
 
@@ -179,21 +181,27 @@ impl ProviderConfigManager {
     /// Set the API key for a provider
     pub async fn set_api_key(&self, name: &str, api_key: String) -> Result<()> {
         let key_name = format!("provider.{}.api_key", name);
-        self.credential_store.set(&key_name, api_key).await
+        self.credential_store
+            .set(&key_name, api_key)
+            .await
             .with_context(|| format!("failed to store API key for {}", name))
     }
 
     /// Get the API key for a provider
     pub async fn get_api_key(&self, name: &str) -> Result<Option<String>> {
         let key_name = format!("provider.{}.api_key", name);
-        self.credential_store.get(&key_name).await
+        self.credential_store
+            .get(&key_name)
+            .await
             .with_context(|| format!("failed to get API key for {}", name))
     }
 
     /// Delete the API key for a provider
     pub async fn delete_api_key(&self, name: &str) -> Result<()> {
         let key_name = format!("provider.{}.api_key", name);
-        self.credential_store.delete(&key_name).await
+        self.credential_store
+            .delete(&key_name)
+            .await
             .with_context(|| format!("failed to delete API key for {}", name))
     }
 
@@ -356,9 +364,12 @@ mod tests {
     async fn test_provider_config_manager() {
         let temp_dir = TempDir::new().unwrap();
         let config_path = temp_dir.path().join("providers.toml");
-        let credential_store = MultiCredentialStore::new(vec![
-            memnoth_auth::CredentialStore::File(memnoth_auth::FileCredentialStore::at_path(temp_dir.path().join("credentials")).await.unwrap())
-        ]);
+        let credential_store =
+            MultiCredentialStore::new(vec![memnoth_auth::CredentialStore::File(
+                memnoth_auth::FileCredentialStore::at_path(temp_dir.path().join("credentials"))
+                    .await
+                    .unwrap(),
+            )]);
         let manager = ProviderConfigManager::with_store(credential_store, config_path);
 
         let config = ProviderConfig {
@@ -383,12 +394,19 @@ mod tests {
         assert_eq!(loaded.models_cache.len(), 2);
 
         // Test API key storage
-        manager.set_api_key("test-provider", "sk-test123".to_string()).await.unwrap();
+        manager
+            .set_api_key("test-provider", "sk-test123".to_string())
+            .await
+            .unwrap();
         let key = manager.get_api_key("test-provider").await.unwrap();
         assert_eq!(key, Some("sk-test123".to_string()));
 
         // Test get with key
-        let with_key = manager.get_config_with_key("test-provider").await.unwrap().unwrap();
+        let with_key = manager
+            .get_config_with_key("test-provider")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(with_key.api_key, Some("sk-test123".to_string()));
 
         // Test delete
@@ -441,18 +459,30 @@ mod tests {
             models_endpoint: Some("/models".to_string()),
         };
 
-        assert_eq!(models_url(&config), Some("https://api.example.com/v1/models".to_string()));
-        assert_eq!(chat_url(&config), "https://api.example.com/v1/chat/completions".to_string());
+        assert_eq!(
+            models_url(&config),
+            Some("https://api.example.com/v1/models".to_string())
+        );
+        assert_eq!(
+            chat_url(&config),
+            "https://api.example.com/v1/chat/completions".to_string()
+        );
 
         // Anthropic
         let mut anthro = config.clone();
         anthro.kind = "anthropic".to_string();
-        assert_eq!(chat_url(&anthro), "https://api.example.com/v1/v1/messages".to_string());
+        assert_eq!(
+            chat_url(&anthro),
+            "https://api.example.com/v1/v1/messages".to_string()
+        );
 
         // Ollama
         let mut ollama = config.clone();
         ollama.kind = "ollama".to_string();
         ollama.base_url = "http://localhost:11434".to_string();
-        assert_eq!(chat_url(&ollama), "http://localhost:11434/api/chat".to_string());
+        assert_eq!(
+            chat_url(&ollama),
+            "http://localhost:11434/api/chat".to_string()
+        );
     }
 }

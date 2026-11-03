@@ -258,7 +258,10 @@ fn render_stats(
     out.push("".to_string());
 
     // Series (by day)
-    if !cloud.series.is_empty() && by.as_deref() != Some("model") && by.as_deref() != Some("project") {
+    if !cloud.series.is_empty()
+        && by.as_deref() != Some("model")
+        && by.as_deref() != Some("project")
+    {
         out.push("Daily activity:".to_string());
         out.push("  Date        Input       Output      Cost      Tasks".to_string());
         out.push("  ──────────  ─────────  ─────────  ───────  ──────".to_string());
@@ -276,7 +279,8 @@ fn render_stats(
     }
 
     // By model breakdown
-    if !cloud.models.is_empty() && by.as_deref() != Some("day") && by.as_deref() != Some("project") {
+    if !cloud.models.is_empty() && by.as_deref() != Some("day") && by.as_deref() != Some("project")
+    {
         out.push("By model:".to_string());
         out.push("  Provider          Model                    Tokens      Cost".to_string());
         out.push("  ────────────────  ──────────────────────  ─────────  ───────".to_string());
@@ -293,7 +297,10 @@ fn render_stats(
     }
 
     // Leaderboard
-    if !cloud.leaderboard.is_empty() && by.as_deref() != Some("day") && by.as_deref() != Some("model") {
+    if !cloud.leaderboard.is_empty()
+        && by.as_deref() != Some("day")
+        && by.as_deref() != Some("model")
+    {
         out.push("Top users:".to_string());
         out.push(
             "  Email                    Name              Spend      Tokens  Tasks".to_string(),

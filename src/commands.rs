@@ -1,23 +1,20 @@
 use anyhow::Context;
 use memnoth_capability::Profile;
-use memnoth_skills::{execute_skill_command, SkillCommand as SkillsSkillCommand};
+use memnoth_skills::{SkillCommand as SkillsSkillCommand, execute_skill_command};
 
-use crate::cli::{
-    ActionArgs, ActionCommand, AutomationArgs, AutomationCommand, AuthCommand, CiArgs, CiCommand,
-    HookArgs, HookCommand, KgCommand, McpCommand, McpProfileCommand, TeamsCommand, VaultCommand, Verb,
-    PrivacyArgs, PrivacyCommand,
-    SkillCommand, SkillArgs, OpenArgs,
-    FeedbackArgs, FeedbackCommand, StatsArgs,
-    ConnectArgs, ConnectCommand,
-};
 use crate::auth::{auth_status, login, logout, whoami};
+use crate::cli::{
+    ActionArgs, ActionCommand, AuthCommand, AutomationArgs, AutomationCommand, CiArgs, CiCommand,
+    ConnectArgs, ConnectCommand, FeedbackArgs, FeedbackCommand, HookArgs, HookCommand, KgCommand,
+    McpCommand, McpProfileCommand, OpenArgs, PrivacyArgs, PrivacyCommand, SkillArgs, SkillCommand,
+    StatsArgs, TeamsCommand, VaultCommand, Verb,
+};
 use crate::completion::{Shell, install, show_completions};
 use crate::context::AppContext;
 use crate::output::{ErrorOutcome, Outcome};
 use crate::{
-    cloud, config_cmd, doctor, kg, mcp, models, session_cmd, setup, teams, update_cmd,
-    usage, vault, team, billing, open,
-    telemetry, sync, feedback, stats, connect,
+    billing, cloud, config_cmd, connect, doctor, feedback, kg, mcp, models, open, session_cmd,
+    setup, stats, sync, team, teams, telemetry, update_cmd, usage, vault,
 };
 
 pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
@@ -42,13 +39,10 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
             }
             crate::cli::SessionCommand::Stop(stop) => session_cmd::stop(ctx, stop.name.as_deref())
                 .map_err(|e| ErrorOutcome::from_anyhow(&e)),
-            crate::cli::SessionCommand::Effort(effort) => session_cmd::effort(
-                ctx,
-                effort.name.as_deref(),
-                &effort.level,
-                effort.json,
-            )
-            .map_err(|e| ErrorOutcome::from_anyhow(&e)),
+            crate::cli::SessionCommand::Effort(effort) => {
+                session_cmd::effort(ctx, effort.name.as_deref(), &effort.level, effort.json)
+                    .map_err(|e| ErrorOutcome::from_anyhow(&e))
+            }
             crate::cli::SessionCommand::Replay(replay) => session_cmd::replay(
                 ctx,
                 &replay.name,
@@ -292,8 +286,7 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
                 ))
             }
             McpCommand::Selftest => {
-                let report =
-                    mcp::selftest_inner(ctx).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                let report = mcp::selftest_inner(ctx).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
                 let data = serde_json::to_value(&report)
                     .context("serialize mcp selftest report")
                     .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
@@ -313,7 +306,11 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
                 let data = serde_json::to_value(&report)
                     .context("serialize mcp remove report")
                     .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
-                Ok(Outcome::new("mcp.remove", mcp::render_remove(&report), data))
+                Ok(Outcome::new(
+                    "mcp.remove",
+                    mcp::render_remove(&report),
+                    data,
+                ))
             }
             McpCommand::List => {
                 let report = mcp::list(ctx).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
@@ -364,8 +361,8 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
                     ))
                 }
                 McpProfileCommand::Set { profile } => {
-                    let report =
-                        mcp::profile_set(ctx, profile).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                    let report = mcp::profile_set(ctx, profile)
+                        .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
                     let data = serde_json::to_value(&report)
                         .context("serialize mcp profile set report")
                         .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
@@ -462,19 +459,12 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
                 config_cmd::edit(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e))
             }
         },
-        Verb::Update(args) => {
-            update_cmd::execute_update(ctx, args)
-        },
-        Verb::Install(args) => {
-            update_cmd::execute_install(ctx, args)
-        }
+        Verb::Update(args) => update_cmd::execute_update(ctx, args),
+        Verb::Install(args) => update_cmd::execute_install(ctx, args),
         Verb::Uninstall(args) => update_cmd::execute_uninstall(ctx, args),
         Verb::SetTheme(theme) => {
             let mut config = ctx.config.clone();
-            config
-                .ui
-                .get_or_insert_with(Default::default)
-                .theme = Some(theme.as_str().to_string());
+            config.ui.get_or_insert_with(Default::default).theme = Some(theme.as_str().to_string());
             config
                 .save(&ctx.config_path)
                 .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
@@ -492,10 +482,8 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
         }
         Verb::SetScreenReader(mode) => {
             let mut config = ctx.config.clone();
-            config
-                .ui
-                .get_or_insert_with(Default::default)
-                .screen_reader = Some(mode.as_str().to_string());
+            config.ui.get_or_insert_with(Default::default).screen_reader =
+                Some(mode.as_str().to_string());
             config
                 .save(&ctx.config_path)
                 .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
@@ -510,7 +498,7 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
                     "config": ctx.config_path.display().to_string(),
                 }),
             ))
-        },
+        }
         Verb::Completion(args) => match &args.action {
             crate::cli::CompletionCommand::Show(show_args) => {
                 let shell = match show_args.shell.as_str() {
@@ -529,17 +517,14 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
                 ))
             }
             crate::cli::CompletionCommand::Install(install_args) => {
-                let shell = install_args
-                    .shell
-                    .as_deref()
-                    .and_then(|s| match s {
-                        "bash" => Some(Shell::Bash),
-                        "zsh" => Some(Shell::Zsh),
-                        "fish" => Some(Shell::Fish),
-                        "powershell" => Some(Shell::PowerShell),
-                        "elvish" => Some(Shell::Elvish),
-                        _ => None,
-                    });
+                let shell = install_args.shell.as_deref().and_then(|s| match s {
+                    "bash" => Some(Shell::Bash),
+                    "zsh" => Some(Shell::Zsh),
+                    "fish" => Some(Shell::Fish),
+                    "powershell" => Some(Shell::PowerShell),
+                    "elvish" => Some(Shell::Elvish),
+                    _ => None,
+                });
                 let label = shell.map(|s| format!("{s:?}"));
                 install(shell).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
                 Ok(Outcome::new(
@@ -553,44 +538,66 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
             }
         },
         Verb::Setup(args) => setup::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
-        Verb::Telemetry(args) => telemetry::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
-        Verb::Privacy(args) => crate::sync::run_privacy(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
+        Verb::Telemetry(args) => {
+            telemetry::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e))
+        }
+        Verb::Privacy(args) => {
+            crate::sync::run_privacy(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e))
+        }
         Verb::Billing(args) => billing::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
         Verb::Skill(args) => {
             let skill_cmd = match &args.action {
-                SkillCommand::Add(a) => SkillsSkillCommand::Add(memnoth_skills::commands::AddArgs {
-                    path: a.path.clone(),
-                    name: a.name.clone(),
-                }),
-                SkillCommand::List(a) => SkillsSkillCommand::List(memnoth_skills::commands::ListArgs {
-                    detail: a.detail,
-                    tag: a.tag.clone(),
-                    json: a.json,
-                }),
-                SkillCommand::Remove(a) => SkillsSkillCommand::Remove(memnoth_skills::commands::RemoveArgs {
-                    name: a.name.clone(),
-                    force: a.force,
-                }),
-                SkillCommand::Run(a) => SkillsSkillCommand::Run(memnoth_skills::commands::RunArgs {
-                    name: a.name.clone(),
-                    args: a.args.clone(),
-                    json: a.json,
-                }),
-                SkillCommand::Edit(a) => SkillsSkillCommand::Edit(memnoth_skills::commands::EditArgs {
-                    name: a.name.clone(),
-                    editor: a.editor.clone(),
-                }),
+                SkillCommand::Add(a) => {
+                    SkillsSkillCommand::Add(memnoth_skills::commands::AddArgs {
+                        path: a.path.clone(),
+                        name: a.name.clone(),
+                    })
+                }
+                SkillCommand::List(a) => {
+                    SkillsSkillCommand::List(memnoth_skills::commands::ListArgs {
+                        detail: a.detail,
+                        tag: a.tag.clone(),
+                        json: a.json,
+                    })
+                }
+                SkillCommand::Remove(a) => {
+                    SkillsSkillCommand::Remove(memnoth_skills::commands::RemoveArgs {
+                        name: a.name.clone(),
+                        force: a.force,
+                    })
+                }
+                SkillCommand::Run(a) => {
+                    SkillsSkillCommand::Run(memnoth_skills::commands::RunArgs {
+                        name: a.name.clone(),
+                        args: a.args.clone(),
+                        json: a.json,
+                    })
+                }
+                SkillCommand::Edit(a) => {
+                    SkillsSkillCommand::Edit(memnoth_skills::commands::EditArgs {
+                        name: a.name.clone(),
+                        editor: a.editor.clone(),
+                    })
+                }
             };
-            let result = execute_skill_command(skill_cmd)
-                .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+            let result =
+                execute_skill_command(skill_cmd).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
             Ok(Outcome::new("skill", result, serde_json::json!({})))
-        },
+        }
         Verb::Open(args) => open::run(ctx, args),
         Verb::Connect(args) => match &args.action {
-            ConnectCommand::Add(args) => connect::connect_add(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
-            ConnectCommand::List(args) => connect::connect_list(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
-            ConnectCommand::Remove(args) => connect::connect_remove(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
-            ConnectCommand::Test(args) => connect::connect_test(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
+            ConnectCommand::Add(args) => {
+                connect::connect_add(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e))
+            }
+            ConnectCommand::List(args) => {
+                connect::connect_list(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e))
+            }
+            ConnectCommand::Remove(args) => {
+                connect::connect_remove(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e))
+            }
+            ConnectCommand::Test(args) => {
+                connect::connect_test(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e))
+            }
         },
         Verb::Feedback(args) => feedback::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
     }

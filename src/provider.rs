@@ -392,12 +392,20 @@ pub fn fetch_memnoth_models(base_url: &str, api_key: Option<&str>) -> Result<Vec
             "{} answered {}: {}",
             url,
             status,
-            provider_error(&text).unwrap_or_else(|| clip(&text, 600))
+            scrub_secrets(
+                &provider_error(&text).unwrap_or_else(|| clip(&text, 600)),
+                api_key
+            )
         );
     }
 
-    let value: Value = serde_json::from_str(&text)
-        .with_context(|| format!("{} did not answer with JSON: {}", url, clip(&text, 400)))?;
+    let value: Value = serde_json::from_str(&text).with_context(|| {
+        format!(
+            "{} did not answer with JSON: {}",
+            url,
+            scrub_secrets(&clip(&text, 400), api_key)
+        )
+    })?;
 
     // Expect OpenAI-compatible format: { "data": [{ "id": "model-1" }, ...] }
     let models = value["data"]
@@ -915,7 +923,14 @@ pub fn run_turn(
     let mut conversation = Conversation::new(settings, root, history, prompt);
     for round in 0..MAX_ROUNDS {
         let (body, url, headers) = conversation.request();
-        let reply = post_json(&client, &url, headers, &body, settings.kind)?;
+        let reply = post_json(
+            &client,
+            &url,
+            headers,
+            &body,
+            settings.kind,
+            settings.api_key.as_deref(),
+        )?;
         let step = conversation.absorb(&reply)?;
         if step.calls.is_empty() {
             return Ok(Answer {
@@ -1296,12 +1311,30 @@ impl<'a> Conversation<'a> {
     }
 }
 
+/// Remove the credential from text a provider sent back.
+///
+/// A rejected request often quotes the key it rejected, and the reply body is
+/// written straight into the transcript. The configured key is stripped
+/// verbatim on top of the generic pattern redaction, so a provider that masks
+/// nothing still cannot put a secret on screen.
+fn scrub_secrets(text: &str, secret: Option<&str>) -> String {
+    let mut out = memnoth_auth::redaction::redact_token(text);
+    if let Some(secret) = secret {
+        let secret = secret.trim();
+        if secret.len() >= 8 {
+            out = out.replace(secret, "***");
+        }
+    }
+    out
+}
+
 fn post_json(
     client: &reqwest::blocking::Client,
     url: &str,
     headers: Vec<(&'static str, String)>,
     body: &Value,
     kind: Kind,
+    secret: Option<&str>,
 ) -> Result<Value> {
     let mut request = client.post(url).json(body);
     for (name, value) in headers {
@@ -1323,11 +1356,18 @@ fn post_json(
         }
         bail!(
             "{url} answered {status}: {}",
-            provider_error(&text).unwrap_or_else(|| clip(&text, 600))
+            scrub_secrets(
+                &provider_error(&text).unwrap_or_else(|| clip(&text, 600)),
+                secret
+            )
         );
     }
-    serde_json::from_str(&text)
-        .with_context(|| format!("{url} did not answer with JSON: {}", clip(&text, 400)))
+    serde_json::from_str(&text).with_context(|| {
+        format!(
+            "{url} did not answer with JSON: {}",
+            scrub_secrets(&clip(&text, 400), secret)
+        )
+    })
 }
 
 /// Pull the provider's own error sentence out of an error body, so the user

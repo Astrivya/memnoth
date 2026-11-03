@@ -67,10 +67,16 @@ fn render_telemetry_disabled() -> String {
 
 fn get_telemetry_categories() -> Vec<(&'static str, &'static str)> {
     vec![
-        ("command_usage", "Which commands are run and their success/failure"),
+        (
+            "command_usage",
+            "Which commands are run and their success/failure",
+        ),
         ("performance", "Command latency and memory usage"),
         ("errors", "Error types and stack traces (sanitized)"),
-        ("model_usage", "Model IDs, token counts, latency (no prompt content)"),
+        (
+            "model_usage",
+            "Model IDs, token counts, latency (no prompt content)",
+        ),
         ("feature_flags", "Which experimental features are enabled"),
     ]
 }

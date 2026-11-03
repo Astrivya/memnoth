@@ -123,7 +123,11 @@ where
 impl Provider {
     /// Returns the full models endpoint URL.
     pub fn models_url(&self) -> String {
-        format!("{}{}", self.base_url.trim_end_matches('/'), self.models_endpoint)
+        format!(
+            "{}{}",
+            self.base_url.trim_end_matches('/'),
+            self.models_endpoint
+        )
     }
 
     /// Checks if the provider supports a given capability.
@@ -206,10 +210,7 @@ pub const KNOWN_PROVIDERS: &[Provider] = &[
             Capability::ToolCalling,
             Capability::Streaming,
         ],
-        default_models: &[
-            "deepseek-chat",
-            "deepseek-coder",
-        ],
+        default_models: &["deepseek-chat", "deepseek-coder"],
         pricing_url: "https://www.deepseek.com/pricing",
         requires_api_key: true,
         api_key_env_var: "DEEPSEEK_API_KEY",
@@ -526,31 +527,59 @@ mod tests {
     #[test]
     fn test_all_providers_have_base_url() {
         for p in KNOWN_PROVIDERS {
-            assert!(!p.base_url.is_empty(), "provider {} has empty base_url", p.name);
-            assert!(p.base_url.starts_with("https://"), "provider {} base_url must be https", p.name);
+            assert!(
+                !p.base_url.is_empty(),
+                "provider {} has empty base_url",
+                p.name
+            );
+            assert!(
+                p.base_url.starts_with("https://"),
+                "provider {} base_url must be https",
+                p.name
+            );
         }
     }
 
     #[test]
     fn test_all_providers_have_models_endpoint() {
         for p in KNOWN_PROVIDERS {
-            assert!(!p.models_endpoint.is_empty(), "provider {} has empty models_endpoint", p.name);
-            assert!(p.models_endpoint.starts_with('/'), "provider {} models_endpoint must start with /", p.name);
+            assert!(
+                !p.models_endpoint.is_empty(),
+                "provider {} has empty models_endpoint",
+                p.name
+            );
+            assert!(
+                p.models_endpoint.starts_with('/'),
+                "provider {} models_endpoint must start with /",
+                p.name
+            );
         }
     }
 
     #[test]
     fn test_all_providers_have_default_models() {
         for p in KNOWN_PROVIDERS {
-            assert!(!p.default_models.is_empty(), "provider {} has no default models", p.name);
+            assert!(
+                !p.default_models.is_empty(),
+                "provider {} has no default models",
+                p.name
+            );
         }
     }
 
     #[test]
     fn test_all_providers_have_pricing_url() {
         for p in KNOWN_PROVIDERS {
-            assert!(!p.pricing_url.is_empty(), "provider {} has empty pricing_url", p.name);
-            assert!(p.pricing_url.starts_with("https://"), "provider {} pricing_url must be https", p.name);
+            assert!(
+                !p.pricing_url.is_empty(),
+                "provider {} has empty pricing_url",
+                p.name
+            );
+            assert!(
+                p.pricing_url.starts_with("https://"),
+                "provider {} pricing_url must be https",
+                p.name
+            );
         }
     }
 
@@ -558,7 +587,11 @@ mod tests {
     fn test_all_providers_have_api_key_env_var() {
         for p in KNOWN_PROVIDERS {
             if p.requires_api_key {
-                assert!(!p.api_key_env_var.is_empty(), "provider {} requires API key but has no env var", p.name);
+                assert!(
+                    !p.api_key_env_var.is_empty(),
+                    "provider {} requires API key but has no env var",
+                    p.name
+                );
             }
         }
     }
@@ -591,7 +624,10 @@ mod tests {
         let provider = provider_by_name("openai").unwrap();
         assert_eq!(provider.auth_header_format.header_name(), "Authorization");
         assert_eq!(provider.auth_header_format.value_prefix(), "Bearer ");
-        assert_eq!(provider.auth_header_value("test-token"), "Bearer test-token");
+        assert_eq!(
+            provider.auth_header_value("test-token"),
+            "Bearer test-token"
+        );
     }
 
     #[test]

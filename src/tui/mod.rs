@@ -140,8 +140,7 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
             app.theme = crate::tui::app::Theme::parse(theme).unwrap_or_default();
         }
         if let Some(mode) = ui.screen_reader.as_deref() {
-            app.screen_reader =
-                crate::tui::app::ScreenReaderMode::parse(mode).unwrap_or_default();
+            app.screen_reader = crate::tui::app::ScreenReaderMode::parse(mode).unwrap_or_default();
         }
     }
     app.set_paths(display_path(&ctx.root), display_path(&ctx.vault_path));
@@ -228,39 +227,42 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
 
         if event::poll(Duration::from_millis(150)).context("cannot poll the keyboard")? {
             match event::read().context("cannot read the keyboard")? {
-                // Focus, resize and paste carry no command; the panes pick up
-                // the new size on the next draw.
+                // Focus, resize and mouse carry no command; the panes pick up
+                // the new size on the next draw. Paste is text and goes in the
+                // prompt, because losing a pasted stack trace is the worst
+                // thing a terminal agent can do with it.
                 Event::FocusGained | Event::FocusLost => {}
-                Event::Paste(_) => {}
+                Event::Paste(text) => {
+                    for ch in text.chars() {
+                        app.insert_char(ch);
+                    }
+                }
                 Event::Resize(_, _) => {}
                 Event::Mouse(_) => {}
-                // Key releases are filtered by the guarded arm above.
-                Event::Key(_) => {}
                 // Windows reports press and release; acting on both would type
-                // every character twice.
+                // every character twice. Every other `Event::Key` arm below
+                // this one is unreachable, so this must stay the only one.
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     if let Some(pending) = app.pending_shell.take() {
-                        let decision = match key.code {
-                            KeyCode::Char('y' | 'Y') | KeyCode::Enter => true,
-                            KeyCode::Char('n' | 'N') | KeyCode::Esc => false,
-                            _ => {
-                                // Put it back if not a confirmation key
-                                app.pending_shell = Some(pending);
-                                false
+                        // Three outcomes, not two: a key that is not an answer
+                        // must leave the question standing. Only y/n/enter/esc
+                        // decide, and the command that was parked is the command
+                        // that runs — it is not looked up a second time.
+                        match key.code {
+                            KeyCode::Char('y' | 'Y') | KeyCode::Enter => {
+                                execute_shell_command(&mut app, &pending.command);
+                                app.push(
+                                    EntryRole::Info,
+                                    format!("approved · {}", pending.command),
+                                );
                             }
-                        };
-                        if decision {
-                            // The shell was parked on the app while waiting for
-                            // this key; take it back rather than cloning it.
-                            let command = app
-                                .pending_shell
-                                .take()
-                                .map(|shell| shell.command)
-                                .unwrap_or_default();
-                            execute_shell_command(&mut app, &command);
-                            app.push(EntryRole::Info, "approved".to_string());
-                        } else {
-                            app.push(EntryRole::Info, "declined".to_string());
+                            KeyCode::Char('n' | 'N') | KeyCode::Esc => {
+                                app.push(
+                                    EntryRole::Info,
+                                    format!("declined · {} was not run", pending.command),
+                                );
+                            }
+                            _ => app.pending_shell = Some(pending),
                         }
                     } else if let Some(pending) = approval.take() {
                         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -295,27 +297,34 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
                         let mut stack = std::mem::take(&mut app.overlay_stack);
                         let action = stack.handle_key(key, &mut app);
                         app.overlay_stack = stack;
+                        // No overlay was open: the session gets the key. When
+                        // one is open it owns every key, so nothing it ignores
+                        // can leak into the prompt behind it.
                         match action {
-                            crate::tui::overlays::OverlayAction::Close => {
+                            None => handle_key(&mut app, key, &ctx.root),
+                            Some(crate::tui::overlays::OverlayAction::Close) => {
                                 app.overlay_stack.pop();
                             }
-                            crate::tui::overlays::OverlayAction::CloseAll => {
+                            Some(crate::tui::overlays::OverlayAction::CloseAll) => {
                                 while app.overlay_stack.pop().is_some() {}
                             }
-                            crate::tui::overlays::OverlayAction::Push(kind) => {
-                                app.overlay_stack.push(crate::tui::overlays::create_overlay(kind));
+                            Some(crate::tui::overlays::OverlayAction::Push(kind)) => {
+                                app.overlay_stack
+                                    .push(crate::tui::overlays::create_overlay(kind));
                             }
-                            crate::tui::overlays::OverlayAction::Replace(kind) => {
+                            Some(crate::tui::overlays::OverlayAction::Replace(kind)) => {
                                 app.overlay_stack.pop();
-                                app.overlay_stack.push(crate::tui::overlays::create_overlay(kind));
+                                app.overlay_stack
+                                    .push(crate::tui::overlays::create_overlay(kind));
                             }
-                            crate::tui::overlays::OverlayAction::None => {
-                                // If no overlay handled it, pass to main handler
-                                handle_key(&mut app, key, &ctx.root);
-                            }
+                            Some(crate::tui::overlays::OverlayAction::None) => {}
                         }
                     }
                 }
+                // Key releases, repeats and any future key event kind: no
+                // command. This arm must come after the `Press` arm, never
+                // before it, or nothing above is ever reached.
+                Event::Key(_) => {}
             }
         }
         if app.pending_submit {
@@ -381,14 +390,20 @@ fn handle_key(app: &mut App, key: KeyEvent, workspace_root: &Path) {
         KeyCode::Char('e') if ctrl => app.move_end(),
         // Ctrl+K or Ctrl+P opens command palette (like VS Code / lazygit)
         KeyCode::Char('k') if ctrl => {
-            app.overlay_stack.push(crate::tui::overlays::create_overlay(crate::tui::overlays::OverlayKind::Palette));
+            app.overlay_stack.push(crate::tui::overlays::create_overlay(
+                crate::tui::overlays::OverlayKind::Palette,
+            ));
         }
         KeyCode::Char('p') if ctrl => {
-            app.overlay_stack.push(crate::tui::overlays::create_overlay(crate::tui::overlays::OverlayKind::Palette));
+            app.overlay_stack.push(crate::tui::overlays::create_overlay(
+                crate::tui::overlays::OverlayKind::Palette,
+            ));
         }
         // '/' key opens command palette when input is empty (not typing a command)
         KeyCode::Char('/') if app.input.trim().is_empty() && !app.busy => {
-            app.overlay_stack.push(crate::tui::overlays::create_overlay(crate::tui::overlays::OverlayKind::Palette));
+            app.overlay_stack.push(crate::tui::overlays::create_overlay(
+                crate::tui::overlays::OverlayKind::Palette,
+            ));
         }
         KeyCode::Tab => {
             // @file fuzzy completion
@@ -562,7 +577,10 @@ fn run_verb(
         }
         Verb::SetScreenReader(mode) => {
             app.screen_reader = *mode;
-            app.push(EntryRole::Info, format!("Screen reader mode set to {:?}", mode));
+            app.push(
+                EntryRole::Info,
+                format!("Screen reader mode set to {:?}", mode),
+            );
             return;
         }
         _ => {}
@@ -1129,7 +1147,9 @@ fn run_shell(app: &mut App, ctx: &AppContext, cmd: &str) {
             destructive,
             kind,
         } => {
-            // Store for confirmation
+            // Parked for confirmation. The question itself is the modal in
+            // `ui::draw`, not a transcript line: a line can scroll away, and a
+            // second copy of the same sentence under the box read as noise.
             app.pending_shell = Some(PendingShell {
                 command: cmd.to_string(),
                 decision: RuleDecision::Ask {
@@ -1139,16 +1159,6 @@ fn run_shell(app: &mut App, ctx: &AppContext, cmd: &str) {
                     kind,
                 },
             });
-            app.push(
-                EntryRole::Info,
-                format!("⚠ confirm: {} (y/n) [rule: {}]", reason, rule),
-            );
-            if destructive {
-                app.push(
-                    EntryRole::Info,
-                    "⚠ This is a potentially destructive operation".to_string(),
-                );
-            }
         }
     }
 }

@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use std::process::Command;
 
 use crate::context::AppContext;
-use crate::output::{Outcome, ErrorOutcome};
+use crate::output::{ErrorOutcome, Outcome};
 
 /// Run `mn open`.
 pub fn run(ctx: &AppContext, args: &crate::cli::OpenArgs) -> Result<Outcome, ErrorOutcome> {
@@ -52,7 +52,11 @@ fn get_console_base_url() -> Result<String> {
 }
 
 /// Build the console URL based on page and parameters.
-fn build_console_url(base_url: &str, args: &crate::cli::OpenArgs, ctx: &AppContext) -> Result<String> {
+fn build_console_url(
+    base_url: &str,
+    args: &crate::cli::OpenArgs,
+    ctx: &AppContext,
+) -> Result<String> {
     let page = args.page.to_lowercase();
     let mut url = match page.as_str() {
         "dashboard" | "dash" => format!("{}/dashboard", base_url),
@@ -85,10 +89,15 @@ fn build_console_url(base_url: &str, args: &crate::cli::OpenArgs, ctx: &AppConte
     };
 
     // Add workspace context as query parameter if available
-    let workspace_name = ctx.root.file_name()
+    let workspace_name = ctx
+        .root
+        .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("workspace");
-    url.push_str(&format!("?workspace={}", encode_query_component(workspace_name)));
+    url.push_str(&format!(
+        "?workspace={}",
+        encode_query_component(workspace_name)
+    ));
 
     Ok(url)
 }

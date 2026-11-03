@@ -11,10 +11,8 @@
 
 use anyhow::{Context, Result};
 use memnoth_cloud_client::CloudClient;
-use memnoth_coord::{
-    ClaimResult, Coord, SessionStatus, TaskRow, TaskStatus, WorkerRow,
-};
-use serde_json::{json, Value};
+use memnoth_coord::{ClaimResult, Coord, SessionStatus, TaskRow, TaskStatus, WorkerRow};
+use serde_json::{Value, json};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::context::AppContext;
@@ -33,9 +31,8 @@ fn coord_db_path(ctx: &AppContext) -> std::path::PathBuf {
 fn open_coord(ctx: &AppContext) -> Result<Coord> {
     let db_path = coord_db_path(ctx);
     if let Some(parent) = db_path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| {
-            format!("cannot create coordination dir {}", parent.display())
-        })?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("cannot create coordination dir {}", parent.display()))?;
     }
     Coord::open(&db_path).context("failed to open coordination database")
 }
@@ -67,15 +64,14 @@ fn current_user() -> String {
 /// A connection to the coordination database for the statements `memnoth-coord`
 /// does not expose yet (releasing a task claim, and the audit reads).
 fn coord_connection(ctx: &AppContext) -> Result<rusqlite::Connection> {
-    rusqlite::Connection::open(coord_db_path(ctx))
-        .context("failed to open coordination database")
+    rusqlite::Connection::open(coord_db_path(ctx)).context("failed to open coordination database")
 }
 
 /// Get the cloud client with auth token.
 fn get_cloud_client(ctx: &AppContext) -> Result<CloudClient> {
     let base_url = get_base_url(ctx)?;
-    let mut client = CloudClient::with_base_url(&base_url)
-        .context("failed to create cloud client")?;
+    let mut client =
+        CloudClient::with_base_url(&base_url).context("failed to create cloud client")?;
 
     let token = get_credential_sync("api_key")?
         .ok_or_else(|| anyhow::anyhow!("not authenticated; run `mn auth login` first"))?;
@@ -102,12 +98,12 @@ fn parse_range(range: &str) -> Result<i64> {
     } else if range.ends_with('s') {
         (&range[..range.len() - 1], "s")
     } else {
-        return Err(anyhow::anyhow!("invalid range format; use e.g. 24h, 7d, 30m"));
+        return Err(anyhow::anyhow!(
+            "invalid range format; use e.g. 24h, 7d, 30m"
+        ));
     };
 
-    let num: i64 = num_str
-        .parse()
-        .context("invalid number in range")?;
+    let num: i64 = num_str.parse().context("invalid number in range")?;
 
     let ms = match unit {
         "h" => num * 60 * 60 * 1000,
@@ -281,7 +277,9 @@ pub fn presence(ctx: &AppContext, args: &crate::cli::TeamPresenceArgs) -> Result
     let session_id = get_session_id(&coord, ctx)?;
 
     // Clean up expired claims and stale sessions
-    coord.cleanup_expired().context("failed to cleanup expired")?;
+    coord
+        .cleanup_expired()
+        .context("failed to cleanup expired")?;
 
     let mut sessions = coord.status().context("failed to get status")?;
 
@@ -490,7 +488,10 @@ pub fn review(ctx: &AppContext, args: &crate::cli::TeamReviewArgs) -> Result<Out
         .send_message(&session_id, Some(&args.reviewer), &message)
         .context("failed to send review request")?;
 
-    let text = format!("Requested review for task {} from {}", args.task_id, args.reviewer);
+    let text = format!(
+        "Requested review for task {} from {}",
+        args.task_id, args.reviewer
+    );
     let data = json!({
         "task_id": args.task_id,
         "requester": session_id,
@@ -506,8 +507,8 @@ pub fn review(ctx: &AppContext, args: &crate::cli::TeamReviewArgs) -> Result<Out
 pub fn audit(ctx: &AppContext, args: &crate::cli::TeamAuditArgs) -> Result<Outcome> {
     let coord = open_coord(ctx)?;
 
-    let range_ms = parse_range(&args.range)
-        .with_context(|| format!("invalid range: {}", args.range))?;
+    let range_ms =
+        parse_range(&args.range).with_context(|| format!("invalid range: {}", args.range))?;
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -532,7 +533,9 @@ pub fn audit(ctx: &AppContext, args: &crate::cli::TeamAuditArgs) -> Result<Outco
     let all_tasks = coord.task_list().context("failed to list tasks")?;
 
     // Get all workers
-    let all_workers = coord.worker_list(args.session.as_deref()).context("failed to list workers")?;
+    let all_workers = coord
+        .worker_list(args.session.as_deref())
+        .context("failed to list workers")?;
 
     // Filter workers by time range
     let recent_workers: Vec<WorkerRow> = all_workers
@@ -583,7 +586,13 @@ pub fn audit(ctx: &AppContext, args: &crate::cli::TeamAuditArgs) -> Result<Outco
          Workers started: {}\n\
          Claims: {}\n\
          Messages: {}",
-        args.range, range_ms, sessions.len(), all_tasks.len(), recent_workers.len(), claims.len(), messages.len()
+        args.range,
+        range_ms,
+        sessions.len(),
+        all_tasks.len(),
+        recent_workers.len(),
+        claims.len(),
+        messages.len()
     );
 
     let data = json!({

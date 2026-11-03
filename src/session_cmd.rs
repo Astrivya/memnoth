@@ -1,11 +1,11 @@
 use anyhow::{Context, Result, bail};
-use memnoth_session::{Role, Session, Message};
+use memnoth_session::{Message, Role, Session};
 use serde_json::json;
 use std::path::PathBuf;
 
 use crate::context::AppContext;
 use crate::output::{ExitCode, Outcome};
-use crate::session::{SESSION_MODEL, SessionStore, transcript, validate_name, now_ms};
+use crate::session::{SESSION_MODEL, SessionStore, now_ms, transcript, validate_name};
 
 /// `memnoth session start [--resume NAME] [--model ID]` — start a new session.
 pub fn start(
@@ -259,20 +259,26 @@ pub fn stop(ctx: &AppContext, name: Option<&str>) -> Result<Outcome> {
 pub fn effort(ctx: &AppContext, name: Option<&str>, level: &str, _json: bool) -> Result<Outcome> {
     let store = SessionStore::new(&ctx.sessions_dir);
     let name = name.unwrap_or("session");
-    let validated = validate_name(name).with_context(|| format!("invalid session name {name:?}"))?;
+    let validated =
+        validate_name(name).with_context(|| format!("invalid session name {name:?}"))?;
 
     let path = store.path(&validated)?;
     if !path.exists() {
         bail!("session '{}' not found", validated);
     }
 
-    let mut session = Session::load(&path).with_context(|| format!("cannot load session {}", path.display()))?;
+    let mut session =
+        Session::load(&path).with_context(|| format!("cannot load session {}", path.display()))?;
 
     // Validate effort level
     let valid_levels = ["low", "medium", "high", "max"];
     let level_lower = level.to_lowercase();
     if !valid_levels.contains(&level_lower.as_str()) {
-        bail!("invalid effort level '{}'; must be one of: {}", level, valid_levels.join(", "));
+        bail!(
+            "invalid effort level '{}'; must be one of: {}",
+            level,
+            valid_levels.join(", ")
+        );
     }
 
     // Store effort level in session metadata (we'll add it as a special message)
@@ -287,7 +293,10 @@ pub fn effort(ctx: &AppContext, name: Option<&str>, level: &str, _json: bool) ->
         "path": save_path.display().to_string(),
     });
 
-    let text = format!("Set reasoning effort to '{}' for session '{}'", level_lower, session.id);
+    let text = format!(
+        "Set reasoning effort to '{}' for session '{}'",
+        level_lower, session.id
+    );
 
     Ok(Outcome::new("session.effort", text, data))
 }
@@ -305,19 +314,25 @@ pub fn replay(
     _json: bool,
 ) -> Result<Outcome> {
     let store = SessionStore::new(&ctx.sessions_dir);
-    let validated = validate_name(name).with_context(|| format!("invalid session name {name:?}"))?;
+    let validated =
+        validate_name(name).with_context(|| format!("invalid session name {name:?}"))?;
 
     let path = store.path(&validated)?;
     if !path.exists() {
         bail!("session '{}' not found", validated);
     }
 
-    let session = Session::load(&path).with_context(|| format!("cannot load session {}", path.display()))?;
+    let session =
+        Session::load(&path).with_context(|| format!("cannot load session {}", path.display()))?;
 
     // Get turn indices
     let turns = session.turns();
     if from_turn >= turns.len() {
-        bail!("from_turn {} exceeds session turns ({})", from_turn, turns.len());
+        bail!(
+            "from_turn {} exceeds session turns ({})",
+            from_turn,
+            turns.len()
+        );
     }
 
     let end_turn = max_turns.map_or(turns.len(), |m| (from_turn + m).min(turns.len()));
@@ -326,7 +341,10 @@ pub fn replay(
     // For now, we'll output the replay transcript
     // In a full implementation, this would re-run the model with the same context
     let mut output_lines = Vec::new();
-    output_lines.push(format!("Replaying session '{}' from turn {} to {}", name, from_turn, end_turn));
+    output_lines.push(format!(
+        "Replaying session '{}' from turn {} to {}",
+        name, from_turn, end_turn
+    ));
     output_lines.push(format!("Original model: {}", session.model));
     if let Some(m) = model {
         output_lines.push(format!("Replay model: {}", m));
@@ -343,7 +361,11 @@ pub fn replay(
         // Find assistant response after this turn
         for msg in &session.messages[turn_idx + 1..] {
             if msg.role == Role::Assistant {
-                output_lines.push(format!("[Turn {}] Assistant: {}", from_turn + i, msg.content));
+                output_lines.push(format!(
+                    "[Turn {}] Assistant: {}",
+                    from_turn + i,
+                    msg.content
+                ));
                 break;
             }
         }
@@ -368,7 +390,11 @@ pub fn replay(
     });
 
     let text = if output.is_some() {
-        format!("Replay saved to {} ({} turns)", output.unwrap(), replay_turns.len())
+        format!(
+            "Replay saved to {} ({} turns)",
+            output.unwrap(),
+            replay_turns.len()
+        )
     } else {
         replay_text
     };
@@ -386,14 +412,16 @@ pub fn attach(
     _json: bool,
 ) -> Result<Outcome> {
     let store = SessionStore::new(&ctx.sessions_dir);
-    let validated = validate_name(name).with_context(|| format!("invalid session name {name:?}"))?;
+    let validated =
+        validate_name(name).with_context(|| format!("invalid session name {name:?}"))?;
 
     let path = store.path(&validated)?;
     if !path.exists() {
         bail!("session '{}' not found", validated);
     }
 
-    let session = Session::load(&path).with_context(|| format!("cannot load session {}", path.display()))?;
+    let session =
+        Session::load(&path).with_context(|| format!("cannot load session {}", path.display()))?;
 
     // Determine output path
     let bundle_path = output
@@ -441,8 +469,8 @@ pub fn attach(
         });
     }
 
-    let bundle_json = serde_json::to_string_pretty(&bundle)
-        .context("failed to serialize bundle")?;
+    let bundle_json =
+        serde_json::to_string_pretty(&bundle).context("failed to serialize bundle")?;
 
     let size_bytes = bundle_json.len();
     std::fs::write(&bundle_path, bundle_json)
@@ -482,8 +510,8 @@ pub fn handoff(
     let bundle_content = std::fs::read_to_string(&bundle_path)
         .with_context(|| format!("failed to read bundle {}", bundle_path.display()))?;
 
-    let bundle_json: serde_json::Value = serde_json::from_str(&bundle_content)
-        .context("failed to parse bundle JSON")?;
+    let bundle_json: serde_json::Value =
+        serde_json::from_str(&bundle_content).context("failed to parse bundle JSON")?;
 
     // Extract session data
     let session_data = &bundle_json["session"];
@@ -493,7 +521,8 @@ pub fn handoff(
 
     // Determine session name
     let session_name = name.unwrap_or(session_id);
-    let validated = validate_name(session_name).with_context(|| format!("invalid session name {session_name:?}"))?;
+    let validated = validate_name(session_name)
+        .with_context(|| format!("invalid session name {session_name:?}"))?;
 
     // Reconstruct session
     let mut session = Session::new(model);
@@ -568,7 +597,10 @@ pub fn handoff(
 
     let text = format!(
         "Session '{}' handed off as '{}' ({} messages, {} receipts)",
-        session_id, validated, session.messages.len(), session.receipts.len()
+        session_id,
+        validated,
+        session.messages.len(),
+        session.receipts.len()
     );
 
     Ok(Outcome::new("session.handoff", text, data))
@@ -588,7 +620,11 @@ pub fn exec(
     // Validate policy
     let valid_policies = ["strict", "balanced", "permissive"];
     if !valid_policies.contains(&policy) {
-        bail!("invalid policy '{}'; must be one of: {}", policy, valid_policies.join(", "));
+        bail!(
+            "invalid policy '{}'; must be one of: {}",
+            policy,
+            valid_policies.join(", ")
+        );
     }
 
     if cmd.is_empty() {
@@ -598,10 +634,12 @@ pub fn exec(
     // Load session context if provided
     let session_context = if let Some(sess_name) = session {
         let store = SessionStore::new(&ctx.sessions_dir);
-        let validated = validate_name(sess_name).with_context(|| format!("invalid session name {sess_name:?}"))?;
+        let validated = validate_name(sess_name)
+            .with_context(|| format!("invalid session name {sess_name:?}"))?;
         let path = store.path(&validated)?;
         if path.exists() {
-            let s = Session::load(&path).with_context(|| format!("cannot load session {}", path.display()))?;
+            let s = Session::load(&path)
+                .with_context(|| format!("cannot load session {}", path.display()))?;
             Some(s)
         } else {
             None
@@ -627,7 +665,8 @@ pub fn exec(
     command.current_dir(&ctx.root);
 
     // Set timeout
-    let output = command.output()
+    let output = command
+        .output()
         .with_context(|| format!("failed to execute command: {}", cmd.join(" ")))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -637,7 +676,13 @@ pub fn exec(
     // Record in session if provided
     if let Some(mut sess) = session_context {
         sess.push(Role::User, format!("$ {}", cmd.join(" ")));
-        sess.push(Role::Assistant, format!("Exit code: {}\nStdout:\n{}\nStderr:\n{}", exit_code, stdout, stderr));
+        sess.push(
+            Role::Assistant,
+            format!(
+                "Exit code: {}\nStdout:\n{}\nStderr:\n{}",
+                exit_code, stdout, stderr
+            ),
+        );
         let store = SessionStore::new(&ctx.sessions_dir);
         store.save(&sess)?;
     }

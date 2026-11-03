@@ -153,8 +153,55 @@ impl ErrorOutcome {
     }
 
     /// Create from anyhow error with default exit code.
+    ///
+    /// A cloud failure carries its own answer — missing token, exhausted
+    /// credits, a rate limit — so it maps to the exit code and the fix the
+    /// command-line contract promises instead of collapsing into code 1.
     pub fn from_anyhow(error: &anyhow::Error) -> Self {
+        if let Some(cloud) = error.downcast_ref::<memnoth_cloud_client::CloudError>() {
+            return Self::from_cloud(cloud);
+        }
         Self::new(ExitCode::Unexpected, format!("{error:#}"))
+    }
+
+    /// Map a cloud failure onto the exit-code table.
+    pub fn from_cloud(error: &memnoth_cloud_client::CloudError) -> Self {
+        use memnoth_cloud_client::CloudError;
+        let bare = |text: &str| text.trim().trim_matches('"').to_string();
+        match error {
+            CloudError::AuthError(message) => {
+                Self::new(ExitCode::Auth, format!("not signed in: {}", bare(message)))
+                    .with_fix("run `memnoth auth login` (or set MEMNOTH_API_KEY)")
+                    .with_docs_url("https://memnoth.astrivya.ai/docs/cli#auth")
+            }
+            CloudError::CreditsExhausted(message) => Self::new(
+                ExitCode::Auth,
+                format!("credits exhausted: {}", bare(message)),
+            )
+            .with_fix("check the balance with `memnoth billing`, then add credits")
+            .with_docs_url("https://memnoth.astrivya.ai/pricing"),
+            CloudError::NotFound(message) => {
+                Self::new(ExitCode::NotFound, format!("not found: {}", bare(message)))
+            }
+            CloudError::RateLimited {
+                retry_after_secs,
+                message,
+            } => Self::new(
+                ExitCode::Transient,
+                format!("rate limited: {}", bare(message)),
+            )
+            .with_fix(format!("retry in {retry_after_secs}s")),
+            CloudError::Transient { status, message } => Self::new(
+                ExitCode::Transient,
+                format!("server error ({status}): {message}"),
+            )
+            .with_fix("the service is up but unhappy; retry shortly"),
+            CloudError::ClientError { status, message } => Self::new(
+                ExitCode::Usage,
+                format!("request rejected ({status}): {message}"),
+            ),
+            other => Self::new(ExitCode::Unexpected, other.to_string()),
+        }
     }
 
     /// Create usage error.
@@ -188,16 +235,25 @@ impl std::fmt::Display for ErrorOutcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "memnoth: {}", self.message)?;
         if let Some(cause) = &self.cause {
-            write!(f, "
-  cause: {cause}")?;
+            write!(
+                f,
+                "
+  cause: {cause}"
+            )?;
         }
         if let Some(fix) = &self.fix {
-            write!(f, "
-  fix: {fix}")?;
+            write!(
+                f,
+                "
+  fix: {fix}"
+            )?;
         }
         if let Some(docs) = &self.docs_url {
-            write!(f, "
-  docs: {docs}")?;
+            write!(
+                f,
+                "
+  docs: {docs}"
+            )?;
         }
         Ok(())
     }

@@ -3,8 +3,8 @@ use serde_json::json;
 use std::collections::HashSet;
 use std::fs;
 
-use crate::{AppContext, Config};
 use crate::output::Outcome;
+use crate::{AppContext, Config};
 use memnoth_auth::get_credential_sync;
 use memnoth_cloud_client::CloudClient;
 
@@ -43,7 +43,9 @@ fn models_list(ctx: &AppContext, args: &crate::cli::ModelsListArgs) -> Result<Ou
         models.retain(|m| {
             let provider = model_provider(m);
             provider.eq_ignore_ascii_case(provider_filter)
-                || m.id.to_lowercase().contains(&provider_filter.to_lowercase())
+                || m.id
+                    .to_lowercase()
+                    .contains(&provider_filter.to_lowercase())
         });
     }
 
@@ -192,9 +194,15 @@ fn extract_pricing_detail(desc: &str) -> String {
     for word in desc.split_whitespace() {
         if word.starts_with('$') && word.contains("/1m") {
             if word.contains("in") || word.contains("input") {
-                in_price = word.trim_start_matches('$').replace("/1m", "/M").replace("/1M", "/M");
+                in_price = word
+                    .trim_start_matches('$')
+                    .replace("/1m", "/M")
+                    .replace("/1M", "/M");
             } else if word.contains("out") || word.contains("output") {
-                out_price = word.trim_start_matches('$').replace("/1m", "/M").replace("/1M", "/M");
+                out_price = word
+                    .trim_start_matches('$')
+                    .replace("/1m", "/M")
+                    .replace("/1M", "/M");
             }
         } else if word.starts_with('$') && word.len() > 1 {
             // Generic price
@@ -242,7 +250,10 @@ fn render_compare(
                 "model2": model_to_json(m2),
             }
         });
-        let text = format!("Comparison: {} vs {}\nUse --json for full details", id1, id2);
+        let text = format!(
+            "Comparison: {} vs {}\nUse --json for full details",
+            id1, id2
+        );
         return Ok(Outcome::new("models.compare", text, data));
     }
 
@@ -253,18 +264,44 @@ fn render_compare(
     let prd2 = extract_pricing_detail(&m2.description);
 
     let mut rows = Vec::new();
-    rows.push(format!("══════════════════════════════════════════════════════════════"));
-    rows.push(format!("           MODEL COMPARISON: {} vs {}", m1.id, m2.id));
-    rows.push(format!("══════════════════════════════════════════════════════════════"));
+    rows.push(format!(
+        "══════════════════════════════════════════════════════════════"
+    ));
+    rows.push(format!(
+        "           MODEL COMPARISON: {} vs {}",
+        m1.id, m2.id
+    ));
+    rows.push(format!(
+        "══════════════════════════════════════════════════════════════"
+    ));
     rows.push(format!(""));
     rows.push(format!("{:<25} {:<35} {:<35}", "ATTRIBUTE", m1.id, m2.id));
-    rows.push(format!("{:<25} {:<35} {:<35}", "─────────", "────────────────", "────────────────"));
-    rows.push(format!("{:<25} {:<35} {:<35}", "Name", truncate(&m1.name, 33), truncate(&m2.name, 33)));
+    rows.push(format!(
+        "{:<25} {:<35} {:<35}",
+        "─────────", "────────────────", "────────────────"
+    ));
+    rows.push(format!(
+        "{:<25} {:<35} {:<35}",
+        "Name",
+        truncate(&m1.name, 33),
+        truncate(&m2.name, 33)
+    ));
     rows.push(format!("{:<25} {:<35} {:<35}", "Provider", p1, p2));
     rows.push(format!("{:<25} {:<35} {:<35}", "Context Window", c1, c2));
-    rows.push(format!("{:<25} {:<35} {:<35}", "Max Output Tokens", "unreported", "unreported"));
-    rows.push(format!("{:<25} {:<35} {:<35}", "Pricing (in/out)", prd1, prd2));
-    rows.push(format!("{:<25} {:<35} {:<35}", "Capabilities", truncate(&cap1, 33), truncate(&cap2, 33)));
+    rows.push(format!(
+        "{:<25} {:<35} {:<35}",
+        "Max Output Tokens", "unreported", "unreported"
+    ));
+    rows.push(format!(
+        "{:<25} {:<35} {:<35}",
+        "Pricing (in/out)", prd1, prd2
+    ));
+    rows.push(format!(
+        "{:<25} {:<35} {:<35}",
+        "Capabilities",
+        truncate(&cap1, 33),
+        truncate(&cap2, 33)
+    ));
     rows.push(format!(""));
     rows.push(format!("Description:"));
     rows.push(format!("  {}: {}", m1.id, truncate(&m1.description, 100)));
@@ -305,7 +342,10 @@ fn model_use(ctx: &AppContext, args: &crate::cli::ModelUseArgs) -> Result<Outcom
 
     // Verify model exists
     let Some(model) = list.data.iter().find(|m| m.id == args.model_id) else {
-        anyhow::bail!("Model '{}' not found. Run `mn models` to see available models.", args.model_id);
+        anyhow::bail!(
+            "Model '{}' not found. Run `mn models` to see available models.",
+            args.model_id
+        );
     };
 
     // Update config
@@ -418,7 +458,10 @@ fn extract_context_window(desc: &str) -> Option<String> {
         Some("128k".to_string())
     } else if desc_lower.contains("200k") || desc_lower.contains("200 k") {
         Some("200k".to_string())
-    } else if desc_lower.contains("1m") || desc_lower.contains("1 m") || desc_lower.contains("1000k") {
+    } else if desc_lower.contains("1m")
+        || desc_lower.contains("1 m")
+        || desc_lower.contains("1000k")
+    {
         Some("1M".to_string())
     } else if desc_lower.contains("32k") || desc_lower.contains("32 k") {
         Some("32k".to_string())

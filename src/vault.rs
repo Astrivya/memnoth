@@ -921,7 +921,10 @@ pub fn audit(
 
             text.push_str(&format!(
                 "  [{}] {}  {}  {}  ({})\n",
-                author, window, action, name,
+                author,
+                window,
+                action,
+                name,
                 summary.chars().take(60).collect::<String>()
             ));
 
