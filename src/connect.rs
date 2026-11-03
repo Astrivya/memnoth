@@ -21,7 +21,7 @@ use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
     execute,
     terminal::{enable_raw_mode, disable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-}
+};
 
 /// Known provider configurations with defaults
 fn known_providers() -> Vec<ProviderInfo> {

@@ -27,11 +27,8 @@ mod render;
 mod store;
 
 pub use render::{
-    render_callees, render_callers, render_callpath, render_cycles, render_dead_code, render_deps,
-    render_def, render_diff_impact, render_explore, render_hotspots, render_index, render_outline,
-    render_owners, render_query, render_refs, render_review, render_search, render_status,
-    render_tests_for, render_tree, render_unused_exports,
-};
+    render_callees, render_callers, render_def, render_diff_impact, render_explore, render_index, render_refs, render_search, render_status,
+    };
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;

@@ -41,6 +41,50 @@ pub enum ScreenReaderMode {
     Plain,  // Plain text output for mn ask
 }
 
+impl Theme {
+    /// The spelling `mn set-theme` and `[ui] theme` accept, and the one saved.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::HighContrast => "high-contrast",
+            Self::NoColor => "no-color",
+        }
+    }
+
+    /// Parse a theme name, naming the valid set on a miss.
+    pub fn parse(name: &str) -> Result<Self, String> {
+        match name {
+            "default" => Ok(Self::Default),
+            "high-contrast" | "highcontrast" => Ok(Self::HighContrast),
+            "no-color" | "nocolor" => Ok(Self::NoColor),
+            other => Err(format!(
+                "unknown theme `{other}`; use default, high-contrast or no-color"
+            )),
+        }
+    }
+}
+
+impl ScreenReaderMode {
+    /// The spelling `mn set-screen-reader` and `[ui] screen_reader` accept.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Plain => "plain",
+        }
+    }
+
+    /// Parse a screen-reader mode, naming the valid set on a miss.
+    pub fn parse(name: &str) -> Result<Self, String> {
+        match name {
+            "off" => Ok(Self::Off),
+            "plain" => Ok(Self::Plain),
+            other => Err(format!(
+                "unknown screen reader mode `{other}`; use off or plain"
+            )),
+        }
+    }
+}
+
 
 /// Fuzzy path completion state for @file references.
 #[derive(Debug, Default)]

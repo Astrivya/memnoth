@@ -1,12 +1,12 @@
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use memnoth_command::{
-    spec::{AuthLevel, CommandSpec, DangerLevel, OverlayType, ParamSpec, ParamType, SlashSpec},
+    spec::{AuthLevel, CommandSpec, DangerLevel, OverlayType, ParamSpec, SlashSpec},
     RegistryBuilder,
 };
 use serde_json;
 
-use crate::{default_skills_dir, registry::SkillRegistry};
+use crate::registry::SkillRegistry;
 
 /// Skill management commands.
 #[derive(Debug, Subcommand)]
@@ -107,15 +107,10 @@ pub fn build_skill_commands(mut builder: RegistryBuilder) -> RegistryBuilder {
                 description: "Add a new skill from a SKILL.md file".into(),
                 long_description: None,
                 params: vec![
-                    ParamSpec::required("path", "Path to SKILL.md file", ParamType::String),
+                    ParamSpec::string("path", "Path to SKILL.md file"),
                     ParamSpec {
-                        name: "name".into(),
-                        description: "Override skill name".into(),
-                        param_type: ParamType::String,
                         required: false,
-                        default: None,
-                        enum_values: Vec::new(),
-                        multiple: false,
+                        ..ParamSpec::string("name", "Override skill name")
                     },
                 ],
                 overlay: OverlayType::None,
@@ -151,33 +146,12 @@ pub fn build_skill_commands(mut builder: RegistryBuilder) -> RegistryBuilder {
                 description: "List all installed skills".into(),
                 long_description: None,
                 params: vec![
+                    ParamSpec::bool("detail", "Show detailed information"),
                     ParamSpec {
-                        name: "detail".into(),
-                        description: "Show detailed information".into(),
-                        param_type: ParamType::Bool,
                         required: false,
-                        default: Some(serde_json::json!(false)),
-                        enum_values: Vec::new(),
-                        multiple: false,
+                        ..ParamSpec::string("tag", "Filter by tag")
                     },
-                    ParamSpec {
-                        name: "tag".into(),
-                        description: "Filter by tag".into(),
-                        param_type: ParamType::String,
-                        required: false,
-                        default: None,
-                        enum_values: Vec::new(),
-                        multiple: false,
-                    },
-                    ParamSpec {
-                        name: "json".into(),
-                        description: "Output as JSON".into(),
-                        param_type: ParamType::Bool,
-                        required: false,
-                        default: Some(serde_json::json!(false)),
-                        enum_values: Vec::new(),
-                        multiple: false,
-                    },
+                    ParamSpec::bool("json", "Output as JSON"),
                 ],
                 overlay: OverlayType::None,
                 danger: DangerLevel::Safe,
@@ -213,19 +187,11 @@ pub fn build_skill_commands(mut builder: RegistryBuilder) -> RegistryBuilder {
                 description: "Remove a skill by name".into(),
                 long_description: None,
                 params: vec![
-                    ParamSpec::required("name", "Skill name to remove", ParamType::String),
-                    ParamSpec {
-                        name: "force".into(),
-                        description: "Force removal without confirmation".into(),
-                        param_type: ParamType::Bool,
-                        required: false,
-                        default: Some(serde_json::json!(false)),
-                        enum_values: Vec::new(),
-                        multiple: false,
-                    },
+                    ParamSpec::string("name", "Skill name to remove"),
+                    ParamSpec::bool("force", "Force removal without confirmation"),
                 ],
                 overlay: OverlayType::Confirm,
-                danger: DangerLevel::Dangerous,
+                danger: DangerLevel::Destructive,
                 auth: AuthLevel::Session,
                 profile: None,
                 categories: vec!["skill".into()],
@@ -257,25 +223,12 @@ pub fn build_skill_commands(mut builder: RegistryBuilder) -> RegistryBuilder {
                 description: "Run a skill with arguments".into(),
                 long_description: None,
                 params: vec![
-                    ParamSpec::required("name", "Skill name to run", ParamType::String),
+                    ParamSpec::string("name", "Skill name to run"),
                     ParamSpec {
-                        name: "args".into(),
-                        description: "Skill arguments as KEY=VALUE pairs".into(),
-                        param_type: ParamType::Json,
                         required: false,
-                        default: None,
-                        enum_values: Vec::new(),
-                        multiple: true,
+                        ..ParamSpec::json("args", "Skill arguments as KEY=VALUE pairs")
                     },
-                    ParamSpec {
-                        name: "json".into(),
-                        description: "Output as JSON".into(),
-                        param_type: ParamType::Bool,
-                        required: false,
-                        default: Some(serde_json::json!(false)),
-                        enum_values: Vec::new(),
-                        multiple: false,
-                    },
+                    ParamSpec::bool("json", "Output as JSON"),
                 ],
                 overlay: OverlayType::None,
                 danger: DangerLevel::Safe,
@@ -310,19 +263,17 @@ pub fn build_skill_commands(mut builder: RegistryBuilder) -> RegistryBuilder {
                 description: "Edit a skill's SKILL.md file".into(),
                 long_description: None,
                 params: vec![
-                    ParamSpec::required("name", "Skill name to edit", ParamType::String),
+                    ParamSpec::string("name", "Skill name to edit"),
                     ParamSpec {
-                        name: "editor".into(),
-                        description: "Editor to use (defaults to $EDITOR or vi)".into(),
-                        param_type: ParamType::String,
                         required: false,
-                        default: None,
-                        enum_values: Vec::new(),
-                        multiple: false,
+                        ..ParamSpec::string(
+                            "editor",
+                            "Editor to use (defaults to $EDITOR or vi)",
+                        )
                     },
                 ],
                 overlay: OverlayType::Fullscreen,
-                danger: DangerLevel::Caution,
+                danger: DangerLevel::LocalWrite,
                 auth: AuthLevel::Session,
                 profile: None,
                 categories: vec!["skill".into()],
@@ -540,12 +491,14 @@ pub fn skill_names() -> Vec<String> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
-    use std::io::Write;
     
     #[test]
     fn test_skill_commands_integration() {
         let temp_dir = TempDir::new().unwrap();
-        std::env::set_var("HOME", temp_dir.path());
+        // Override the skills directory rather than $HOME: on Windows the home
+        // directory comes from USERPROFILE, so a HOME override would leave the
+        // test writing into — and deleting from — the developer's real skills.
+        unsafe { std::env::set_var("MEMNOTH_SKILLS_DIR", temp_dir.path()) };
         
         let skill_content = r#"---
 name = "test-skill"

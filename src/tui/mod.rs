@@ -132,6 +132,18 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
     let mut app = App::new(name, resumed);
     app.config = ctx.config.clone();
     app.config_path = ctx.config_path.clone();
+
+    // A preference written by `mn set-theme` or `mn set-screen-reader` shapes
+    // the next session; `/theme` still overrides it live.
+    if let Some(ui) = &ctx.config.ui {
+        if let Some(theme) = ui.theme.as_deref() {
+            app.theme = crate::tui::app::Theme::parse(theme).unwrap_or_default();
+        }
+        if let Some(mode) = ui.screen_reader.as_deref() {
+            app.screen_reader =
+                crate::tui::app::ScreenReaderMode::parse(mode).unwrap_or_default();
+        }
+    }
     app.set_paths(display_path(&ctx.root), display_path(&ctx.vault_path));
     app.seed(&session);
     app.home = Some(home(ctx, name, resumed, &graph, indexed));

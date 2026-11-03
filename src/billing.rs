@@ -219,17 +219,8 @@ fn render_limits_unavailable() -> String {
 fn get_cloud_client(ctx: &AppContext) -> Result<CloudClient> {
     let mut client = CloudClient::new()?;
 
-    if let Ok(token) = std::env::var("MEMNOTH_API_KEY") {
+    if let Some(token) = ctx.auth_token() {
         client.set_auth_token(token);
-    } else if let Ok(token) = std::env::var("MEMNOTH_MCP_TOKEN") {
-        client.set_auth_token(token);
-    } else {
-        // Try to load from credential store
-        if let Ok(store) = memnoth_auth::create_credential_store() {
-            if let Ok(Some(token)) = store.get("api_token") {
-                client.set_auth_token(token);
-            }
-        }
     }
 
     Ok(client)
