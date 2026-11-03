@@ -1,0 +1,18 @@
+[package]
+name = "memnoth-command-macros"
+version = "0.1.0-beta.1"
+edition = "2024"
+publish = false
+license.workspace = true
+description = "Proc macros for memnoth-command"
+
+[lib]
+proc-macro = true
+name = "memnoth_command_macros"
+path = "src/lib.rs"
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full", "extra-traits"] }
+ctor = "1"

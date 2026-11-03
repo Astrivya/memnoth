@@ -1,0 +1,41 @@
+# Build output
+/target
+
+# Editor and backup artifacts
+**/*.rs.bk
+*.orig
+*.rej
+
+# Per-workspace state written by `memnoth kg index`, and local vaults
+.memnoth/
+*.db
+*.db-wal
+*.db-shm
+
+# Release bundle assembled by scripts/dist.sh — the publishable copy is the
+# one attached to the release, not the working directory.
+/dist/
+/artifacts/
+/dist-*.tar.gz
+
+# Secrets. A committed key cannot be un-committed, only rotated.
+.env
+.env.*
+!.env.example
+*.pem
+*.p8
+*.p12
+*.pfx
+*.key
+**/credentials
+**/id_ed25519*
+**/id_rsa*
+**/secrets.json
+
+# OS and editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.log

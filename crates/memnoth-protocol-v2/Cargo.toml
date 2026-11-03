@@ -1,0 +1,14 @@
+[package]
+name = "memnoth-protocol-v2"
+version = "0.1.0-beta.1"
+license.workspace = true
+edition = "2024"
+description = "Compact binary framing protocol replacing NDJSON-over-Unix-socket IPC"
+
+[dependencies]
+bytes = "1"
+tokio = { version = "1", features = ["io-util"] }
+thiserror = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }

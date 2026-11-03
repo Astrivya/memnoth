@@ -1,0 +1,35 @@
+memnoth
+Copyright 2026 Astrivya
+
+This product includes software developed at Astrivya
+(https://github.com/Astrivya).
+
+The core is licensed under the Apache License, Version 2.0. See LICENSE.
+The hosted control plane (the `memnoth-cloud` repository) is separate,
+proprietary software and is not part of this distribution. See OPEN_CORE.md
+for the boundary.
+
+Third-party components
+----------------------
+
+memnoth is built on open-source crates, each used under its own license. The
+authoritative list is `Cargo.lock`; the license of every dependency can be
+checked with:
+
+    cargo deny check licenses
+
+Principal dependencies and their licenses:
+
+  * ratatui, crossterm ............................... MIT
+  * clap, clap_complete .............................. MIT OR Apache-2.0
+  * tokio, serde, serde_json, reqwest, hyper ......... MIT OR Apache-2.0
+  * rusqlite ......................................... MIT
+  * SQLite (bundled via rusqlite) .................... Public Domain
+  * ignore, globset (ripgrep) ........................ MIT OR Unlicense
+  * tree-sitter and grammars ......................... MIT
+  * regex, walkdir, toml, chrono ..................... MIT OR Apache-2.0
+  * anyhow, thiserror ................................ MIT OR Apache-2.0
+
+If you redistribute a binary built from this source, keep this NOTICE and the
+LICENSE with it. If you modify the source, add your own attribution above
+rather than replacing this one.

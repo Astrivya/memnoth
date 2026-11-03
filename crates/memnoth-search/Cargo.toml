@@ -1,0 +1,21 @@
+[package]
+name = "memnoth-search"
+version = "0.1.0-beta.1"
+license.workspace = true
+edition = "2024"
+description = "memnoth code search engine: lexical grep, ranked file discovery, structural outline, relation tracing. First-party implementation on ripgrep's `ignore`/`globset` crates."
+
+# Only what the engine actually calls, which is what the `manifest` gate now
+# asserts (`cargo machete`). The J1 scaffold listed a plan rather than an
+# implementation — `grep-searcher`, `grep-regex`, the five tree-sitter crates,
+# `walkdir` and `anyhow` were never referenced by a line of code, and the
+# comments that named them have been corrected to say what runs.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
+ignore = "0.4"
+globset = "0.4"
+
+[dev-dependencies]
+tempfile = "3"

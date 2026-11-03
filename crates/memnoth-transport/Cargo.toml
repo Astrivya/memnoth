@@ -1,0 +1,13 @@
+[package]
+name = "memnoth-transport"
+version = "0.1.0-beta.1"
+edition = "2024"
+license = "Apache-2.0"
+description = "Transport layer for memnoth IPC and harness API"
+repository = "https://github.com/astrivya/memnoth"
+
+[dependencies]
+tokio = { version = "1", features = ["io-std", "io-util", "net", "rt-multi-thread", "sync", "time"] }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

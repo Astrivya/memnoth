@@ -1,0 +1,29 @@
+[package]
+name = "memnoth-update"
+version = "0.1.0-beta.1"
+edition = "2024"
+publish = false
+description = "Self-update mechanism with signature verification, atomic swap, and passive checks"
+
+[lib]
+name = "memnoth_update"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "rustls-tls-native-roots"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+hex = "0.4"
+minisign-verify = "0.3"
+serde_with = "3"
+# sigstore = "0.14"  // Temporarily disabled due to compilation issues in older versions
+semver = "1"
+thiserror = "1"
+dirs = "5"
+toml = "0.8"
+
+[dev-dependencies]
+tempfile = "3"

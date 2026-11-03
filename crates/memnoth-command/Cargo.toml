@@ -1,0 +1,29 @@
+[package]
+name = "memnoth-command"
+version = "0.1.0-beta.1"
+edition = "2024"
+publish = false
+license.workspace = true
+description = "Command specification, registry, and derive macro for memnoth CLI"
+
+[lib]
+name = "memnoth_command"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+indexmap = "2"
+regex = "1"
+ctor = "1"
+memnoth-command-macros = { path = "../memnoth-command-macros" }
+
+# Workspace dependencies
+memnoth-capability = { path = "../memnoth-capability" }
+
+[dev-dependencies]
+tempfile = "3"

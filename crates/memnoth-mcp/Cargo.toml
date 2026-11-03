@@ -1,0 +1,60 @@
+[package]
+name = "memnoth-mcp"
+version = "0.1.0-beta.1"
+# Spelled out rather than inherited: this crate is excluded from the workspace
+# (five of its path dependencies are not published here), and an excluded
+# package cannot resolve `workspace = true`. Inheriting would hide the real
+# blocker behind "failed to find a workspace root".
+license = "Apache-2.0"
+edition = "2024"
+
+[features]
+# The semantic stack: the local ONNX embedder (dense retrieval arm) and the
+# cross-encoder reranker. On by default so production is unchanged; a
+# `--no-default-features` build drops the tract-ONNX + tokenizer stack and both
+# features report "unavailable" through the paths that already handle it
+# (`dense_ranking` -> `None`, `cross_encoder()` -> `None`) instead of failing.
+default = ["semantic"]
+semantic = ["dep:memnoth-embedding", "memnoth-codegraph/semantic"]
+
+[dependencies]
+tokio = { version = "1", features = ["io-std", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+# The Tasks extension requires ISO 8601 `createdAt`/`lastUpdatedAt` timestamps
+# (see `tasks.rs::iso8601`). Declared in the same form as every other member:
+# this workspace has no `[workspace.dependencies]` table, so `workspace = true`
+# would not resolve.
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+# The tool-exposure table lives here so the server and the agent router answer
+# from one dataset instead of two lists that drift.
+memnoth-capability = { path = "../memnoth-capability" }
+memnoth-engine = { path = "../memnoth-engine" }
+memnoth-ingest = { path = "../memnoth-ingest" }
+memnoth-coord = { path = "../memnoth-coord" }
+memnoth-codegraph = { path = "../memnoth-codegraph", default-features = false }
+# W2.1: the cross-encoder reranker (`CrossEncoder::rerank`) and the embedding
+# primitives live here. Optional, behind this crate's `semantic` feature: the
+# dense arm and the reranker are the only things that need an ONNX runtime, and
+# both already have an "unavailable" path (`dense_ranking` -> `None`,
+# `cross_encoder()` -> `None`), so a minimal-profile build skips the whole
+# tract stack instead of paying for it in a crate that never runs it.
+memnoth-embedding = { path = "../memnoth-embedding", optional = true }
+memnoth-harness-api = { path = "../memnoth-harness-api" }
+memnoth-transport = { path = "../memnoth-transport" }
+memnoth-mcp-auth = { path = "../memnoth-mcp-auth", features = ["prometheus"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+# The cloud ingest's HTTP client. Required, not optional: the previous
+# implementation spoke cleartext HTTP over a raw `TcpStream`, so every ingest
+# against the documented `https://` endpoint wrote an HTTP request into a TLS
+# port and failed invisibly. `rustls` keeps it consistent with the rest of the
+# workspace and adds no native dependency.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "rustls-tls-native-roots"] }
+# SHA-256 of the dataset a published number was measured on. Tier 3 asks for
+# "reproducible code/results", and a figure whose input file cannot be identified is
+# not reproducible — a re-run against a revised dataset is a different measurement
+# that looks identical. Already in the graph via five other members, so this adds no
+# new third-party code to the build. (This workspace has no `[workspace.dependencies]`
+# table, so the version is declared here, as every other member does.)
+sha2 = "0.10"

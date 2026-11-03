@@ -1,0 +1,12 @@
+[package]
+name = "memnoth-capability"
+version = "0.1.0-beta.1"
+edition = "2024"
+publish = false
+license.workspace = true
+description = "One tool registry for every memnoth surface: definitions, profiles, approval and receipts"
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

@@ -1,0 +1,10 @@
+[package]
+name = "memnoth-context"
+version = "0.1.0-beta.1"
+edition = "2024"
+publish = false
+description = "Context authority: instruction precedence, budgeted assembly with receipts, and selection-first compaction"
+
+[lib]
+name = "memnoth_context"
+path = "src/lib.rs"

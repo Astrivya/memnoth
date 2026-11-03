@@ -1,0 +1,59 @@
+# memnoth winget manifest
+# This file is a template - actual values (PackageVersion, InstallerUrl, InstallerSha256)
+# are populated by the release workflow during publish
+PackageIdentifier: Astrivya.memnoth
+PackageVersion: 0.1.0-beta.1
+PackageName: memnoth
+PackageLocale: en-US
+Publisher: Astrivya
+PublisherUrl: https://astrivya.ai
+PublisherSupportUrl: https://github.com/astrivya/memnoth/issues
+Author: Astrivya
+PackageUrl: https://memnoth.astrivya.ai
+License: Apache-2.0
+LicenseUrl: https://github.com/astrivya/memnoth/blob/main/LICENSE
+Copyright: Copyright (c) 2024 Astrivya
+CopyrightUrl: https://github.com/astrivya/memnoth/blob/main/LICENSE
+ShortDescription: Terminal agent, bi-temporal vault, code graph and MCP server
+Description: |
+  memnoth is a local-first AI development environment that combines:
+  - A terminal agent with session persistence and rewind
+  - A bi-temporal vault for code, notes, and context
+  - A code graph with semantic search and cross-references
+  - An MCP (Model Context Protocol) server for AI tool integration
+  
+  All in a single binary with zero external dependencies.
+Moniker: memnoth
+Tags:
+  - cli
+  - terminal
+  - ai
+  - mcp
+  - code-graph
+  - vault
+  - developer-tools
+Commands:
+  - memnoth
+  - mn
+Installers:
+  - Architecture: x64
+    InstallerType: zip
+    InstallerUrl: https://github.com/astrivya/memnoth/releases/download/v0.1.0-beta.1/memnoth-x86_64-pc-windows-msvc.zip
+    InstallerSha256: PLACEHOLDER_SHA256
+    Commands:
+      - memnoth
+      - mn
+    AppsAndFeaturesEntries:
+      - DisplayName: memnoth
+        DisplayVersion: 0.1.0-beta.1
+        ProductCode: "{PLACEHOLDER_PRODUCT_CODE}"
+        UpgradeCode: "{PLACEHOLDER_UPGRADE_CODE}"
+    ExpectedReturnCodes:
+      - InstallerReturnCode: 0
+        ReturnResponse: success
+      - InstallerReturnCode: 1641
+        ReturnResponse: successRebootRequired
+      - InstallerReturnCode: 3010
+        ReturnResponse: successRebootRequired
+ManifestType: installer
+ManifestVersion: 1.8.0

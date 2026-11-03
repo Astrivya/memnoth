@@ -1,0 +1,68 @@
+[package]
+name = "memnoth-mcp-auth"
+version = "0.1.0-beta.1"
+license.workspace = true
+edition = "2024"
+description = "Authentication verifier for memnoth-mcp HTTP transport (static bearer + JWT modes)"
+# Deny unsafe globally: this crate is on the auth hot path, every code path is auditable Rust.
+# A clippy lint will reinforce this.
+
+[dependencies]
+# JWT verification (HS256 + RS256)
+jsonwebtoken = "9"
+# Async-native JWKS cache (LRU + TTL + singleflight via per-entry OnceCell)
+moka = { version = "0.12", features = ["future"] }
+# In-memory user-token table (lock-free shard-per-bucket)
+dashmap = "6"
+# Constant-time byte comparison (defeats timing attacks on the static bearer)
+subtle = "2"
+# Async runtime + HTTP client (already in workspace; pinned features match memnoth-mcp)
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+# JWKS fetch — feature set matches the rest of the workspace
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "rustls-tls-native-roots"] }
+# Serde for claim deserialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Strongly-typed identifiers (UserId, TokenId)
+uuid = { version = "1", features = ["v4", "serde"] }
+# Time helpers (clock skew tolerance, exp/nbf validation)
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+# Error type
+thiserror = "1"
+# async-trait for the Authenticator trait (we want dyn-compatible)
+async-trait = "0.1"
+# SHA-256 of the bearer token for the user-token store key (constant-time, never stores the raw token)
+sha2 = "0.10"
+# Prometheus metrics (T8 wiring). The `prometheus` feature enables
+# the in-process counter; without it the `metrics` module is a no-op
+# stub that compiles but does nothing (so Lane B can wire it in
+# without forcing every consumer of the crate to pull `prometheus`).
+prometheus = { version = "0.13", optional = true }
+
+[features]
+default = []
+prometheus = ["dep:prometheus"]
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[dev-dependencies]
+# Real-JWT generation in tests (HS256: ring; RS256: rsa)
+jsonwebtoken = "9"
+rsa = "0.9"
+rand = "0.8"
+# Tiny test HTTP server for the fake JWKS endpoint (used by RS256 + singleflight tests)
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+# Atomic counters for fake JWKS request counting (singleflight test)
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "io-util", "net"] }
+# For the alg=none attack test (URL_SAFE_NO_PAD encoding)
+base64 = "0.22"
+# Benchmark harness
+criterion = { version = "0.5", features = ["html_reports", "async_tokio", "async_futures"] }
+
+[[bench]]
+name = "verify"
+harness = false
+bench = false
