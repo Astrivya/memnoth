@@ -1,6 +1,6 @@
 //! Connect overlay: configure model provider connections with beautiful TUI UI.
 
-use crossterm::event::{KeyEvent, KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -89,9 +89,19 @@ impl ConnectOverlay {
 
         // Define all supported providers
         let all_providers = vec![
-            (Kind::Anthropic, "Anthropic", "🤖", "https://api.anthropic.com"),
+            (
+                Kind::Anthropic,
+                "Anthropic",
+                "🤖",
+                "https://api.anthropic.com",
+            ),
             (Kind::OpenAi, "OpenAI", "🧠", "https://api.openai.com"),
-            (Kind::Memnoth, "Memnoth", "✨", "https://api.memnoth.astrivya.ai"),
+            (
+                Kind::Memnoth,
+                "Memnoth",
+                "✨",
+                "https://api.memnoth.astrivya.ai",
+            ),
         ];
 
         self.providers = all_providers
@@ -104,13 +114,16 @@ impl ConnectOverlay {
                     .map(|s| s.base_url.clone())
                     .or_else(|| Some(default_url.to_string()));
 
-                let model = settings.as_ref().and_then(|s| {
-                    if s.kind == kind {
-                        Some(s.model.clone())
-                    } else {
-                        None
-                    }
-                }).unwrap_or_else(|| self.default_model_for(&kind));
+                let model = settings
+                    .as_ref()
+                    .and_then(|s| {
+                        if s.kind == kind {
+                            Some(s.model.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_else(|| self.default_model_for(&kind));
 
                 let status = if has_key && base_url.is_some() {
                     ProviderStatus::Connected
@@ -140,12 +153,10 @@ impl ConnectOverlay {
     fn check_api_key(&self, kind: &Kind, _config: &crate::Config) -> bool {
         match kind {
             Kind::Anthropic => {
-                std::env::var("ANTHROPIC_API_KEY").is_ok()
-                    || std::env::var(kind.key_env()).is_ok()
+                std::env::var("ANTHROPIC_API_KEY").is_ok() || std::env::var(kind.key_env()).is_ok()
             }
             Kind::OpenAi => {
-                std::env::var("OPENAI_API_KEY").is_ok()
-                    || std::env::var(kind.key_env()).is_ok()
+                std::env::var("OPENAI_API_KEY").is_ok() || std::env::var(kind.key_env()).is_ok()
             }
             Kind::Memnoth => {
                 // Check memnoth-auth credential store
@@ -167,7 +178,10 @@ impl ConnectOverlay {
         if self.selected < self.providers.len() {
             self.editing = true;
             self.edit_field = EditField::Model;
-            self.edit_buffer = self.providers[self.selected].model.clone().unwrap_or_default();
+            self.edit_buffer = self.providers[self.selected]
+                .model
+                .clone()
+                .unwrap_or_default();
             self.edit_cursor = self.edit_buffer.len();
         }
     }
@@ -217,7 +231,10 @@ impl ConnectOverlay {
         self.providers[self.selected].status = ProviderStatus::Testing;
 
         let provider = self.providers[self.selected].clone();
-        let base_url = provider.base_url.clone().unwrap_or_else(|| provider.kind.default_base_url().to_string());
+        let base_url = provider
+            .base_url
+            .clone()
+            .unwrap_or_else(|| provider.kind.default_base_url().to_string());
         let api_key = self.get_api_key(&provider.kind, &app.config);
 
         // Spawn async test
@@ -230,7 +247,11 @@ impl ConnectOverlay {
             let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
 
             let (success, message, model_count) = match result {
-                Ok(models) => (true, format!("Connected - {} models available", models.len()), models.len()),
+                Ok(models) => (
+                    true,
+                    format!("Connected - {} models available", models.len()),
+                    models.len(),
+                ),
                 Err(e) => (false, format!("Failed: {}", e), 0),
             };
 
@@ -246,22 +267,27 @@ impl ConnectOverlay {
 
     fn get_api_key(&self, kind: &Kind, _config: &crate::Config) -> Option<String> {
         match kind {
-            Kind::Anthropic => {
-                std::env::var("ANTHROPIC_API_KEY").ok()
-                    .or_else(|| std::env::var(kind.key_env()).ok())
-            }
-            Kind::OpenAi => {
-                std::env::var("OPENAI_API_KEY").ok()
-                    .or_else(|| std::env::var(kind.key_env()).ok())
-            }
-            Kind::Memnoth => {
-                memnoth_auth::get_credential_sync("memnoth").ok().flatten()
-                    .or_else(|| std::env::var("MEMNOTH_API_KEY").ok())
-            }
+            Kind::Anthropic => std::env::var("ANTHROPIC_API_KEY")
+                .ok()
+                .or_else(|| std::env::var(kind.key_env()).ok()),
+            Kind::OpenAi => std::env::var("OPENAI_API_KEY")
+                .ok()
+                .or_else(|| std::env::var(kind.key_env()).ok()),
+            Kind::Memnoth => memnoth_auth::get_credential_sync("memnoth")
+                .ok()
+                .flatten()
+                .or_else(|| std::env::var("MEMNOTH_API_KEY").ok()),
         }
     }
 
-    fn handle_test_result(&mut self, index: usize, success: bool, message: String, model_count: usize, timestamp: String) {
+    fn handle_test_result(
+        &mut self,
+        index: usize,
+        success: bool,
+        message: String,
+        model_count: usize,
+        timestamp: String,
+    ) {
         if index < self.providers.len() {
             self.providers[index].status = if success {
                 ProviderStatus::Connected
@@ -287,18 +313,36 @@ impl ConnectOverlay {
                 format!("Provider: {}", provider.display_name),
                 format!("Kind: {:?}", provider.kind),
                 format!("Status: {:?}", provider.status),
-                format!("Base URL: {}", provider.base_url.as_deref().unwrap_or("not set")),
+                format!(
+                    "Base URL: {}",
+                    provider.base_url.as_deref().unwrap_or("not set")
+                ),
                 format!("Model: {}", provider.model.as_deref().unwrap_or("not set")),
-                format!("API Key: {}", if provider.has_key { "✓ Configured" } else { "✗ Not configured" }),
+                format!(
+                    "API Key: {}",
+                    if provider.has_key {
+                        "✓ Configured"
+                    } else {
+                        "✗ Not configured"
+                    }
+                ),
                 format!("Models: {}", provider.model_count),
-                format!("Last Tested: {}", provider.last_tested.as_deref().unwrap_or("never")),
+                format!(
+                    "Last Tested: {}",
+                    provider.last_tested.as_deref().unwrap_or("never")
+                ),
             ];
 
-            if let Some(last_result) = self.test_results.iter()
+            if let Some(last_result) = self
+                .test_results
+                .iter()
                 .rev()
                 .find(|r| r.provider == provider.kind)
             {
-                details.push(format!("Last Test: {} - {}", last_result.timestamp, last_result.message));
+                details.push(format!(
+                    "Last Test: {} - {}",
+                    last_result.timestamp, last_result.message
+                ));
             }
 
             self.info_popup = Some(InfoPopup {
@@ -308,18 +352,33 @@ impl ConnectOverlay {
         }
     }
 
-    fn render_provider_card(&self, provider: &ProviderCard, selected: bool, area: Rect, frame: &mut Frame) {
+    fn render_provider_card(
+        &self,
+        provider: &ProviderCard,
+        selected: bool,
+        area: Rect,
+        frame: &mut Frame,
+    ) {
         let style = if selected {
-            Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD)
+            Style::default()
+                .bg(Color::Blue)
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
         };
 
         let status_style = match provider.status {
-            ProviderStatus::Connected => Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            ProviderStatus::Connected => Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
             ProviderStatus::Disconnected => Style::default().fg(Color::Yellow),
-            ProviderStatus::Testing => Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-            ProviderStatus::Error(_) => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ProviderStatus::Testing => Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+            ProviderStatus::Error(_) => {
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+            }
         };
 
         let status_text = match &provider.status {
@@ -330,31 +389,45 @@ impl ConnectOverlay {
         };
 
         let lines = vec![
-            Line::from(vec![
-                Span::styled(format!("{}  {}", provider.icon, provider.display_name), style),
-            ]),
-            Line::from(vec![
-                Span::styled(status_text, status_style),
-            ]),
-            Line::from(vec![
-                Span::styled(format!("  Model: {}", provider.model.as_deref().unwrap_or("not set")), style.fg(Color::Gray)),
-            ]),
-            Line::from(vec![
-                Span::styled(format!("  Endpoint: {}", provider.base_url.as_deref().unwrap_or("not set")), style.fg(Color::Gray)),
-            ]),
-            Line::from(vec![
-                Span::styled(format!("  Models: {}  •  Last tested: {}", provider.model_count, provider.last_tested.as_deref().unwrap_or("never")), style.fg(Color::DarkGray)),
-            ]),
+            Line::from(vec![Span::styled(
+                format!("{}  {}", provider.icon, provider.display_name),
+                style,
+            )]),
+            Line::from(vec![Span::styled(status_text, status_style)]),
+            Line::from(vec![Span::styled(
+                format!(
+                    "  Model: {}",
+                    provider.model.as_deref().unwrap_or("not set")
+                ),
+                style.fg(Color::Gray),
+            )]),
+            Line::from(vec![Span::styled(
+                format!(
+                    "  Endpoint: {}",
+                    provider.base_url.as_deref().unwrap_or("not set")
+                ),
+                style.fg(Color::Gray),
+            )]),
+            Line::from(vec![Span::styled(
+                format!(
+                    "  Models: {}  •  Last tested: {}",
+                    provider.model_count,
+                    provider.last_tested.as_deref().unwrap_or("never")
+                ),
+                style.fg(Color::DarkGray),
+            )]),
         ];
 
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(if selected { Style::default().fg(Color::Yellow) } else { Style::default().fg(Color::DarkGray) })
+            .border_style(if selected {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            })
             .title(if selected { " ▼ " } else { "   " });
 
-        let paragraph = Paragraph::new(lines)
-            .block(block)
-            .wrap(Wrap { trim: true });
+        let paragraph = Paragraph::new(lines).block(block).wrap(Wrap { trim: true });
 
         frame.render_widget(paragraph, area);
     }
@@ -393,47 +466,77 @@ impl ConnectOverlay {
                 let index = row * cols + col;
                 if index < self.providers.len() && col < col_chunks.len() {
                     let selected = index == self.selected;
-                    self.render_provider_card(&self.providers[index], selected, col_chunks[col], frame);
+                    self.render_provider_card(
+                        &self.providers[index],
+                        selected,
+                        col_chunks[col],
+                        frame,
+                    );
                 }
             }
         }
     }
 
     fn render_list(&mut self, frame: &mut Frame, area: Rect) {
-        let items: Vec<ListItem> = self.providers.iter().enumerate().map(|(i, p)| {
-            let selected = i == self.selected;
-            let style = if selected {
-                Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
+        let items: Vec<ListItem> = self
+            .providers
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let selected = i == self.selected;
+                let style = if selected {
+                    Style::default()
+                        .bg(Color::Blue)
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
 
-            let status_style = match p.status {
-                ProviderStatus::Connected => Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-                ProviderStatus::Disconnected => Style::default().fg(Color::Yellow),
-                ProviderStatus::Testing => Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                ProviderStatus::Error(_) => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            };
+                let status_style = match p.status {
+                    ProviderStatus::Connected => Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                    ProviderStatus::Disconnected => Style::default().fg(Color::Yellow),
+                    ProviderStatus::Testing => Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                    ProviderStatus::Error(_) => {
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                    }
+                };
 
-            let status_text = match &p.status {
-                ProviderStatus::Connected => "●",
-                ProviderStatus::Disconnected => "○",
-                ProviderStatus::Testing => "◐",
-                ProviderStatus::Error(_) => "✗",
-            };
+                let status_text = match &p.status {
+                    ProviderStatus::Connected => "●",
+                    ProviderStatus::Disconnected => "○",
+                    ProviderStatus::Testing => "◐",
+                    ProviderStatus::Error(_) => "✗",
+                };
 
-            ListItem::new(Line::from(vec![
-                Span::styled(format!("{}  {}", p.icon, p.display_name), style),
-                Span::raw("  "),
-                Span::styled(status_text, status_style),
-                Span::styled(format!("  {}", p.model.as_deref().unwrap_or("not set")), style.fg(Color::Gray)),
-                Span::styled(format!("  ({} models)", p.model_count), style.fg(Color::DarkGray)),
-            ]))
-        }).collect();
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!("{}  {}", p.icon, p.display_name), style),
+                    Span::raw("  "),
+                    Span::styled(status_text, status_style),
+                    Span::styled(
+                        format!("  {}", p.model.as_deref().unwrap_or("not set")),
+                        style.fg(Color::Gray),
+                    ),
+                    Span::styled(
+                        format!("  ({} models)", p.model_count),
+                        style.fg(Color::DarkGray),
+                    ),
+                ]))
+            })
+            .collect();
 
         let list = List::new(items)
             .block(Block::default().borders(Borders::ALL).title(" Providers "))
-            .highlight_style(Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD))
+            .highlight_style(
+                Style::default()
+                    .bg(Color::Blue)
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            )
             .highlight_symbol("► ");
 
         frame.render_stateful_widget(list, area, &mut self.list_state);
@@ -444,15 +547,19 @@ impl ConnectOverlay {
             let popup_area = centered_rect(60, 70, area);
             frame.render_widget(Clear, popup_area);
 
-            let lines: Vec<Line> = popup.details.iter()
+            let lines: Vec<Line> = popup
+                .details
+                .iter()
                 .map(|d| Line::from(Span::raw(d.clone())))
                 .collect();
 
             let paragraph = Paragraph::new(lines)
-                .block(Block::default()
-                    .borders(Borders::ALL)
-                    .title(format!(" {} Provider Details ", popup.provider))
-                    .border_style(Style::default().fg(Color::Cyan)))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(format!(" {} Provider Details ", popup.provider))
+                        .border_style(Style::default().fg(Color::Cyan)),
+                )
                 .wrap(Wrap { trim: true })
                 .style(Style::default().fg(Color::White));
 
@@ -473,10 +580,15 @@ impl ConnectOverlay {
             };
 
             let paragraph = Paragraph::new(self.edit_buffer.as_str())
-                .block(Block::default()
-                    .borders(Borders::ALL)
-                    .title(format!(" Editing {} (Enter to save, Esc to cancel) ", field_name))
-                    .border_style(Style::default().fg(Color::Yellow)))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(format!(
+                            " Editing {} (Enter to save, Esc to cancel) ",
+                            field_name
+                        ))
+                        .border_style(Style::default().fg(Color::Yellow)),
+                )
                 .style(Style::default().fg(Color::White));
 
             frame.render_widget(paragraph, popup_area);
@@ -574,13 +686,21 @@ impl Overlay for ConnectOverlay {
                     }
                 }
                 KeyCode::Left => {
-                    if self.edit_cursor > 0 { self.edit_cursor -= 1; }
+                    if self.edit_cursor > 0 {
+                        self.edit_cursor -= 1;
+                    }
                 }
                 KeyCode::Right => {
-                    if self.edit_cursor < self.edit_buffer.len() { self.edit_cursor += 1; }
+                    if self.edit_cursor < self.edit_buffer.len() {
+                        self.edit_cursor += 1;
+                    }
                 }
-                KeyCode::Home => { self.edit_cursor = 0; }
-                KeyCode::End => { self.edit_cursor = self.edit_buffer.len(); }
+                KeyCode::Home => {
+                    self.edit_cursor = 0;
+                }
+                KeyCode::End => {
+                    self.edit_cursor = self.edit_buffer.len();
+                }
                 _ => {}
             }
             return OverlayAction::None;
@@ -588,7 +708,13 @@ impl Overlay for ConnectOverlay {
 
         // Check for test results
         if let Some(event) = app.try_recv_provider_test_result() {
-            self.handle_test_result(event.index, event.success, event.message, event.model_count, event.timestamp);
+            self.handle_test_result(
+                event.index,
+                event.success,
+                event.message,
+                event.model_count,
+                event.timestamp,
+            );
         }
 
         match key.code {
@@ -647,7 +773,13 @@ impl Overlay for ConnectOverlay {
                     self.providers[self.selected].base_url = None;
                     self.providers[self.selected].model_count = 0;
                     self.providers[self.selected].last_tested = None;
-                    app.push(crate::tui::app::EntryRole::Info, format!("Disconnected {}", self.providers[self.selected].display_name));
+                    app.push(
+                        crate::tui::app::EntryRole::Info,
+                        format!(
+                            "Disconnected {}",
+                            self.providers[self.selected].display_name
+                        ),
+                    );
                 }
             }
             KeyCode::Char('t') => {
@@ -659,7 +791,10 @@ impl Overlay for ConnectOverlay {
             KeyCode::Char('r') => {
                 // Refresh - reload providers
                 self.load_providers(app);
-                app.push(crate::tui::app::EntryRole::Info, "Provider list refreshed".to_string());
+                app.push(
+                    crate::tui::app::EntryRole::Info,
+                    "Provider list refreshed".to_string(),
+                );
             }
             KeyCode::Char('1') => {
                 if self.selected < self.providers.len() {
@@ -670,7 +805,10 @@ impl Overlay for ConnectOverlay {
             KeyCode::Char('2') => {
                 if self.selected < self.providers.len() {
                     self.edit_field = EditField::BaseUrl;
-                    self.edit_buffer = self.providers[self.selected].base_url.clone().unwrap_or_default();
+                    self.edit_buffer = self.providers[self.selected]
+                        .base_url
+                        .clone()
+                        .unwrap_or_default();
                     self.edit_cursor = self.edit_buffer.len();
                     self.editing = true;
                 }
@@ -701,15 +839,19 @@ impl Overlay for ConnectOverlay {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3),  // Title
-                Constraint::Min(0),     // Content
-                Constraint::Length(2),  // Help footer
+                Constraint::Length(3), // Title
+                Constraint::Min(0),    // Content
+                Constraint::Length(2), // Help footer
             ])
             .split(area);
 
         // Title
         let title = Paragraph::new("Model Provider Connections")
-            .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+            .style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )
             .block(Block::default().borders(Borders::ALL));
         frame.render_widget(title, chunks[0]);
 

@@ -7,8 +7,8 @@
 use crate::output::{ellipsize, rfc3339};
 
 use super::{
-    AddReport, DoctorReport, ExposesReport, ListReport, LogsReport, ProfileSetReport, ProfileShowReport,
-    RemoveReport, RestartReport, SelftestReport, TestReport, TokenReport,
+    AddReport, DoctorReport, ExposesReport, ListReport, LogsReport, ProfileSetReport,
+    ProfileShowReport, RemoveReport, RestartReport, SelftestReport, TestReport, TokenReport,
 };
 
 /// `memnoth mcp doctor`.
@@ -258,17 +258,28 @@ pub fn render_token(report: &TokenReport) -> String {
 /// `memnoth mcp logs`.
 pub fn render_logs(report: &LogsReport) -> String {
     let mut text = String::new();
-    text.push_str(&format!("mcp logs (profile: {}, url: {})\n", report.profile, report.url));
+    text.push_str(&format!(
+        "mcp logs (profile: {}, url: {})\n",
+        report.profile, report.url
+    ));
     if report.sessions.is_empty() {
         text.push_str("  no sessions found\n");
     } else {
         for session in &report.sessions {
-            text.push_str(&format!("  session: {} (status: {})\n", session.session, session.status));
+            text.push_str(&format!(
+                "  session: {} (status: {})\n",
+                session.session, session.status
+            ));
             if session.events.is_empty() {
                 text.push_str("    no events\n");
             } else {
                 for event in &session.events {
-                    text.push_str(&format!("    [{}] {}: {}\n", event.at, event.source, event.transcript.as_deref().unwrap_or("")));
+                    text.push_str(&format!(
+                        "    [{}] {}: {}\n",
+                        event.at,
+                        event.source,
+                        event.transcript.as_deref().unwrap_or("")
+                    ));
                 }
             }
         }
@@ -278,7 +289,10 @@ pub fn render_logs(report: &LogsReport) -> String {
 
 /// `memnoth mcp profile show`.
 pub fn render_profile_show(report: &ProfileShowReport) -> String {
-    format!("mcp profile: {} (source: {})\n", report.profile, report.source)
+    format!(
+        "mcp profile: {} (source: {})\n",
+        report.profile, report.source
+    )
 }
 
 /// `memnoth mcp profile set`.
@@ -291,7 +305,10 @@ pub fn render_exposes(report: &ExposesReport) -> String {
     let mut text = String::new();
     text.push_str("mcp exposes:\n");
     for p in &report.profiles {
-        text.push_str(&format!("  {}: {} tools ({} bytes)\n", p.profile, p.tool_count, p.tools_list_bytes));
+        text.push_str(&format!(
+            "  {}: {} tools ({} bytes)\n",
+            p.profile, p.tool_count, p.tools_list_bytes
+        ));
         for tool in &p.tools {
             text.push_str(&format!("    {}\n", tool));
         }

@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use memnoth_command::{
-    spec::{AuthLevel, CommandSpec, DangerLevel, OverlayType, ParamSpec, SlashSpec},
     RegistryBuilder,
+    spec::{AuthLevel, CommandSpec, DangerLevel, OverlayType, ParamSpec, SlashSpec},
 };
 use serde_json;
 
@@ -13,16 +13,16 @@ use crate::registry::SkillRegistry;
 pub enum SkillCommand {
     /// Add a new skill from a SKILL.md file.
     Add(AddArgs),
-    
+
     /// List all installed skills.
     List(ListArgs),
-    
+
     /// Remove a skill by name.
     Remove(RemoveArgs),
-    
+
     /// Run a skill with arguments.
     Run(RunArgs),
-    
+
     /// Edit a skill's SKILL.md file.
     Edit(EditArgs),
 }
@@ -33,7 +33,7 @@ pub struct AddArgs {
     /// Path to the SKILL.md file to add.
     #[arg(value_name = "PATH")]
     pub path: String,
-    
+
     /// Override the skill name (uses frontmatter name by default).
     #[arg(long, value_name = "NAME")]
     pub name: Option<String>,
@@ -45,11 +45,11 @@ pub struct ListArgs {
     /// Show detailed information for each skill.
     #[arg(long, short)]
     pub detail: bool,
-    
+
     /// Filter by tag.
     #[arg(long, value_name = "TAG")]
     pub tag: Option<String>,
-    
+
     /// Output as JSON.
     #[arg(long)]
     pub json: bool,
@@ -61,7 +61,7 @@ pub struct RemoveArgs {
     /// Name of the skill to remove.
     #[arg(value_name = "NAME")]
     pub name: String,
-    
+
     /// Force removal without confirmation.
     #[arg(long, short)]
     pub force: bool,
@@ -73,11 +73,11 @@ pub struct RunArgs {
     /// Name of the skill to run.
     #[arg(value_name = "NAME")]
     pub name: String,
-    
+
     /// Arguments to pass to the skill (KEY=VALUE format).
     #[arg(value_name = "KEY=VALUE", trailing_var_arg = true)]
     pub args: Vec<String>,
-    
+
     /// Output as JSON.
     #[arg(long)]
     pub json: bool,
@@ -89,7 +89,7 @@ pub struct EditArgs {
     /// Name of the skill to edit.
     #[arg(value_name = "NAME")]
     pub name: String,
-    
+
     /// Editor to use (defaults to $EDITOR or vi).
     #[arg(long, short, value_name = "EDITOR")]
     pub editor: Option<String>,
@@ -266,10 +266,7 @@ pub fn build_skill_commands(mut builder: RegistryBuilder) -> RegistryBuilder {
                     ParamSpec::string("name", "Skill name to edit"),
                     ParamSpec {
                         required: false,
-                        ..ParamSpec::string(
-                            "editor",
-                            "Editor to use (defaults to $EDITOR or vi)",
-                        )
+                        ..ParamSpec::string("editor", "Editor to use (defaults to $EDITOR or vi)")
                     },
                 ],
                 overlay: OverlayType::Fullscreen,
@@ -317,96 +314,123 @@ fn execute_add(args: AddArgs) -> Result<String> {
 fn execute_list(args: ListArgs) -> Result<String> {
     let registry = SkillRegistry::new()?;
     let skills = registry.list();
-    
+
     if args.json {
-        let output: Vec<serde_json::Value> = skills.iter().map(|s| {
-            let mut obj = serde_json::json!({
-                "name": s.frontmatter.metadata.name,
-                "description": s.frontmatter.metadata.description,
-                "version": s.frontmatter.metadata.version,
-                "tags": s.frontmatter.metadata.tags,
-                "publish": s.frontmatter.metadata.publish,
-                "arguments": s.frontmatter.arguments.len(),
-            });
-            if args.detail {
-                obj["arguments"] = serde_json::to_value(&s.frontmatter.arguments).unwrap();
-                obj["examples"] = serde_json::to_value(&s.frontmatter.examples).unwrap();
-                obj["requires"] = serde_json::to_value(&s.frontmatter.metadata.requires).unwrap();
-                obj["path"] = serde_json::Value::String(s.path.to_string_lossy().to_string());
-            }
-            obj
-        }).collect();
-        
+        let output: Vec<serde_json::Value> = skills
+            .iter()
+            .map(|s| {
+                let mut obj = serde_json::json!({
+                    "name": s.frontmatter.metadata.name,
+                    "description": s.frontmatter.metadata.description,
+                    "version": s.frontmatter.metadata.version,
+                    "tags": s.frontmatter.metadata.tags,
+                    "publish": s.frontmatter.metadata.publish,
+                    "arguments": s.frontmatter.arguments.len(),
+                });
+                if args.detail {
+                    obj["arguments"] = serde_json::to_value(&s.frontmatter.arguments).unwrap();
+                    obj["examples"] = serde_json::to_value(&s.frontmatter.examples).unwrap();
+                    obj["requires"] =
+                        serde_json::to_value(&s.frontmatter.metadata.requires).unwrap();
+                    obj["path"] = serde_json::Value::String(s.path.to_string_lossy().to_string());
+                }
+                obj
+            })
+            .collect();
+
         return Ok(serde_json::to_string_pretty(&output)?);
     }
-    
+
     if skills.is_empty() {
         return Ok("No skills installed. Use `mn skill add <path>` to add a skill.".to_string());
     }
-    
+
     let mut lines = Vec::new();
-    lines.push(format!("{} skill(s) installed in {}", skills.len(), registry.skills_dir().display()));
+    lines.push(format!(
+        "{} skill(s) installed in {}",
+        skills.len(),
+        registry.skills_dir().display()
+    ));
     lines.push("".to_string());
-    
+
     for skill in skills {
         if let Some(tag_filter) = &args.tag {
             if !skill.frontmatter.metadata.tags.contains(tag_filter) {
                 continue;
             }
         }
-        
-        lines.push(format!("  {} v{}", skill.frontmatter.metadata.name, skill.frontmatter.metadata.version));
+
+        lines.push(format!(
+            "  {} v{}",
+            skill.frontmatter.metadata.name, skill.frontmatter.metadata.version
+        ));
         lines.push(format!("    {}", skill.frontmatter.metadata.description));
-        
+
         if !skill.frontmatter.metadata.tags.is_empty() {
-            lines.push(format!("    tags: {}", skill.frontmatter.metadata.tags.join(", ")));
+            lines.push(format!(
+                "    tags: {}",
+                skill.frontmatter.metadata.tags.join(", ")
+            ));
         }
-        
+
         if args.detail {
             if !skill.frontmatter.arguments.is_empty() {
                 lines.push("    arguments:".to_string());
                 for arg in &skill.frontmatter.arguments {
                     let req = if arg.required { " (required)" } else { "" };
-                    let default = arg.default.as_ref().map(|d| format!(" = {}", d)).unwrap_or_default();
-                    lines.push(format!("      {}: {}{}{}", arg.name, arg.description, req, default));
+                    let default = arg
+                        .default
+                        .as_ref()
+                        .map(|d| format!(" = {}", d))
+                        .unwrap_or_default();
+                    lines.push(format!(
+                        "      {}: {}{}{}",
+                        arg.name, arg.description, req, default
+                    ));
                 }
             }
             if !skill.frontmatter.metadata.requires.is_empty() {
-                lines.push(format!("    requires: {}", skill.frontmatter.metadata.requires.join(", ")));
+                lines.push(format!(
+                    "    requires: {}",
+                    skill.frontmatter.metadata.requires.join(", ")
+                ));
             }
             lines.push(format!("    path: {}", skill.path.display()));
         }
-        
+
         lines.push("".to_string());
     }
-    
+
     Ok(lines.join("\n"))
 }
 
 fn execute_remove(args: RemoveArgs) -> Result<String> {
     let mut registry = SkillRegistry::new()?;
-    
+
     if !registry.has_skill(&args.name) {
         return Err(anyhow::anyhow!("Skill '{}' not found", args.name));
     }
-    
+
     if !args.force {
         // In a real CLI, we'd prompt for confirmation
         // For now, we'll just require --force
         return Err(anyhow::anyhow!("Use --force to confirm removal"));
     }
-    
+
     registry.remove_skill(&args.name)?;
     Ok(format!("Removed skill: {}", args.name))
 }
 
 fn execute_run(args: RunArgs) -> Result<String> {
     let registry = SkillRegistry::new()?;
-    
+
     if !registry.has_skill(&args.name) {
-        return Err(anyhow::anyhow!("Skill '{}' not found. Run `mn skill list` to see available skills.", args.name));
+        return Err(anyhow::anyhow!(
+            "Skill '{}' not found. Run `mn skill list` to see available skills.",
+            args.name
+        ));
     }
-    
+
     // Parse KEY=VALUE arguments
     let mut skill_args = std::collections::HashMap::new();
     for arg in &args.args {
@@ -415,10 +439,13 @@ fn execute_run(args: RunArgs) -> Result<String> {
             let parsed = serde_json::from_str(value).unwrap_or_else(|_| serde_json::json!(value));
             skill_args.insert(key.to_string(), parsed);
         } else {
-            return Err(anyhow::anyhow!("Invalid argument format: '{}'. Use KEY=VALUE", arg));
+            return Err(anyhow::anyhow!(
+                "Invalid argument format: '{}'. Use KEY=VALUE",
+                arg
+            ));
         }
     }
-    
+
     // Validate required arguments
     if let Some(skill_args_spec) = registry.get_skill_arguments(&args.name) {
         for spec in &skill_args_spec {
@@ -431,9 +458,9 @@ fn execute_run(args: RunArgs) -> Result<String> {
             }
         }
     }
-    
+
     let rendered = registry.render_skill(&args.name, skill_args)?;
-    
+
     if args.json {
         let output = serde_json::json!({
             "skill": args.name,
@@ -441,42 +468,48 @@ fn execute_run(args: RunArgs) -> Result<String> {
         });
         return Ok(serde_json::to_string_pretty(&output)?);
     }
-    
+
     Ok(rendered)
 }
 
 fn execute_edit(args: EditArgs) -> Result<String> {
     let mut registry = SkillRegistry::new()?;
-    
-    let entry = registry.get_mut(&args.name)
+
+    let entry = registry
+        .get_mut(&args.name)
         .ok_or_else(|| anyhow::anyhow!("Skill '{}' not found", args.name))?;
-    
+
     let skill_file = entry.path.join("SKILL.md");
-    
+
     // Determine editor
-    let editor = args.editor
+    let editor = args
+        .editor
         .or_else(|| std::env::var("EDITOR").ok())
         .unwrap_or_else(|| {
-            if cfg!(windows) { "notepad".to_string() } else { "vi".to_string() }
+            if cfg!(windows) {
+                "notepad".to_string()
+            } else {
+                "vi".to_string()
+            }
         });
-    
+
     // Open editor
     let status = std::process::Command::new(&editor)
         .arg(&skill_file)
         .status()
         .with_context(|| format!("Failed to launch editor: {}", editor))?;
-    
+
     if !status.success() {
         return Err(anyhow::anyhow!("Editor exited with error"));
     }
-    
+
     // Reload the skill to verify it's valid
     let frontmatter = crate::frontmatter::parse_skill_file(&skill_file)?;
     crate::frontmatter::validate_skill(&frontmatter)?;
-    
+
     // Update the registry entry
     entry.frontmatter = frontmatter;
-    
+
     Ok(format!("Edited skill: {}", args.name))
 }
 
@@ -491,7 +524,7 @@ pub fn skill_names() -> Vec<String> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
-    
+
     #[test]
     fn test_skill_commands_integration() {
         let temp_dir = TempDir::new().unwrap();
@@ -499,7 +532,7 @@ mod tests {
         // directory comes from USERPROFILE, so a HOME override would leave the
         // test writing into — and deleting from — the developer's real skills.
         unsafe { std::env::set_var("MEMNOTH_SKILLS_DIR", temp_dir.path()) };
-        
+
         let skill_content = r#"---
 name = "test-skill"
 description = "A test skill"
@@ -510,24 +543,42 @@ arguments = [
 
 Hello {{name}}!
 "#;
-        
+
         let skill_file = temp_dir.path().join("test-skill.md");
         std::fs::write(&skill_file, skill_content).unwrap();
-        
+
         // Test add
-        let result = execute_add(AddArgs { path: skill_file.to_string_lossy().to_string(), name: None }).unwrap();
+        let result = execute_add(AddArgs {
+            path: skill_file.to_string_lossy().to_string(),
+            name: None,
+        })
+        .unwrap();
         assert!(result.contains("test-skill"));
-        
+
         // Test list
-        let result = execute_list(ListArgs { detail: false, tag: None, json: false }).unwrap();
+        let result = execute_list(ListArgs {
+            detail: false,
+            tag: None,
+            json: false,
+        })
+        .unwrap();
         assert!(result.contains("test-skill"));
-        
+
         // Test run
-        let result = execute_run(RunArgs { name: "test-skill".to_string(), args: vec!["name=World".to_string()], json: false }).unwrap();
+        let result = execute_run(RunArgs {
+            name: "test-skill".to_string(),
+            args: vec!["name=World".to_string()],
+            json: false,
+        })
+        .unwrap();
         assert_eq!(result.trim(), "Hello World!");
-        
+
         // Test remove
-        let result = execute_remove(RemoveArgs { name: "test-skill".to_string(), force: true }).unwrap();
+        let result = execute_remove(RemoveArgs {
+            name: "test-skill".to_string(),
+            force: true,
+        })
+        .unwrap();
         assert!(result.contains("Removed"));
     }
 }

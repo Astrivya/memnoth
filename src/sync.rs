@@ -5,10 +5,10 @@ use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::thread::sleep;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::cli::{SyncArgs, PrivacyArgs, PrivacyCommand};
+use crate::cli::{PrivacyArgs, PrivacyCommand, SyncArgs};
 use crate::context::AppContext;
 use crate::output::Outcome;
 use memnoth_cloud_client::{BatchIngestRequest, BatchIngestResponse, CloudClient, IngestRequest};
@@ -77,7 +77,9 @@ impl SyncQueue {
         let mut queue = Self::new();
         for line in content.lines() {
             if let Ok(item) = serde_json::from_str::<QueuedSyncItem>(line) {
-                let size = serde_json::to_vec(&item).map(|v| v.len() as u64).unwrap_or(0);
+                let size = serde_json::to_vec(&item)
+                    .map(|v| v.len() as u64)
+                    .unwrap_or(0);
                 if queue.total_size_bytes + size <= MAX_QUEUE_SIZE_MB * 1024 * 1024
                     && queue.items.len() < MAX_QUEUE_ENTRIES
                 {
@@ -108,7 +110,9 @@ impl SyncQueue {
 
     /// Add an item to the queue
     pub fn push(&mut self, item: QueuedSyncItem) -> Result<()> {
-        let size = serde_json::to_vec(&item).map(|v| v.len() as u64).unwrap_or(0);
+        let size = serde_json::to_vec(&item)
+            .map(|v| v.len() as u64)
+            .unwrap_or(0);
 
         // Evict oldest items if we exceed bounds
         while (self.total_size_bytes + size > MAX_QUEUE_SIZE_MB * 1024 * 1024
@@ -116,7 +120,9 @@ impl SyncQueue {
             && !self.items.is_empty()
         {
             if let Some(old) = self.items.pop_front() {
-                let old_size = serde_json::to_vec(&old).map(|v| v.len() as u64).unwrap_or(0);
+                let old_size = serde_json::to_vec(&old)
+                    .map(|v| v.len() as u64)
+                    .unwrap_or(0);
                 self.total_size_bytes = self.total_size_bytes.saturating_sub(old_size);
             }
         }
@@ -129,7 +135,9 @@ impl SyncQueue {
     /// Pop the next item for processing
     pub fn pop(&mut self) -> Option<QueuedSyncItem> {
         self.items.pop_front().map(|item| {
-            let size = serde_json::to_vec(&item).map(|v| v.len() as u64).unwrap_or(0);
+            let size = serde_json::to_vec(&item)
+                .map(|v| v.len() as u64)
+                .unwrap_or(0);
             self.total_size_bytes = self.total_size_bytes.saturating_sub(size);
             item
         })
@@ -192,9 +200,7 @@ fn check_privacy_gate(ctx: &AppContext) -> Result<bool> {
         .unwrap_or(false)
     {
         // Check if user has explicitly enabled sync
-        let sync_enabled = sync_config
-            .and_then(|s| s.enabled)
-            .unwrap_or(false);
+        let sync_enabled = sync_config.and_then(|s| s.enabled).unwrap_or(false);
         if !sync_enabled {
             return Ok(false);
         }
@@ -351,7 +357,9 @@ fn process_queue(ctx: &AppContext, client: &CloudClient, dry_run: bool) -> Resul
                     result.succeeded += 1;
                 } else {
                     result.failed += 1;
-                    result.errors.push(format!("Batch rejected: {:?}", response.results));
+                    result
+                        .errors
+                        .push(format!("Batch rejected: {:?}", response.results));
                     // Re-queue for retry
                     queue.requeue(item, "Batch rejected".to_string())?;
                 }
@@ -580,7 +588,11 @@ fn privacy_status(ctx: &AppContext) -> Result<Outcome> {
     let telemetry_enabled = privacy_config
         .and_then(|p| p.telemetry_enabled)
         .unwrap_or(true);
-    let sync_enabled = config.sync.as_ref().and_then(|s| s.enabled).unwrap_or(false);
+    let sync_enabled = config
+        .sync
+        .as_ref()
+        .and_then(|s| s.enabled)
+        .unwrap_or(false);
 
     let text = format!(
         r#"Privacy Status
@@ -594,7 +606,11 @@ What leaves this machine (current mode: {}):
 {}
 "#,
         if sync_enabled { "ENABLED" } else { "DISABLED" },
-        if telemetry_enabled { "ENABLED" } else { "DISABLED" },
+        if telemetry_enabled {
+            "ENABLED"
+        } else {
+            "DISABLED"
+        },
         mode,
         mode,
         describe_privacy_mode(mode)
@@ -698,10 +714,7 @@ fn privacy_show_data(ctx: &AppContext) -> Result<Outcome> {
     let mode = get_sync_privacy_mode(ctx);
     let items = collect_session_data(ctx, mode)?;
 
-    let mut text = format!(
-        "Data that would be sent (privacy mode: {:?}):\n\n",
-        mode
-    );
+    let mut text = format!("Data that would be sent (privacy mode: {:?}):\n\n", mode);
 
     for item in &items {
         text.push_str(&format!(

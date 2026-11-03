@@ -249,10 +249,7 @@ fn apply_update_with_config(
         .iter()
         .find(|t| t.triple == target_triple)
         .ok_or_else(|| {
-            ErrorOutcome::usage(format!(
-                "No release artifact for target: {}",
-                target_triple
-            ))
+            ErrorOutcome::usage(format!("No release artifact for target: {}", target_triple))
         })?;
 
     // Download to temp file
@@ -267,8 +264,7 @@ fn apply_update_with_config(
 
     // Download with progress
     println!("Downloading {}...", download_url);
-    download_file_with_progress(&download_url, &temp_exe)
-        .map_err(|e| failure(e))?;
+    download_file_with_progress(&download_url, &temp_exe).map_err(|e| failure(e))?;
 
     // Verify checksum unless --no-verify
     if !no_verify {

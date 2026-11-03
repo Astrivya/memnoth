@@ -14,9 +14,9 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
 use crate::cli::{
-    DoctorArgs, KgArgs, KgCommand, McpArgs, McpCommand, TeamsArgs, TeamsCommand, TeamsJoinArgs,
-    VaultArgs, VaultCommand, Verb,
-    SkillArgs, SkillCommand, SkillAddArgs, SkillListArgs, SkillRemoveArgs, SkillRunArgs, SkillEditArgs,
+    DoctorArgs, KgArgs, KgCommand, McpArgs, McpCommand, SkillAddArgs, SkillArgs, SkillCommand,
+    SkillEditArgs, SkillListArgs, SkillRemoveArgs, SkillRunArgs, TeamsArgs, TeamsCommand,
+    TeamsJoinArgs, VaultArgs, VaultCommand, Verb,
 };
 use crate::tui::panes::{ContextPane, DiffPane, TasksPane, TranscriptPane};
 use memnoth_sandbox::rules::{RuleDecision, RuleSet, decide};
@@ -38,7 +38,7 @@ pub enum Theme {
 pub enum ScreenReaderMode {
     #[default]
     Off,
-    Plain,  // Plain text output for mn ask
+    Plain, // Plain text output for mn ask
 }
 
 impl Theme {
@@ -85,7 +85,6 @@ impl ScreenReaderMode {
     }
 }
 
-
 /// Fuzzy path completion state for @file references.
 #[derive(Debug, Default)]
 pub struct CompletionState {
@@ -109,6 +108,38 @@ pub struct PendingShell {
     pub command: String,
     /// The sandbox policy decision.
     pub decision: RuleDecision,
+}
+
+impl PendingShell {
+    /// The text the confirmation box shows: what would run, why it is asking,
+    /// and — when the policy flagged it — that it can destroy work. The keys
+    /// are spelled out because this box is the only thing on screen.
+    pub fn prompt(&self) -> String {
+        let (reason, rule, destructive) = match &self.decision {
+            RuleDecision::Ask {
+                reason,
+                rule,
+                destructive,
+                ..
+            } => (reason.as_str(), rule.as_str(), *destructive),
+            RuleDecision::Allow { rule } => ("allowed by policy", rule.as_str(), false),
+            RuleDecision::Deny { reason, rule } => (reason.as_str(), rule.as_str(), true),
+        };
+        let mut text = String::new();
+        if destructive {
+            text.push_str("destructive — this can remove or overwrite work\n\n");
+        }
+        text.push_str("run this command?\n\n  ");
+        text.push_str(&self.command);
+        // The reason usually names the rule that fired; printing the id twice
+        // ("rule builtin:68: …  [rule: builtin:68]") reads like a defect.
+        text.push_str(&format!("\n\n{reason}"));
+        if !reason.contains(rule) {
+            text.push_str(&format!("  [rule: {rule}]"));
+        }
+        text.push_str("\n\ny run · n cancel");
+        text
+    }
 }
 
 /// Observation kinds `remember` accepts, mirrored from the vault command so a
@@ -796,9 +827,15 @@ pub fn parse_line(raw: &str) -> Parsed {
             } else {
                 match args[0].as_str() {
                     "default" => Parsed::Run(Verb::SetTheme(crate::tui::app::Theme::Default)),
-                    "high-contrast" => Parsed::Run(Verb::SetTheme(crate::tui::app::Theme::HighContrast)),
-                    "no-color" | "nocolor" => Parsed::Run(Verb::SetTheme(crate::tui::app::Theme::NoColor)),
-                    other => Parsed::Unknown(format!("unknown theme: {other} — use default, high-contrast, or no-color")),
+                    "high-contrast" => {
+                        Parsed::Run(Verb::SetTheme(crate::tui::app::Theme::HighContrast))
+                    }
+                    "no-color" | "nocolor" => {
+                        Parsed::Run(Verb::SetTheme(crate::tui::app::Theme::NoColor))
+                    }
+                    other => Parsed::Unknown(format!(
+                        "unknown theme: {other} — use default, high-contrast, or no-color"
+                    )),
                 }
             }
         }
@@ -807,9 +844,15 @@ pub fn parse_line(raw: &str) -> Parsed {
                 Parsed::Unknown("usage: /screen-reader <off|plain>".to_string())
             } else {
                 match args[0].as_str() {
-                    "off" => Parsed::Run(Verb::SetScreenReader(crate::tui::app::ScreenReaderMode::Off)),
-                    "plain" => Parsed::Run(Verb::SetScreenReader(crate::tui::app::ScreenReaderMode::Plain)),
-                    other => Parsed::Unknown(format!("unknown screen reader mode: {other} — use off or plain")),
+                    "off" => Parsed::Run(Verb::SetScreenReader(
+                        crate::tui::app::ScreenReaderMode::Off,
+                    )),
+                    "plain" => Parsed::Run(Verb::SetScreenReader(
+                        crate::tui::app::ScreenReaderMode::Plain,
+                    )),
+                    other => Parsed::Unknown(format!(
+                        "unknown screen reader mode: {other} — use off or plain"
+                    )),
                 }
             }
         }
@@ -864,16 +907,25 @@ fn parse_skill(args: &[String]) -> Parsed {
             let skill_args = positional[1..].to_vec();
             let json = flags.get("json").is_some();
             Parsed::Run(Verb::Skill(SkillArgs {
-                action: SkillCommand::Run(SkillRunArgs { name, args: skill_args, json }),
+                action: SkillCommand::Run(SkillRunArgs {
+                    name,
+                    args: skill_args,
+                    json,
+                }),
             }))
         }
         "edit" => {
             let (flags, positional) = split_flags(rest);
             if positional.is_empty() {
-                return Parsed::Unknown("usage: /skill edit <name> [--editor <editor>]".to_string());
+                return Parsed::Unknown(
+                    "usage: /skill edit <name> [--editor <editor>]".to_string(),
+                );
             }
             let name = positional[0].clone();
-            let editor = flags.get("editor").cloned().or_else(|| flags.get("e").cloned());
+            let editor = flags
+                .get("editor")
+                .cloned()
+                .or_else(|| flags.get("e").cloned());
             Parsed::Run(Verb::Skill(SkillArgs {
                 action: SkillCommand::Edit(SkillEditArgs { name, editor }),
             }))
@@ -881,7 +933,6 @@ fn parse_skill(args: &[String]) -> Parsed {
         other => Parsed::Unknown(format!("unknown skill command {other:?}\n{SKILL_USAGE}")),
     }
 }
-
 
 fn parse_vault(args: &[String]) -> Parsed {
     let Some(action) = args.first() else {
@@ -1396,7 +1447,10 @@ mod tests {
                 action: VaultCommand::Init
             }))
         ));
-        assert!(matches!(parse_line("/doctor"), Parsed::Run(Verb::Doctor(_))));
+        assert!(matches!(
+            parse_line("/doctor"),
+            Parsed::Run(Verb::Doctor(_))
+        ));
         assert!(matches!(
             parse_line("/mcp doctor"),
             Parsed::Run(Verb::Mcp(_))

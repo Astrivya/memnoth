@@ -5,7 +5,9 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph, Tabs, Wrap};
+use ratatui::widgets::{
+    Block, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph, Tabs, Wrap,
+};
 
 use crate::tui::app::App;
 
@@ -238,7 +240,10 @@ impl ContextPane {
             KeyCode::Char('c') if ctrl => {
                 // Compact action
                 self.compact_requested = true;
-                app.push(crate::tui::app::EntryRole::Info, "Context compact requested".to_string());
+                app.push(
+                    crate::tui::app::EntryRole::Info,
+                    "Context compact requested".to_string(),
+                );
                 true
             }
             KeyCode::Char('g') => {
@@ -302,9 +307,9 @@ impl ContextPane {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3),  // Tabs
-                Constraint::Min(0),     // Content
-                Constraint::Length(3),  // Footer with compact button
+                Constraint::Length(3), // Tabs
+                Constraint::Min(0),    // Content
+                Constraint::Length(3), // Footer with compact button
             ])
             .split(area);
 
@@ -326,14 +331,20 @@ impl ContextPane {
 
     fn render_tabs(&self, frame: &mut Frame, area: Rect) {
         let titles = vec!["Overview", "Beliefs", "Coordination", "Budget"];
-        let tabs = titles.iter().enumerate().map(|(i, t)| {
-            let style = if i == self.active_tab {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::DarkGray)
-            };
-            Span::styled(format!(" {} ", t), style)
-        }).collect::<Vec<_>>();
+        let tabs = titles
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let style = if i == self.active_tab {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
+                Span::styled(format!(" {} ", t), style)
+            })
+            .collect::<Vec<_>>();
 
         let tabs_widget = Paragraph::new(Line::from(tabs))
             .block(Block::default().borders(Borders::BOTTOM))
@@ -353,23 +364,41 @@ impl ContextPane {
 
         let overview_items = vec![
             ("Vault Beliefs", self.vault_beliefs.len().to_string()),
-            ("Active Agents", self.coordination.iter().filter(|c| c.status == CoordinationStatus::Active).count().to_string()),
-            ("Total Tokens Used", format!("{} / {}", budget.used, budget.limit)),
+            (
+                "Active Agents",
+                self.coordination
+                    .iter()
+                    .filter(|c| c.status == CoordinationStatus::Active)
+                    .count()
+                    .to_string(),
+            ),
+            (
+                "Total Tokens Used",
+                format!("{} / {}", budget.used, budget.limit),
+            ),
             ("Available", budget.available.to_string()),
         ];
 
-        let items: Vec<ListItem> = overview_items.iter().enumerate().map(|(i, (label, value))| {
-            let selected = i == self.selected;
-            let style = if selected {
-                Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            ListItem::new(Line::from(vec![
-                Span::styled(format!("{}: ", label), style.fg(Color::Cyan)),
-                Span::styled(value, style),
-            ])).style(style)
-        }).collect();
+        let items: Vec<ListItem> = overview_items
+            .iter()
+            .enumerate()
+            .map(|(i, (label, value))| {
+                let selected = i == self.selected;
+                let style = if selected {
+                    Style::default()
+                        .bg(Color::Blue)
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!("{}: ", label), style.fg(Color::Cyan)),
+                    Span::styled(value, style),
+                ]))
+                .style(style)
+            })
+            .collect();
 
         let list = List::new(items)
             .block(Block::default().borders(Borders::ALL).title(" Overview "))
@@ -378,71 +407,101 @@ impl ContextPane {
     }
 
     fn render_beliefs(&mut self, frame: &mut Frame, area: Rect) {
-        let items: Vec<ListItem> = self.vault_beliefs.iter().enumerate().map(|(i, b)| {
-            let selected = i == self.selected;
-            let style = if selected {
-                Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
+        let items: Vec<ListItem> = self
+            .vault_beliefs
+            .iter()
+            .enumerate()
+            .map(|(i, b)| {
+                let selected = i == self.selected;
+                let style = if selected {
+                    Style::default()
+                        .bg(Color::Blue)
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
 
-            let contradiction_mark = if b.contradicted { " ⚠" } else { "" };
-            let lines = vec![
-                Line::from(vec![
-                    Span::styled(format!("[{}] ", b.kind), Style::default().fg(Color::Cyan)),
-                    Span::styled(&b.name, style),
-                    Span::styled(contradiction_mark, style.fg(Color::Red)),
-                    Span::styled(format!("  v{}  {} tok", b.version, b.tokens), style.fg(Color::DarkGray)),
-                ]),
-                Line::from(vec![
-                    Span::styled("    ", Style::default()),
-                    Span::styled(&b.content, style.fg(Color::Gray)),
-                    Span::styled(format!("  ({})", b.updated), style.fg(Color::DarkGray)),
-                ]),
-            ];
-            ListItem::new(lines).style(style)
-        }).collect();
+                let contradiction_mark = if b.contradicted { " ⚠" } else { "" };
+                let lines = vec![
+                    Line::from(vec![
+                        Span::styled(format!("[{}] ", b.kind), Style::default().fg(Color::Cyan)),
+                        Span::styled(&b.name, style),
+                        Span::styled(contradiction_mark, style.fg(Color::Red)),
+                        Span::styled(
+                            format!("  v{}  {} tok", b.version, b.tokens),
+                            style.fg(Color::DarkGray),
+                        ),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("    ", Style::default()),
+                        Span::styled(&b.content, style.fg(Color::Gray)),
+                        Span::styled(format!("  ({})", b.updated), style.fg(Color::DarkGray)),
+                    ]),
+                ];
+                ListItem::new(lines).style(style)
+            })
+            .collect();
 
         let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title(" Vault Beliefs "))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Vault Beliefs "),
+            )
             .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
         frame.render_stateful_widget(list, area, &mut self.list_state);
     }
 
     fn render_coordination(&mut self, frame: &mut Frame, area: Rect) {
-        let items: Vec<ListItem> = self.coordination.iter().enumerate().map(|(i, c)| {
-            let selected = i == self.selected;
-            let style = if selected {
-                Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
+        let items: Vec<ListItem> = self
+            .coordination
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let selected = i == self.selected;
+                let style = if selected {
+                    Style::default()
+                        .bg(Color::Blue)
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
 
-            let status_char = match c.status {
-                CoordinationStatus::Active => "●",
-                CoordinationStatus::Idle => "○",
-                CoordinationStatus::Away => "◌",
-            };
-            let status_color = match c.status {
-                CoordinationStatus::Active => Color::Green,
-                CoordinationStatus::Idle => Color::Yellow,
-                CoordinationStatus::Away => Color::DarkGray,
-            };
+                let status_char = match c.status {
+                    CoordinationStatus::Active => "●",
+                    CoordinationStatus::Idle => "○",
+                    CoordinationStatus::Away => "◌",
+                };
+                let status_color = match c.status {
+                    CoordinationStatus::Active => Color::Green,
+                    CoordinationStatus::Idle => Color::Yellow,
+                    CoordinationStatus::Away => Color::DarkGray,
+                };
 
-            let lines = vec![Line::from(vec![
-                Span::styled(
-                    format!("{} ", status_char),
-                    Style::default().fg(status_color),
-                ),
-                Span::styled(&c.agent, style),
-                Span::styled(format!(" ({})", c.role), style.fg(Color::Cyan)),
-                Span::styled(format!("  {} tok  {}", c.tokens_used, c.last_seen), style.fg(Color::DarkGray)),
-            ])];
-            ListItem::new(lines).style(style)
-        }).collect();
+                let lines = vec![Line::from(vec![
+                    Span::styled(
+                        format!("{} ", status_char),
+                        Style::default().fg(status_color),
+                    ),
+                    Span::styled(&c.agent, style),
+                    Span::styled(format!(" ({})", c.role), style.fg(Color::Cyan)),
+                    Span::styled(
+                        format!("  {} tok  {}", c.tokens_used, c.last_seen),
+                        style.fg(Color::DarkGray),
+                    ),
+                ])];
+                ListItem::new(lines).style(style)
+            })
+            .collect();
 
         let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title(" Coordination "))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Coordination "),
+            )
             .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
         frame.render_stateful_widget(list, area, &mut self.list_state);
     }
@@ -460,18 +519,27 @@ impl ContextPane {
         let budget_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3),  // Token gauge
-                Constraint::Length(8),  // Grid
-                Constraint::Min(0),     // Details
+                Constraint::Length(3), // Token gauge
+                Constraint::Length(8), // Grid
+                Constraint::Min(0),    // Details
             ])
             .split(area);
 
         // Token gauge
         let gauge = Gauge::default()
-            .block(Block::default().borders(Borders::ALL).title(" Token Budget "))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Token Budget "),
+            )
             .gauge_style(Style::default().fg(usage_color))
             .ratio(budget.used as f64 / budget.limit as f64)
-            .label(format!("{}% ({}/{})", budget.usage_percent() as u32, budget.used, budget.limit));
+            .label(format!(
+                "{}% ({}/{})",
+                budget.usage_percent() as u32,
+                budget.used,
+                budget.limit
+            ));
         frame.render_widget(gauge, budget_chunks[0]);
 
         // Token grid (visual representation)
@@ -487,11 +555,17 @@ impl ContextPane {
             ]),
             Line::from(vec![
                 Span::styled("Reserved: ", Style::default().fg(Color::Cyan)),
-                Span::styled(budget.reserved.to_string(), Style::default().fg(Color::White)),
+                Span::styled(
+                    budget.reserved.to_string(),
+                    Style::default().fg(Color::White),
+                ),
             ]),
             Line::from(vec![
                 Span::styled("Available: ", Style::default().fg(Color::Cyan)),
-                Span::styled(budget.available.to_string(), Style::default().fg(Color::White)),
+                Span::styled(
+                    budget.available.to_string(),
+                    Style::default().fg(Color::White),
+                ),
             ]),
             Line::from(vec![
                 Span::styled("Limit: ", Style::default().fg(Color::Cyan)),
@@ -510,7 +584,7 @@ impl ContextPane {
         let grid_height = area.height as usize;
         let total_cells = grid_width * grid_height;
         let used_cells = ((budget.used as f64 / budget.limit as f64) * total_cells as f64) as usize;
-        
+
         let usage_color = if budget.is_critical() {
             Color::Red
         } else if budget.is_warning() {
@@ -525,14 +599,21 @@ impl ContextPane {
             for col in 0..grid_width {
                 let cell_idx = row * grid_width + col;
                 let cell_char = if cell_idx < used_cells { "█" } else { "░" };
-                let cell_color = if cell_idx < used_cells { usage_color } else { Color::DarkGray };
+                let cell_color = if cell_idx < used_cells {
+                    usage_color
+                } else {
+                    Color::DarkGray
+                };
                 spans.push(Span::styled(cell_char, Style::default().fg(cell_color)));
             }
             lines.push(Line::from(spans));
         }
 
-        let grid = Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title(" Token Grid (█ = used) "));
+        let grid = Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Token Grid (█ = used) "),
+        );
         frame.render_widget(grid, area);
     }
 

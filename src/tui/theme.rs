@@ -116,7 +116,11 @@ impl ColorScheme {
     }
 
     /// Get style for a role with modifiers
-    pub fn role_style(&self, role: crate::tui::app::EntryRole, selected: bool) -> (Style, &'static str) {
+    pub fn role_style(
+        &self,
+        role: crate::tui::app::EntryRole,
+        selected: bool,
+    ) -> (Style, &'static str) {
         let (base_color, glyph) = match role {
             crate::tui::app::EntryRole::User => (self.user, "▶"),
             crate::tui::app::EntryRole::Answer => (self.assistant, "▶"),
@@ -154,7 +158,8 @@ impl ScreenReaderOutput {
 
     /// Format a transcript for plain text output
     pub fn format_transcript(entries: &[crate::tui::app::Entry]) -> String {
-        entries.iter()
+        entries
+            .iter()
             .map(Self::format_entry)
             .collect::<Vec<_>>()
             .join("\n\n")
@@ -193,7 +198,8 @@ impl ScreenReaderOutput {
 /memory                    edit project memory
 !<cmd>                     shell passthrough (sandbox policy applies)
 
-Keys: enter send · ↑↓ history · ←→ edit · pgup/pgdn scroll · end newest · ctrl-c quit"#.to_string()
+Keys: enter send · ↑↓ history · ←→ edit · pgup/pgdn scroll · end newest · ctrl-c quit"#
+            .to_string()
     }
 
     /// Format keybindings for plain text output
@@ -236,6 +242,7 @@ Tasks overlay:
   Ctrl+R             Retry failed task
   Ctrl+X             Cancel running task
   Ctrl+C             Clear completed tasks
-  A                  Toggle auto-refresh"#.to_string()
+  A                  Toggle auto-refresh"#
+            .to_string()
     }
 }

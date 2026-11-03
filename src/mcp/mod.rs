@@ -33,12 +33,12 @@ use memnoth_mcp_client::{Client, StdioTransport};
 use crate::context::AppContext;
 
 pub use clients::ClientStatus;
+use clients::{ClientKind, Entry};
 pub use render::{
     render_add, render_call, render_doctor, render_exposes, render_list, render_logs,
     render_profile_set, render_profile_show, render_remove, render_restart, render_selftest,
     render_test, render_token,
 };
-use clients::{ClientKind, Entry};
 
 /// How long `mcp call` waits for one reply from the server.
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -917,10 +917,7 @@ pub fn token(ctx: &AppContext) -> Result<TokenReport> {
 }
 
 /// `memnoth mcp add` - wrapper for commands.rs.
-pub fn add_client(
-    ctx: &AppContext,
-    args: &crate::cli::McpCommand,
-) -> Result<AddReport> {
+pub fn add_client(ctx: &AppContext, args: &crate::cli::McpCommand) -> Result<AddReport> {
     if let crate::cli::McpCommand::Add {
         clients,
         profile,
@@ -930,24 +927,31 @@ pub fn add_client(
     } = args
     {
         let profile_opt = profile.as_ref().and_then(|p| Profile::from_name(p));
-        add(ctx, clients, profile_opt, url.as_deref(), token.as_deref(), *dry_run)
+        add(
+            ctx,
+            clients,
+            profile_opt,
+            url.as_deref(),
+            token.as_deref(),
+            *dry_run,
+        )
     } else {
         bail!("add_client called with non-Add command")
     }
 }
 
 /// `memnoth mcp call` - wrapper for commands.rs.
-pub fn call_tool(
-    ctx: &AppContext,
-    args: &crate::cli::McpCommand,
-) -> Result<Value> {
+pub fn call_tool(ctx: &AppContext, args: &crate::cli::McpCommand) -> Result<Value> {
     if let crate::cli::McpCommand::Call {
         tool,
         args: args_json,
         profile,
     } = args
     {
-        let profile_opt = profile.as_ref().and_then(|p| Profile::from_name(p)).unwrap_or(Profile::Full);
+        let profile_opt = profile
+            .as_ref()
+            .and_then(|p| Profile::from_name(p))
+            .unwrap_or(Profile::Full);
         call(ctx, tool, args_json, profile_opt)
     } else {
         bail!("call_tool called with non-Call command")
@@ -955,10 +959,7 @@ pub fn call_tool(
 }
 
 /// `memnoth mcp list` - wrapper for commands.rs.
-pub fn list_clients(
-    ctx: &AppContext,
-    _args: &crate::cli::McpCommand,
-) -> Result<ListReport> {
+pub fn list_clients(ctx: &AppContext, _args: &crate::cli::McpCommand) -> Result<ListReport> {
     list(ctx)
 }
 
@@ -987,9 +988,9 @@ pub fn logs_impl(
     let url = ctx.mcp_url();
 
     use memnoth_mcp_client::HttpTransport;
-    
+
     let mut sessions_log = Vec::new();
-    
+
     // If URL is set (HTTP), we can connect and query
     if let Ok(http_url) = reqwest::Url::parse(&url) {
         let transport = HttpTransport::new(http_url.to_string())?;
@@ -1030,7 +1031,7 @@ pub fn logs_impl(
             }
         }
     }
-    
+
     Ok(LogsReport {
         sessions: sessions_log,
         profile: profile.name().to_string(),
@@ -1057,7 +1058,9 @@ pub fn profile_set(ctx: &AppContext, profile_name: &str) -> Result<ProfileSetRep
 
     let mut config = ctx.config.clone();
     config.profile = Some(profile.name().to_string());
-    config.save(&ctx.config_path).context("failed to save config")?;
+    config
+        .save(&ctx.config_path)
+        .context("failed to save config")?;
 
     Ok(ProfileSetReport {
         profile: profile.name().to_string(),
@@ -1087,9 +1090,12 @@ pub fn exposes(_ctx: &AppContext) -> Result<ExposesReport> {
     Ok(ExposesReport { profiles })
 }
 
-
 /// `memnoth mcp restart` implementation.
-pub fn restart_impl(ctx: &AppContext, server: Option<String>, _force: bool) -> Result<RestartReport> {
+pub fn restart_impl(
+    ctx: &AppContext,
+    server: Option<String>,
+    _force: bool,
+) -> Result<RestartReport> {
     // For HTTP servers, we can't easily restart from the client side
     // This is mainly useful for stdio servers launched by the CLI
     let binary = require_server(ctx)?;
@@ -1130,7 +1136,7 @@ fn stop_mcp_server() -> Result<bool> {
                 std::thread::sleep(std::time::Duration::from_millis(500));
                 Ok(true)
             }
-            Ok(_) => Ok(false), // Process not found
+            Ok(_) => Ok(false),  // Process not found
             Err(_) => Ok(false), // Command failed
         }
     }
@@ -1146,7 +1152,7 @@ fn stop_mcp_server() -> Result<bool> {
                 std::thread::sleep(std::time::Duration::from_millis(500));
                 Ok(true)
             }
-            Ok(_) => Ok(false), // Process not found
+            Ok(_) => Ok(false),  // Process not found
             Err(_) => Ok(false), // Command failed
         }
     }

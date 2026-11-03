@@ -231,10 +231,7 @@ impl DiffViewer {
     /// Next hunk containing conflict markers.
     pub fn next_conflict(&mut self) {
         let start = self.state.selected().map(|s| s + 1).unwrap_or(0);
-        if let Some(offset) = self.hunks[start..]
-            .iter()
-            .position(Self::is_conflict)
-        {
+        if let Some(offset) = self.hunks[start..].iter().position(Self::is_conflict) {
             self.state.select(Some(start + offset));
         }
     }

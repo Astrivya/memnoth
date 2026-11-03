@@ -9,18 +9,18 @@
 //! Shows current default with ★.
 //! --json with full metadata.
 
+use crate::context::Config;
+use crate::provider::{Pricing, Settings};
+use crate::tui::app::App;
+use crate::tui::overlays::{Overlay, OverlayAction, OverlayKind};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use memnoth_auth::get_credential_sync;
+use memnoth_cloud_client::{CloudClient, ModelInfo};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
-use crate::context::Config;
-use crate::provider::{Pricing, Settings};
-use crate::tui::app::App;
-use crate::tui::overlays::{Overlay, OverlayAction, OverlayKind};
-use memnoth_auth::get_credential_sync;
-use memnoth_cloud_client::{CloudClient, ModelInfo};
 /// Tab variants for the model browser.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ModelTab {
@@ -147,7 +147,10 @@ pub struct ModelsOverlay {
 impl ModelsOverlay {
     /// The tab the overlay is showing.
     fn tab(&self) -> ModelTab {
-        self.tabs.get(self.active_tab).cloned().unwrap_or(ModelTab::All)
+        self.tabs
+            .get(self.active_tab)
+            .cloned()
+            .unwrap_or(ModelTab::All)
     }
 
     pub fn new() -> Self {
@@ -222,9 +225,7 @@ impl ModelsOverlay {
         let mut entries: Vec<ModelEntry> = Vec::new();
         for info in fetched {
             let capabilities = info.capabilities.clone().unwrap_or_default();
-            let supports_json = capabilities
-                .iter()
-                .any(|c| c == "json" || c == "json_mode");
+            let supports_json = capabilities.iter().any(|c| c == "json" || c == "json_mode");
             let speed = infer_speed(&info.family);
 
             let is_default = default_model.as_ref().map_or(false, |dm| dm == &info.id);
@@ -614,11 +615,7 @@ impl ModelsOverlay {
             .collect();
 
         let tabs = ratatui::widgets::Tabs::new(tab_titles)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Models "),
-            )
+            .block(Block::default().borders(Borders::ALL).title(" Models "))
             .select(self.active_tab)
             .style(Style::default().fg(Color::Gray))
             .highlight_style(
@@ -645,7 +642,9 @@ impl ModelsOverlay {
                             .bg(Color::Cyan)
                             .add_modifier(Modifier::BOLD)
                     } else if m.is_default {
-                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default()
                     },
@@ -846,56 +845,72 @@ impl ModelsOverlay {
                 Line::from(vec![
                     Span::styled(
                         "ID: ",
-                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
                     ),
                     Span::raw(&m.id),
                 ]),
                 Line::from(vec![
                     Span::styled(
                         "Provider: ",
-                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
                     ),
                     Span::raw(&m.provider),
                 ]),
                 Line::from(vec![
                     Span::styled(
                         "Family: ",
-                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
                     ),
                     Span::raw(&m.family),
                 ]),
                 Line::from(vec![
                     Span::styled(
                         "Context: ",
-                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
                     ),
                     Span::raw(format!("{}k tokens", m.context_window / 1000)),
                 ]),
                 Line::from(vec![
                     Span::styled(
                         "Max Output: ",
-                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
                     ),
                     Span::raw(format!("{} tokens", m.max_output_tokens)),
                 ]),
                 Line::from(vec![
                     Span::styled(
                         "Input Price: ",
-                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
                     ),
                     Span::raw(Self::format_price(m.input_cost_per_million_micros)),
                 ]),
                 Line::from(vec![
                     Span::styled(
                         "Output Price: ",
-                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
                     ),
                     Span::raw(Self::format_price(m.output_cost_per_million_micros)),
                 ]),
                 Line::from(vec![
                     Span::styled(
                         "Capabilities: ",
-                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
                     ),
                     Span::raw(m.capabilities.join(", ")),
                 ]),
@@ -1074,9 +1089,9 @@ impl Overlay for ModelsOverlay {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3),  // Tabs
-                Constraint::Min(0),     // Table
-                Constraint::Length(3),  // Footer
+                Constraint::Length(3), // Tabs
+                Constraint::Min(0),    // Table
+                Constraint::Length(3), // Footer
             ])
             .split(area);
 
@@ -1134,11 +1149,7 @@ fn infer_speed(family: &str) -> SpeedRating {
     let f = family.to_lowercase();
     if f.contains("haiku") || f.contains("mini") || f.contains("flash") {
         SpeedRating::Fast
-    } else if f.contains("opus")
-        || f.contains("sonnet")
-        || f.contains("4o")
-        || f.contains("70b")
-    {
+    } else if f.contains("opus") || f.contains("sonnet") || f.contains("4o") || f.contains("70b") {
         SpeedRating::Medium
     } else {
         SpeedRating::Slow

@@ -159,10 +159,7 @@ fn render_plan(credits: &CreditsResponse, billing: &BillingResponse) -> String {
     };
 
     out.push_str(&format!("Plan: {plan_name}\n"));
-    out.push_str(&format!(
-        "Balance: {} {:.2}\n",
-        credits.currency, balance
-    ));
+    out.push_str(&format!("Balance: {} {:.2}\n", credits.currency, balance));
     out.push_str(&format!(
         "Auto-recharge: {}\n",
         if credits.auto_recharge {

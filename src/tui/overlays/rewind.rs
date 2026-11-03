@@ -1,6 +1,6 @@
 //! Rewind overlay: navigate session history, replay turns, branch from points.
 
-use crossterm::event::{KeyEvent, KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -73,7 +73,12 @@ impl RewindOverlay {
         let mut state = ListState::default();
         state.select(Some(0));
         Self {
-            tabs: vec![RewindTab::Sessions, RewindTab::Turns, RewindTab::Checkpoints, RewindTab::Branches],
+            tabs: vec![
+                RewindTab::Sessions,
+                RewindTab::Turns,
+                RewindTab::Checkpoints,
+                RewindTab::Branches,
+            ],
             list_state: state,
             ..Default::default()
         }
@@ -114,67 +119,132 @@ impl RewindOverlay {
         ];
 
         self.turns = vec![
-            TurnEntry { index: 41, timestamp: "14:32".to_string(), role: "assistant".to_string(), preview: "Implemented the search overlay with vault and graph results".to_string(), tokens: Some(1240), cost: Some(0.0024) },
-            TurnEntry { index: 40, timestamp: "14:31".to_string(), role: "user".to_string(), preview: "/search event sourcing architecture".to_string(), tokens: None, cost: None },
-            TurnEntry { index: 39, timestamp: "14:30".to_string(), role: "assistant".to_string(), preview: "Created decision: use event sourcing for session replay".to_string(), tokens: Some(890), cost: Some(0.0018) },
-            TurnEntry { index: 38, timestamp: "14:29".to_string(), role: "user".to_string(), preview: "/vault remember architecture --kind decision \"Use event sourcing...\"".to_string(), tokens: None, cost: None },
-            TurnEntry { index: 37, timestamp: "14:25".to_string(), role: "assistant".to_string(), preview: "Refactored the diff viewer to use memnoth-ui DiffViewer widget".to_string(), tokens: Some(2100), cost: Some(0.0042) },
+            TurnEntry {
+                index: 41,
+                timestamp: "14:32".to_string(),
+                role: "assistant".to_string(),
+                preview: "Implemented the search overlay with vault and graph results".to_string(),
+                tokens: Some(1240),
+                cost: Some(0.0024),
+            },
+            TurnEntry {
+                index: 40,
+                timestamp: "14:31".to_string(),
+                role: "user".to_string(),
+                preview: "/search event sourcing architecture".to_string(),
+                tokens: None,
+                cost: None,
+            },
+            TurnEntry {
+                index: 39,
+                timestamp: "14:30".to_string(),
+                role: "assistant".to_string(),
+                preview: "Created decision: use event sourcing for session replay".to_string(),
+                tokens: Some(890),
+                cost: Some(0.0018),
+            },
+            TurnEntry {
+                index: 38,
+                timestamp: "14:29".to_string(),
+                role: "user".to_string(),
+                preview: "/vault remember architecture --kind decision \"Use event sourcing...\""
+                    .to_string(),
+                tokens: None,
+                cost: None,
+            },
+            TurnEntry {
+                index: 37,
+                timestamp: "14:25".to_string(),
+                role: "assistant".to_string(),
+                preview: "Refactored the diff viewer to use memnoth-ui DiffViewer widget"
+                    .to_string(),
+                tokens: Some(2100),
+                cost: Some(0.0042),
+            },
         ];
     }
 
-
     fn render_checkpoints(&mut self, frame: &mut Frame, area: Rect) {
-        let items: Vec<ListItem> = self.checkpoints.iter().enumerate().map(|(i, c)| {
-            let selected = i == self.selected;
-            let style = if selected {
-                Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
+        let items: Vec<ListItem> = self
+            .checkpoints
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let selected = i == self.selected;
+                let style = if selected {
+                    Style::default()
+                        .bg(Color::Blue)
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
 
-            let lines = vec![
-                Line::from(vec![
-                    Span::styled(&c.id, style),
-                    Span::styled(format!("  {}", c.label), style.fg(Color::Cyan)),
-                    Span::styled(format!("  {} turns, {} tok", c.turn_count, c.token_count), style.fg(Color::DarkGray)),
-                ]),
-                Line::from(vec![
-                    Span::styled("    ", Style::default()),
-                    Span::styled(&c.timestamp, style.fg(Color::Gray)),
-                ]),
-            ];
-            ListItem::new(lines).style(style)
-        }).collect();
+                let lines = vec![
+                    Line::from(vec![
+                        Span::styled(&c.id, style),
+                        Span::styled(format!("  {}", c.label), style.fg(Color::Cyan)),
+                        Span::styled(
+                            format!("  {} turns, {} tok", c.turn_count, c.token_count),
+                            style.fg(Color::DarkGray),
+                        ),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("    ", Style::default()),
+                        Span::styled(&c.timestamp, style.fg(Color::Gray)),
+                    ]),
+                ];
+                ListItem::new(lines).style(style)
+            })
+            .collect();
 
         let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title(" Checkpoints "))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Checkpoints "),
+            )
             .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
         frame.render_stateful_widget(list, area, &mut self.list_state);
     }
 
     fn render_sessions(&mut self, frame: &mut Frame, area: Rect) {
-        let items: Vec<ListItem> = self.sessions.iter().enumerate().map(|(i, s)| {
-            let selected = i == self.selected;
-            let style = if selected {
-                Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
+        let items: Vec<ListItem> = self
+            .sessions
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let selected = i == self.selected;
+                let style = if selected {
+                    Style::default()
+                        .bg(Color::Blue)
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
 
-            let current_mark = if s.is_current { " ●" } else { "" };
-            let lines = vec![
-                Line::from(vec![
-                    Span::styled(&s.name, style),
-                    Span::styled(current_mark, style.fg(Color::Green)),
-                    Span::styled(format!("  ({} msgs)", s.message_count), style.fg(Color::DarkGray)),
-                ]),
-                Line::from(vec![
-                    Span::styled("    ", Style::default()),
-                    Span::styled(format!("Created: {}  Last: {}", s.created, s.last_active), style.fg(Color::Gray)),
-                ]),
-            ];
-            ListItem::new(lines).style(style)
-        }).collect();
+                let current_mark = if s.is_current { " ●" } else { "" };
+                let lines = vec![
+                    Line::from(vec![
+                        Span::styled(&s.name, style),
+                        Span::styled(current_mark, style.fg(Color::Green)),
+                        Span::styled(
+                            format!("  ({} msgs)", s.message_count),
+                            style.fg(Color::DarkGray),
+                        ),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("    ", Style::default()),
+                        Span::styled(
+                            format!("Created: {}  Last: {}", s.created, s.last_active),
+                            style.fg(Color::Gray),
+                        ),
+                    ]),
+                ];
+                ListItem::new(lines).style(style)
+            })
+            .collect();
 
         let list = List::new(items)
             .block(Block::default().borders(Borders::ALL).title(" Sessions "))
@@ -183,38 +253,52 @@ impl RewindOverlay {
     }
 
     fn render_turns(&mut self, frame: &mut Frame, area: Rect) {
-        let items: Vec<ListItem> = self.turns.iter().enumerate().map(|(i, t)| {
-            let selected = i == self.selected;
-            let style = if selected {
-                Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
+        let items: Vec<ListItem> = self
+            .turns
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let selected = i == self.selected;
+                let style = if selected {
+                    Style::default()
+                        .bg(Color::Blue)
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
 
-            let role_color = match t.role.as_str() {
-                "user" => Color::Cyan,
-                "assistant" => Color::Green,
-                _ => Color::Gray,
-            };
+                let role_color = match t.role.as_str() {
+                    "user" => Color::Cyan,
+                    "assistant" => Color::Green,
+                    _ => Color::Gray,
+                };
 
-            let tokens_str = t.tokens.map_or("".to_string(), |v| format!("  {} tok", v));
-            let cost_str = t.cost.map_or("".to_string(), |v| format!("  ${:.4}", v));
+                let tokens_str = t.tokens.map_or("".to_string(), |v| format!("  {} tok", v));
+                let cost_str = t.cost.map_or("".to_string(), |v| format!("  ${:.4}", v));
 
-            let lines = vec![
-                Line::from(vec![
-                    Span::styled(format!("#{} ", t.index), Style::default().fg(Color::DarkGray)),
-                    Span::styled(&t.timestamp, Style::default().fg(Color::Gray)),
-                    Span::styled(format!("  [{}]", t.role), Style::default().fg(role_color).add_modifier(Modifier::BOLD)),
-                    Span::styled(tokens_str, style.fg(Color::DarkGray)),
-                    Span::styled(cost_str, style.fg(Color::Yellow)),
-                ]),
-                Line::from(vec![
-                    Span::styled("    ", Style::default()),
-                    Span::styled(&t.preview, style.fg(Color::Gray)),
-                ]),
-            ];
-            ListItem::new(lines).style(style)
-        }).collect();
+                let lines = vec![
+                    Line::from(vec![
+                        Span::styled(
+                            format!("#{} ", t.index),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                        Span::styled(&t.timestamp, Style::default().fg(Color::Gray)),
+                        Span::styled(
+                            format!("  [{}]", t.role),
+                            Style::default().fg(role_color).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(tokens_str, style.fg(Color::DarkGray)),
+                        Span::styled(cost_str, style.fg(Color::Yellow)),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("    ", Style::default()),
+                        Span::styled(&t.preview, style.fg(Color::Gray)),
+                    ]),
+                ];
+                ListItem::new(lines).style(style)
+            })
+            .collect();
 
         let list = List::new(items)
             .block(Block::default().borders(Borders::ALL).title(" Turns "))
@@ -228,23 +312,28 @@ impl RewindOverlay {
             ("main", "bugfix-search", "1 turn diverged"),
         ];
 
-        let items: Vec<ListItem> = branches.iter().enumerate().map(|(i, (base, name, desc))| {
-            let selected = i == self.selected;
-            let style = if selected {
-                Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
+        let items: Vec<ListItem> = branches
+            .iter()
+            .enumerate()
+            .map(|(i, (base, name, desc))| {
+                let selected = i == self.selected;
+                let style = if selected {
+                    Style::default()
+                        .bg(Color::Blue)
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
 
-            let lines = vec![
-                Line::from(vec![
+                let lines = vec![Line::from(vec![
                     Span::styled(*name, style),
                     Span::styled(format!("  (from {})", base), style.fg(Color::Cyan)),
                     Span::styled(format!("  {}", desc), style.fg(Color::DarkGray)),
-                ]),
-            ];
-            ListItem::new(lines).style(style)
-        }).collect();
+                ])];
+                ListItem::new(lines).style(style)
+            })
+            .collect();
 
         let list = List::new(items)
             .block(Block::default().borders(Borders::ALL).title(" Branches "))
@@ -288,7 +377,10 @@ impl Overlay for RewindOverlay {
         if self.mode == RewindMode::ConfirmBranch {
             match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                    app.push(crate::tui::app::EntryRole::Info, "Branched from selected turn".to_string());
+                    app.push(
+                        crate::tui::app::EntryRole::Info,
+                        "Branched from selected turn".to_string(),
+                    );
                     self.mode = RewindMode::Browse;
                     self.detail_view = false;
                 }
@@ -386,7 +478,10 @@ impl Overlay for RewindOverlay {
                         RewindTab::Sessions => {
                             if let Some(s) = self.sessions.get(self.selected) {
                                 if !s.is_current {
-                                    app.push(crate::tui::app::EntryRole::Info, format!("Resuming session: {}", s.name));
+                                    app.push(
+                                        crate::tui::app::EntryRole::Info,
+                                        format!("Resuming session: {}", s.name),
+                                    );
                                     return OverlayAction::Close;
                                 }
                             }
@@ -435,12 +530,22 @@ impl Overlay for RewindOverlay {
                 // Copy
                 if !self.detail_view {
                     match self.tab() {
-                        RewindTab::Sessions => if let Some(s) = self.sessions.get(self.selected) {
-                            app.push(crate::tui::app::EntryRole::Info, format!("Copied session: {}", s.name));
-                        },
-                        RewindTab::Turns => if let Some(t) = self.turns.get(self.selected) {
-                            app.push(crate::tui::app::EntryRole::Info, format!("Copied turn #{}", t.index));
-                        },
+                        RewindTab::Sessions => {
+                            if let Some(s) = self.sessions.get(self.selected) {
+                                app.push(
+                                    crate::tui::app::EntryRole::Info,
+                                    format!("Copied session: {}", s.name),
+                                );
+                            }
+                        }
+                        RewindTab::Turns => {
+                            if let Some(t) = self.turns.get(self.selected) {
+                                app.push(
+                                    crate::tui::app::EntryRole::Info,
+                                    format!("Copied turn #{}", t.index),
+                                );
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -449,12 +554,22 @@ impl Overlay for RewindOverlay {
                 // Pin
                 if !self.detail_view {
                     match self.tab() {
-                        RewindTab::Sessions => if let Some(s) = self.sessions.get(self.selected) {
-                            app.push(crate::tui::app::EntryRole::Info, format!("Pinned session: {}", s.name));
-                        },
-                        RewindTab::Turns => if let Some(t) = self.turns.get(self.selected) {
-                            app.push(crate::tui::app::EntryRole::Info, format!("Pinned turn #{}", t.index));
-                        },
+                        RewindTab::Sessions => {
+                            if let Some(s) = self.sessions.get(self.selected) {
+                                app.push(
+                                    crate::tui::app::EntryRole::Info,
+                                    format!("Pinned session: {}", s.name),
+                                );
+                            }
+                        }
+                        RewindTab::Turns => {
+                            if let Some(t) = self.turns.get(self.selected) {
+                                app.push(
+                                    crate::tui::app::EntryRole::Info,
+                                    format!("Pinned turn #{}", t.index),
+                                );
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -464,7 +579,10 @@ impl Overlay for RewindOverlay {
                 if !self.detail_view && self.tab() == RewindTab::Sessions {
                     if let Some(s) = self.sessions.get(self.selected) {
                         if !s.is_current {
-                            app.push(crate::tui::app::EntryRole::Info, format!("Resuming session: {}", s.name));
+                            app.push(
+                                crate::tui::app::EntryRole::Info,
+                                format!("Resuming session: {}", s.name),
+                            );
                             return OverlayAction::Close;
                         }
                     }
@@ -475,10 +593,18 @@ impl Overlay for RewindOverlay {
                 if !self.detail_view && self.tab() == RewindTab::Sessions {
                     if let Some(s) = self.sessions.get(self.selected) {
                         if !s.is_current {
-                            app.push(crate::tui::app::EntryRole::Info, format!("Deleted session: {}", s.name));
+                            app.push(
+                                crate::tui::app::EntryRole::Info,
+                                format!("Deleted session: {}", s.name),
+                            );
                             self.sessions.remove(self.selected);
-                            self.selected = self.selected.min(self.sessions.len().saturating_sub(1));
-                            self.list_state.select(if self.sessions.is_empty() { None } else { Some(self.selected) });
+                            self.selected =
+                                self.selected.min(self.sessions.len().saturating_sub(1));
+                            self.list_state.select(if self.sessions.is_empty() {
+                                None
+                            } else {
+                                Some(self.selected)
+                            });
                         }
                     }
                 }
@@ -498,24 +624,32 @@ impl Overlay for RewindOverlay {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3),  // Tabs
-                Constraint::Min(0),     // Content
-                Constraint::Length(2),  // Help footer
+                Constraint::Length(3), // Tabs
+                Constraint::Min(0),    // Content
+                Constraint::Length(2), // Help footer
             ])
             .split(area);
 
         // Tabs
-        let tab_titles: Vec<&str> = self.tabs.iter().map(|t| match t {
-            RewindTab::Sessions => "Sessions",
-            RewindTab::Turns => "Turns",
-            RewindTab::Checkpoints => "Checkpoints",
-            RewindTab::Branches => "Branches",
-        }).collect();
+        let tab_titles: Vec<&str> = self
+            .tabs
+            .iter()
+            .map(|t| match t {
+                RewindTab::Sessions => "Sessions",
+                RewindTab::Turns => "Turns",
+                RewindTab::Checkpoints => "Checkpoints",
+                RewindTab::Branches => "Branches",
+            })
+            .collect();
         let tabs = Tabs::new(tab_titles)
             .block(Block::default().borders(Borders::ALL).title(" Rewind "))
             .select(self.active_tab)
             .style(Style::default().fg(Color::Gray))
-            .highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+            .highlight_style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            );
         frame.render_widget(tabs, chunks[0]);
 
         // Content
@@ -541,9 +675,15 @@ impl Overlay for RewindOverlay {
             "esc: back · c: copy · p: pin · b: branch from turn"
         } else {
             match self.tab() {
-                RewindTab::Sessions => "↑↓: navigate · enter: resume · r: resume · d: delete · c: copy · p: pin · tab: next tab · esc: close",
-                RewindTab::Turns => "↑↓: navigate · enter: detail · b: branch · c: copy · p: pin · tab: next tab · esc: close",
-                RewindTab::Checkpoints => "↑↓: navigate · enter: detail · c: copy · tab: next tab · esc: close",
+                RewindTab::Sessions => {
+                    "↑↓: navigate · enter: resume · r: resume · d: delete · c: copy · p: pin · tab: next tab · esc: close"
+                }
+                RewindTab::Turns => {
+                    "↑↓: navigate · enter: detail · b: branch · c: copy · p: pin · tab: next tab · esc: close"
+                }
+                RewindTab::Checkpoints => {
+                    "↑↓: navigate · enter: detail · c: copy · tab: next tab · esc: close"
+                }
                 RewindTab::Branches => "tab: next tab · esc: close",
             }
         };
@@ -558,7 +698,10 @@ impl Overlay for RewindOverlay {
             ("/rewind", "Open rewind overlay"),
             ("Tab", "Switch tabs (Sessions/Turns/Checkpoints/Branches)"),
             ("↑/↓", "Navigate"),
-            ("Enter", "Resume session / View turn detail / View checkpoint detail"),
+            (
+                "Enter",
+                "Resume session / View turn detail / View checkpoint detail",
+            ),
             ("B", "Branch from selected turn"),
             ("R", "Resume session"),
             ("D", "Delete session"),

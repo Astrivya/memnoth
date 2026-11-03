@@ -8,13 +8,12 @@ pub mod error;
 pub use error::{CloudError, CloudResult, RetryExhausted};
 pub mod types;
 pub use types::{
-    ApiErrorResponse, ApiKeyInfo, BatchIngestItemResult,
-    BatchIngestRequest, BatchIngestResponse, BillingResponse, CreateKeyRequest, CreateKeyResponse,
-    CreditExpiry, CreditGrant, CreditsResponse, DeviceApproveResponse, DeviceAuthResponse,
-    IngestRequest, IngestResponse, KeysResponse, McpTokenResponse, MeResponse,
-    ModelInfo, ModelPricing, ModelUsage, OrganizationInfo, OrganizationSummary, OrganizationsResponse,
-    PricingResponse, ProjectInfo, ProjectSettings, ProjectUsage, ProjectsResponse, RevokeKeyResponse,
-    TokenResponse,
+    ApiErrorResponse, ApiKeyInfo, BatchIngestItemResult, BatchIngestRequest, BatchIngestResponse,
+    BillingResponse, CreateKeyRequest, CreateKeyResponse, CreditExpiry, CreditGrant,
+    CreditsResponse, DeviceApproveResponse, DeviceAuthResponse, IngestRequest, IngestResponse,
+    KeysResponse, McpTokenResponse, MeResponse, ModelInfo, ModelPricing, ModelUsage,
+    OrganizationInfo, OrganizationSummary, OrganizationsResponse, PricingResponse, ProjectInfo,
+    ProjectSettings, ProjectUsage, ProjectsResponse, RevokeKeyResponse, TokenResponse,
 };
 
 /// Response from GET /api/v1/models
@@ -183,7 +182,6 @@ pub struct ModelList {
 
 const DEFAULT_BASE_URL: &str = "https://memnoth.astrivya.ai/api/v1";
 
-
 /// Typed HTTP client for the memnoth cloud API.
 
 /// Typed HTTP client for the memnoth cloud API.
@@ -204,10 +202,15 @@ impl CloudClient {
 
     /// Create a new cloud client with a custom base URL.
     pub fn with_base_url(base_url: &str) -> CloudResult<Self> {
-        let base_url = Url::parse(base_url)
-            .map_err(|e| CloudError::InvalidUrl(e.to_string()))?
-            .join("/")
-            .map_err(|e| CloudError::InvalidUrl(e.to_string()))?;
+        // The trailing slash is what makes `join("models")` append rather than
+        // replace the last segment; `join("/")` would also throw away `/api/v1`
+        // and land every request on the web router.
+        let mut base_url =
+            Url::parse(base_url).map_err(|e| CloudError::InvalidUrl(e.to_string()))?;
+        if !base_url.path().ends_with('/') {
+            let path = format!("{}/", base_url.path());
+            base_url.set_path(&path);
+        }
 
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(30))
@@ -236,6 +239,11 @@ impl CloudClient {
         let mut headers = HeaderMap::new();
         headers.insert("Accept", HeaderValue::from_static("application/json"));
         headers.insert("Content-Type", HeaderValue::from_static("application/json"));
+        // The API refuses writes without this marker. It exists to stop a
+        // browser from issuing state-changing requests on a user's behalf; a
+        // CLI has no ambient cookie session to abuse, and the server asks for
+        // the literal marker, so every client request carries it.
+        headers.insert("x-memnoth-csrf", HeaderValue::from_static("1"));
         if let Some(token) = &self.auth_token {
             if let Ok(value) = HeaderValue::from_str(&format!("Bearer {}", token)) {
                 headers.insert(AUTHORIZATION, value);
@@ -449,7 +457,10 @@ impl Default for CloudClient {
     }
 }
 impl CloudClient {
-    pub fn set_telemetry_preferences(&self, enabled: bool) -> CloudResult<TelemetryPreferencesResponse> {
+    pub fn set_telemetry_preferences(
+        &self,
+        enabled: bool,
+    ) -> CloudResult<TelemetryPreferencesResponse> {
         let url = self
             .base_url
             .join("telemetry/preferences")
