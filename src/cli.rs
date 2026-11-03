@@ -110,17 +110,6 @@ pub enum Verb {
     Privacy(PrivacyArgs),
     /// Billing: invoices, plan, limits.
     Billing(BillingCommands),
-    /// Git worktree management: create, list, clean, diff.
-    Worktree(WorktreeArgs),
-    /// Fan out a task across isolated worktrees (batch execution).
-    Batch(BatchCmdArgs),
-    /// Run a command in parallel across worktree targets.
-    Parallel(ParallelArgs),
-    Automation(AutomationArgs),
-    /// Watch for file changes and incrementally update the code graph and vault.
-    Watch(WatchArgs),
-    /// Serve a local HTTP API for editor integration.
-    Serve(ServeArgs),
     /// Open a deep-link to the memnoth cloud console.
     Open(OpenArgs),
     /// Skill management: add, list, remove, run, edit.
@@ -129,8 +118,6 @@ pub enum Verb {
     SetTheme(crate::tui::app::Theme),
     /// Set screen reader mode.
     SetScreenReader(crate::tui::app::ScreenReaderMode),
-    /// Generate Markdown documentation from the command registry.
-    Docs(DocsArgs),
     /// Send feedback to memnoth cloud.
     Feedback(FeedbackArgs),
     /// Configure model provider: add, list, remove, test connection.
@@ -977,6 +964,7 @@ pub struct PrivacyArgs {
     pub action: PrivacyCommand,
 }
 
+#[derive(Debug, Subcommand)]
 pub enum PrivacyCommand {
     /// Show privacy status and what data leaves the machine.
     #[command(name = "status")]
@@ -1888,6 +1876,12 @@ pub enum McpCommand {
         #[arg(long, value_name = "PROFILE")]
         profile: Option<String>,
     },
+    /// Mint an MCP bearer token from the cloud for this account.
+    Token {
+        /// Output as JSON.
+        #[arg(long, global = true)]
+        json: bool,
+    },
     /// Show MCP server logs (agent events, lifecycle).
     Logs {
         /// Session to show logs for (default: all sessions).
@@ -2362,6 +2356,8 @@ pub struct ParallelArgs {
     /// Output as JSON.
     #[arg(long, global = true)]
     pub json: bool,
+}
+
 /// `mn docs` — generate Markdown documentation from the command registry.
 #[derive(Debug, Args)]
 pub struct DocsArgs {

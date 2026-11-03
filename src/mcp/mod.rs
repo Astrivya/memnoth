@@ -38,10 +38,6 @@ pub use render::{
     render_profile_set, render_profile_show, render_remove, render_restart, render_selftest,
     render_test, render_token,
 };
-pub use self::{
-    add_client, call_tool, exposes, list_clients, logs, profile_set, profile_show, restart, selftest, token,
-};
-
 use clients::{ClientKind, Entry};
 
 /// How long `mcp call` waits for one reply from the server.
@@ -997,63 +993,49 @@ pub fn logs_impl(ctx: &AppContext, session: Option<String>, tail: usize, json_ou
     })
 }
 
-/// `memnoth mcp profile show` implementation.
-pub fn profile_show(ctx: &AppContext, _args: &crate::cli::McpProfileShowArgs) -> Result<ProfileShowReport> {
+/// `memnoth mcp profile show` - which profile is active, and where it came from.
+pub fn profile_show(ctx: &AppContext) -> Result<ProfileShowReport> {
     let profile_name = ctx.profile();
     let profile = Profile::from_name(&profile_name).unwrap_or(Profile::Full);
-    let source = profile_source(ctx);
-    
+
     Ok(ProfileShowReport {
         profile: profile.name().to_string(),
-        source,
+        source: profile_source(ctx),
     })
 }
 
-/// `memnoth mcp profile set` implementation.
-pub fn profile_set(ctx: &AppContext, args: &crate::cli::McpProfileSetArgs) -> Result<ProfileSetReport> {
-    let profile_name = &args.profile;
-    let profile = Profile::from_name(profile_name)
-        .with_context(|| format!("unknown profile `{}`; valid: micro, memory, coord, code, full, agent", profile_name))?;
-    
-    // Update config file
+/// `memnoth mcp profile set` - persist the profile every client reads.
+pub fn profile_set(ctx: &AppContext, profile_name: &str) -> Result<ProfileSetReport> {
+    let profile = Profile::from_name(profile_name).with_context(|| {
+        format!("unknown profile `{profile_name}`; valid: micro, memory, coord, code, full, agent")
+    })?;
+
     let mut config = ctx.config.clone();
     config.profile = Some(profile.name().to_string());
-    config.save(&ctx.config_path)
-        .context("failed to save config")?;
-    
+    config.save(&ctx.config_path).context("failed to save config")?;
+
     Ok(ProfileSetReport {
         profile: profile.name().to_string(),
         updated: true,
     })
 }
 
-
-/// `memnoth mcp exposes`.
-pub fn exposes(ctx: &AppContext) -> Result<ExposesReport> {
-    use memnoth_capability::{Profile, surface_report};
-    
+pub fn exposes(_ctx: &AppContext) -> Result<ExposesReport> {
     let mut profiles = Vec::new();
-    
-    for row in surface_report() {
-        let profile = match row.profile {
-            Profile::Micro => Profile::Micro,
-            Profile::Memory => Profile::Memory,
-            Profile::Coord => Profile::Coord,
-            Profile::Code => Profile::Code,
-            Profile::Full => Profile::Full,
-            // Agent is handled by the server
-        };
-        
-        let tools = profile.tool_names();
-        let tools_list = serde_json::to_string(&memnoth_mcp::visible_tools(profile))
-            .unwrap_or_default()
-            .len();
-        
+
+    for profile in [
+        Profile::Micro,
+        Profile::Memory,
+        Profile::Coord,
+        Profile::Code,
+        Profile::Full,
+    ] {
+        let tools: Vec<String> = profile.tool_names().into_iter().map(String::from).collect();
         profiles.push(ProfileExposure {
-            profile: row.profile.name().to_string(),
-            tool_count: row.tool_count,
-            tools_list_bytes: tools_list,
-            tools: tools.into_iter().map(String::from).collect(),
+            profile: profile.name().to_string(),
+            tool_count: tools.len(),
+            tools_list_bytes: serde_json::to_string(&tools).map(|s| s.len()).unwrap_or(0),
+            tools,
         });
     }
 
@@ -1085,164 +1067,6 @@ pub fn restart_impl(ctx: &AppContext, server: Option<String>, _force: bool) -> R
         message,
         server: Some(binary_path),
     })
-}
-
-/// `memnoth mcp restart` wrapper for commands.rs.
-pub fn restart(
-    ctx: &AppContext,
-    args: &crate::cli::McpCommand,
-) -> Result<RestartReport> {
-    if let crate::cli::McpCommand::Restart { server, force } = args {
-        restart_impl(ctx, server.clone(), *force)
-    } else {
-        bail!("restart called with non-Restart command")
-    }
-}
-
-/// `memnoth mcp exposes` wrapper for commands.rs.
-pub fn exposes(
-    ctx: &AppContext,
-    args: &crate::cli::McpCommand,
-) -> Result<ExposesReport> {
-    if let crate::cli::McpCommand::Exposes { json: _ } = args {
-        exposes_impl(ctx)
-    } else {
-        bail!("exposes called with non-Exposes command")
-    }
-}
-
-/// `memnoth mcp profile show` wrapper for commands.rs.
-pub fn profile_show(
-    ctx: &AppContext,
-    args: &crate::cli::McpCommand,
-) -> Result<ProfileShowReport> {
-    if let crate::cli::McpCommand::Profile {
-        action: crate::cli::McpProfileCommand::Show { json: _ },
-    } = args
-    {
-        profile_show_impl(ctx)
-    } else {
-        bail!("profile_show called with non-Profile Show command")
-    }
-}
-
-/// `memnoth mcp profile set` wrapper for commands.rs.
-pub fn profile_set(
-    ctx: &AppContext,
-    args: &crate::cli::McpCommand,
-) -> Result<ProfileSetReport> {
-    if let crate::cli::McpCommand::Profile {
-        action: crate::cli::McpProfileCommand::Set { profile },
-    } = args
-    {
-        profile_set_impl(ctx, profile)
-    } else {
-        bail!("profile_set called with non-Profile Set command")
-    }
-}
-
-/// `memnoth mcp logs` wrapper for commands.rs.
-pub fn logs(
-    ctx: &AppContext,
-    args: &crate::cli::McpCommand,
-) -> Result<LogsReport> {
-    if let crate::cli::McpCommand::Logs {
-        session,
-        tail,
-        json: _,
-    } = args
-    {
-        logs_impl(ctx, session.clone(), *tail, false)
-    } else {
-        bail!("logs called with non-Logs command")
-    }
-}
-
-/// `memnoth mcp selftest` wrapper for commands.rs.
-pub fn selftest(
-    ctx: &AppContext,
-    _args: &crate::cli::McpCommand,
-) -> Result<SelftestReport> {
-    selftest_inner(ctx)
-}
-
-/// `memnoth mcp token` wrapper for commands.rs.
-pub fn token(
-    ctx: &AppContext,
-    _args: &crate::cli::McpCommand,
-) -> Result<TokenReport> {
-    token_impl(ctx)
-}
-
-/// `memnoth mcp profile show` implementation.
-pub fn profile_show_impl(ctx: &AppContext) -> Result<ProfileShowReport> {
-    let profile_name = ctx.profile();
-    let profile = Profile::from_name(&profile_name).unwrap_or(Profile::Full);
-    let source = profile_source(ctx);
-    
-    Ok(ProfileShowReport {
-        profile: profile.name().to_string(),
-        source,
-    })
-}
-
-/// `memnoth mcp profile set` implementation.
-pub fn profile_set_impl(ctx: &AppContext, profile_name: &str) -> Result<ProfileSetReport> {
-    let profile = Profile::from_name(profile_name)
-        .with_context(|| format!("unknown profile `{}`; valid: micro, memory, coord, code, full, agent", profile_name))?;
-    
-    // Update config file
-    let mut config = ctx.config.clone();
-    config.profile = Some(profile.name().to_string());
-    config.save(&ctx.config_path)
-        .context("failed to save config")?;
-    
-    Ok(ProfileSetReport {
-        profile: profile.name().to_string(),
-        updated: true,
-    })
-}
-
-/// `memnoth mcp exposes` implementation.
-pub fn exposes_impl(ctx: &AppContext) -> Result<ExposesReport> {
-    use memnoth_capability::{Profile, surface_report};
-    
-    let mut profiles = Vec::new();
-    
-    for row in surface_report() {
-        let profile = match row.profile {
-            Profile::Micro => Profile::Micro,
-            Profile::Memory => Profile::Memory,
-            Profile::Coord => Profile::Coord,
-            Profile::Code => Profile::Code,
-            Profile::Full => Profile::Full,
-            // Agent is handled by the server
-        };
-        
-        let tools = profile.tool_names();
-        let tools_list = serde_json::to_string(&memnoth_mcp::visible_tools(profile))
-            .unwrap_or_default()
-            .len();
-        
-        profiles.push(ProfileExposure {
-            profile: row.profile.name().to_string(),
-            tool_count: row.tool_count,
-            tools_list_bytes: tools_list,
-            tools: tools.into_iter().map(String::from).collect(),
-        });
-    }
-    
-    // Add agent profile info
-    profiles.push(ProfileExposure {
-        profile: "agent".to_string(),
-        tool_count: memnoth_mcp::agent::AGENT_TOOLS.len(),
-        tools_list_bytes: serde_json::to_string(&memnoth_mcp::agent::agent_tool_definitions())
-            .unwrap_or_default()
-            .len(),
-        tools: memnoth_mcp::agent::AGENT_TOOLS.iter().map(|s| s.to_string()).collect(),
-    });
-    
-    Ok(ExposesReport { profiles })
 }
 
 /// Attempt to gracefully stop the memnoth-mcp server process.
@@ -1280,17 +1104,6 @@ fn stop_mcp_server() -> Result<bool> {
             Ok(_) => Ok(false), // Process not found
             Err(_) => Ok(false), // Command failed
         }
-    }
-}
-/// `memnoth mcp logs` wrapper for commands.rs.
-pub fn logs(
-    ctx: &AppContext,
-    args: &crate::cli::McpCommand,
-) -> Result<LogsReport> {
-    if let crate::cli::McpCommand::Logs { session, tail, json: _ } = args {
-        logs_impl(ctx, session.clone(), *tail, false)
-    } else {
-        bail!("logs called with non-Logs command")
     }
 }
 #[cfg(test)]

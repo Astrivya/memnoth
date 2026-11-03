@@ -1,5 +1,4 @@
-use anyhow::{Context, Result};
-use regex::Regex;
+use anyhow::Result;
 use serde_json::Value;
 use std::collections::HashMap;
 /// Template engine for rendering skill content with arguments.

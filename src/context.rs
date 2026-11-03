@@ -54,6 +54,21 @@ pub struct Config {
     /// `[privacy]`: privacy and telemetry configuration
     #[serde(skip_serializing_if = "Option::is_none")]
     pub privacy: Option<PrivacyConfig>,
+    /// `[ui]`: presentation preferences that outlive a single session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ui: Option<UiConfig>,
+}
+
+/// Presentation preferences written by `mn set-theme` and
+/// `mn set-screen-reader`, read when a session starts.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UiConfig {
+    /// `default`, `high-contrast` or `no-color`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub theme: Option<String>,
+    /// `off` or `plain`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub screen_reader: Option<String>,
 }
 
 /// Sync configuration

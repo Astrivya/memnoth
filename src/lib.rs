@@ -24,8 +24,9 @@
 //! "nothing found".
 
 pub mod auth;
-pub mod automation;
 pub mod cli;
+
+pub use context::Config;
 pub mod cloud;
 pub mod commands;
 pub mod completion;
@@ -50,11 +51,7 @@ pub mod tui;
 pub mod update_cmd;
 pub mod usage;
 pub mod vault;
-pub mod watch;
-pub mod worktree;
-pub mod serve;
 pub mod open;
-pub mod docs;
 pub mod feedback;
 pub mod stats;
 pub mod connect;

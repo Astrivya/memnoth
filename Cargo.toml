@@ -43,6 +43,7 @@ clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 crossterm = "0.28"
 dirs = "6"
+memnoth-command = { path = "crates/memnoth-command" }
 memnoth-update = { path = "crates/memnoth-update" }
 ratatui = "0.29"
 regex = "1"
@@ -57,6 +58,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"] }
+uuid = { version = "1", features = ["v4"] }
 walkdir = "2"
 memnoth-capability = { path = "crates/memnoth-capability" }
 memnoth-context = { path = "crates/memnoth-context" }

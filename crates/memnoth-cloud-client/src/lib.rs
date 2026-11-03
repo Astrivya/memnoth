@@ -166,13 +166,6 @@ pub struct TelemetryPreferencesResponse {
     pub updated_at: String,
 }
 
-pub use self::{
-    UsageParams, UsageResponse, UsageTotals, UsagePoint,
-    LeaderboardRow, ModelRow, LocalReceipt, LocalTotals, UsageDelta, Reconciliation,
-    AcceptInviteRequest, AcceptInviteResponse, TelemetryPreferencesRequest,
-    TelemetryPreferencesResponse, DeviceAuthRequest,
-};
-
 /// Device authorization request (POST /auth/device).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceAuthRequest {
@@ -180,9 +173,13 @@ pub struct DeviceAuthRequest {
     pub client_name: String,
 }
 
-pub use types::{
-    ModelEntry, ModelList,
-};
+/// Response from GET /api/v1/models — the OpenAI-compatible envelope the cloud
+/// serves, so a client can list models with the same parser it uses elsewhere.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelList {
+    /// Models this account can select.
+    pub data: Vec<ModelEntry>,
+}
 
 const DEFAULT_BASE_URL: &str = "https://memnoth.astrivya.ai/api/v1";
 

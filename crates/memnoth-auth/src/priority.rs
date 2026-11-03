@@ -222,8 +222,14 @@ mod tests {
     use crate::credentials::{CredentialStore, FileCredentialStore};
     use tempfile::tempdir;
 
+    // Both tests below mutate the same process-wide variable. Without this lock
+    // they race when the harness runs them in parallel: one removes the value
+    // the other is about to read, so the test that fails depends on scheduling.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[tokio::test]
     async fn resolve_cli_priority() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe { std::env::set_var("MEMNOTH_API_KEY", "env_token") };
 
         let result = resolve_token(Some("cli_token".to_string()), None)
@@ -238,6 +244,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_env_priority() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe { std::env::set_var("MEMNOTH_API_KEY", "env_token") };
 
         let result = resolve_token(None, None).await.unwrap();

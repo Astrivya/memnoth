@@ -3,19 +3,20 @@ use memnoth_capability::Profile;
 use memnoth_skills::{execute_skill_command, SkillCommand as SkillsSkillCommand};
 
 use crate::cli::{
-    ActionArgs, ActionCommand, AutomationArgs, AutomationCommand, AuthCommand, BatchArgs, BatchCmdArgs, CiArgs, CiCommand,
-    HookArgs, HookCommand, KgCommand, McpCommand, McpProfileCommand, ParallelArgs, TeamsCommand, VaultCommand, Verb,
-    PrivacyArgs, PrivacyCommand, WorktreeArgs, WorktreeCommand,
-    SkillCommand, SkillArgs, WatchArgs, ServeArgs, OpenArgs, DocsArgs,
+    ActionArgs, ActionCommand, AutomationArgs, AutomationCommand, AuthCommand, CiArgs, CiCommand,
+    HookArgs, HookCommand, KgCommand, McpCommand, McpProfileCommand, TeamsCommand, VaultCommand, Verb,
+    PrivacyArgs, PrivacyCommand,
+    SkillCommand, SkillArgs, OpenArgs,
     FeedbackArgs, FeedbackCommand, StatsArgs,
     ConnectArgs, ConnectCommand,
 };
+use crate::auth::{auth_status, login, logout, whoami};
 use crate::completion::{Shell, install, show_completions};
 use crate::context::AppContext;
 use crate::output::{ErrorOutcome, Outcome};
 use crate::{
-    automation, cloud, config_cmd, doctor, docs, kg, mcp, models, session_cmd, setup, teams, update_cmd,
-    usage, vault, team, billing, worktree, watch, serve, open,
+    cloud, config_cmd, doctor, kg, mcp, models, session_cmd, setup, teams, update_cmd,
+    usage, vault, team, billing, open,
     telemetry, sync, feedback, stats, connect,
 };
 
@@ -141,60 +142,9 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
                 *confidence,
                 reason,
             ),
-            VaultCommand::Merge { from, into, reason } => {
-                vault::merge(ctx, from, into, reason)
-            }
-            VaultCommand::Duplicates { at, json } => {
-                vault::duplicates(ctx, at.as_deref(), *json)
-            }
-            VaultCommand::Top { limit, kind, at } => {
-                vault::top(ctx, *limit, kind.as_deref(), at.as_deref())
-            }
-            VaultCommand::Timeline { limit, at, kind, include_observations } => {
-                vault::timeline(ctx, *limit, at.as_deref(), kind.as_deref(), *include_observations)
-            }
-            VaultCommand::Audit { limit, kind, json } => {
-                vault::audit(ctx, *limit, kind.as_deref(), *json)
-            }
-            VaultCommand::Explain { name, at } => {
-                vault::explain(ctx, name, at.as_deref())
-            }
-            VaultCommand::Graph { name, depth, at, json } => {
-                vault::graph(ctx, name, *depth, at.as_deref(), *json)
-            }
-            VaultCommand::Link { source, target, kind, confidence, reason } => {
-                vault::link(ctx, source, target, kind, *confidence, reason)
-            }
-            VaultCommand::Unlink { source, target, kind, reason } => {
-                vault::unlink(ctx, source, target, kind, reason)
-            }
-            VaultCommand::Search { query, limit, semantic, at } => {
-                vault::search(ctx, query, *limit, *semantic, at.as_deref())
-            }
-            VaultCommand::Export { output, format, include_history, kind } => {
-                vault::export(ctx, output.as_deref(), format, *include_history, kind.as_deref())
-            }
-            VaultCommand::Import { input, format, dry_run, on_conflict } => {
-                vault::import(ctx, input.as_deref(), format, *dry_run, on_conflict)
-            }
-            VaultCommand::Gc { keep, apply } => {
-                vault::gc(ctx, *keep, *apply)
-            }
-            VaultCommand::Prune { keep_days, apply } => {
-                vault::prune(ctx, *keep_days, *apply)
-            }
-            VaultCommand::Reindex { embeddings, full } => {
-                vault::reindex(ctx, *embeddings, *full)
-            }
-            VaultCommand::Stats { json, growth } => {
-                vault::stats(ctx, *json, *growth)
-            }
-            VaultCommand::Backup { output, include_wal, compress } => {
-                vault::backup(ctx, output, *include_wal, *compress)
-            }
-            VaultCommand::Restore { input, verify, force } => {
-                vault::restore(ctx, input, *verify, *force)
-            }
+            _other => Err(ErrorOutcome::usage(
+                "this `vault` subcommand is not available in this build; run `memnoth vault --help`",
+            )),
         },
         Verb::Kg(args) => match &args.action {
             KgCommand::Index { full, no_embed } => {
@@ -297,41 +247,9 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
                     data,
                 ))
             }
-            KgCommand::Callpath { from, to } => {
-                let report = kg::callpath(ctx, from, to).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
-                let data = serde_json::to_value(&report)
-                    .context("serialize kg callpath report")
-                    .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
-                Ok(Outcome::new("kg.callpath", kg::render_callpath(&report), data))
-            }
-            KgCommand::Outline { file } => {
-                let report = kg::outline(ctx, file).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
-                let data = serde_json::to_value(&report)
-                    .context("serialize kg outline report")
-                    .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
-                Ok(Outcome::new("kg.outline", kg::render_outline(&report), data))
-            }
-            KgCommand::Tree { dir } => {
-                let report = kg::tree(ctx, dir).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
-                let data = serde_json::to_value(&report)
-                    .context("serialize kg tree report")
-                    .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
-                Ok(Outcome::new("kg.tree", kg::render_tree(&report), data))
-            }
-            KgCommand::Review { staged } => {
-                let report = kg::review(ctx, *staged).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
-                let data = serde_json::to_value(&report)
-                    .context("serialize kg review report")
-                    .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
-                Ok(Outcome::new("kg.review", kg::render_review(&report), data))
-            }
-            KgCommand::TestsFor { symbol } => {
-                let report = kg::tests_for(ctx, symbol).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
-                let data = serde_json::to_value(&report)
-                    .context("serialize kg tests-for report")
-                    .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
-                Ok(Outcome::new("kg.tests_for", kg::render_tests_for(&report), data))
-            }
+            _other => Err(ErrorOutcome::usage(
+                "this `kg` subcommand is not available in this build; run `memnoth kg --help`",
+            )),
         },
         Verb::Mcp(args) => match &args.action {
             McpCommand::Serve { http, db, profile } => {
@@ -340,52 +258,152 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
                     .map_err(|e| ErrorOutcome::from_anyhow(&e))
             }
             McpCommand::Doctor => mcp::doctor(ctx).map_err(|e| ErrorOutcome::from_anyhow(&e)),
-            McpCommand::Add(args) => mcp::add_client(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
-            McpCommand::Call(args) => mcp::call_tool(ctx, args)
-                .map_err(|e| ErrorOutcome::from_anyhow(&e)),
-            McpCommand::Selftest(args) => mcp::selftest(ctx, args)
-                .map_err(|e| ErrorOutcome::from_anyhow(&e)),
-            McpCommand::Clients(args) => mcp::list_clients(ctx, args)
-                .map_err(|e| ErrorOutcome::from_anyhow(&e)),
-            McpCommand::Token(args) => mcp::token(ctx, args)
-                .map_err(|e| ErrorOutcome::from_anyhow(&e)),
-            McpCommand::Logs(args) => {
-                let report = mcp::logs(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+            McpCommand::Add {
+                clients,
+                profile,
+                url,
+                token,
+                dry_run,
+            } => {
+                let profile_opt = profile.as_ref().and_then(|p| Profile::from_name(p));
+                let report = mcp::add(
+                    ctx,
+                    clients,
+                    profile_opt,
+                    url.as_deref(),
+                    token.as_deref(),
+                    *dry_run,
+                )
+                .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                let data = serde_json::to_value(&report)
+                    .context("serialize mcp add report")
+                    .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                Ok(Outcome::new("mcp.add", mcp::render_add(&report), data))
+            }
+            McpCommand::Call {
+                tool,
+                args: args_json,
+                profile,
+            } => {
+                let profile_opt = profile
+                    .as_ref()
+                    .and_then(|p| Profile::from_name(p))
+                    .unwrap_or(Profile::Full);
+                let value = mcp::call(ctx, tool, args_json, profile_opt)
+                    .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                Ok(Outcome::new(
+                    "mcp.call",
+                    mcp::render_call(tool, &value),
+                    value,
+                ))
+            }
+            McpCommand::Selftest => {
+                let report =
+                    mcp::selftest_inner(ctx).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                let data = serde_json::to_value(&report)
+                    .context("serialize mcp selftest report")
+                    .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                Ok(Outcome::new(
+                    "mcp.selftest",
+                    mcp::render_selftest(&report),
+                    data,
+                ))
+            }
+            McpCommand::Remove {
+                clients,
+                token,
+                dry_run,
+            } => {
+                let report = mcp::remove(ctx, clients, *token, *dry_run)
+                    .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                let data = serde_json::to_value(&report)
+                    .context("serialize mcp remove report")
+                    .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                Ok(Outcome::new("mcp.remove", mcp::render_remove(&report), data))
+            }
+            McpCommand::List => {
+                let report = mcp::list(ctx).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                let data = serde_json::to_value(&report)
+                    .context("serialize mcp list report")
+                    .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                Ok(Outcome::new("mcp.list", mcp::render_list(&report), data))
+            }
+            McpCommand::Test { tool, profile } => {
+                let profile_opt = profile.as_ref().and_then(|p| Profile::from_name(p));
+                let report = mcp::test(ctx, tool.as_deref(), profile_opt)
+                    .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                let data = serde_json::to_value(&report)
+                    .context("serialize mcp test report")
+                    .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                Ok(Outcome::new("mcp.test", mcp::render_test(&report), data))
+            }
+            McpCommand::Token { json: _ } => {
+                let report = mcp::token(ctx).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                let data = serde_json::to_value(&report)
+                    .context("serialize mcp token report")
+                    .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                Ok(Outcome::new("mcp.token", mcp::render_token(&report), data))
+            }
+            McpCommand::Logs {
+                session,
+                tail,
+                json: _,
+            } => {
+                let report = mcp::logs_impl(ctx, session.clone(), *tail, ctx.json)
+                    .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
                 let data = serde_json::to_value(&report)
                     .context("serialize mcp logs report")
                     .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
                 Ok(Outcome::new("mcp.logs", mcp::render_logs(&report), data))
             }
-            McpCommand::Profile(args) => match &args.action {
-                McpProfileCommand::Show(args) => {
-                    let report = mcp::profile_show(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+            McpCommand::Profile { action } => match action {
+                McpProfileCommand::Show { json: _ } => {
+                    let report =
+                        mcp::profile_show(ctx).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
                     let data = serde_json::to_value(&report)
                         .context("serialize mcp profile show report")
                         .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
-                    Ok(Outcome::new("mcp.profile.show", mcp::render_profile_show(&report), data))
+                    Ok(Outcome::new(
+                        "mcp.profile.show",
+                        mcp::render_profile_show(&report),
+                        data,
+                    ))
                 }
-                McpProfileCommand::Set(args) => {
-                    let report = mcp::profile_set(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                McpProfileCommand::Set { profile } => {
+                    let report =
+                        mcp::profile_set(ctx, profile).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
                     let data = serde_json::to_value(&report)
                         .context("serialize mcp profile set report")
                         .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
-                    Ok(Outcome::new("mcp.profile.set", mcp::render_profile_set(&report), data))
+                    Ok(Outcome::new(
+                        "mcp.profile.set",
+                        mcp::render_profile_set(&report),
+                        data,
+                    ))
                 }
             },
-            McpCommand::Exposes(args) => {
-                let report = mcp::exposes(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+            McpCommand::Exposes { json: _ } => {
+                let report = mcp::exposes(ctx).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
                 let data = serde_json::to_value(&report)
                     .context("serialize mcp exposes report")
                     .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
-                Ok(Outcome::new("mcp.exposes", mcp::render_exposes(&report), data))
+                Ok(Outcome::new(
+                    "mcp.exposes",
+                    mcp::render_exposes(&report),
+                    data,
+                ))
             }
             McpCommand::Restart { server, force } => {
-                let report = mcp::restart(ctx, server.clone(), *force)
+                let report = mcp::restart_impl(ctx, server.clone(), *force)
                     .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
                 let data = serde_json::to_value(&report)
                     .context("serialize mcp restart report")
                     .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
-                Ok(Outcome::new("mcp.restart", mcp::render_restart(&report), data))
+                Ok(Outcome::new(
+                    "mcp.restart",
+                    mcp::render_restart(&report),
+                    data,
+                ))
             }
         },
         Verb::Models(args) => match &args.action {
@@ -458,6 +476,49 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
         },
         Verb::Install(args) => {
             update_cmd::execute_install(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e))
+        }
+        Verb::Uninstall(args) => update_cmd::execute_uninstall(ctx, args),
+        Verb::SetTheme(theme) => {
+            let mut config = ctx.config.clone();
+            config
+                .ui
+                .get_or_insert_with(Default::default)
+                .theme = Some(theme.as_str().to_string());
+            config
+                .save(&ctx.config_path)
+                .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+            Ok(Outcome::new(
+                "set-theme",
+                format!(
+                    "Theme set to {}.\nNext: `mn session` to see it.",
+                    theme.as_str()
+                ),
+                serde_json::json!({
+                    "theme": theme.as_str(),
+                    "config": ctx.config_path.display().to_string(),
+                }),
+            ))
+        }
+        Verb::SetScreenReader(mode) => {
+            let mut config = ctx.config.clone();
+            config
+                .ui
+                .get_or_insert_with(Default::default)
+                .screen_reader = Some(mode.as_str().to_string());
+            config
+                .save(&ctx.config_path)
+                .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+            Ok(Outcome::new(
+                "set-screen-reader",
+                format!(
+                    "Screen reader mode set to {}.\nNext: `mn session` to see it.",
+                    mode.as_str()
+                ),
+                serde_json::json!({
+                    "screen_reader": mode.as_str(),
+                    "config": ctx.config_path.display().to_string(),
+                }),
+            ))
         },
         Verb::Completion(args) => match &args.action {
             crate::cli::CompletionCommand::Show(show_args) => {
@@ -490,9 +551,6 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
         Verb::Telemetry(args) => telemetry::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
         Verb::Privacy(args) => crate::sync::run_privacy(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
         Verb::Billing(args) => billing::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
-        Verb::Worktree(args) => worktree::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
-        Verb::Batch(args) => worktree::run_batch_cmd(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
-        Verb::Parallel(args) => worktree::run_parallel(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
         Verb::Skill(args) => {
             let skill_cmd = match &args.action {
                 SkillCommand::Add(a) => SkillsSkillCommand::Add(memnoth_skills::commands::AddArgs {
@@ -522,10 +580,7 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
                 .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
             Ok(Outcome::new("skill", result, serde_json::json!({})))
         },
-        Verb::Watch(args) => watch::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
-        Verb::Serve(args) => serve::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
         Verb::Open(args) => open::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
-        Verb::Docs(args) => docs::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
         Verb::Connect(args) => match &args.action {
             ConnectCommand::Add(args) => connect::connect_add(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
             ConnectCommand::List(args) => connect::connect_list(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
