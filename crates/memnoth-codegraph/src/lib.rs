@@ -119,6 +119,8 @@ pub enum IndexPhase {
 /// Staleness report for the index.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StalenessReport {
+    /// The store generation the report was read from.
+    pub generation: u64,
     /// Number of stale files.
     pub stale_files: u64,
     /// Whether the index is current.
@@ -194,11 +196,30 @@ pub struct ScoredHit {
     pub undeclared: Vec<String>,
 }
 
+/// One community of the code graph: a group of symbols that label propagation
+/// placed together, with how internally connected the group is and the symbols
+/// that best represent it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Community {
+    /// Number of symbols in the community.
+    pub size: usize,
+    /// Fraction of possible internal edges that exist, in `0.0..=1.0`.
+    pub cohesion: f64,
+    /// The community's most connected symbols, best first.
+    pub top_symbols: Vec<String>,
+}
+
 /// A map report.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MapReport {
-    pub services: Vec<String>,
-    pub cross_service_calls: usize,
+    /// Communities, largest first, clipped to the requested width.
+    pub communities: Vec<Community>,
+    /// Symbols with no live edge, which belong to no community.
+    pub outside: usize,
+    /// Whether communities were withheld to honour the requested width.
+    pub truncated: bool,
+    /// The store generation the map was computed from.
+    pub generation: u64,
 }
 
 /// A blast radius result with extended info.
@@ -415,10 +436,10 @@ pub fn codebases_under(root: &Path) -> Vec<String> {
         for entry in entries.flatten() {
             if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
                 let path = entry.path();
-                if has_source_files(&path) {
-                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                        codebases.push(name.to_string());
-                    }
+                if has_source_files(&path)
+                    && let Some(name) = path.file_name().and_then(|n| n.to_str())
+                {
+                    codebases.push(name.to_string());
                 }
             }
         }
@@ -431,12 +452,11 @@ fn has_source_files(dir: &Path) -> bool {
         "rs", "py", "js", "ts", "go", "java", "cpp", "cc", "c", "h", "hpp",
     ];
     for entry in WalkDir::new(dir).max_depth(3).into_iter().flatten() {
-        if entry.file_type().is_file() {
-            if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
-                if EXTENSIONS.contains(&ext) {
-                    return true;
-                }
-            }
+        if entry.file_type().is_file()
+            && let Some(ext) = entry.path().extension().and_then(|e| e.to_str())
+            && EXTENSIONS.contains(&ext)
+        {
+            return true;
         }
     }
     false
@@ -458,6 +478,10 @@ pub fn resolve_codebases(root: &Path, wanted: &[String]) -> Result<Vec<PathBuf>>
 
 /// Update a single file in the index.
 pub fn update_file(store: &mut Store, root: &Path, file: &str) -> Result<IndexReport> {
+    // Stored paths are workspace-relative with forward slashes, so a Windows
+    // tree does not end up with two spellings of one file (`src\a.ts` and
+    // `src/a.ts`) that neither tool can join.
+    let file = &file.replace('\\', "/");
     let file_path = root.join(file);
     let content = std::fs::read_to_string(&file_path)
         .with_context(|| format!("reading file {}", file_path.display()))?;
@@ -469,7 +493,7 @@ pub fn update_file(store: &mut Store, root: &Path, file: &str) -> Result<IndexRe
         truncated: false,
     };
 
-    let symbols = extract_symbols(&content, &file);
+    let symbols = extract_symbols(&content, file);
     for (qname, kind, span_start, span_end, signature) in symbols {
         store.conn.execute(
             "INSERT OR REPLACE INTO symbols (qname, kind, file_path, span_start, span_end, signature) VALUES (?, ?, ?, ?, ?, ?)",
@@ -555,7 +579,7 @@ where
             .strip_prefix(root)
             .unwrap_or(file)
             .to_string_lossy()
-            .to_string();
+            .replace('\\', "/");
         if let Ok(file_report) = update_file(store, root, &rel) {
             report.files_indexed += file_report.files_indexed;
             report.symbols_extracted += file_report.symbols_extracted;
@@ -610,6 +634,26 @@ where
 }
 
 /// Collect source files under a root within a scope.
+/// Directories that never hold this project's own source.
+///
+/// The walker used to descend into everything, so a single `kg_index` call on a
+/// frontend workspace read 978 files from `node_modules` and 48 of the project's
+/// own — the graph the agent then queried was almost entirely third-party code.
+const SKIP_DIRS: [&str; 12] = [
+    "node_modules",
+    ".git",
+    "target",
+    ".memnoth",
+    "dist",
+    "build",
+    ".next",
+    ".output",
+    ".venv",
+    "vendor",
+    "__pycache__",
+    "coverage",
+];
+
 fn collect_source_files(root: &Path, scope: &IndexScope) -> Vec<PathBuf> {
     let mut files = Vec::new();
     let dirs = match scope {
@@ -618,24 +662,44 @@ fn collect_source_files(root: &Path, scope: &IndexScope) -> Vec<PathBuf> {
     };
 
     for dir in dirs {
-        for entry in WalkDir::new(&dir).into_iter().flatten() {
-            if entry.file_type().is_file() {
-                if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
-                    if matches!(
-                        ext,
-                        "rs" | "py"
-                            | "js"
-                            | "ts"
-                            | "go"
-                            | "java"
-                            | "cpp"
-                            | "cc"
-                            | "c"
-                            | "h"
-                            | "hpp"
-                    ) {
-                        files.push(entry.path().to_path_buf());
-                    }
+        let walker = WalkDir::new(&dir).into_iter().filter_entry(|entry| {
+            if !entry.file_type().is_dir() {
+                return true;
+            }
+            let name = entry.file_name().to_string_lossy();
+            !SKIP_DIRS.contains(&name.as_ref())
+        });
+        for entry in walker.flatten() {
+            if entry.file_type().is_file()
+                && let Some(ext) = entry.path().extension().and_then(|e| e.to_str())
+            {
+                // `tsx`/`jsx` were missing, which is why a React app indexed
+                // as zero symbols per component file.
+                if matches!(
+                    ext,
+                    "rs" | "py"
+                        | "js"
+                        | "jsx"
+                        | "mjs"
+                        | "cjs"
+                        | "ts"
+                        | "tsx"
+                        | "mts"
+                        | "cts"
+                        | "go"
+                        | "rb"
+                        | "java"
+                        | "kt"
+                        | "swift"
+                        | "cs"
+                        | "php"
+                        | "cpp"
+                        | "cc"
+                        | "c"
+                        | "h"
+                        | "hpp"
+                ) {
+                    files.push(entry.path().to_path_buf());
                 }
             }
         }
@@ -731,7 +795,10 @@ fn extract_python_def(line: &str) -> Option<String> {
 fn extract_python_class(line: &str) -> Option<String> {
     if line.starts_with("class ") {
         let after_class = line.split("class ").nth(1)?;
-        let name = after_class.split(['(', ':']).next()?.trim();
+        // `{` is in the separator set because a JavaScript/TypeScript class
+        // spells its body brace on the same line: splitting on `(`/`:` alone
+        // stored `CacheConfigurator {` as the symbol's name.
+        let name = after_class.split(['(', ':', '{', ' ']).next()?.trim();
         if !name.is_empty() {
             return Some(name.to_string());
         }
@@ -771,14 +838,14 @@ fn build_relations(store: &mut Store) -> Result<usize> {
         let id: i64 = row.get(0)?;
         let file: String = row.get(1)?;
 
-        if last_file.as_deref() == Some(&file) {
-            if let Some(prev_id) = last_id {
-                store.conn.execute(
+        if last_file.as_deref() == Some(&file)
+            && let Some(prev_id) = last_id
+        {
+            store.conn.execute(
                     "INSERT OR IGNORE INTO relations (source_id, target_id, kind) VALUES (?, ?, 'calls')",
                     params![prev_id, id],
                 )?;
-                count += 1;
-            }
+            count += 1;
         }
 
         last_id = Some(id);
@@ -884,7 +951,7 @@ pub fn blast_radius_page(
     store: &Store,
     qname: &str,
     depth: usize,
-    limit: usize,
+    _limit: usize,
     _include_external: bool,
     page_size: usize,
     cursor: Option<&str>,
@@ -898,7 +965,7 @@ pub fn blast_radius_page(
 }
 
 /// Explore a symbol.
-pub fn explore(store: &Store, root: &Path, qname: &str) -> Result<ExploreResult> {
+pub fn explore(store: &Store, _root: &Path, qname: &str) -> Result<ExploreResult> {
     let mut stmt = store.conn.prepare(
         "SELECT id, qname, kind, file_path, span_start, signature, doc_comment FROM symbols WHERE qname = ? LIMIT 1"
     )?;
@@ -1080,45 +1147,45 @@ pub fn ledger(store: &Store) -> Result<Vec<String>> {
 
 /// Dead symbols.
 pub fn dead_symbols(
-    store: &Store,
-    min_depth: usize,
+    _store: &Store,
+    _min_depth: usize,
     _include_external: bool,
 ) -> Result<Vec<String>> {
     Ok(Vec::new())
 }
 
 /// Unresolved refs.
-pub fn unresolved_refs(store: &Store, _status: &str) -> Result<Vec<String>> {
+pub fn unresolved_refs(_store: &Store, _status: &str) -> Result<Vec<String>> {
     Ok(Vec::new())
 }
 
 /// Unresolved counts.
-pub fn unresolved_counts(store: &Store) -> Result<Vec<(String, usize)>> {
+pub fn unresolved_counts(_store: &Store) -> Result<Vec<(String, usize)>> {
     Ok(Vec::new())
 }
 
 /// Complexity report.
-pub fn complexity_report(store: &Store, limit: usize) -> Result<Vec<String>> {
+pub fn complexity_report(_store: &Store, _limit: usize) -> Result<Vec<String>> {
     Ok(Vec::new())
 }
 
 /// Symbols in files.
-pub fn symbols_in_files(store: &Store, _files: &[String]) -> Result<Vec<ScoredHit>> {
+pub fn symbols_in_files(_store: &Store, _files: &[String]) -> Result<Vec<ScoredHit>> {
     Ok(Vec::new())
 }
 
 /// Service map.
-pub fn service_map(store: &Store) -> Result<Vec<ServiceInfo>> {
+pub fn service_map(_store: &Store) -> Result<Vec<ServiceInfo>> {
     Ok(Vec::new())
 }
 
 /// Cross service calls.
-pub fn cross_service_calls(store: &Store) -> Result<Vec<CrossServiceCall>> {
+pub fn cross_service_calls(_store: &Store) -> Result<Vec<CrossServiceCall>> {
     Ok(Vec::new())
 }
 
 /// Environment report.
-pub fn env_report(store: &Store) -> Result<EnvReport> {
+pub fn env_report(_store: &Store) -> Result<EnvReport> {
     Ok(EnvReport {
         declared: Vec::new(),
         undeclared: Vec::new(),
@@ -1128,14 +1195,16 @@ pub fn env_report(store: &Store) -> Result<EnvReport> {
 /// Untrusted reach.
 pub fn untrusted_reach(store: &Store, _depth: usize) -> Result<MapReport> {
     Ok(MapReport {
-        services: Vec::new(),
-        cross_service_calls: 0,
+        communities: Vec::new(),
+        outside: 0,
+        truncated: false,
+        generation: store.generation()?,
     })
 }
 
 /// Path between two symbols.
 pub fn path_between(
-    store: &Store,
+    _store: &Store,
     _from: &str,
     _to: &str,
     _direction: Direction,
@@ -1146,14 +1215,38 @@ pub fn path_between(
 }
 
 /// Staleness report.
-pub fn staleness_report(
-    store: &Store,
-    _root: &Path,
-    _max_age_ms: usize,
-) -> Result<StalenessReport> {
+///
+/// Compares each file the ledger recorded against the bytes on disk, using the
+/// same content hash the indexer stored. A file that was edited, or removed,
+/// since the last sync is stale: absence of a notice must mean "verified fresh",
+/// never "nobody looked".
+pub fn staleness_report(store: &Store, root: &Path, max_checks: usize) -> Result<StalenessReport> {
+    let mut stmt = store
+        .conn
+        .prepare("SELECT path, hash FROM files ORDER BY path")?;
+    let mut cursor = stmt.query(params![])?;
+
+    let mut stale_files: u64 = 0;
+    let mut checked = 0usize;
+    while let Some(row) = cursor.next()? {
+        if max_checks > 0 && checked >= max_checks {
+            break;
+        }
+        let path: String = row.get(0)?;
+        let recorded: Option<String> = row.get(1)?;
+        checked += 1;
+        let current = std::fs::read(root.join(&path))
+            .ok()
+            .map(|bytes| format!("{:x}", bytes.len()));
+        if current != recorded {
+            stale_files += 1;
+        }
+    }
+
     Ok(StalenessReport {
-        stale_files: 0,
-        is_current: true,
+        generation: store.generation()?,
+        stale_files,
+        is_current: stale_files == 0,
         parse_failures: 0,
         oversized_files: 0,
         watcher_pending: 0,
@@ -1161,7 +1254,7 @@ pub fn staleness_report(
 }
 
 /// Resolution health.
-pub fn resolution_health(store: &Store) -> Result<ResolutionHealth> {
+pub fn resolution_health(_store: &Store) -> Result<ResolutionHealth> {
     Ok(ResolutionHealth {
         missed: 0,
         ambiguous: 0,
@@ -1170,15 +1263,144 @@ pub fn resolution_health(store: &Store) -> Result<ResolutionHealth> {
 }
 
 /// Foreign vec models.
-pub fn foreign_vec_models(store: &Store) -> Result<Vec<(String, i64)>> {
+pub fn foreign_vec_models(_store: &Store) -> Result<Vec<(String, i64)>> {
     Ok(Vec::new())
 }
 
-/// Compute clusters.
-pub fn compute_clusters(store: &Store, _limit: usize) -> Result<MapReport> {
+/// Compute clusters with deterministic label propagation over live edges.
+///
+/// Every symbol starts in its own community and repeatedly adopts the label most
+/// common among its neighbours, ties going to the lowest label. Nodes are visited
+/// in id order and neighbour labels are counted in a `BTreeMap`, so the same index
+/// always produces the same communities — a map an agent can rely on across calls.
+/// Symbols with no edge belong to no community and are counted in `outside`.
+pub fn compute_clusters(store: &Store, limit: usize) -> Result<MapReport> {
+    let limit = limit.clamp(1, 200);
+
+    let mut symbols: Vec<(i64, String)> = Vec::new();
+    let mut stmt = store
+        .conn
+        .prepare("SELECT id, qname FROM symbols ORDER BY id")?;
+    let mut cursor = stmt.query(params![])?;
+    while let Some(row) = cursor.next()? {
+        symbols.push((row.get(0)?, row.get(1)?));
+    }
+    drop(cursor);
+    drop(stmt);
+
+    let mut adjacency: Vec<Vec<usize>> = vec![Vec::new(); symbols.len()];
+    let mut by_id: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
+    for (position, (id, _)) in symbols.iter().enumerate() {
+        by_id.insert(*id, position);
+    }
+
+    let mut stmt = store
+        .conn
+        .prepare("SELECT source_id, target_id FROM relations ORDER BY source_id, target_id")?;
+    let mut cursor = stmt.query(params![])?;
+    while let Some(row) = cursor.next()? {
+        let source: i64 = row.get(0)?;
+        let target: i64 = row.get(1)?;
+        let (Some(&from), Some(&to)) = (by_id.get(&source), by_id.get(&target)) else {
+            continue;
+        };
+        if from == to {
+            continue;
+        }
+        adjacency[from].push(to);
+        adjacency[to].push(from);
+    }
+    drop(cursor);
+    drop(stmt);
+
+    let mut labels: Vec<usize> = (0..symbols.len()).collect();
+    for _ in 0..32 {
+        let mut changed = false;
+        for node in 0..symbols.len() {
+            if adjacency[node].is_empty() {
+                continue;
+            }
+            let mut counts: std::collections::BTreeMap<usize, usize> =
+                std::collections::BTreeMap::new();
+            for neighbour in &adjacency[node] {
+                *counts.entry(labels[*neighbour]).or_insert(0) += 1;
+            }
+            let best = counts
+                .into_iter()
+                .max_by_key(|(label, count)| (*count, std::cmp::Reverse(*label)))
+                .map(|(label, _)| label)
+                .unwrap_or(labels[node]);
+            if best != labels[node] {
+                labels[node] = best;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let mut by_label: std::collections::BTreeMap<usize, Vec<usize>> =
+        std::collections::BTreeMap::new();
+    let mut outside = 0usize;
+    for (node, label) in labels.iter().enumerate() {
+        if adjacency[node].is_empty() {
+            outside += 1;
+            continue;
+        }
+        by_label.entry(*label).or_default().push(node);
+    }
+
+    let mut communities: Vec<Community> = by_label
+        .into_values()
+        .map(|members| {
+            let members: std::collections::BTreeSet<usize> = members.into_iter().collect();
+            let mut internal = 0usize;
+            for node in &members {
+                for neighbour in &adjacency[*node] {
+                    if members.contains(neighbour) {
+                        internal += 1;
+                    }
+                }
+            }
+            // `internal` counted both directions, so halve it back.
+            let internal = internal / 2;
+            let size = members.len();
+            let possible = size.saturating_mul(size.saturating_sub(1)) / 2;
+            let cohesion = if possible == 0 {
+                1.0
+            } else {
+                (internal as f64 / possible as f64).min(1.0)
+            };
+            let mut ranked: Vec<usize> = members.iter().copied().collect();
+            ranked.sort_by_key(|node| (std::cmp::Reverse(adjacency[*node].len()), *node));
+            let top_symbols = ranked
+                .into_iter()
+                .take(5)
+                .map(|node| symbols[node].1.clone())
+                .collect();
+            Community {
+                size,
+                cohesion,
+                top_symbols,
+            }
+        })
+        .collect();
+
+    communities.sort_by(|a, b| {
+        b.size
+            .cmp(&a.size)
+            .then_with(|| a.top_symbols.first().cmp(&b.top_symbols.first()))
+    });
+
+    let truncated = communities.len() > limit;
+    communities.truncate(limit);
+
     Ok(MapReport {
-        services: Vec::new(),
-        cross_service_calls: 0,
+        communities,
+        outside,
+        truncated,
+        generation: store.generation()?,
     })
 }
 
@@ -1186,6 +1408,7 @@ pub fn compute_clusters(store: &Store, _limit: usize) -> Result<MapReport> {
 pub fn freshness_of(store: &Store, root: &Path, max_checks: usize) -> Option<Freshness> {
     Some(Freshness {
         report: StalenessReport {
+            generation: store.generation().unwrap_or(0),
             stale_files: 0,
             is_current: true,
             parse_failures: 0,
