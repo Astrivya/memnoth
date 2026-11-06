@@ -108,7 +108,7 @@ fn serialize_capabilities<S>(caps: &&'static [Capability], ser: S) -> Result<S::
 where
     S: serde::Serializer,
 {
-    let slice: &[Capability] = *caps;
+    let slice: &[Capability] = caps;
     slice.serialize(ser)
 }
 
@@ -116,7 +116,7 @@ fn serialize_default_models<S>(models: &&'static [&'static str], ser: S) -> Resu
 where
     S: serde::Serializer,
 {
-    let slice: &[&str] = *models;
+    let slice: &[&str] = models;
     slice.serialize(ser)
 }
 
@@ -217,8 +217,8 @@ pub const KNOWN_PROVIDERS: &[Provider] = &[
     },
     Provider {
         name: "kilo",
-        display_name: "Kilo (OpenRouter)",
-        base_url: "https://openrouter.ai/api/v1",
+        display_name: "Kilo Gateway",
+        base_url: "https://ai-gateway.kilo.ai/api/v1",
         models_endpoint: "/models",
         auth_header_format: AuthHeaderFormat::Bearer,
         capabilities: &[
@@ -234,13 +234,14 @@ pub const KNOWN_PROVIDERS: &[Provider] = &[
         default_models: &[
             "inclusionai/ling-3.0-flash-vl:free",
             "google/gemini-flash-1.5",
+            "anthropic/claude-sonnet-4.5",
             "anthropic/claude-3.5-sonnet",
             "openai/gpt-4o",
             "meta-llama/llama-3.1-405b-instruct",
         ],
-        pricing_url: "https://openrouter.ai/pricing",
+        pricing_url: "https://kilo.ai/docs/gateway",
         requires_api_key: true,
-        api_key_env_var: "OPENROUTER_API_KEY",
+        api_key_env_var: "KILO_API_KEY",
     },
     Provider {
         name: "google",
