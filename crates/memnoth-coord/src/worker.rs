@@ -366,7 +366,7 @@ mod tests {
         ));
 
         // Backdate w1's heartbeat to make it stale
-        let stale_ts = now_ms() - 2 * STALE_HEARTBEAT_MS as i64;
+        let stale_ts = now_ms() - 2 * STALE_HEARTBEAT_MS;
         pool.coord
             .conn
             .execute(
