@@ -31,6 +31,7 @@ pub fn build_p0_registry() -> RegistryBuilder {
             cli_path: vec!["session".into(), "start".into()],
             slash: SlashSpec {
                 name: "start".into(),
+                palette: None,
                 description: "Open a new session".into(),
                 long_description: None,
                 params: vec![ParamSpec::string_opt("name", "Session name", "session").short('n')],
@@ -60,6 +61,7 @@ pub fn build_p0_registry() -> RegistryBuilder {
             cli_path: vec!["session".into(), "resume".into()],
             slash: SlashSpec {
                 name: "resume".into(),
+                palette: None,
                 description: "Resume a named session".into(),
                 long_description: None,
                 params: vec![ParamSpec::string("name", "Session name to resume").short('n')],
@@ -89,6 +91,7 @@ pub fn build_p0_registry() -> RegistryBuilder {
             cli_path: vec!["session".into(), "list".into()],
             slash: SlashSpec {
                 name: "list".into(),
+                palette: None,
                 description: "List all sessions".into(),
                 long_description: None,
                 params: vec![],
@@ -118,6 +121,7 @@ pub fn build_p0_registry() -> RegistryBuilder {
             cli_path: vec!["session".into(), "status".into()],
             slash: SlashSpec {
                 name: "status".into(),
+                palette: None,
                 description: "Show current session status".into(),
                 long_description: None,
                 params: vec![],
@@ -147,6 +151,7 @@ pub fn build_p0_registry() -> RegistryBuilder {
             cli_path: vec!["session".into(), "stop".into()],
             slash: SlashSpec {
                 name: "stop".into(),
+                palette: None,
                 description: "Stop the current session".into(),
                 long_description: None,
                 params: vec![
@@ -181,6 +186,7 @@ pub fn build_p0_registry() -> RegistryBuilder {
             cli_path: vec!["vault".into(), "init".into()],
             slash: SlashSpec {
                 name: "init".into(),
+                palette: Some("vault init".into()),
                 description: "Create the vault (idempotent; safe to run once per machine)".into(),
                 long_description: None,
                 params: vec![],
@@ -210,6 +216,7 @@ pub fn build_p0_registry() -> RegistryBuilder {
             cli_path: vec!["vault".into(), "status".into()],
             slash: SlashSpec {
                 name: "status".into(),
+                palette: Some("vault status".into()),
                 description: "What the vault holds now: namespaces, counts, path, size".into(),
                 long_description: None,
                 params: vec![],
@@ -239,6 +246,7 @@ pub fn build_p0_registry() -> RegistryBuilder {
             cli_path: vec!["vault".into(), "remember".into()],
             slash: SlashSpec {
                 name: "remember".into(),
+                palette: Some("vault remember <name> [--summary ...] [--kind ...]".into()),
                 description: "Record a fact, decision, lesson, gotcha, or correction".into(),
                 long_description: None,
                 params: vec![
@@ -266,7 +274,6 @@ pub fn build_p0_registry() -> RegistryBuilder {
                         env: None,
                         positional: true,
                         position: Some(1),
-                        completion_values: None,
                         hidden: false,
                         deprecated: None,
                     },
@@ -297,6 +304,7 @@ pub fn build_p0_registry() -> RegistryBuilder {
             cli_path: vec!["vault".into(), "recall".into()],
             slash: SlashSpec {
                 name: "recall".into(),
+                palette: Some("vault recall <query>".into()),
                 description: "Search the vault (FTS + graph, temporal windows understood)".into(),
                 long_description: None,
                 params: vec![
@@ -330,6 +338,7 @@ pub fn build_p0_registry() -> RegistryBuilder {
             cli_path: vec!["vault".into(), "asof".into()],
             slash: SlashSpec {
                 name: "asof".into(),
+                palette: Some("vault asof [--at WHEN]".into()),
                 description: "What the vault believed at an instant".into(),
                 long_description: None,
                 params: vec![
@@ -368,6 +377,7 @@ pub fn build_p0_registry() -> RegistryBuilder {
             cli_path: vec!["vault".into(), "history".into()],
             slash: SlashSpec {
                 name: "history".into(),
+                palette: Some("vault history <name>".into()),
                 description: "Every version of one entity, with the reasons they changed".into(),
                 long_description: None,
                 params: vec![ParamSpec::string("name", "Entity name").positional(0)],
@@ -397,6 +407,7 @@ pub fn build_p0_registry() -> RegistryBuilder {
             cli_path: vec!["vault".into(), "contradictions".into()],
             slash: SlashSpec {
                 name: "contradictions".into(),
+                palette: Some("vault contradictions [--name NAME]".into()),
                 description: "Beliefs explicitly contradicted, both sources kept".into(),
                 long_description: None,
                 params: vec![ParamSpec::string_opt("name", "Restrict to one entity", "")],
@@ -431,6 +442,7 @@ pub fn build_p0_registry() -> RegistryBuilder {
             cli_path: vec!["kg".into(), "index".into()],
             slash: SlashSpec {
                 name: "index".into(),
+                palette: Some("kg index".into()),
                 description: "Build or update the code graph from the workspace".into(),
                 long_description: None,
                 params: vec![
@@ -467,6 +479,7 @@ pub fn build_p0_registry() -> RegistryBuilder {
             cli_path: vec!["kg".into(), "status".into()],
             slash: SlashSpec {
                 name: "status".into(),
+                palette: Some("kg status".into()),
                 description: "What was built, when, and how stale it is".into(),
                 long_description: None,
                 params: vec![],
@@ -496,6 +509,7 @@ pub fn build_p0_registry() -> RegistryBuilder {
             cli_path: vec!["kg".into(), "impact".into()],
             slash: SlashSpec {
                 name: "impact".into(),
+                palette: Some("kg impact <symbol>".into()),
                 description:
                     "What depends on a symbol: definitions, references, tests, blast radius".into(),
                 long_description: None,
@@ -531,6 +545,7 @@ pub fn build_p0_registry() -> RegistryBuilder {
             cli_path: vec!["kg".into(), "search".into()],
             slash: SlashSpec {
                 name: "search".into(),
+                palette: Some("kg search <query>".into()),
                 description: "Find symbols by name".into(),
                 long_description: None,
                 params: vec![
@@ -565,6 +580,7 @@ pub fn build_p0_registry() -> RegistryBuilder {
             cli_path: vec!["mcp".into(), "serve".into()],
             slash: SlashSpec {
                 name: "serve".into(),
+                palette: Some("mcp serve".into()),
                 description: "Serve the graph over MCP (stdio by default, HTTP with --http)".into(),
                 long_description: None,
                 params: vec![
@@ -614,6 +630,7 @@ pub fn build_p0_registry() -> RegistryBuilder {
             cli_path: vec!["mcp".into(), "doctor".into()],
             slash: SlashSpec {
                 name: "doctor".into(),
+                palette: Some("mcp doctor".into()),
                 description: "What is registered, and where — profile, tool counts, client configs"
                     .into(),
                 long_description: None,
@@ -644,6 +661,7 @@ pub fn build_p0_registry() -> RegistryBuilder {
             cli_path: vec!["mcp".into(), "add".into()],
             slash: SlashSpec {
                 name: "add".into(),
+                palette: Some("mcp add".into()),
                 description: "Write a client's MCP config for this server".into(),
                 long_description: None,
                 params: vec![
@@ -683,6 +701,7 @@ pub fn build_p0_registry() -> RegistryBuilder {
             cli_path: vec!["mcp".into(), "call".into()],
             slash: SlashSpec {
                 name: "call".into(),
+                palette: None,
                 description: "Call one MCP tool without a transport in front of it".into(),
                 long_description: None,
                 params: vec![
@@ -717,6 +736,7 @@ pub fn build_p0_registry() -> RegistryBuilder {
             cli_path: vec!["mcp".into(), "selftest".into()],
             slash: SlashSpec {
                 name: "selftest".into(),
+                palette: None,
                 description: "Run the server's own initialize/tools/list/resources/list probe"
                     .into(),
                 long_description: None,
@@ -749,6 +769,7 @@ pub fn build_p0_registry() -> RegistryBuilder {
             cli_path: vec!["doctor".into()],
             slash: SlashSpec {
                 name: "doctor".into(),
+                palette: Some("doctor".into()),
                 description: "Report what is wired: paths, versions, profiles, clients".into(),
                 long_description: None,
                 params: vec![],
@@ -780,6 +801,7 @@ pub fn build_p0_registry() -> RegistryBuilder {
             cli_path: vec!["cloud".into(), "login".into()],
             slash: SlashSpec {
                 name: "login".into(),
+                palette: Some("login".into()),
                 description: "Authenticate with memnoth cloud".into(),
                 long_description: None,
                 params: vec![ParamSpec::enum_opt(
@@ -814,6 +836,7 @@ pub fn build_p0_registry() -> RegistryBuilder {
             cli_path: vec!["cloud".into(), "logout".into()],
             slash: SlashSpec {
                 name: "logout".into(),
+                palette: Some("logout".into()),
                 description: "Revoke cloud credentials and sign out".into(),
                 long_description: None,
                 params: vec![],
@@ -843,6 +866,7 @@ pub fn build_p0_registry() -> RegistryBuilder {
             cli_path: vec!["cloud".into(), "status".into()],
             slash: SlashSpec {
                 name: "status".into(),
+                palette: None,
                 description: "Show cloud authentication and sync status".into(),
                 long_description: None,
                 params: vec![],
@@ -872,6 +896,7 @@ pub fn build_p0_registry() -> RegistryBuilder {
             cli_path: vec!["cloud".into(), "sync".into()],
             slash: SlashSpec {
                 name: "sync".into(),
+                palette: Some("sync".into()),
                 description: "Sync local vault and graph to cloud".into(),
                 long_description: None,
                 params: vec![
@@ -909,6 +934,7 @@ pub fn build_p0_registry() -> RegistryBuilder {
             cli_path: vec!["cloud".into(), "profile".into()],
             slash: SlashSpec {
                 name: "profile".into(),
+                palette: None,
                 description: "Manage cloud profile settings".into(),
                 long_description: None,
                 params: vec![ParamSpec::string("name", "Profile name").positional(0)],
@@ -938,6 +964,7 @@ pub fn build_p0_registry() -> RegistryBuilder {
             cli_path: vec!["cloud".into(), "usage".into()],
             slash: SlashSpec {
                 name: "usage".into(),
+                palette: Some("usage".into()),
                 description: "Show cloud usage and billing summary".into(),
                 long_description: None,
                 params: vec![ParamSpec::enum_opt(
@@ -972,6 +999,7 @@ pub fn build_p0_registry() -> RegistryBuilder {
             cli_path: vec!["cloud".into(), "billing".into()],
             slash: SlashSpec {
                 name: "billing".into(),
+                palette: Some("credits".into()),
                 description: "Manage cloud billing and payment methods".into(),
                 long_description: None,
                 params: vec![],
@@ -1003,6 +1031,7 @@ pub fn build_p0_registry() -> RegistryBuilder {
             cli_path: vec!["config".into(), "get".into()],
             slash: SlashSpec {
                 name: "get".into(),
+                palette: None,
                 description: "Get a configuration value".into(),
                 long_description: None,
                 params: vec![
@@ -1034,6 +1063,7 @@ pub fn build_p0_registry() -> RegistryBuilder {
             cli_path: vec!["config".into(), "set".into()],
             slash: SlashSpec {
                 name: "set".into(),
+                palette: None,
                 description: "Set a configuration value".into(),
                 long_description: None,
                 params: vec![
@@ -1066,6 +1096,7 @@ pub fn build_p0_registry() -> RegistryBuilder {
             cli_path: vec!["config".into(), "list".into()],
             slash: SlashSpec {
                 name: "list".into(),
+                palette: None,
                 description: "List all configuration values".into(),
                 long_description: None,
                 params: vec![],
@@ -1097,6 +1128,7 @@ pub fn build_p0_registry() -> RegistryBuilder {
             cli_path: vec!["completion".into(), "install".into()],
             slash: SlashSpec {
                 name: "install".into(),
+                palette: None,
                 description: "Install shell completions for memnoth".into(),
                 long_description: None,
                 params: vec![
@@ -1139,6 +1171,7 @@ pub fn build_p0_registry() -> RegistryBuilder {
             cli_path: vec!["completion".into(), "show".into()],
             slash: SlashSpec {
                 name: "show".into(),
+                palette: None,
                 description: "Print shell completions for memnoth".into(),
                 long_description: None,
                 params: vec![
@@ -1180,6 +1213,7 @@ pub fn build_p0_registry() -> RegistryBuilder {
             cli_path: vec!["docs".into()],
             slash: SlashSpec {
                 name: "docs".into(),
+                palette: Some("docs".into()),
                 description: "Generate Markdown documentation from command registry".into(),
                 long_description: Some("Outputs all command specifications as Markdown. Use --output to write to a file, otherwise prints to stdout.".into()),
                 params: vec![
@@ -1210,6 +1244,7 @@ pub fn build_p0_registry() -> RegistryBuilder {
 
 /// Helper: optional integer parameter.
 pub trait ParamSpecIntegerExt {
+    /// An optional integer argument that defaults to `default`.
     fn integer_opt(
         name: impl Into<String>,
         description: impl Into<String>,
@@ -1237,7 +1272,6 @@ impl ParamSpecIntegerExt for ParamSpec {
             env: None,
             positional: false,
             position: None,
-            completion_values: None,
             hidden: false,
             deprecated: None,
         }
@@ -1246,6 +1280,7 @@ impl ParamSpecIntegerExt for ParamSpec {
 
 /// Helper: optional JSON parameter.
 pub trait ParamSpecJsonOptExt {
+    /// An optional argument holding a JSON object.
     fn json_opt(name: impl Into<String>, description: impl Into<String>) -> ParamSpec;
 }
 
@@ -1262,7 +1297,6 @@ impl ParamSpecJsonOptExt for ParamSpec {
             env: None,
             positional: false,
             position: None,
-            completion_values: None,
             hidden: false,
             deprecated: None,
         }

@@ -134,6 +134,7 @@ impl CommandRegistry {
             );
 
         // Build subcommands from registry
+        let mut built: Vec<(Vec<String>, ClapCommand)> = Vec::new();
         for spec in self.all() {
             if spec.cli_path.is_empty() {
                 continue;
@@ -150,6 +151,10 @@ impl CommandRegistry {
             );
             let mut cmd = ClapCommand::new(name).about(about).long_about(long);
 
+            // clap requires positional indexes to be contiguous from 1; the
+            // declared `position` is only an ordering hint and is not guaranteed
+            // to be dense.
+            let mut positional_index = 0usize;
             for param in &spec.slash.params {
                 if param.hidden {
                     continue;
@@ -163,9 +168,18 @@ impl CommandRegistry {
                 );
                 let help: &'static str = &*Box::leak(param.description.clone().into_boxed_str());
                 let param_name: &str = &*Box::leak(param.name.clone().into_boxed_str());
-                let mut arg = Arg::new(param_name).long(long_name).help(help);
+                // A positional argument may not carry a long or short name; clap
+                // rejects that at build time, and it would make the flag and the
+                // positional ambiguous if it were accepted.
+                let mut arg = if param.positional {
+                    Arg::new(param_name).help(help)
+                } else {
+                    Arg::new(param_name).long(long_name).help(help)
+                };
 
-                if let Some(short) = param.short {
+                if let Some(short) = param.short
+                    && !param.positional
+                {
                     arg = arg.short(short);
                 }
 
@@ -174,7 +188,8 @@ impl CommandRegistry {
                 }
 
                 if param.positional {
-                    arg = arg.index(param.position.unwrap_or(0));
+                    positional_index += 1;
+                    arg = arg.index(positional_index);
                 }
 
                 match &param.param_type {
@@ -216,10 +231,61 @@ impl CommandRegistry {
                 cmd = cmd.alias(alias_static);
             }
 
-            root = root.subcommand(cmd);
+            built.push((spec.cli_path.clone(), cmd));
         }
 
+        root = Self::compose(root, built);
+
         root
+    }
+
+    /// Hang the built leaf commands under the verb groups their `cli_path`
+    /// names, creating the groups above them.
+    ///
+    /// This used to be flat: every leaf became a top-level command, so the row
+    /// for `["kg", "impact"]` projected to `memnoth impact` — a command the
+    /// binary does not accept — and `mn doctor` installs completions from this
+    /// projection, so the wrong shape reached real shells. The real parse tree
+    /// is `cli::Cli`; this projection only has to agree with it.
+    ///
+    /// A row whose path is fully consumed by a group (e.g. `["session"]` next to
+    /// `["session", "start"]`) becomes the group's own command, keeping its
+    /// arguments, and the deeper rows hang beneath it.
+    fn compose(mut node: clap::Command, rows: Vec<(Vec<String>, clap::Command)>) -> clap::Command {
+        type GroupRow = (Vec<String>, clap::Command);
+        type Group = (String, Vec<GroupRow>);
+        let mut groups: Vec<Group> = Vec::new();
+        for (path, cmd) in rows {
+            match path.split_first() {
+                None => node = node.subcommand(cmd),
+                Some((head, tail)) => {
+                    let tail = tail.to_vec();
+                    match groups.iter_mut().find(|(name, _)| name == head) {
+                        Some((_, bucket)) => bucket.push((tail, cmd)),
+                        None => groups.push((head.clone(), vec![(tail, cmd)])),
+                    }
+                }
+            }
+        }
+
+        for (head, bucket) in groups {
+            let name: &'static str = Box::leak(head.into_boxed_str());
+            let mut child = clap::Command::new(name);
+            let mut deeper: Vec<GroupRow> = Vec::new();
+            for (tail, cmd) in bucket {
+                if tail.is_empty() {
+                    child = cmd;
+                } else {
+                    deeper.push((tail, cmd));
+                }
+            }
+            if !deeper.is_empty() {
+                child = Self::compose(child, deeper);
+            }
+            node = node.subcommand(child);
+        }
+
+        node
     }
 
     /// Build palette data (for TUI command palette).
@@ -481,7 +547,7 @@ impl CommandRegistry {
                             param.description
                         ));
                     }
-                    md.push_str("\n");
+                    md.push('\n');
                 }
 
                 if !optional_params.is_empty() {
@@ -500,7 +566,7 @@ impl CommandRegistry {
                             default
                         ));
                     }
-                    md.push_str("\n");
+                    md.push('\n');
                 }
 
                 md.push_str(&format!(
@@ -666,6 +732,7 @@ mod tests {
                 name: "cmd".into(),
                 description: "Test command".into(),
                 long_description: None,
+                palette: None,
                 params: vec![],
                 overlay: OverlayType::None,
                 danger: DangerLevel::Safe,
@@ -689,5 +756,37 @@ mod tests {
         registry.register(spec).unwrap();
         assert_eq!(registry.len(), 1);
         assert!(registry.get("test.cmd").is_some());
+    }
+
+    /// The projection must nest verbs the way `cli::Cli` parses them, because
+    /// `mn doctor` installs shell completions from it.
+    #[test]
+    fn clap_projection_nests_verb_groups() {
+        let registry = crate::build_p0_registry().build();
+        let mut command = registry.build_clap();
+        command.build();
+
+        let mut leaf = command.clone();
+        for word in ["kg", "impact"] {
+            let next = leaf
+                .get_subcommands()
+                .find(|sub| sub.get_name() == word)
+                .cloned();
+            leaf = match next {
+                Some(sub) => sub,
+                None => panic!("`memnoth {word}` is missing from the clap projection"),
+            };
+        }
+        assert!(
+            leaf.get_subcommands().next().is_none(),
+            "`memnoth kg impact` should be a leaf"
+        );
+
+        assert!(
+            command
+                .get_subcommands()
+                .all(|sub| sub.get_name() != "impact"),
+            "`impact` must not leak to the top level"
+        );
     }
 }
