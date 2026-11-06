@@ -117,11 +117,6 @@ impl Listener {
     }
 }
 
-unsafe impl Send for Stream {}
-unsafe impl Sync for Stream {}
-unsafe impl Send for Listener {}
-unsafe impl Sync for Listener {}
-
 /// Remove a stale socket file at `path` before binding (no-op on TCP).
 pub fn remove_stale_socket(_path: &Path) -> Result<()> {
     Ok(())
@@ -129,20 +124,22 @@ pub fn remove_stale_socket(_path: &Path) -> Result<()> {
 
 /// Resolve a path to a SocketAddr.
 ///
-/// On Windows, a path like `/tmp/memnoth-test.sock` is interpreted as
-/// `127.0.0.1:<port>` where port is derived from the path hash.
+/// Without Unix-domain sockets the path is the *name* of a loopback endpoint, so
+/// the port must be derived from the whole path: a stable hash means a client
+/// connecting to a path finds the server that bound it, and two different paths
+/// (two workspaces, two concurrent tests) cannot land on the same endpoint.
+/// Taking the leading digits of the path would do the opposite — every path in
+/// one process shares a pid and therefore a port.
 fn resolve_addr(path: &Path) -> Result<SocketAddr> {
-    let path_str = path.to_string_lossy();
-    let port: u16 = path_str
-        .chars()
-        .filter(|c| c.is_ascii_digit())
-        .take(5)
-        .collect::<String>()
-        .parse::<u16>()
-        .unwrap_or(9876);
-
-    let ip: std::net::IpAddr = "127.0.0.1".parse().unwrap();
-    Ok(SocketAddr::new(ip, port.max(1024)))
+    // FNV-1a: stable across processes and toolchains, which `DefaultHasher` is not.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in path.to_string_lossy().as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let port = 20_000 + (hash % 40_000) as u16;
+    let ip: std::net::IpAddr = "127.0.0.1".parse().expect("loopback literal");
+    Ok(SocketAddr::new(ip, port))
 }
 
 #[cfg(test)]
@@ -151,10 +148,25 @@ mod tests {
 
     #[tokio::test]
     async fn bind_and_connect() {
-        let listener = Listener::bind("/tmp/memnoth-transport-test.sock")
+        let path = std::env::temp_dir().join(format!(
+            "memnoth-transport-test-{}-{}.sock",
+            std::process::id(),
+            memnoth_now_ms()
+        ));
+        let listener = Listener::bind(&path).await.expect("bind");
+        let connect_path = path.clone();
+        let client = tokio::spawn(async move { Stream::connect(&connect_path).await });
+        let (_stream, _peer) = listener.accept().await.expect("accept");
+        client
             .await
-            .expect("bind");
-        let (stream, _peer) = listener.accept().await.expect("accept");
-        drop(stream);
+            .expect("join")
+            .expect("a client must reach the endpoint its path names");
+    }
+
+    fn memnoth_now_ms() -> u128 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
     }
 }
