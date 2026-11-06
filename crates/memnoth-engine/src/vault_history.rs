@@ -142,7 +142,42 @@ fn entity_chain(engine: &MemoryEngine, name: &str) -> Result<Vec<Value>> {
         }
     }
     chain.sort_by_key(|v| v["valid_from"].as_i64().unwrap_or(0));
-    Ok(chain)
+
+    // A live row and the journaled snapshot of the same belief are one version,
+    // not two. The snapshot is written when the row is created, so the chain
+    // listed every version twice and a two-step history read as four — which
+    // undermines the one verb whose whole job is to be the record.
+    //
+    // They are not duplicates of each other's content, though: the row carries
+    // the name, the snapshot carries `change_reason`. So this folds rather than
+    // drops, and a field the kept copy lacks is taken from the copy being merged
+    // away.
+    let mut merged: Vec<Value> = Vec::new();
+    for row in chain {
+        let entity_id = row["entity_id"].as_i64();
+        let valid_from = row["valid_from"].as_i64();
+        let valid_to = row["valid_to"].as_i64();
+        let existing = merged.iter_mut().find(|kept| {
+            kept["entity_id"].as_i64() == entity_id
+                && kept["valid_from"].as_i64() == valid_from
+                && kept["valid_to"].as_i64() == valid_to
+        });
+        match existing {
+            Some(kept) => {
+                for field in ["change_reason", "name", "canonical_name", "snapshot"] {
+                    let missing = match kept.get(field) {
+                        None | Some(Value::Null) => true,
+                        Some(_) => false,
+                    };
+                    if missing && row.get(field).is_some_and(|value| !value.is_null()) {
+                        kept[field] = row[field].clone();
+                    }
+                }
+            }
+            None => merged.push(row),
+        }
+    }
+    Ok(merged)
 }
 
 /// Every belief the vault holds, superseded ones included, newest first.
@@ -530,6 +565,44 @@ mod tests {
     }
 
     #[test]
+    fn a_belief_journaled_once_is_one_version_not_two() {
+        // The regression this guards: every snapshot written at creation is a
+        // second copy of the version the live row already is. A single `correct`
+        // therefore listed the old belief twice and the new one twice, and a
+        // reader counting versions over-counted a two-step history as four.
+        let eng = MemoryEngine::open_in_memory().unwrap();
+        let e1 = eng
+            .add_entity(EntityKind::Concept, "api-port", 0.9, T0)
+            .unwrap();
+        let e2 = eng
+            .supersede_entity(
+                e1,
+                None,
+                None,
+                Some("the API listens on 9090"),
+                Some(0.95),
+                "confirmed in prod config",
+                T0 + DAY,
+            )
+            .unwrap();
+
+        let h = vault_history(&eng, "api-port").unwrap();
+        let rows = h["versions"].as_array().unwrap();
+        assert_eq!(rows.len(), 2, "one correction is two versions: {rows:?}");
+        assert_eq!(h["count"], 2);
+        assert_eq!(rows[0]["entity_id"], serde_json::json!(e1));
+        assert_eq!(rows[1]["entity_id"], serde_json::json!(e2));
+        assert_eq!(
+            rows[0]["change_reason"],
+            serde_json::json!("confirmed in prod config")
+        );
+        // The folded version still carries the snapshot the journal kept — the
+        // fold merges the copies, it does not throw one away.
+        assert_eq!(rows[0]["snapshot"]["name"], serde_json::json!("api-port"));
+        assert!(rows[1]["change_reason"].is_null());
+    }
+
+    #[test]
     fn lineage_survives_chained_supersedes() {
         let eng = MemoryEngine::open_in_memory().unwrap();
         let e1 = eng.add_entity(EntityKind::Concept, "acq", 1.0, T0).unwrap();
@@ -556,10 +629,10 @@ mod tests {
             )
             .unwrap();
 
-        // Original name sees all three generations. The chain carries each
-        // generation's live row plus its journal rows (journal exists for the
-        // two closed generations; the open one has none) — so 5 rows over 3
-        // distinct ids.
+        // Original name sees all three generations, one version each: the live
+        // row and the journal entry for a closed generation describe the same
+        // belief, so they fold into one version (the journal contributes the
+        // reason). Three generations must read as three versions, not six.
         let h = vault_history(&eng, "acq").unwrap();
         let rows = h["versions"].as_array().unwrap();
         let mut ids: Vec<i64> = rows
@@ -569,7 +642,22 @@ mod tests {
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids, vec![e1, e2, e3], "lineage must be whole: {ids:?}");
-        assert_eq!(rows.len(), 5, "3 live rows + 2 journal rows: {rows:?}");
+        assert_eq!(rows.len(), 3, "one version per generation: {rows:?}");
+        assert_eq!(h["count"], 3, "the reported count matches: {h}");
+
+        // Oldest first, each closed generation carrying the reason it closed
+        // and the open one carrying none.
+        let order: Vec<i64> = rows
+            .iter()
+            .filter_map(|v| v["entity_id"].as_i64())
+            .collect();
+        assert_eq!(order, vec![e1, e2, e3], "ordered by valid_from: {rows:?}");
+        let reasons: Vec<Option<&str>> = rows.iter().map(|v| v["change_reason"].as_str()).collect();
+        assert_eq!(reasons, vec![Some("incorporated"), Some("rebrand"), None]);
+        // Every version keeps the name it was believed under, whether that came
+        // from the live row or the folded-in journal snapshot.
+        let names: Vec<&str> = rows.iter().filter_map(|v| v["name"].as_str()).collect();
+        assert_eq!(names, vec!["acq", "acq-inc", "acq-global"]);
 
         // Recall by the original name returns the CURRENT (third-generation)
         // belief — a pre-rename name must not strand the caller on a closed
