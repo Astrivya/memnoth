@@ -20,21 +20,23 @@ pub struct DeviceAuthResponse {
     pub interval: u64,
 }
 
-/// Token response (POST /auth/token).
+/// approved key (POST /auth/token) — the account contract.
+///
+/// Not an OAuth token envelope: the cloud mints an **API key** and reports the
+/// identity behind it, which is why `email` and `account_id` are here and there
+/// is no refresh token. The CLI used to parse `{access_token, token_type, …}`,
+/// a shape the control plane never sent, so every completed sign-in failed to
+/// deserialize. This is the server's `ApprovedAccountKey`, field for field.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TokenResponse {
-    /// The access token.
-    pub access_token: String,
-    /// Token type (typically "Bearer").
-    pub token_type: String,
-    /// Lifetime in seconds.
-    pub expires_in: u64,
-    /// Refresh token (if offline_access scope was requested).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub refresh_token: Option<String>,
-    /// Scopes granted.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub scope: Option<String>,
+pub struct ApprovedAccountKey {
+    /// The secret. Returned exactly once, here.
+    pub api_key: String,
+    /// Stable account identifier.
+    pub account_id: String,
+    pub email: String,
+    /// Wire tier. `none` on a self-hosted deployment.
+    pub tier: String,
+    pub status: String,
 }
 
 /// Device approval response (POST /auth/device/approve).
@@ -56,46 +58,58 @@ pub struct DeviceApproveResponse {
     pub refresh_token: Option<String>,
 }
 
-/// Current user info (GET /me).
+/// Current caller, as a token sees itself (GET /me).
+///
+/// Four fields, because that is what the control plane answers: the account
+/// subject, the org scope, and the role(s). It carries no email or profile — a
+/// key is not a user session — so nothing here may assume one.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MeResponse {
-    /// User ID.
-    pub id: String,
-    /// Email address.
-    pub email: String,
-    /// Display name.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    /// Avatar URL.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub avatar_url: Option<String>,
-    /// Whether email is verified.
-    pub email_verified: bool,
-    /// Account creation timestamp (RFC3339).
-    pub created_at: String,
-    /// Last login timestamp (RFC3339).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_login_at: Option<String>,
-    /// User's organizations.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub organizations: Option<Vec<OrganizationSummary>>,
-    /// User's default organization.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub default_organization_id: Option<String>,
+pub struct Me {
+    /// The account subject (`None` on a key with no subject).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sub: Option<String>,
+    /// The org scope this credential is bound to, e.g. `org:acme`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org: Option<String>,
+    /// The caller's primary role.
+    #[serde(default)]
+    pub role: String,
+    /// Every role the caller holds.
+    #[serde(default)]
+    pub roles: Vec<String>,
 }
 
-/// Organization summary.
+/// `GET /api/v1/org` — the envelope the control plane wraps the org in.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OrganizationSummary {
-    /// Organization ID.
-    pub id: String,
-    /// Organization name.
+pub struct OrgEnvelope {
+    pub org: OrgInfo,
+}
+
+/// The tenant's identity, as `GET /api/v1/org` reports it.
+///
+/// `slug` is the machine scope (`org:<slug>`), not an opaque id: there is no
+/// separate org id on the wire, and the CLI used to expect one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrgInfo {
+    pub slug: String,
     pub name: String,
-    /// User's role in the organization.
+    pub plan: String,
+    /// The caller's effective role in this org.
     pub role: String,
-    /// Whether this is the default organization.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub is_default: Option<bool>,
+    #[serde(default)]
+    pub member_count: i64,
+    #[serde(default)]
+    pub seats_used: i64,
+    #[serde(default)]
+    pub seats: i64,
+    #[serde(default)]
+    pub team_count: i64,
+    #[serde(default)]
+    pub project_count: i64,
+    #[serde(default)]
+    pub unassigned_sessions: i64,
+    #[serde(default)]
+    pub created_at: String,
 }
 
 /// Usage response (GET /usage).
@@ -151,48 +165,96 @@ pub struct ProjectUsage {
     pub request_count: u64,
 }
 
-/// Credits response (GET /credits).
+/// Credits summary (GET /credits).
+///
+/// The control plane reports credit **buckets**: a balance, what burned in the
+/// window, the grants still live and the ledger of what moved it. The client
+/// previously required `currency` and `auto_recharge`, two fields this service
+/// has never sent, so `mn credits` failed to deserialize on every account.
+/// Every count is `default`ed so a deployment that grows a field does not break
+/// an older CLI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreditsResponse {
-    /// Available credits in micros.
+    /// Remaining micros across unexpired, unexhausted grants.
     pub balance_micros: i64,
-    /// Credit currency (e.g., "USD").
-    pub currency: String,
-    /// Whether auto-recharge is enabled.
-    pub auto_recharge: bool,
-    /// Auto-recharge threshold in micros.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub recharge_threshold_micros: Option<i64>,
-    /// Auto-recharge amount in micros.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub recharge_amount_micros: Option<i64>,
-    /// Next billing date (RFC3339).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub next_billing_date: Option<String>,
-}
-/// Credit grant information.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreditGrant {
-    /// Grant ID.
-    pub id: String,
-    /// Grant amount in micros.
-    pub amount_micros: i64,
-    /// Grant reason.
-    pub reason: String,
-    /// Grant timestamp (RFC3339).
-    pub created_at: String,
-    /// Expiry timestamp if applicable (RFC3339).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub expires_at: Option<String>,
+    /// Consumed in the window, as a positive number.
+    #[serde(default)]
+    pub burned_micros: i64,
+    /// The window `burned_micros` covers.
+    #[serde(default)]
+    pub window_days: i64,
+    /// Live and exhausted grants, newest first.
+    #[serde(default)]
+    pub grants: Vec<CreditGrant>,
+    /// Append-only ledger rows, newest first.
+    #[serde(default)]
+    pub ledger: Vec<CreditLedgerEntry>,
+    /// Sessions that rolled up without a metered cost.
+    #[serde(default)]
+    pub unpriced_sessions: i64,
+    /// Remaining micros expiring inside the warning window.
+    #[serde(default)]
+    pub expiring_micros: i64,
+    /// How many buckets `expiring_micros` covers.
+    #[serde(default)]
+    pub expiring_grants: i64,
+    /// The soonest expiry (RFC3339), when one exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_expiry_at: Option<String>,
+    /// The window `expiring_micros` is measured over.
+    #[serde(default)]
+    pub expiry_warning_days: i64,
+    /// Total grants, against the (possibly capped) `grants` page.
+    #[serde(default)]
+    pub grants_total: i64,
+    /// Total ledger rows, against the (possibly capped) `ledger` page.
+    #[serde(default)]
+    pub ledger_total: i64,
+    /// Whether the numbers came from a demo dataset.
+    #[serde(default)]
+    pub demo: bool,
 }
 
-/// Credit expiry information.
+/// One credit grant: a bucket with its own expiry and provenance.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreditExpiry {
-    /// Expiry timestamp (RFC3339).
-    pub expires_at: String,
-    /// Amount expiring in micros.
+pub struct CreditGrant {
+    pub id: String,
     pub amount_micros: i64,
+    #[serde(default)]
+    pub remaining_micros: i64,
+    /// `grant` | `plan` | `promo` | `adjustment`.
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub note: String,
+    #[serde(default)]
+    pub granted_by: String,
+    /// `None` = never expires.
+    #[serde(default)]
+    pub expires_at: Option<String>,
+    #[serde(default)]
+    pub created_at: String,
+}
+
+/// One append-only ledger row. `amount_micros` is signed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreditLedgerEntry {
+    pub id: String,
+    /// `grant` | `debit` | `adjustment` | `expiry`.
+    #[serde(default)]
+    pub kind: String,
+    pub amount_micros: i64,
+    #[serde(default)]
+    pub balance_after_micros: Option<i64>,
+    #[serde(default)]
+    pub reason: String,
+    /// The session id for a debit; empty otherwise.
+    #[serde(default)]
+    pub ref_id: String,
+    #[serde(default)]
+    pub actor: String,
+    #[serde(default)]
+    pub created_at: String,
 }
 
 /// Model list response (GET /models).
@@ -245,25 +307,33 @@ pub struct ProjectsResponse {
     pub projects: Vec<ProjectInfo>,
 }
 
-/// Project information.
+/// `POST /api/v1/projects`, `PATCH /api/v1/projects/{id}`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectEnvelope {
+    pub project: ProjectInfo,
+}
+
+/// An org's project, as the control plane reports it.
+///
+/// The CLI used to expect a description and a settings blob; the server has
+/// neither. What it does carry is the caller's own access level and how many
+/// people reach the project, which is what a CLI can act on.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectInfo {
-    /// Project ID.
     pub id: String,
-    /// Project name.
     pub name: String,
-    /// Project description.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    /// Organization ID.
-    pub organization_id: String,
-    /// Creation timestamp (RFC3339).
+    /// `org` | `restricted`.
+    #[serde(default)]
+    pub visibility: String,
+    /// The caller's effective level (`viewer` | `developer` | `admin`).
+    #[serde(default)]
+    pub access_level: String,
+    #[serde(default)]
+    pub member_count: i64,
+    #[serde(default)]
+    pub repos: i32,
+    #[serde(default)]
     pub created_at: String,
-    /// Last updated timestamp (RFC3339).
-    pub updated_at: String,
-    /// Project settings.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub settings: Option<ProjectSettings>,
 }
 
 /// Project settings.
@@ -282,45 +352,52 @@ pub struct ProjectSettings {
     pub metadata: Option<HashMap<String, serde_json::Value>>,
 }
 
-/// Organization list response (GET /orgs).
+/// `GET /api/v1/orgs` — the org switcher's rows.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrganizationsResponse {
-    /// Organizations.
-    pub organizations: Vec<OrganizationInfo>,
+    #[serde(default)]
+    pub orgs: Vec<OrganizationInfo>,
 }
 
-/// Organization information.
+/// One org the caller belongs to, as `GET /api/v1/orgs` reports it.
+///
+/// There is no opaque org id on the wire: `slug` is the machine scope, and
+/// `current` says which one a browser session has selected (always false for a
+/// key, which is bound to the org it was minted in).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrganizationInfo {
-    /// Organization ID.
-    pub id: String,
-    /// Organization name.
-    pub name: String,
-    /// Organization slug.
     pub slug: String,
-    /// User's role in the organization.
+    pub name: String,
+    #[serde(default)]
     pub role: String,
-    /// Whether this is the user's default organization.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub is_default: Option<bool>,
-    /// Member count.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub member_count: Option<u32>,
-    /// Creation timestamp (RFC3339).
-    pub created_at: String,
+    #[serde(default)]
+    pub plan: String,
+    #[serde(default)]
+    pub member_count: i64,
+    #[serde(default)]
+    pub current: bool,
 }
 
-/// MCP token response (POST /mcp/token).
+/// `POST /api/v1/auth/session/org` — the selection after a switch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrgSwitch {
+    pub slug: String,
+    #[serde(default)]
+    pub role: String,
+}
+
+/// MCP token (POST /mcp/token).
+///
+/// `endpoint` and `expires_at` are the server's names; the CLI used to read
+/// `mcp_url` / `expires_in`, so the hosted-MCP path never parsed a minted token.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpTokenResponse {
-    /// The MCP access token.
+    /// The signed bearer. Never stored server-side.
     pub token: String,
-    /// Token type.
-    pub token_type: String,
-    /// Lifetime in seconds.
-    pub expires_in: u64,
-    /// MCP server URL.
-    pub mcp_url: String,
+    /// The MCP endpoint the token is valid at.
+    pub endpoint: String,
+    /// When it stops working (RFC3339).
+    pub expires_at: String,
 }
 
 /// Ingest request (POST /ingest).
@@ -398,106 +475,240 @@ pub struct BatchIngestItemResult {
     pub error: Option<String>,
 }
 
-/// Pricing information for a model.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModelPricing {
-    /// Model ID.
-    pub model_id: String,
-    /// Input token price per million tokens (in micros).
-    pub input_price_per_million_micros: i64,
-    /// Output token price per million tokens (in micros).
-    pub output_price_per_million_micros: i64,
-    /// Currency (e.g., "USD").
-    pub currency: String,
-}
-
-/// Pricing response (GET /api/v1/pricing).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PricingResponse {
-    /// Model pricing entries.
-    pub models: Vec<ModelPricing>,
-    /// Currency.
-    pub currency: String,
-}
-
-/// Billing response combining credits and pricing.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BillingResponse {
-    /// Credits information.
-    pub credits: CreditsResponse,
-    /// Pricing information.
-    pub pricing: PricingResponse,
-}
-
-/// API key list response (GET /keys).
+/// `GET /api/v1/api-keys`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeysResponse {
-    /// API keys.
+    #[serde(default)]
     pub keys: Vec<ApiKeyInfo>,
 }
 
-/// API key information.
+/// One API key, as the control plane reports it. Never the secret.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiKeyInfo {
-    /// Key ID (not the secret).
     pub id: String,
-    /// Key name/label.
+    #[serde(default)]
     pub name: String,
-    /// Key prefix (first 8 chars of secret).
+    /// Display form of the token, e.g. `mn_live_1a2b3c4d…`.
+    #[serde(default)]
     pub prefix: String,
-    /// Scopes/permissions.
-    pub scopes: Vec<String>,
-    /// Creation timestamp (RFC3339).
+    /// One scope, not a list: the server models a key's authority as one value.
+    #[serde(default)]
+    pub scope: String,
+    /// The project this key is bound to; `None` is an org-wide key.
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
     pub created_at: String,
-    /// Last used timestamp (RFC3339).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub last_used_at: Option<String>,
-    /// Expiration timestamp (RFC3339).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Set when revoked. A revoked key stays in the list, visibly dead.
+    #[serde(default)]
+    pub revoked_at: Option<String>,
+    #[serde(default)]
     pub expires_at: Option<String>,
-    /// Whether the key is revoked.
-    pub revoked: bool,
 }
 
-/// Create API key request (POST /keys).
+/// `POST /api/v1/api-keys` — the only body that ever carries a secret.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateKeyRequest {
-    /// Key name/label.
-    pub name: String,
-    /// Scopes/permissions.
-    pub scopes: Vec<String>,
-    /// Expiration in days (optional).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub expires_in_days: Option<u32>,
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    /// Relative deadline, resolved server-side. May not be combined with `expires_at`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_in_days: Option<i64>,
 }
 
-/// Create API key response (POST /keys).
+/// `POST /api/v1/api-keys` response: the key, plus the plaintext once.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateKeyResponse {
-    /// Key ID.
-    pub id: String,
-    /// The full secret (only returned once).
-    pub secret: String,
-    /// Key prefix.
-    pub prefix: String,
-    /// Key name.
-    pub name: String,
-    /// Scopes.
-    pub scopes: Vec<String>,
-    /// Creation timestamp (RFC3339).
-    pub created_at: String,
-    /// Expiration timestamp (RFC3339).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub expires_at: Option<String>,
+    pub key: ApiKeyInfo,
+    /// The secret. Present in this response and nowhere else, ever.
+    pub token: String,
 }
 
-/// Revoke API key response (DELETE /keys/{id}).
+/// `POST /api/v1/api-keys/{id}/revoke`, and the bulk form.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RevokeKeyResponse {
-    /// Whether the key was revoked.
-    pub revoked: bool,
-    /// Key ID.
+    #[serde(default)]
+    pub revoked: u64,
+}
+
+/// A group of people inside an org (`GET /api/v1/teams`).
+///
+/// A team decides **who shares work with whom**; it never grants a role, which
+/// is why there is no `role` field. `can_manage` is the server's own answer to
+/// "may this caller rename, delete or change members", so a command can gate the
+/// action on it instead of guessing from the org role.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Team {
     pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub project_count: i64,
+    #[serde(default)]
+    pub member_count: i64,
+    /// Whether the caller is in this team.
+    #[serde(default)]
+    pub is_member: bool,
+    #[serde(default)]
+    pub can_manage: bool,
+    #[serde(default)]
+    pub created_by: Option<String>,
+    #[serde(default)]
+    pub created_by_email: Option<String>,
+    #[serde(default)]
+    pub created_at: String,
+}
+
+/// `GET /api/v1/teams`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TeamsResponse {
+    #[serde(default)]
+    pub teams: Vec<Team>,
+    #[serde(default)]
+    pub demo: bool,
+}
+
+/// One person in a team, with the org role that decides what they may do
+/// elsewhere. Visible to org admins and to that team's own members.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TeamMember {
+    pub user_id: String,
+    pub email: String,
+    #[serde(default)]
+    pub name: String,
+    /// `owner` | `admin` | `member` — the *org* role, not a team role.
+    #[serde(default)]
+    pub org_role: String,
+}
+
+/// A project a team has a grant on, with the level of that grant.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TeamProject {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub level: String,
+}
+
+/// `GET /api/v1/teams/{id}` — one team, its people, its projects.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TeamDetail {
+    pub team: Team,
+    #[serde(default)]
+    pub members: Vec<TeamMember>,
+    #[serde(default)]
+    pub projects: Vec<TeamProject>,
+    #[serde(default)]
+    pub can_manage: bool,
+}
+
+/// `POST /api/v1/teams`, `PATCH /api/v1/teams/{id}`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TeamEnvelope {
+    pub team: Team,
+}
+
+/// One person in the org, as `GET /api/v1/members` reports them.
+///
+/// `role` is the org role (`owner` | `admin` | `member`), and `user_id` is the
+/// id the role and removal routes take — not the email.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Member {
+    pub user_id: String,
+    pub email: String,
+    #[serde(default)]
+    pub name: String,
+    pub role: String,
+    #[serde(default)]
+    pub joined_at: String,
+    /// The member's primary org relationship.
+    #[serde(default)]
+    pub primary: bool,
+}
+
+/// `GET /api/v1/members`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MembersResponse {
+    #[serde(default)]
+    pub members: Vec<Member>,
+    #[serde(default)]
+    pub demo: bool,
+}
+
+/// `POST /api/v1/orgs/members` — what the add did.
+///
+/// `created_account` says whether this was also the account's first membership:
+/// "added" and "created the account and added" are different facts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemberAdded {
+    pub user_id: String,
+    pub email: String,
+    pub role: String,
+    #[serde(default)]
+    pub created_account: bool,
+}
+
+/// One pending invite, as `GET /api/v1/orgs/invites` reports it.
+///
+/// Never a token: the link and code exist only in the response to the call that
+/// created the invite, so a list can never re-print a working credential.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Invite {
+    pub id: String,
+    pub email: String,
+    #[serde(default)]
+    pub role: String,
+    /// Set on a guest invite: the one project it reaches, and the level it carries.
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub project_name: Option<String>,
+    #[serde(default)]
+    pub access_level: Option<String>,
+    #[serde(default)]
+    pub invited_by_email: Option<String>,
+    pub expires_at: String,
+    #[serde(default)]
+    pub created_at: String,
+}
+
+/// `GET /api/v1/orgs/invites`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InvitesResponse {
+    #[serde(default)]
+    pub invites: Vec<Invite>,
+}
+
+/// `POST /api/v1/orgs/invites` — the one response carrying the credentials.
+///
+/// Only the hashes are stored, so this is the only place the token and code
+/// ever appear. `link` is `None` when the deployment has no public URL, which
+/// is why `email_sent` exists separately.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InviteCreated {
+    pub id: String,
+    pub email: String,
+    #[serde(default)]
+    pub role: String,
+    #[serde(default)]
+    pub expires_at: String,
+    /// The join link's token.
+    #[serde(default)]
+    pub token: String,
+    /// The short code an invitee can type instead.
+    #[serde(default)]
+    pub code: String,
+    #[serde(default)]
+    pub link: Option<String>,
+    #[serde(default)]
+    pub email_sent: bool,
+    #[serde(default)]
+    pub email_error: Option<String>,
 }
 
 /// Generic error response from the API.
