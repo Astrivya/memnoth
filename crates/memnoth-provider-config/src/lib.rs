@@ -38,6 +38,13 @@ pub struct ProviderConfig {
     pub models_endpoint: Option<String>,
 }
 
+/// The on-disk shape of `providers.toml`: one `[[providers]]` table per entry.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct ProviderConfigFile {
+    #[serde(default)]
+    providers: Vec<ProviderConfig>,
+}
+
 /// Known provider presets with default configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KnownProvider {
@@ -97,10 +104,15 @@ impl ProviderConfigManager {
         let content = std::fs::read_to_string(&self.config_path)
             .with_context(|| format!("failed to read {}", self.config_path.display()))?;
 
-        let configs: Vec<ProviderConfig> = toml::from_str(&content)
+        // TOML has no top-level array: the file is `[[providers]]` tables. An
+        // empty file is an empty list, not a parse error.
+        if content.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        let file: ProviderConfigFile = toml::from_str(&content)
             .with_context(|| format!("failed to parse {}", self.config_path.display()))?;
 
-        Ok(configs)
+        Ok(file.providers)
     }
 
     /// Save all provider configurations to disk
@@ -110,8 +122,10 @@ impl ProviderConfigManager {
                 .with_context(|| format!("cannot create {}", parent.display()))?;
         }
 
-        let content =
-            toml::to_string_pretty(configs).context("cannot serialize provider configs")?;
+        let file = ProviderConfigFile {
+            providers: configs.to_vec(),
+        };
+        let content = toml::to_string_pretty(&file).context("cannot serialize provider configs")?;
         std::fs::write(&self.config_path, content)
             .with_context(|| format!("cannot write {}", self.config_path.display()))
     }
@@ -264,9 +278,9 @@ pub fn known_providers() -> Vec<KnownProvider> {
         },
         KnownProvider {
             id: "kilo".to_string(),
-            name: "Kilo Code (OpenRouter)".to_string(),
+            name: "Kilo Gateway".to_string(),
             kind: "openai".to_string(),
-            base_url: "https://api.kilo.ai/api/gateway/v1".to_string(),
+            base_url: "https://ai-gateway.kilo.ai/api/v1".to_string(),
             models_endpoint: Some("/models".to_string()),
             is_custom: false,
         },
