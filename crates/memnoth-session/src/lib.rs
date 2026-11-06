@@ -320,7 +320,7 @@ impl Session {
         let write_cutoff = self
             .writes
             .iter()
-            .position(|w| w.turn_id.map_or(false, |id| id > turn))
+            .position(|w| w.turn_id.is_some_and(|id| id > turn))
             .unwrap_or(self.writes.len());
         self.writes.truncate(write_cutoff);
         // Checkpoints are one per turn boundary, so we keep checkpoints for turns < turn
