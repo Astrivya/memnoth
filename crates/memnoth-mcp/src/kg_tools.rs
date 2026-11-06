@@ -9,6 +9,9 @@
 //! Nothing in this module knows about the transport, the profile gate or the
 //! task machinery — a name that arrives here has already been authorised.
 
+use std::collections::HashMap;
+use std::path::Path;
+
 use anyhow::Result;
 use memnoth_codegraph::{DEFAULT_BUDGET, blast_radius, blast_radius_page, explore, open_store};
 use serde_json::{Value, json};
@@ -69,6 +72,171 @@ pub(crate) fn with_default_workspace(
     filled
 }
 
+/// An answer for a question this graph has no data to support.
+///
+/// The alternative — an empty list — reads as "there are none", and a model
+/// will act on that. The two fields that matter are `supported: false` and the
+/// reason, because a caller can then stop asking instead of concluding.
+fn unsupported(tool: &str, reason: &str, instead: Option<&str>) -> Value {
+    let mut answer = json!({
+        "tool": tool,
+        "supported": false,
+        "reason": reason,
+    });
+    if let Some(instead) = instead {
+        answer["instead"] = json!(instead);
+    }
+    answer
+}
+
+/// The server's own graph, opened only when this workspace actually has one.
+///
+/// `Store::open` creates the file it is given, so opening it unconditionally
+/// turned "this workspace was never indexed" into an empty graph that answers
+/// every question with "nothing" — the most misleading answer a tool can give.
+fn legacy_store(root: &Path) -> Result<memnoth_codegraph::Store> {
+    let path = root.join(".memnoth/kg.db");
+    if !path.is_file() {
+        anyhow::bail!(
+            "this workspace has no code graph — run `memnoth kg index` (or call kg_index), then ask again"
+        );
+    }
+    open_store(&path)
+}
+
+/// What a symbol mentions inside its own body, from the CLI's graph.
+///
+/// This is the one question on this surface that needs `refs.container` — the
+/// innermost declaration a mention sits in — so it is a query rather than a
+/// projection of another tool's answer. Duplicated from `kg callees` on
+/// purpose, with the same rule, because an agent and a person asking the same
+/// checkout must get the same rows; `CliGraph::dead` argues the same case.
+///
+/// Mention-shaped, not resolved: a mention in a comment inside the body is
+/// counted, and a same-named local in another body is not. The answer says so
+/// rather than leaving the model to assume call edges.
+fn callees_from_cli_graph(
+    root: &Path,
+    symbol: &str,
+    limit: usize,
+    indexed: Value,
+) -> Result<Value> {
+    use rusqlite::{Connection, OpenFlags, params_from_iter};
+
+    let path = root.join(".memnoth").join("graph.db");
+    let conn = Connection::open_with_flags(
+        &path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+
+    let has_container = conn
+        .prepare("PRAGMA table_info(refs)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .flatten()
+        .any(|column| column == "container");
+    if !has_container {
+        return Ok(unsupported(
+            "kg_callees",
+            "this graph was built before refs recorded the declaration around a mention, so it cannot say what a symbol calls",
+            Some("run kg_index to rebuild it, or use kg_impact for who mentions the symbol"),
+        ));
+    }
+
+    // Exact name first, then a qualified spelling's last segment — the same
+    // fallback every other lookup makes, so all of them resolve to one subject.
+    let mut names: Vec<String> = Vec::new();
+    {
+        let mut statement = conn.prepare("SELECT DISTINCT name FROM symbols WHERE name = ?1")?;
+        names.extend(
+            statement
+                .query_map([symbol], |row| row.get::<_, String>(0))?
+                .flatten(),
+        );
+    }
+    if names.is_empty() {
+        let segment = symbol
+            .rsplit("::")
+            .next()
+            .unwrap_or(symbol)
+            .rsplit('.')
+            .next()
+            .unwrap_or(symbol);
+        let mut statement = conn.prepare(
+            "SELECT DISTINCT name FROM symbols
+              WHERE name = ?1 OR name LIKE '%::' || ?1 OR name LIKE '%.' || ?1",
+        )?;
+        names.extend(
+            statement
+                .query_map([segment], |row| row.get::<_, String>(0))?
+                .flatten(),
+        );
+    }
+    if names.is_empty() {
+        return Ok(json!({
+            "graph": "memnoth kg",
+            "symbol": symbol,
+            "resolved": false,
+            "callees": [],
+            "truncated": false,
+            "note": "no declaration by that name; `kg_search` finds the spelling",
+            "indexed": indexed,
+        }));
+    }
+
+    let limit = limit.max(1);
+    let placeholders = vec!["?"; names.len()].join(",");
+    let sql = format!(
+        "SELECT name, path, line FROM refs WHERE container IN ({placeholders})
+         ORDER BY path, line LIMIT {}",
+        limit.saturating_add(1)
+    );
+    let rows: Vec<(String, String, i64)> = {
+        let mut statement = conn.prepare(&sql)?;
+        statement
+            .query_map(params_from_iter(names.iter()), |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?
+            .flatten()
+            .collect()
+    };
+    let truncated = rows.len() > limit;
+    let rows = &rows[..rows.len().min(limit)];
+
+    // One read per file, as every other row-carrying tool does: the context
+    // line is what makes a list of names judgeable without opening an editor.
+    let mut cache: HashMap<String, Vec<String>> = HashMap::new();
+    let mut callees: Vec<Value> = Vec::new();
+    for (name, path, line) in rows {
+        let lines = cache.entry(path.clone()).or_insert_with(|| {
+            std::fs::read_to_string(root.join(path))
+                .map(|text| text.lines().map(|line| line.trim().to_string()).collect())
+                .unwrap_or_default()
+        });
+        let context = lines
+            .get(line.saturating_sub(1) as usize)
+            .cloned()
+            .unwrap_or_default();
+        callees.push(json!({
+            "name": name,
+            "path": path,
+            "line": line,
+            "context": context,
+            "kind": "callee",
+            "call_shaped": context.contains(&format!("{name}(")),
+        }));
+    }
+
+    Ok(json!({
+        "graph": "memnoth kg",
+        "symbol": symbol,
+        "resolved": true,
+        "callees": callees,
+        "truncated": truncated,
+        "note": "names mentioned inside this symbol's body; `call_shaped` is the line's shape, not a resolved call edge",
+        "indexed": indexed,
+    }))
+}
+
 /// Answer one `kg_*` tool call.
 ///
 /// The match is exhaustive over the names `tools_call` routes here and bails on
@@ -80,13 +248,19 @@ pub(crate) fn call(name: &str, args: &Value) -> Result<Value> {
         "kg_impact" => {
             let workspace = workspace_arg(args)?;
             let symbol = arg_str(args, "symbol")?;
-            let depth = arg_usize(args, "depth", 2) as u32;
+            let depth = arg_usize(args, "depth", 1) as u32;
             let include_tests = args
                 .get("include_tests")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             let root = std::path::Path::new(&workspace);
-            let store = open_store(&root.join(".memnoth/kg.db"))?;
+            // One graph per workspace: `memnoth kg index` writes
+            // `.memnoth/graph.db`, and this is where the agent reads the same
+            // rows the person sees.
+            if let Some(graph) = crate::cli_graph::CliGraph::open(root) {
+                return graph.impact(&symbol, depth);
+            }
+            let store = legacy_store(root)?;
             let imp = blast_radius(
                 &store,
                 &symbol,
@@ -105,7 +279,10 @@ pub(crate) fn call(name: &str, args: &Value) -> Result<Value> {
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
             let root = std::path::Path::new(&workspace);
-            let store = open_store(&root.join(".memnoth/kg.db"))?;
+            if let Some(graph) = crate::cli_graph::CliGraph::open(root) {
+                return graph.trace_page(&symbol, page_size, cursor.as_deref());
+            }
+            let store = legacy_store(root)?;
             let page = blast_radius_page(
                 &store,
                 &symbol,
@@ -117,11 +294,93 @@ pub(crate) fn call(name: &str, args: &Value) -> Result<Value> {
             )?;
             stamped(&page, &store, root)
         }
+        "kg_callees" => {
+            let workspace = workspace_arg(args)?;
+            let symbol = arg_str(args, "symbol")?;
+            let limit = arg_usize(args, "limit", 50);
+            let root = std::path::Path::new(&workspace);
+            if let Some(graph) = crate::cli_graph::CliGraph::open(root) {
+                // The same resolution `kg_impact` performs, so an unknown name is
+                // reported unresolved instead of as "this function calls nothing".
+                let subject = graph.impact(&symbol, 1)?;
+                if subject["resolved"] != json!(true) {
+                    return Ok(json!({
+                        "graph": "memnoth kg",
+                        "symbol": symbol,
+                        "resolved": false,
+                        "callees": [],
+                        "truncated": false,
+                        "note": "no declaration by that name; `kg_search` finds the spelling",
+                        "indexed": subject["indexed"].clone(),
+                    }));
+                }
+                return callees_from_cli_graph(root, &symbol, limit, subject["indexed"].clone());
+            }
+            // The bundled graph records mentions, not the declaration a mention
+            // sits in, so it cannot answer this one at all.
+            Ok(unsupported(
+                "kg_callees",
+                "the bundled graph does not record which declaration a mention sits in, so it cannot say what a symbol calls",
+                Some(
+                    "kg_impact on the symbol lists the places it is mentioned; kg_explore names its definition",
+                ),
+            ))
+        }
+        "kg_def" => {
+            let workspace = workspace_arg(args)?;
+            let symbol = arg_str(args, "symbol")?;
+            let root = std::path::Path::new(&workspace);
+            if let Some(graph) = crate::cli_graph::CliGraph::open(root) {
+                let explored = graph.explore(&symbol)?;
+                let definition = explored["definitions"]
+                    .as_array()
+                    .and_then(|definitions| definitions.first())
+                    .cloned();
+                return Ok(json!({
+                    "graph": "memnoth kg",
+                    "symbol": symbol,
+                    "resolved": definition.is_some(),
+                    "definition": definition,
+                    "note": "the first declaration of that name, with its snippet; `kg_explore` returns every one with the mentions",
+                    "indexed": explored["indexed"].clone(),
+                }));
+            }
+            let store = legacy_store(root)?;
+            let explored = explore(&store, root, &symbol)?;
+            stamped(&explored, &store, root)
+        }
+        "kg_refs" => {
+            let workspace = workspace_arg(args)?;
+            let symbol = arg_str(args, "symbol")?;
+            let limit = arg_usize(args, "limit", 100).max(1);
+            let root = std::path::Path::new(&workspace);
+            if let Some(graph) = crate::cli_graph::CliGraph::open(root) {
+                let impact = graph.impact(&symbol, 1)?;
+                let mut references = impact["references"].as_array().cloned().unwrap_or_default();
+                let listed = references.len();
+                references.truncate(limit);
+                return Ok(json!({
+                    "graph": "memnoth kg",
+                    "symbol": symbol,
+                    "resolved": impact["resolved"].clone(),
+                    "references": references,
+                    "truncated": listed > limit,
+                    "note": "textual mentions, not resolved call edges; `container` is the declaration the mention sits in",
+                    "indexed": impact["indexed"].clone(),
+                }));
+            }
+            let store = legacy_store(root)?;
+            let imp = blast_radius(&store, &symbol, 1, DEFAULT_BUDGET, false)?;
+            stamped(&imp, &store, root)
+        }
         "kg_status" => {
             let workspace = workspace_arg(args)?;
             let max_checks = arg_usize(args, "max_checks", 64);
             let root = std::path::Path::new(&workspace);
-            let store = open_store(&root.join(".memnoth/kg.db"))?;
+            if let Some(graph) = crate::cli_graph::CliGraph::open(root) {
+                return Ok(graph.status());
+            }
+            let store = legacy_store(root)?;
             // The same accessor the `mem://index/status` resource uses, so the
             // tool and the resource cannot disagree about one workspace. The
             // tool keeps its own `max_checks` because a caller asking for a full
@@ -152,7 +411,10 @@ pub(crate) fn call(name: &str, args: &Value) -> Result<Value> {
             let workspace = workspace_arg(args)?;
             let query = arg_str(args, "query")?;
             let root = std::path::Path::new(&workspace);
-            let store = open_store(&root.join(".memnoth/kg.db"))?;
+            if let Some(graph) = crate::cli_graph::CliGraph::open(root) {
+                return graph.explore(&query);
+            }
+            let store = legacy_store(root)?;
             let resp = explore(&store, root, &query)?;
             let mut value = serde_json::to_value(&resp)?;
             // In-band staleness transparency: the agent sees which files are
@@ -172,7 +434,10 @@ pub(crate) fn call(name: &str, args: &Value) -> Result<Value> {
             let hybrid = args.get("hybrid").and_then(|v| v.as_bool()).unwrap_or(true);
             let rerank_mode: &str = args.get("rerank").and_then(|v| v.as_str()).unwrap_or("off");
             let root = std::path::Path::new(&workspace);
-            let store = open_store(&root.join(".memnoth/kg.db"))?;
+            if let Some(graph) = crate::cli_graph::CliGraph::open(root) {
+                return graph.search(&query, limit);
+            }
+            let store = legacy_store(root)?;
 
             let vectors_available = memnoth_codegraph::vec_count(&store)?;
             let mut value = if hybrid && vectors_available > 0 {
@@ -234,7 +499,10 @@ pub(crate) fn call(name: &str, args: &Value) -> Result<Value> {
             let workspace = workspace_arg(args)?;
             let max_checks = arg_usize(args, "max_checks", 64);
             let root = std::path::Path::new(&workspace);
-            let store = open_store(&root.join(".memnoth/kg.db"))?;
+            if let Some(graph) = crate::cli_graph::CliGraph::open(root) {
+                return Ok(graph.coverage());
+            }
+            let store = legacy_store(root)?;
             let ledger_rows = memnoth_codegraph::ledger(&store)?;
             let freshness = freshness_of(&store, root, max_checks).ok_or_else(|| {
                 anyhow::anyhow!(
@@ -259,7 +527,22 @@ pub(crate) fn call(name: &str, args: &Value) -> Result<Value> {
             let workspace = workspace_arg(args)?;
             let limit = arg_usize(args, "limit", memnoth_codegraph::DEFAULT_MAX_COMMUNITIES);
             let root = std::path::Path::new(&workspace);
-            let store = open_store(&root.join(".memnoth/kg.db"))?;
+            // Communities are components of live CALLS edges. The CLI graph has
+            // no edges — it records where a name appears, not who calls whom —
+            // so a partition of it would be a partition of something else
+            // wearing this report's name. `kg_index` builds the CLI graph
+            // whenever it can, which makes this the common path, so the refusal
+            // has to be useful rather than an error a caller has to decode.
+            if crate::cli_graph::CliGraph::open(root).is_some() {
+                return Ok(unsupported(
+                    "kg_communities",
+                    "communities are clusters of call edges; this graph records name mentions, so any partition it produced would be a different metric under this report's name",
+                    Some(
+                        "kg_hotspots ranks files by churn and declaration count, and kg_coverage reports what the graph actually holds",
+                    ),
+                ));
+            }
+            let store = legacy_store(root)?;
             let report = load_communities(&store, limit)?;
             stamped(report, &store, root)
         }
@@ -267,7 +550,10 @@ pub(crate) fn call(name: &str, args: &Value) -> Result<Value> {
             let workspace = workspace_arg(args)?;
             let min_depth = arg_usize(args, "min_loop_depth", 0) as i64;
             let root = std::path::Path::new(&workspace);
-            let store = open_store(&root.join(".memnoth/kg.db"))?;
+            if let Some(graph) = crate::cli_graph::CliGraph::open(root) {
+                return graph.dead(arg_usize(args, "limit", 200));
+            }
+            let store = legacy_store(root)?;
             // Public API excluded, as the CLI's default is: a `pub` function may
             // be called from a crate this graph never read.
             let dead = memnoth_codegraph::dead_symbols(&store, min_depth as usize, true)?;
@@ -277,7 +563,16 @@ pub(crate) fn call(name: &str, args: &Value) -> Result<Value> {
             let workspace = workspace_arg(args)?;
             let status = args.get("status").and_then(|v| v.as_str());
             let root = std::path::Path::new(&workspace);
-            let store = open_store(&root.join(".memnoth/kg.db"))?;
+            if crate::cli_graph::CliGraph::open(root).is_some() {
+                return Ok(unsupported(
+                    "kg_unresolved",
+                    "the graph records where a name appears, not what it binds to, so a name it never resolved is indistinguishable from one it never saw",
+                    Some(
+                        "kg_impact lists every mention with its source line, which is what a resolution answer was standing in for",
+                    ),
+                ));
+            }
+            let store = legacy_store(root)?;
             let refs = memnoth_codegraph::unresolved_refs(&store, status.unwrap_or("missed"))?;
             // `refs` is a bounded listing; the count is a separate query. An
             // agent that reads `count: 300` as the size of the problem will
@@ -296,7 +591,13 @@ pub(crate) fn call(name: &str, args: &Value) -> Result<Value> {
             let workspace = workspace_arg(args)?;
             let limit = arg_usize(args, "limit", 50);
             let root = std::path::Path::new(&workspace);
-            let store = open_store(&root.join(".memnoth/kg.db"))?;
+            // The CLI answers this question as `kg hotspots`: churn times size.
+            // Ranking the same checkout differently here would make the tool
+            // and the command disagree about which file is riskiest.
+            if let Some(graph) = crate::cli_graph::CliGraph::open(root) {
+                return graph.hotspots(limit);
+            }
+            let store = legacy_store(root)?;
             let rows = memnoth_codegraph::complexity_report(&store, limit)?;
             stamped(json!({ "complexity": rows }), &store, root)
         }
@@ -305,9 +606,8 @@ pub(crate) fn call(name: &str, args: &Value) -> Result<Value> {
             let base = args.get("base").and_then(|v| v.as_str()).unwrap_or("HEAD");
             let depth = arg_usize(args, "depth", 1) as u32;
             let root = std::path::Path::new(&workspace);
-            let store = open_store(&root.join(".memnoth/kg.db"))?;
 
-            // changed files via git (codebase-memory-mcp detect_changes pattern)
+            // changed files via git
             let out = std::process::Command::new("git")
                 .args(["diff", "--name-only", base])
                 .current_dir(root)
@@ -323,10 +623,36 @@ pub(crate) fn call(name: &str, args: &Value) -> Result<Value> {
                 .filter(|l| !l.is_empty())
                 .collect();
 
-            let symbols = memnoth_codegraph::symbols_in_files(
-                &store,
-                &files.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
-            )?;
+            let paths: Vec<String> = files.iter().map(|s| s.to_string()).collect();
+            // One graph: the declarations in the files git just named come from
+            // the same rows `memnoth kg diff-impact` reads.
+            if let Some(graph) = crate::cli_graph::CliGraph::open(root) {
+                let symbols = graph.symbols_in(&paths)?;
+                let mut impacts = Vec::new();
+                for symbol in symbols.iter().take(30) {
+                    let name = symbol["name"].as_str().unwrap_or_default();
+                    if let Ok(impact) = graph.impact(name, depth) {
+                        impacts.push(json!({
+                            "symbol": name,
+                            "file": symbol["path"],
+                            "direct_callers": impact["references_direct"],
+                            "references": impact["references"].as_array().map_or(0, Vec::len),
+                            "files_touched": impact["files"],
+                        }));
+                    }
+                }
+                return Ok(json!({
+                    "graph": "memnoth kg",
+                    "changed_files": files.len(),
+                    "affected_symbols": symbols.len(),
+                    "impact": impacts,
+                    "guidance": "each impact row is how many files mention that declaration — the reachable surface of your uncommitted work",
+                    "indexed": graph.status()["indexed"],
+                }));
+            }
+
+            let store = legacy_store(root)?;
+            let symbols = memnoth_codegraph::symbols_in_files(&store, &paths)?;
             let mut impacts = Vec::new();
             for s in symbols.iter().take(30) {
                 if let Ok(imp) =
@@ -350,67 +676,36 @@ pub(crate) fn call(name: &str, args: &Value) -> Result<Value> {
             }))?)
         }
         "kg_services" => {
-            let workspace = workspace_arg(args)?;
-            let undeclared_only = args
-                .get("undeclared_only")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            let root = std::path::Path::new(&workspace);
-            let store = open_store(&root.join(".memnoth/kg.db"))?;
-            let services = memnoth_codegraph::service_map(&store)?;
-            let cross = memnoth_codegraph::cross_service_calls(&store)?;
-            let env = memnoth_codegraph::env_report(&store)?;
-            let payload = json!({
-                "undeclared_only": undeclared_only,
-                "services": services
-                    .iter()
-                    .map(|s| json!({
-                        "name": s.name,
-                        "rel_path": s.rel_path,
-                        "images": s.images,
-                        "depends_on": s.depends_on,
-                    }))
-                    .collect::<Vec<_>>(),
-                "cross_service_calls": cross
-                    .iter()
-                    .map(|c| json!({
-                        "caller": c.caller,
-                        "endpoint": c.endpoint,
-                        "served_here": c.served_here,
-                        "rel_path": c.rel_path,
-                        "line": c.line,
-                    }))
-                    .collect::<Vec<_>>(),
-                "env_declared": env
-                    .declared
-                    .iter()
-                    .map(|v| json!({
-                        "name": v.name,
-                        "definitions": v.defined_in.len(),
-                        "read_sites": v.read_by.len(),
-                        "never_read": v.unread(),
-                    }))
-                    .collect::<Vec<_>>(),
-                "env_undeclared": env
-                    .undeclared
-                    .iter()
-                    .map(|v| json!({"name": v.name}))
-                    .collect::<Vec<_>>(),
-            });
-            stamped(payload, &store, root)
+            // No layer reads compose files or route tables, and the functions
+            // behind this tool return constants rather than findings. Every
+            // list here would be empty for a reason that has nothing to do with
+            // the repository, so say that instead of returning four empty
+            // arrays that read as "this repo has no services".
+            Ok(unsupported(
+                "kg_services",
+                "this build does not map services: no layer reads compose files, route declarations or cross-service calls",
+                Some("kg_search finds a service's entry points by name"),
+            ))
         }
-        "kg_risk" => {
-            let workspace = workspace_arg(args)?;
-            let depth = arg_usize(args, "depth", memnoth_codegraph::RISK_DEFAULT_DEPTH);
-            let root = std::path::Path::new(&workspace);
-            let store = open_store(&root.join(".memnoth/kg.db"))?;
-            let report = memnoth_codegraph::untrusted_reach(&store, depth)?;
-            stamped(report, &store, root)
-        }
+        "kg_risk" => Ok(unsupported(
+            "kg_risk",
+            "taint reach needs resolved call edges; this index holds textual mentions, which would over-count every same-named symbol",
+            Some("kg_impact with depth=2 follows mentions two hops out"),
+        )),
         "kg_why" => {
             let workspace = workspace_arg(args)?;
             let from = arg_str(args, "from")?;
             let to = arg_str(args, "to")?;
+            let root = std::path::Path::new(&workspace);
+            if crate::cli_graph::CliGraph::open(root).is_some() {
+                return Ok(unsupported(
+                    "kg_why",
+                    "a path between two symbols needs directed call edges; this graph knows which files mention which names, not who calls whom",
+                    Some(
+                        "kg_impact on each end reports the files they share, which is the evidence a call path would be built from",
+                    ),
+                ));
+            }
             let direction_arg = args
                 .get("direction")
                 .and_then(|v| v.as_str())
@@ -419,13 +714,8 @@ pub(crate) fn call(name: &str, args: &Value) -> Result<Value> {
                 memnoth_codegraph::Direction::parse(direction_arg).ok_or_else(|| {
                     anyhow::anyhow!("unknown direction {direction_arg:?} — use down, up or both")
                 })?;
-            let depth = arg_usize(
-                args,
-                "depth",
-                memnoth_codegraph::DEFAULT_PATH_DEPTH as usize,
-            ) as u32;
-            let root = std::path::Path::new(&workspace);
-            let store = open_store(&root.join(".memnoth/kg.db"))?;
+            let depth = arg_usize(args, "depth", memnoth_codegraph::DEFAULT_PATH_DEPTH) as u32;
+            let store = legacy_store(root)?;
             let result = memnoth_codegraph::path_between(
                 &store,
                 &from,
@@ -439,7 +729,14 @@ pub(crate) fn call(name: &str, args: &Value) -> Result<Value> {
         "kg_doctor" => {
             let workspace = workspace_arg(args)?;
             let root = std::path::Path::new(&workspace);
-            let store = open_store(&root.join(".memnoth/kg.db"))?;
+            // The health check follows the graph the other tools answer from.
+            // Reporting on `.memnoth/kg.db` while `kg_search` reads
+            // `.memnoth/graph.db` would diagnose a file the caller never
+            // touched.
+            if let Some(graph) = crate::cli_graph::CliGraph::open(root) {
+                return Ok(graph.doctor());
+            }
+            let store = legacy_store(root)?;
             let ledger_rows = memnoth_codegraph::ledger(&store)?;
             // `0` = sweep every indexed file. A health check that samples is not
             // a health check, so this is deliberately the one place that pays
@@ -566,6 +863,101 @@ mod tests {
             Some(Path::new("/repo/.memnoth/vault.db")),
         );
         assert_eq!(filled["workspace"], "/other");
+    }
+
+    #[test]
+    fn a_tool_with_no_data_behind_it_says_so_instead_of_returning_empties() {
+        // "no services found" and "this build never looks for services" are
+        // different answers, and only one of them is true.
+        for tool in ["kg_services", "kg_risk"] {
+            let answer = call(tool, &json!({})).expect("an unsupported tool still answers");
+            assert_eq!(answer["supported"], false, "{tool}: {answer}");
+            assert_eq!(answer["tool"], tool);
+            assert!(
+                answer["reason"].as_str().is_some_and(|r| !r.is_empty()),
+                "{tool} must say why: {answer}"
+            );
+            assert!(
+                answer["instead"].as_str().is_some(),
+                "{tool} must name what does work instead: {answer}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_workspace_that_was_never_indexed_is_an_error_not_an_empty_graph() {
+        let root =
+            std::env::temp_dir().join(format!("memnoth-mcp-no-graph-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let error = call(
+            "kg_communities",
+            &json!({"workspace": root.display().to_string()}),
+        )
+        .expect_err("an unindexed workspace must not answer with an empty graph");
+        assert!(
+            error.to_string().contains("no code graph"),
+            "the error says what is missing and what to run: {error}"
+        );
+    }
+
+    /// A scratch workspace with a graph the CLI wrote and nothing else in it.
+    fn workspace_with_a_cli_graph(name: &str) -> std::path::PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("memnoth-mcp-kg-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        crate::cli_graph::write_test_graph(&root);
+        root
+    }
+
+    #[test]
+    fn a_cli_graph_changes_which_questions_can_be_answered_not_just_where_from() {
+        let root = workspace_with_a_cli_graph("communities");
+        let args = json!({"workspace": root.display().to_string()});
+
+        // There is a graph here. Saying "no code graph" would be false, and
+        // computing a partition of mentions and calling it communities would be
+        // an answer to a different question.
+        let answer = call("kg_communities", &args).expect("a graph exists, so this must answer");
+        assert_eq!(answer["supported"], false, "{answer}");
+        assert_eq!(answer["tool"], "kg_communities");
+        assert!(
+            answer["reason"].as_str().unwrap().contains("call edges"),
+            "the refusal names what the report would have needed: {answer}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_doctor_checks_the_graph_the_other_tools_read() {
+        let root = workspace_with_a_cli_graph("doctor");
+        let answer = call(
+            "kg_doctor",
+            &json!({"workspace": root.display().to_string()}),
+        )
+        .expect("a graph exists, so the health check must run");
+
+        assert_eq!(answer["graph"], "memnoth kg", "{answer}");
+        assert!(
+            answer["findings"].as_array().is_some_and(|f| !f.is_empty()),
+            "a health check always says something: {answer}"
+        );
+        assert!(
+            answer["not_checked"]
+                .as_array()
+                .is_some_and(|f| !f.is_empty()),
+            "the verdict states what it could not check: {answer}"
+        );
+        assert_eq!(
+            answer["path"],
+            root.join(".memnoth").join("graph.db").display().to_string(),
+            "it reports on the file the kg_* tools answer from"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
