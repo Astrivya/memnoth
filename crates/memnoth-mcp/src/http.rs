@@ -1196,7 +1196,7 @@ mod tests {
         assert!(listed.starts_with("HTTP/1.1 200"), "{listed}");
         let listed_body: Value =
             serde_json::from_str(listed.split("\r\n\r\n").nth(1).unwrap()).unwrap();
-        assert_eq!(listed_body["result"]["tools"].as_array().unwrap().len(), 48);
+        assert_eq!(listed_body["result"]["tools"].as_array().unwrap().len(), 51);
 
         // GET is refused per spec when no SSE stream is offered.
         let get = exchange(

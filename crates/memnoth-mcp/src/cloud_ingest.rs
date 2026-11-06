@@ -48,13 +48,12 @@ const INGEST_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_INGEST_BASE: &str = "https://memnoth.astrivya.ai";
 
 /// The control plane's CSRF marker, which every non-browser mutating request
-/// must carry (`csrf_guard`, `crates/memnoth-cloud/src/web.rs`).
+/// must carry. The server half of this contract is not part of this repository.
 ///
-/// A named constant rather than a literal, and duplicated from
-/// `memnoth_base::subscription_catalog` rather than imported: this crate does
-/// not depend on `memnoth-base`, and the dependency-boundaries gate is right to
-/// ask why a machine-surface crate would. The pair is two strings that the
-/// server also hardcodes — `1` is the whole protocol.
+/// A named constant rather than a literal, and deliberately duplicated rather
+/// than imported: this crate must not depend on control-plane internals, and the
+/// dependency-boundaries gate is right to ask why a machine-surface crate would.
+/// The pair is two strings the server hardcodes too — `1` is the whole protocol.
 const CSRF_HEADER: &str = "x-memnoth-csrf";
 /// The only value the guard accepts, alongside `true`.
 const CSRF_VALUE: &str = "1";
