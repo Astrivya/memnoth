@@ -195,7 +195,10 @@ impl SkillRegistry {
                 .filter_map(|e| e.ok())
             {
                 let src = entry.path();
-                if src == skill_file {
+                // Never copy the registry into itself: when the source lives in the
+                // skills directory (or any directory under it), the walk would pick
+                // up the skill directory created above and recurse forever.
+                if src == skill_file || src.starts_with(&self.skills_dir) {
                     continue;
                 }
                 let rel = src.strip_prefix(parent).unwrap();
@@ -414,7 +417,7 @@ Hello {{name}}!
             let content = format!(
                 r#"---
 name = "{}"
-description = "Skill {}
+description = "Skill {}"
 ---
 "#,
                 name, name
