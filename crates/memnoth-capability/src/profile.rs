@@ -170,6 +170,14 @@ pub const TOOL_PROFILES: &[(&str, &[Profile])] = &[
     ("kg_communities", &[Profile::Code, Profile::Full]),
     ("kg_impact", &[Profile::Code, Profile::Full]),
     ("kg_trace", &[Profile::Code, Profile::Full]),
+    // The three the agent used to be half-blind without: `kg_impact` answers
+    // "who calls this", and editing a signature also needs what it calls
+    // (`kg_callees`), the declaration itself (`kg_def`) and the mention list
+    // (`kg_refs`). Code-only, like the impact walk they mirror: a memory host
+    // has no declaration bodies to read.
+    ("kg_callees", &[Profile::Code, Profile::Full]),
+    ("kg_def", &[Profile::Code, Profile::Full]),
+    ("kg_refs", &[Profile::Code, Profile::Full]),
     ("kg_why", &[Profile::Code, Profile::Full]),
     ("kg_dead", &[Profile::Code, Profile::Full]),
     ("kg_complexity", &[Profile::Code, Profile::Full]),
@@ -366,9 +374,9 @@ mod tests {
             vec![
                 ("micro", 4),
                 ("memory", 21),
-                ("code", 23),
+                ("code", 26),
                 ("coord", 11),
-                ("full", 48)
+                ("full", 51)
             ],
             "a profile changed size: update the published tables with it"
         );
@@ -385,9 +393,9 @@ mod tests {
             vec![
                 ("micro", 4),
                 ("memory", 21),
-                ("code", 23),
+                ("code", 26),
                 ("coord", 11),
-                ("full", 48),
+                ("full", 51),
             ],
             "surface_report must match TOOL_PROFILES membership",
         );
