@@ -33,17 +33,17 @@ fn initialize_negotiates_unsupported_versions_down() {
 }
 
 #[test]
-fn tools_list_full_surface_has_44() {
+fn tools_list_full_surface_has_51() {
     let (e, c) = setup();
     let resp = handle_message(&e, &c, rpc(2, "tools/list", json!({}))).unwrap();
     let tools = resp["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 48);
+    assert_eq!(tools.len(), 51);
 }
 
 #[test]
 fn schemas_declare_required_and_descriptions() {
     let defs = tool_definitions();
-    assert_eq!(defs.len(), 37);
+    assert_eq!(defs.len(), 40);
     for def in &defs {
         let name = def["name"].as_str().unwrap();
         let s = &def["inputSchema"];
@@ -103,7 +103,7 @@ fn kg_index_advertises_the_embed_opt_out() {
 #[test]
 fn annotations_classify_all_tools() {
     let defs = tool_definitions();
-    assert_eq!(defs.len(), 37);
+    assert_eq!(defs.len(), 40);
     let mut read_only = Vec::new();
     for def in &defs {
         let name = def["name"].as_str().unwrap().to_string();
@@ -132,14 +132,17 @@ fn annotations_classify_all_tools() {
             "coord_inbox",
             "coord_status",
             "coord_task_list",
+            "kg_callees",
             "kg_changes",
             "kg_communities",
             "kg_complexity",
             "kg_coverage",
             "kg_dead",
+            "kg_def",
             "kg_doctor",
             "kg_explore",
             "kg_impact",
+            "kg_refs",
             "kg_risk",
             "kg_search",
             "kg_services",
@@ -541,9 +544,9 @@ fn profile_filters_tool_list() {
     };
     assert_eq!(count(Profile::Micro), 4);
     assert_eq!(count(Profile::Memory), 21);
-    assert_eq!(count(Profile::Code), 23);
+    assert_eq!(count(Profile::Code), 26);
     assert_eq!(count(Profile::Coord), 11);
-    assert_eq!(count(Profile::Full), 48);
+    assert_eq!(count(Profile::Full), 51);
 }
 
 /// The moat, asserted by name — with the docstring's own reason in the
