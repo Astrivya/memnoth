@@ -47,6 +47,32 @@ pub struct ServerFrame {
     pub event: ApiEvent,
 }
 
+impl ServerFrame {
+    /// A reply to the client frame with `id`.
+    pub fn reply(id: u64, event: ApiEvent) -> Self {
+        ServerFrame {
+            reply_to: Some(id),
+            event,
+        }
+    }
+
+    /// An unsolicited event, not tied to a request.
+    pub fn event(event: ApiEvent) -> Self {
+        ServerFrame {
+            reply_to: None,
+            event,
+        }
+    }
+}
+
+/// Stable error codes for a failed request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorCode {
+    /// The request name or shape is not implemented by this server.
+    UnknownRequest,
+}
+
 /// Lifecycle event in the harness API stream.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -56,8 +82,10 @@ pub enum ApiEvent {
     /// Tool execution done.
     ToolDone {
         session_id: String,
+        call_id: String,
         name: String,
         output: String,
+        error: Option<String>,
     },
     /// Turn complete.
     TurnDone { session_id: String },
@@ -76,7 +104,7 @@ pub enum ApiEvent {
     /// Credential updated.
     CredentialUpdated { key: String },
     /// Error event.
-    Error { message: String },
+    Error { code: ErrorCode, message: String },
     /// File content.
     FileContent { path: String, content: String },
     /// Files listing.
@@ -86,11 +114,14 @@ pub enum ApiEvent {
     /// Session attached.
     Attached { session: SessionInfo },
     /// Session status.
-    SessionStatus { status: String },
+    SessionStatus { session_id: String, status: String },
     /// Sessions listing.
     Sessions { sessions: Vec<SessionInfo> },
     /// History.
-    History { messages: Vec<HistoryMessage> },
+    History {
+        session_id: String,
+        messages: Vec<HistoryMessage>,
+    },
     /// Reasoning delta.
     ReasoningDelta { session_id: String, delta: String },
     /// Reasoning done.
@@ -126,8 +157,9 @@ pub enum ApiEvent {
     SessionRenamed { session_id: String, name: String },
     /// Hello ok.
     HelloOk {
-        server_name: String,
-        version: String,
+        version: u32,
+        server: String,
+        capabilities: Vec<String>,
     },
     /// Ok acknowledgement.
     Ok,
@@ -154,6 +186,8 @@ pub enum ApiRequest {
     },
     /// Set model.
     SetModel { session_id: String, model: String },
+    /// Read a session's history.
+    GetHistory { session_id: String },
     /// Close session.
     CloseSession { session_id: String },
 }
@@ -162,20 +196,19 @@ pub enum ApiRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionInfo {
     pub session_id: String,
-    pub workspace: Option<String>,
-    pub model: Option<String>,
-    pub created_at: u64,
-    pub last_active: u64,
+    pub working_dir: Option<String>,
+    pub title: Option<String>,
+    pub status: String,
+    pub transcript_bytes: Option<u64>,
+    pub archived: bool,
+    pub archived_at_ms: Option<u64>,
 }
 
 /// A message in the harness session history.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryMessage {
-    pub id: u64,
-    pub session_id: String,
     pub role: String,
     pub content: String,
-    pub timestamp: u64,
 }
 
 #[cfg(test)]
@@ -198,10 +231,12 @@ mod tests {
     fn session_info_serialization() {
         let info = SessionInfo {
             session_id: "s-1".to_string(),
-            workspace: Some("/tmp".to_string()),
-            model: Some("claude-3".to_string()),
-            created_at: 1000,
-            last_active: 2000,
+            working_dir: Some("/tmp".to_string()),
+            title: Some("work".to_string()),
+            status: "idle".to_string(),
+            transcript_bytes: Some(2048),
+            archived: false,
+            archived_at_ms: None,
         };
         let json = serde_json::to_string(&info).unwrap();
         let deserialized: SessionInfo = serde_json::from_str(&json).unwrap();

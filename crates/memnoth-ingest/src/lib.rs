@@ -10,7 +10,7 @@ use std::path::Path;
 use walkdir::WalkDir;
 
 /// Report produced at the end of an ingest run.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct IngestReport {
     /// Number of files seen during the walk.
     pub files_seen: u64,
@@ -28,21 +28,6 @@ pub struct IngestReport {
     pub calls_created: u64,
     /// Number of calls unresolved.
     pub calls_unresolved: u64,
-}
-
-impl Default for IngestReport {
-    fn default() -> Self {
-        IngestReport {
-            files_seen: 0,
-            files_ingested: 0,
-            files_unchanged: 0,
-            entities_created: 0,
-            relations_created: 0,
-            observations_created: 0,
-            calls_created: 0,
-            calls_unresolved: 0,
-        }
-    }
 }
 
 /// Progress callback: invoked with files seen count and relative path.
@@ -131,12 +116,11 @@ fn now_ms() -> i64 {
 fn collect_source_files(root: &Path) -> Result<Vec<std::path::PathBuf>> {
     let mut files = Vec::new();
     for entry in WalkDir::new(root).into_iter().flatten() {
-        if entry.file_type().is_file() {
-            if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
-                if SOURCE_EXTENSIONS.contains(&ext) {
-                    files.push(entry.path().to_path_buf());
-                }
-            }
+        if entry.file_type().is_file()
+            && let Some(ext) = entry.path().extension().and_then(|e| e.to_str())
+            && SOURCE_EXTENSIONS.contains(&ext)
+        {
+            files.push(entry.path().to_path_buf());
         }
     }
     files.sort();

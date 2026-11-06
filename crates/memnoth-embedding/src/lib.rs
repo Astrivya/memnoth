@@ -6,7 +6,7 @@
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::ops::{Deref, DerefMut};
 
 /// A dense embedding vector.
 ///
@@ -73,6 +73,26 @@ impl EmbeddingVec {
     }
 }
 
+impl Deref for EmbeddingVec {
+    type Target = [f32];
+
+    fn deref(&self) -> &Self::Target {
+        &self.data
+    }
+}
+
+impl DerefMut for EmbeddingVec {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.data
+    }
+}
+
+impl From<Vec<f32>> for EmbeddingVec {
+    fn from(data: Vec<f32>) -> Self {
+        Self::from_vec(data)
+    }
+}
+
 /// The embedding model.
 pub struct Embedder {
     pub(crate) dim: usize,
@@ -86,6 +106,18 @@ impl Embedder {
             dim,
             model_id: model_id.into(),
         }
+    }
+
+    /// Load the embedder from a model directory.
+    ///
+    /// This build has no ONNX runtime: the loader checks that the directory
+    /// exists and returns the deterministic stub embedder, so callers that
+    /// probe for a model behave the same way they do against the real one.
+    pub fn load_from_dir(path: &std::path::Path) -> Result<Self> {
+        if !path.is_dir() {
+            anyhow::bail!("embedding model directory not found: {}", path.display());
+        }
+        Ok(Self::new(384, "all-MiniLM-L6-v2"))
     }
 
     /// Get the embedding dimension.
@@ -137,6 +169,21 @@ impl CrossEncoder {
     /// Create a new cross-encoder.
     pub fn new() -> Result<Self> {
         Ok(CrossEncoder { _private: () })
+    }
+
+    /// Load the cross-encoder from a model directory.
+    ///
+    /// As with [`Embedder::load_from_dir`], there is no ONNX runtime in this
+    /// build: an existing directory yields the stub encoder, which reranks
+    /// nothing and lets the caller keep its lexical order.
+    pub fn load_from_dir(path: &std::path::Path) -> Result<Self> {
+        if !path.is_dir() {
+            anyhow::bail!(
+                "cross-encoder model directory not found: {}",
+                path.display()
+            );
+        }
+        Self::new()
     }
 
     /// Rerank candidates given a query.
