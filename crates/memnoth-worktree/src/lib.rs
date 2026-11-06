@@ -9,17 +9,12 @@
 //! - Parallel command execution via `mn parallel <cmd> <targets>`
 //! - Integration with `memnoth-coord` for task distribution and path claims
 
-use memnoth_coord::{join_workspace, WorkerPool, WorkerRow, WorkerStatus};
+use memnoth_coord::join_workspace;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use memnoth_coord::{join_workspace, Coord, WorkerRow, WorkerStatus};
-use serde::{Deserialize, Serialize};
-use std::process::Command;
-
 
 /// Result of a worktree operation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,14 +40,17 @@ pub fn create_worktree(
     base_branch: Option<&str>,
 ) -> Result<WorktreeInfo> {
     let worktrees_dir = repo_root.join(".memnoth").join("worktrees");
-    std::fs::create_dir_all(&worktrees_dir)
-        .context("failed to create worktrees directory")?;
+    std::fs::create_dir_all(&worktrees_dir).context("failed to create worktrees directory")?;
 
     let worktree_path = worktrees_dir.join(name);
 
     // Check if worktree already exists
     if worktree_path.exists() {
-        bail!("worktree '{}' already exists at {}", name, worktree_path.display());
+        bail!(
+            "worktree '{}' already exists at {}",
+            name,
+            worktree_path.display()
+        );
     }
 
     // Determine the branch to use
@@ -70,7 +68,14 @@ pub fn create_worktree(
     // Create the worktree
     let mut cmd = Command::new("git");
     cmd.current_dir(repo_root);
-    cmd.args(["worktree", "add", "-b", &target_branch, &worktree_path.to_string_lossy(), base]);
+    cmd.args([
+        "worktree",
+        "add",
+        "-b",
+        &target_branch,
+        &worktree_path.to_string_lossy(),
+        base,
+    ]);
 
     let output = cmd.output().context("failed to execute git worktree add")?;
     if !output.status.success() {
@@ -95,7 +100,9 @@ pub fn list_worktrees(repo_root: &Path) -> Result<Vec<WorktreeInfo>> {
     cmd.current_dir(repo_root);
     cmd.args(["worktree", "list", "--porcelain"]);
 
-    let output = cmd.output().context("failed to execute git worktree list")?;
+    let output = cmd
+        .output()
+        .context("failed to execute git worktree list")?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("git worktree list failed: {}", stderr);
@@ -108,14 +115,12 @@ fn parse_worktree_list(output: &[u8], repo_root: &Path) -> Result<Vec<WorktreeIn
     let text = String::from_utf8_lossy(output);
     let mut worktrees = Vec::new();
     let mut current: Option<WorktreeInfo> = None;
-    let mut in_main = true;
 
     for line in text.lines() {
-        if line.starts_with("worktree ") {
+        if let Some(path_str) = line.strip_prefix("worktree ") {
             if let Some(wt) = current.take() {
                 worktrees.push(wt);
             }
-            let path_str = &line["worktree ".len()..];
             let path = PathBuf::from(path_str);
             let is_main = path == repo_root;
             current = Some(WorktreeInfo {
@@ -124,7 +129,6 @@ fn parse_worktree_list(output: &[u8], repo_root: &Path) -> Result<Vec<WorktreeIn
                 commit: String::new(),
                 is_main,
             });
-            in_main = is_main;
         } else if line.starts_with("HEAD ") && current.is_some() {
             let commit = &line["HEAD ".len()..];
             if let Some(ref mut wt) = current {
@@ -135,10 +139,11 @@ fn parse_worktree_list(output: &[u8], repo_root: &Path) -> Result<Vec<WorktreeIn
             if let Some(ref mut wt) = current {
                 wt.branch = branch.trim_start_matches("refs/heads/").to_string();
             }
-        } else if line.is_empty() && current.is_some() {
-            if let Some(wt) = current.take() {
-                worktrees.push(wt);
-            }
+        } else if line.is_empty()
+            && current.is_some()
+            && let Some(wt) = current.take()
+        {
+            worktrees.push(wt);
         }
     }
     if let Some(wt) = current.take() {
@@ -159,12 +164,19 @@ pub fn clean_worktree(repo_root: &Path, name: &str, force: bool) -> Result<()> {
     let mut cmd = Command::new("git");
     cmd.current_dir(repo_root);
     if force {
-        cmd.args(["worktree", "remove", "--force", &worktree_path.to_string_lossy()]);
+        cmd.args([
+            "worktree",
+            "remove",
+            "--force",
+            &worktree_path.to_string_lossy(),
+        ]);
     } else {
         cmd.args(["worktree", "remove", &worktree_path.to_string_lossy()]);
     }
 
-    let output = cmd.output().context("failed to execute git worktree remove")?;
+    let output = cmd
+        .output()
+        .context("failed to execute git worktree remove")?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("git worktree remove failed: {}", stderr);
@@ -232,11 +244,8 @@ pub struct BatchResult {
 ///
 /// Spawns `config.workers` workers in isolated worktrees, each running the
 /// configured command. Workers coordinate via the shared coordination room.
-pub async fn execute_batch(
-    repo_root: &Path,
-    config: BatchConfig,
-) -> Result<Vec<BatchResult>> {
-    let pool = join_workspace(repo_root)?;
+pub async fn execute_batch(repo_root: &Path, config: BatchConfig) -> Result<Vec<BatchResult>> {
+    let mut pool = join_workspace(repo_root)?;
 
     let mut handles = Vec::new();
     let mut worker_ids = Vec::new();
@@ -248,7 +257,9 @@ pub async fn execute_batch(
         worker_ids.push(worker.id.clone());
     }
 
-    // Run commands in parallel
+    // Run commands in parallel. Path claims are taken before spawning: the pool
+    // owns a database handle and cannot be moved into a worker task.
+    let mut results = Vec::new();
     for worker_id in &worker_ids {
         let worker = pool.worker(worker_id).unwrap().clone();
         let worktree_path = worker.worktree.clone();
@@ -256,41 +267,43 @@ pub async fn execute_batch(
         let workdir = config.workdir.clone();
         let claim_glob = config.claim_glob.clone();
         let claim_ttl = config.claim_ttl_secs;
-        let task_desc = config.task.clone();
         let wid = worker_id.clone();
-        let session_id = worker.session_id.clone();
-        let pool_clone = pool.clone();
+
+        if let Some(ref glob) = claim_glob {
+            let refusal = match pool.claim_task(&wid, glob, claim_ttl) {
+                Ok(memnoth_coord::ClaimResult::Granted { .. }) => None,
+                Ok(memnoth_coord::ClaimResult::Refused {
+                    holder_session,
+                    holder_glob,
+                }) => Some(format!(
+                    "claim refused: held by {} on {}",
+                    holder_session, holder_glob
+                )),
+                Err(e) => Some(format!("claim failed: {}", e)),
+            };
+            if let Some(error) = refusal {
+                results.push(BatchResult {
+                    worker_id: wid,
+                    exit_code: None,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    duration_ms: 0,
+                    error: Some(error),
+                });
+                continue;
+            }
+        }
 
         let handle = tokio::spawn(async move {
             let start = std::time::Instant::now();
             let mut result = BatchResult {
-                worker_id: wid.clone(),
+                worker_id: wid,
                 exit_code: None,
                 stdout: String::new(),
                 stderr: String::new(),
                 duration_ms: 0,
                 error: None,
             };
-
-            // Claim path if specified
-            if let Some(ref glob) = claim_glob {
-                match pool_clone.claim_task(&wid, glob, claim_ttl) {
-                    Ok(memnoth_coord::ClaimResult::Granted { .. }) => {}
-                    Ok(memnoth_coord::ClaimResult::Refused { holder_session, holder_glob }) => {
-                        result.error = Some(format!(
-                            "claim refused: held by {} on {}",
-                            holder_session, holder_glob
-                        ));
-                        result.duration_ms = start.elapsed().as_millis() as u64;
-                        return result;
-                    }
-                    Err(e) => {
-                        result.error = Some(format!("claim failed: {}", e));
-                        result.duration_ms = start.elapsed().as_millis() as u64;
-                        return result;
-                    }
-                }
-            }
 
             // Run the command
             let mut cmd = Command::new(&command[0]);
@@ -323,7 +336,6 @@ pub async fn execute_batch(
     }
 
     // Collect results
-    let mut results = Vec::new();
     for handle in handles {
         match handle.await {
             Ok(result) => results.push(result),
@@ -345,8 +357,6 @@ pub async fn execute_batch(
 
     Ok(results)
 }
-///
-/// Spawns `config.workers` workers in isolated worktrees, each running the
 
 /// Configuration for parallel command execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -391,7 +401,12 @@ pub async fn execute_parallel(
     } else {
         worktrees
             .into_iter()
-            .filter(|w| config.targets.iter().any(|t| t == &w.branch || *t == name_from_path(&w.path)))
+            .filter(|w| {
+                config
+                    .targets
+                    .iter()
+                    .any(|t| t == &w.branch || *t == name_from_path(&w.path))
+            })
             .collect()
     };
 
