@@ -334,7 +334,7 @@ fn kg_index_reports_real_progress_to_a_client_that_opted_in() {
         // Drained before the call as well as after, so the assertion is
         // about this call's notifications and not a previous test's.
         drain_notifications();
-        let _ = handle_message(&e, &c, rpc(1, "tools/call", params));
+        let _response = handle_message(&e, &c, rpc(1, "tools/call", params));
         drain_notifications()
     };
 

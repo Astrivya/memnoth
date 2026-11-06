@@ -392,11 +392,35 @@ fn a_revision_keeps_its_history_and_is_reachable_by_either_name() {
     let hits = call_tool(&e, &c, 3, "mem_search", json!({"query": new, "limit": 5}));
     assert_eq!(hits["results"][0]["name"], json!(new), "{hits}");
 
-    // History is reachable by the name the host actually has now.
+    // History is reachable by the name the host actually has now, and a revision
+    // is one version per belief: the live row and the creation snapshot are the
+    // same revision, so a one-step revision reads as two versions, not four.
     let history = call_tool(&e, &c, 4, "vault_history", json!({"name": new}));
+    assert_eq!(
+        history["count"],
+        json!(2),
+        "a one-step revision is two versions: {history}"
+    );
+    let versions = history["versions"].as_array().cloned().unwrap_or_default();
+    let mut ids: Vec<i64> = versions
+        .iter()
+        .filter_map(|v| v["entity_id"].as_i64())
+        .collect();
+    ids.sort_unstable();
+    let distinct = ids.len();
+    ids.dedup();
+    assert_eq!(ids.len(), distinct, "each revision listed once: {history}");
+    assert_eq!(ids.len(), 2, "predecessor and successor: {history}");
+    // The kept version still carries the journal's reason and snapshot: the fold
+    // merges the two copies of a revision, it does not drop one of them.
+    assert_eq!(
+        versions[0]["change_reason"],
+        json!("renamed in consolidation"),
+        "the closed revision keeps the reason it closed: {history}"
+    );
     assert!(
-        history["count"].as_u64().unwrap_or(0) >= 2,
-        "a rename must be visible from the successor's name: {history}"
+        !versions[0]["snapshot"].is_null(),
+        "the closed revision keeps its snapshot: {history}"
     );
     let contra = call_tool(&e, &c, 5, "vault_contradictions", json!({"name": new}));
     assert!(
