@@ -464,10 +464,10 @@ impl MultiCredentialStore {
     pub fn get_sync(&self, key: &str) -> Result<Option<String>> {
         // Try file store directly (synchronous)
         for store in &self.stores {
-            if let CredentialStore::File(file_store) = store {
-                if let Some(value) = file_store.get_sync(key)? {
-                    return Ok(Some(value));
-                }
+            if let CredentialStore::File(file_store) = store
+                && let Some(value) = file_store.get_sync(key)?
+            {
+                return Ok(Some(value));
             }
         }
         Ok(None)
