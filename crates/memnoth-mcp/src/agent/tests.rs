@@ -16,7 +16,9 @@ pub(crate) async fn spawn_fake_api() -> std::path::PathBuf {
         std::process::id(),
         memnoth_engine::now_ms()
     ));
-    let mut listener = memnoth_transport::Listener::bind(&path).expect("bind fake api");
+    let listener = memnoth_transport::Listener::bind(&path)
+        .await
+        .expect("bind fake api");
     tokio::spawn(async move {
         loop {
             if let Ok((stream, _)) = listener.accept().await {

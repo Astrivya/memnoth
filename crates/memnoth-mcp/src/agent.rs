@@ -744,7 +744,7 @@ fn event_kind(event: &ApiEvent) -> &'static str {
         ApiEvent::Files { .. } => "files",
         ApiEvent::TextMatches { .. } => "text_matches",
         ApiEvent::FileStatus { .. } => "file_status",
-        ApiEvent::Compacted { .. } => "compacted",
+        ApiEvent::Compacted => "compacted",
         ApiEvent::SessionClosed { .. } => "session_closed",
         ApiEvent::SessionRenamed { .. } => "session_renamed",
         ApiEvent::Unknown => "unknown",
