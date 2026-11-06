@@ -85,17 +85,17 @@ pub async fn resolve_token(
     store: Option<&MultiCredentialStore>,
 ) -> Result<Option<ResolvedToken>> {
     // 1. CLI flag (highest priority)
-    if let Some(token) = cli_token {
-        if !token.trim().is_empty() {
-            return Ok(Some(ResolvedToken::new(token, TokenSource::CliFlag)));
-        }
+    if let Some(token) = cli_token
+        && !token.trim().is_empty()
+    {
+        return Ok(Some(ResolvedToken::new(token, TokenSource::CliFlag)));
     }
 
     // 2. Environment variable
-    if let Ok(token) = std::env::var("MEMNOTH_API_KEY") {
-        if !token.trim().is_empty() {
-            return Ok(Some(ResolvedToken::new(token, TokenSource::EnvVar)));
-        }
+    if let Ok(token) = std::env::var("MEMNOTH_API_KEY")
+        && !token.trim().is_empty()
+    {
+        return Ok(Some(ResolvedToken::new(token, TokenSource::EnvVar)));
     }
 
     // 3 & 4. Keychain + File fallback (via store)
@@ -110,31 +110,25 @@ pub async fn resolve_token(
             .iter()
             .any(|s| matches!(s, CredentialStore::File(_)));
 
-        if has_keyring {
-            if let CredentialStore::Keyring(keyring_store) = &store.stores()[0] {
-                let exists = keyring_store.exists("api_key").await.unwrap_or(false);
-                if exists {
-                    if let Some(token) = keyring_store.get("api_key").await? {
-                        if !token.trim().is_empty() {
-                            return Ok(Some(ResolvedToken::new(token, TokenSource::Keyring)));
-                        }
-                    }
-                }
+        if has_keyring && let CredentialStore::Keyring(keyring_store) = &store.stores()[0] {
+            let exists = keyring_store.exists("api_key").await.unwrap_or(false);
+            if exists
+                && let Some(token) = keyring_store.get("api_key").await?
+                && !token.trim().is_empty()
+            {
+                return Ok(Some(ResolvedToken::new(token, TokenSource::Keyring)));
             }
         }
 
-        if has_file {
-            if let CredentialStore::File(file_store) = store
+        if has_file
+            && let CredentialStore::File(file_store) = store
                 .stores()
                 .get(1)
                 .unwrap_or(&CredentialStore::Keyring(KeyringCredentialStore::memnoth()))
-            {
-                if let Some(token) = file_store.get("api_key").await? {
-                    if !token.trim().is_empty() {
-                        return Ok(Some(ResolvedToken::new(token, TokenSource::File)));
-                    }
-                }
-            }
+            && let Some(token) = file_store.get("api_key").await?
+            && !token.trim().is_empty()
+        {
+            return Ok(Some(ResolvedToken::new(token, TokenSource::File)));
         }
     }
 
@@ -148,35 +142,33 @@ pub async fn resolve_token_explicit(
     file: Option<&FileCredentialStore>,
 ) -> Result<Option<ResolvedToken>> {
     // 1. CLI flag
-    if let Some(token) = cli_token {
-        if !token.trim().is_empty() {
-            return Ok(Some(ResolvedToken::new(token, TokenSource::CliFlag)));
-        }
+    if let Some(token) = cli_token
+        && !token.trim().is_empty()
+    {
+        return Ok(Some(ResolvedToken::new(token, TokenSource::CliFlag)));
     }
 
     // 2. Environment variable
-    if let Ok(token) = std::env::var("MEMNOTH_API_KEY") {
-        if !token.trim().is_empty() {
-            return Ok(Some(ResolvedToken::new(token, TokenSource::EnvVar)));
-        }
+    if let Ok(token) = std::env::var("MEMNOTH_API_KEY")
+        && !token.trim().is_empty()
+    {
+        return Ok(Some(ResolvedToken::new(token, TokenSource::EnvVar)));
     }
 
     // 3. Keyring
-    if let Some(keyring) = keyring {
-        if let Some(token) = keyring.get("api_key").await? {
-            if !token.trim().is_empty() {
-                return Ok(Some(ResolvedToken::new(token, TokenSource::Keyring)));
-            }
-        }
+    if let Some(keyring) = keyring
+        && let Some(token) = keyring.get("api_key").await?
+        && !token.trim().is_empty()
+    {
+        return Ok(Some(ResolvedToken::new(token, TokenSource::Keyring)));
     }
 
     // 4. File
-    if let Some(file) = file {
-        if let Some(token) = file.get("api_key").await? {
-            if !token.trim().is_empty() {
-                return Ok(Some(ResolvedToken::new(token, TokenSource::File)));
-            }
-        }
+    if let Some(file) = file
+        && let Some(token) = file.get("api_key").await?
+        && !token.trim().is_empty()
+    {
+        return Ok(Some(ResolvedToken::new(token, TokenSource::File)));
     }
 
     Ok(None)
@@ -225,11 +217,13 @@ mod tests {
     // Both tests below mutate the same process-wide variable. Without this lock
     // they race when the harness runs them in parallel: one removes the value
     // the other is about to read, so the test that fails depends on scheduling.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // A tokio mutex, not a std one: these tests hold the guard across an
+    // `.await`, which a std guard must not span.
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[tokio::test]
     async fn resolve_cli_priority() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_LOCK.lock().await;
         unsafe { std::env::set_var("MEMNOTH_API_KEY", "env_token") };
 
         let result = resolve_token(Some("cli_token".to_string()), None)
@@ -244,7 +238,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_env_priority() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_LOCK.lock().await;
         unsafe { std::env::set_var("MEMNOTH_API_KEY", "env_token") };
 
         let result = resolve_token(None, None).await.unwrap();
@@ -278,6 +272,8 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_none_when_no_token() {
+        // Same variable, same lock: this test removes what the two above set.
+        let _guard = ENV_LOCK.lock().await;
         unsafe { std::env::remove_var("MEMNOTH_API_KEY") };
 
         let result = resolve_token(None, None).await.unwrap();

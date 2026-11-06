@@ -177,6 +177,9 @@ impl WhoamiInfo {
     }
 }
 
+/// A refresh callback: `(refresh_token, org_id)` to freshly minted credentials.
+pub type RefreshCallback = Arc<dyn Fn(String, Option<String>) -> Result<TokenInfo> + Send + Sync>;
+
 /// Token cache with automatic refresh logic.
 ///
 /// Stores tokens per organization/context and handles refresh when needed.
@@ -186,7 +189,7 @@ pub struct TokenCache {
     /// Credential store for persistence
     store: Arc<CredentialStore>,
     /// Refresh callback: (refresh_token, org_id) -> new TokenInfo
-    refresh_fn: Option<Arc<dyn Fn(String, Option<String>) -> Result<TokenInfo> + Send + Sync>>,
+    refresh_fn: Option<RefreshCallback>,
 }
 
 impl TokenCache {
@@ -218,10 +221,10 @@ impl TokenCache {
                 let org_id = key.strip_prefix("token:");
                 let org_key = org_id.map(|s| s.to_string());
 
-                if let Some(value) = self.store.get(&key).await? {
-                    if let Ok(token_info) = serde_json::from_str::<TokenInfo>(&value) {
-                        cache.insert(org_key, token_info);
-                    }
+                if let Some(value) = self.store.get(&key).await?
+                    && let Ok(token_info) = serde_json::from_str::<TokenInfo>(&value)
+                {
+                    cache.insert(org_key, token_info);
                 }
             }
         }
@@ -262,23 +265,23 @@ impl TokenCache {
 
         // Try to load from store if not in cache
         let store_key = format!("token:{}", org_id.unwrap_or("default"));
-        if let Some(value) = self.store.get(&store_key).await? {
-            if let Ok(token_info) = serde_json::from_str::<TokenInfo>(&value) {
-                if !token_info.is_expired(refresh_buffer) {
-                    // Cache it
-                    let cache_key = org_key.clone();
-                    self.cache
-                        .write()
-                        .await
-                        .insert(cache_key, token_info.clone());
-                    return Ok(Some(token_info));
-                }
-                // Try refresh
-                if token_info.refresh_token.is_some() && self.refresh_fn.is_some() {
-                    return self
-                        .refresh_token(org_id, token_info.refresh_token.as_deref())
-                        .await;
-                }
+        if let Some(value) = self.store.get(&store_key).await?
+            && let Ok(token_info) = serde_json::from_str::<TokenInfo>(&value)
+        {
+            if !token_info.is_expired(refresh_buffer) {
+                // Cache it
+                let cache_key = org_key.clone();
+                self.cache
+                    .write()
+                    .await
+                    .insert(cache_key, token_info.clone());
+                return Ok(Some(token_info));
+            }
+            // Try refresh
+            if token_info.refresh_token.is_some() && self.refresh_fn.is_some() {
+                return self
+                    .refresh_token(org_id, token_info.refresh_token.as_deref())
+                    .await;
             }
         }
 
@@ -374,12 +377,11 @@ impl WhoamiCache {
 
     /// Load whoami from store.
     pub async fn load(&self) -> Result<()> {
-        if let Some(value) = self.store.get("whoami").await? {
-            if let Ok(info) = serde_json::from_str::<WhoamiInfo>(&value) {
-                if !info.is_expired() {
-                    *self.cache.write().await = Some(info);
-                }
-            }
+        if let Some(value) = self.store.get("whoami").await?
+            && let Ok(info) = serde_json::from_str::<WhoamiInfo>(&value)
+            && !info.is_expired()
+        {
+            *self.cache.write().await = Some(info);
         }
         Ok(())
     }
