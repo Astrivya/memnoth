@@ -141,7 +141,7 @@ impl KeyBindingHelp {
                     .add_modifier(Modifier::BOLD),
             )));
             lines.push(Line::from(Span::styled(
-                format!(" {}", "─".repeat(width.saturating_sub(1))),
+                format!(" {}", "-".repeat(width.saturating_sub(1))),
                 muted_style(),
             )));
 
@@ -152,7 +152,7 @@ impl KeyBindingHelp {
                     binding.key,
                     key_column_width = self.key_column_width
                 );
-                let desc_col = format!("{}", binding.description);
+                let desc_col = binding.description.clone();
                 lines.push(Line::from(vec![
                     Span::styled(
                         key_col,
@@ -210,69 +210,82 @@ pub fn default_memnoth_help() -> KeyBindingHelp {
     let mut help = KeyBindingHelp::new().with_title("keybindings");
     help.key_column_width = 16;
 
+    // Only keys the session actually handles are listed here. A help screen
+    // that documents a key nothing listens for is worse than no help screen:
+    // it teaches a habit that fails.
     let mut nav = KeyBindingGroup::new("navigation");
-    nav.add_binding(KeyBinding::new("↑↓", "history", "previous/next input"));
-    nav.add_binding(KeyBinding::new("←→", "edit", "move cursor left/right"));
     nav.add_binding(KeyBinding::new(
-        "PgUp/PgDn",
-        "scroll",
-        "scroll transcript up/down",
+        "Up / Down",
+        "history",
+        "previous/next input",
     ));
-    nav.add_binding(KeyBinding::new("End", "newest", "jump to newest entry"));
+    nav.add_binding(KeyBinding::new("Left / Right", "edit", "move the cursor"));
+    nav.add_binding(KeyBinding::new(
+        "PgUp / PgDn",
+        "scroll",
+        "scroll the transcript",
+    ));
+    nav.add_binding(KeyBinding::new(
+        "Home / End",
+        "start / newest",
+        "line start / jump to newest output",
+    ));
+    nav.add_binding(KeyBinding::new(
+        "Tab / Shift+Tab",
+        "complete / cycle",
+        "complete @path, or move between panes",
+    ));
     help.add_group(nav);
 
     let mut session = KeyBindingGroup::new("session");
-    session.add_binding(KeyBinding::new("Enter", "send", "submit the current line"));
-    session.add_binding(KeyBinding::new("Ctrl-C", "quit", "leave the session"));
-    session.add_binding(KeyBinding::new("/help", "help", "show this list"));
-    session.add_binding(KeyBinding::new("/clear", "clear", "empty the transcript"));
+    session.add_binding(KeyBinding::new("Enter", "run", "submit the current line"));
+    session.add_binding(KeyBinding::new(
+        "Esc",
+        "back",
+        "close overlay, cancel the turn, then clear the line",
+    ));
+    session.add_binding(KeyBinding::new(
+        "Ctrl+C",
+        "cancel / quit",
+        "cancel a running turn; press again to leave",
+    ));
+    session.add_binding(KeyBinding::new("Ctrl+D", "quit", "leave the session"));
+    session.add_binding(KeyBinding::new("Ctrl+L", "clear", "empty the transcript"));
+    session.add_binding(KeyBinding::new(
+        "Ctrl+G",
+        "fix",
+        "run the fix the header names (e.g. index the graph)",
+    ));
+    session.add_binding(KeyBinding::new(
+        "Ctrl+A / Ctrl+E",
+        "line start / end",
+        "move to the start or end of the line",
+    ));
     help.add_group(session);
 
-    let mut vault = KeyBindingGroup::new("vault");
-    vault.add_binding(KeyBinding::new(
-        "/vault init",
-        "init",
-        "create the temporal vault",
+    let mut panels = KeyBindingGroup::new("panels");
+    panels.add_binding(KeyBinding::new(
+        "Ctrl+K / Ctrl+P",
+        "palette",
+        "search every command",
     ));
-    vault.add_binding(KeyBinding::new(
-        "/vault status",
-        "status",
-        "what the vault holds",
+    panels.add_binding(KeyBinding::new(
+        "Ctrl+M",
+        "models",
+        "switch model or provider",
     ));
-    vault.add_binding(KeyBinding::new(
-        "/vault remember",
-        "remember",
-        "record a fact",
+    panels.add_binding(KeyBinding::new(
+        "Ctrl+T",
+        "tasks",
+        "show or hide the task rail",
     ));
-    vault.add_binding(KeyBinding::new(
-        "/vault recall",
-        "recall",
-        "search the vault",
+    panels.add_binding(KeyBinding::new(
+        "Ctrl+1..4",
+        "focus pane",
+        "transcript, context, tasks, diff",
     ));
-    help.add_group(vault);
-
-    let mut kg = KeyBindingGroup::new("code graph");
-    kg.add_binding(KeyBinding::new(
-        "/kg index",
-        "index",
-        "build or update the code graph",
-    ));
-    kg.add_binding(KeyBinding::new(
-        "/kg status",
-        "status",
-        "what was built, when, from where",
-    ));
-    kg.add_binding(KeyBinding::new(
-        "/kg impact",
-        "impact",
-        "definitions, references, tests",
-    ));
-    kg.add_binding(KeyBinding::new(
-        "/kg search",
-        "search",
-        "find symbols by name",
-    ));
-    help.add_group(kg);
+    panels.add_binding(KeyBinding::new("F1", "help", "show this list"));
+    help.add_group(panels);
 
     let mut confirm = KeyBindingGroup::new("confirmation");
     confirm.add_binding(KeyBinding::new("y", "approve", "approve a pending change"));
@@ -282,6 +295,31 @@ pub fn default_memnoth_help() -> KeyBindingHelp {
         "reject a pending change",
     ));
     help.add_group(confirm);
+
+    let mut commands = KeyBindingGroup::new("commands");
+    commands.add_binding(KeyBinding::new(
+        "/",
+        "discover",
+        "open the command dropdown",
+    ));
+    commands.add_binding(KeyBinding::new("/search", "search", "vault and code graph"));
+    commands.add_binding(KeyBinding::new(
+        "/vault recall",
+        "recall",
+        "search beliefs with dates",
+    ));
+    commands.add_binding(KeyBinding::new(
+        "/kg impact",
+        "impact",
+        "blast radius of a symbol",
+    ));
+    commands.add_binding(KeyBinding::new(
+        "/worktree create",
+        "worktree",
+        "isolate an agent in its own tree",
+    ));
+    commands.add_binding(KeyBinding::new("/help", "help", "the full command list"));
+    help.add_group(commands);
 
     help
 }

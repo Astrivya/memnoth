@@ -105,6 +105,25 @@ impl Palette {
     }
 
     /// Move selection up
+    /// How many commands exist before the filter is applied.
+    pub fn total(&self) -> usize {
+        self.config.items.len()
+    }
+
+    /// Move the highlight to the first item.
+    pub fn select_first(&mut self) {
+        self.select(0);
+    }
+
+    /// Move the highlight to the last item, or to nothing when the filter
+    /// matched no row.
+    pub fn select_last(&mut self) {
+        let len = self.filtered_items().len();
+        if len > 0 {
+            self.select(len - 1);
+        }
+    }
+
     pub fn select_previous(&mut self) {
         let items = self.filtered_items();
         if !items.is_empty() {
