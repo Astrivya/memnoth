@@ -26,7 +26,7 @@ pub struct SkillFrontmatter {
 }
 
 /// Core skill metadata.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SkillMetadata {
     /// Unique skill name (required)
     pub name: String,
@@ -77,7 +77,7 @@ pub struct SkillArgument {
     pub description: String,
 
     /// Argument type (default: "string")
-    #[serde(default = "default_arg_type")]
+    #[serde(default = "default_arg_type", rename = "type", alias = "arg_type")]
     pub arg_type: String,
 
     /// Whether argument is required (default: true)
@@ -126,21 +126,21 @@ pub fn parse_skill_file(path: &Path) -> Result<SkillFrontmatter> {
 /// Parse SKILL.md content from a string.
 pub fn parse_skill_content(content: &str) -> Result<SkillFrontmatter> {
     // Check for frontmatter delimiter
-    let (frontmatter_str, body) = if content.starts_with("---\n") {
-        let end = content[4..]
+    let (frontmatter_str, body) = if let Some(opened) = content.strip_prefix("---\n") {
+        let end = opened
             .find("\n---\n")
-            .or_else(|| content[4..].find("\n---"))
+            .or_else(|| opened.find("\n---"))
             .ok_or_else(|| anyhow::anyhow!("Unclosed frontmatter delimiter"))?;
-        let fm = &content[4..4 + end];
-        let body = &content[4 + end + 5..]; // Skip "\n---\n"
+        let fm = &opened[..end];
+        let body = &opened[end + 5..]; // Skip "\n---\n"
         (fm, body.trim_start())
-    } else if content.starts_with("---\r\n") {
-        let end = content[5..]
+    } else if let Some(opened) = content.strip_prefix("---\r\n") {
+        let end = opened
             .find("\r\n---\r\n")
-            .or_else(|| content[5..].find("\r\n---"))
+            .or_else(|| opened.find("\r\n---"))
             .ok_or_else(|| anyhow::anyhow!("Unclosed frontmatter delimiter"))?;
-        let fm = &content[5..5 + end];
-        let body = &content[5 + end + 6..]; // Skip "\r\n---\r\n"
+        let fm = &opened[..end];
+        let body = &opened[end + 6..]; // Skip "\r\n---\r\n"
         (fm, body.trim_start())
     } else {
         // No frontmatter - treat entire content as body with minimal metadata
@@ -159,7 +159,7 @@ pub fn parse_skill_content(content: &str) -> Result<SkillFrontmatter> {
     let mut frontmatter: SkillFrontmatter =
         toml::from_str(frontmatter_str).with_context(|| "Failed to parse frontmatter as TOML")?;
 
-    frontmatter.content = body.to_string();
+    frontmatter.content = body.trim().to_string();
 
     // Validate required fields
     if frontmatter.metadata.name.trim().is_empty() {
@@ -207,23 +207,6 @@ pub fn validate_skill(frontmatter: &SkillFrontmatter) -> Result<()> {
     Ok(())
 }
 
-impl Default for SkillMetadata {
-    fn default() -> Self {
-        Self {
-            name: String::new(),
-            description: String::new(),
-            version: String::new(),
-            author: String::new(),
-            tags: Vec::new(),
-            publish: false,
-            min_version: String::new(),
-            depends_on: Vec::new(),
-            requires: Vec::new(),
-            working_dir: String::new(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,7 +241,7 @@ This is the skill content.
         assert_eq!(skill.metadata.version, "1.0.0");
         assert_eq!(skill.metadata.author, "Test Author");
         assert_eq!(skill.metadata.tags, vec!["test", "example"]);
-        assert_eq!(skill.metadata.publish, false);
+        assert!(!skill.metadata.publish);
         assert_eq!(skill.metadata.requires, vec!["fs_read", "fs_write"]);
         assert_eq!(skill.content, "# Test Skill\n\nThis is the skill content.");
     }
@@ -287,7 +270,7 @@ Skill content here.
         assert_eq!(skill.arguments.len(), 3);
         assert_eq!(skill.arguments[0].name, "input");
         assert_eq!(skill.arguments[0].arg_type, "string");
-        assert_eq!(skill.arguments[0].required, true);
+        assert!(skill.arguments[0].required);
         assert_eq!(skill.arguments[1].name, "output");
         assert_eq!(
             skill.arguments[1].default,

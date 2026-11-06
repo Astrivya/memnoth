@@ -12,25 +12,47 @@ impl TemplateEngine {
 
     /// Render a template string with the given context.
     pub fn render(&self, template: &str, context: &RenderContext) -> Result<String> {
-        let mut result = template.to_string();
+        // Blocks first: their bodies may contain placeholders such as {{this}}
+        // that the plain substitution pass would otherwise erase.
+        let result = self.render_conditionals(template, context)?;
+        let result = self.render_loops(&result, context)?;
+        self.render_placeholders(&result, context)
+    }
 
-        // Replace {{arg.name}} with argument values
-        for (name, value) in &context.arguments {
-            let placeholder = format!("{{{{{}}}}}", name);
-            let replacement = self.value_to_string(value)?;
-            result = result.replace(&placeholder, &replacement);
+    /// Replace `{{name}}` with argument values; unknown names render empty.
+    fn render_placeholders(&self, template: &str, context: &RenderContext) -> Result<String> {
+        let re = regex::Regex::new(r"\{\{\s*([\w.]+)\s*\}\}")?;
+        let mut failure: Option<anyhow::Error> = None;
+
+        let result = re
+            .replace_all(template, |caps: &regex::Captures| {
+                let name = &caps[1];
+                let value = context
+                    .arguments
+                    .get(name)
+                    .or_else(|| {
+                        name.strip_prefix("arg.")
+                            .and_then(|n| context.arguments.get(n))
+                    })
+                    .or_else(|| context.metadata.get(name));
+
+                match value {
+                    Some(value) => match self.value_to_string(value) {
+                        Ok(rendered) => rendered,
+                        Err(e) => {
+                            failure = Some(e);
+                            String::new()
+                        }
+                    },
+                    None => String::new(),
+                }
+            })
+            .to_string();
+
+        match failure {
+            Some(e) => Err(e),
+            None => Ok(result),
         }
-
-        // Replace {{arg.name:default}} with default if not provided
-        // This is handled by the context providing defaults
-
-        // Replace {{#if arg.name}}...{{/if}} conditional blocks
-        result = self.render_conditionals(&result, context)?;
-
-        // Replace {{#each arg.name}}...{{/each}} loop blocks
-        result = self.render_loops(&result, context)?;
-
-        Ok(result)
     }
 
     /// Render conditional blocks {{#if name}}...{{/if}}
@@ -38,7 +60,7 @@ impl TemplateEngine {
         let mut result = template.to_string();
 
         // Pattern: {{#if name}}content{{/if}}
-        let re = regex::Regex::new(r"\{\{#if\s+(\w+)\}\}(.*?)\{\{/if\}\}")?;
+        let re = regex::Regex::new(r"(?s)\{\{#if\s+(\w+)\}\}(.*?)\{\{/if\}\}")?;
 
         loop {
             let mut changed = false;
@@ -75,7 +97,7 @@ impl TemplateEngine {
         let mut result = template.to_string();
 
         // Pattern: {{#each name}}content{{/each}}
-        let re = regex::Regex::new(r"\{\{#each\s+(\w+)\}\}(.*?)\{\{/each\}\}")?;
+        let re = regex::Regex::new(r"(?s)\{\{#each\s+(\w+)\}\}(.*?)\{\{/each\}\}")?;
 
         loop {
             let mut changed = false;
@@ -133,7 +155,7 @@ impl TemplateEngine {
         match value {
             Value::Bool(b) => *b,
             Value::String(s) => !s.is_empty(),
-            Value::Number(n) => n.as_f64().map_or(false, |f| f != 0.0),
+            Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
             Value::Array(a) => !a.is_empty(),
             Value::Object(o) => !o.is_empty(),
             Value::Null => false,

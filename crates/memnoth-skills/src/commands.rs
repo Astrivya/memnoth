@@ -104,6 +104,7 @@ pub fn build_skill_commands(mut builder: RegistryBuilder) -> RegistryBuilder {
             cli_path: vec!["skill".into(), "add".into()],
             slash: SlashSpec {
                 name: "skill add".into(),
+                palette: Some("skill add <path>".into()),
                 description: "Add a new skill from a SKILL.md file".into(),
                 long_description: None,
                 params: vec![
@@ -143,6 +144,7 @@ pub fn build_skill_commands(mut builder: RegistryBuilder) -> RegistryBuilder {
             cli_path: vec!["skill".into(), "list".into()],
             slash: SlashSpec {
                 name: "skill list".into(),
+                palette: Some("skill list".into()),
                 description: "List all installed skills".into(),
                 long_description: None,
                 params: vec![
@@ -184,6 +186,7 @@ pub fn build_skill_commands(mut builder: RegistryBuilder) -> RegistryBuilder {
             cli_path: vec!["skill".into(), "remove".into()],
             slash: SlashSpec {
                 name: "skill remove".into(),
+                palette: Some("skill remove <name>".into()),
                 description: "Remove a skill by name".into(),
                 long_description: None,
                 params: vec![
@@ -220,6 +223,7 @@ pub fn build_skill_commands(mut builder: RegistryBuilder) -> RegistryBuilder {
             cli_path: vec!["skill".into(), "run".into()],
             slash: SlashSpec {
                 name: "skill run".into(),
+                palette: Some("skill run <name> [KEY=VALUE...]".into()),
                 description: "Run a skill with arguments".into(),
                 long_description: None,
                 params: vec![
@@ -260,6 +264,7 @@ pub fn build_skill_commands(mut builder: RegistryBuilder) -> RegistryBuilder {
             cli_path: vec!["skill".into(), "edit".into()],
             slash: SlashSpec {
                 name: "skill edit".into(),
+                palette: Some("skill edit <name>".into()),
                 description: "Edit a skill's SKILL.md file".into(),
                 long_description: None,
                 params: vec![
@@ -354,10 +359,10 @@ fn execute_list(args: ListArgs) -> Result<String> {
     lines.push("".to_string());
 
     for skill in skills {
-        if let Some(tag_filter) = &args.tag {
-            if !skill.frontmatter.metadata.tags.contains(tag_filter) {
-                continue;
-            }
+        if let Some(tag_filter) = &args.tag
+            && !skill.frontmatter.metadata.tags.contains(tag_filter)
+        {
+            continue;
         }
 
         lines.push(format!(
