@@ -5,7 +5,7 @@
 //! fail-open child processes; this module is the same mechanism scoped to the
 //! MCP server process: plugin authors declare commands that fire on tool
 //! calls, server commands, MCP events, and session lifecycle — without
-//! touching the daemon's own hook engine (`memnoth-base::hooks`, 8 events).
+//! touching the daemon's own hook engine, which lives outside this repository.
 //! See `docs/ACP-ATTRIBUTION.md` for the lineage.
 //!
 //! Specs come from `MEMNOTH_PLUGIN_HOOKS` (a JSON array of

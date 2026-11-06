@@ -120,7 +120,7 @@ fn normalized(mut v: EmbeddingVec) -> Arc<EmbeddingVec> {
         .sum::<f64>()
         .sqrt();
     if norm > 0.0 {
-        for x in &mut v {
+        for x in v.iter_mut() {
             *x = (*x as f64 / norm) as f32;
         }
     }
@@ -331,14 +331,14 @@ mod tests {
 
     #[test]
     fn normalization_makes_cosine_a_dot_product() {
-        let v = normalized(vec![3.0, 4.0]);
+        let v = normalized(EmbeddingVec::from(vec![3.0, 4.0]));
         let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
         assert!(
             (norm - 1.0).abs() < 1e-5,
             "vector must be unit length: {norm}"
         );
         // A zero vector must not become NaN — it stays zero and scores 0 on any dot.
-        let zero = normalized(vec![0.0, 0.0]);
+        let zero = normalized(EmbeddingVec::from(vec![0.0, 0.0]));
         assert!(zero.iter().all(|x| *x == 0.0));
     }
 
@@ -351,8 +351,8 @@ mod tests {
         let b = hash_text("beta");
         assert_ne!(a, b);
         let mut map: HashMap<u64, Arc<EmbeddingVec>> = HashMap::new();
-        map.insert(a, Arc::new(vec![1.0, 0.0]));
-        map.insert(b, Arc::new(vec![0.0, 1.0]));
+        map.insert(a, Arc::new(EmbeddingVec::from(vec![1.0, 0.0])));
+        map.insert(b, Arc::new(EmbeddingVec::from(vec![0.0, 1.0])));
         assert_eq!(map.get(&a).unwrap()[0], 1.0);
         assert_eq!(map.get(&b).unwrap()[0], 0.0);
     }
