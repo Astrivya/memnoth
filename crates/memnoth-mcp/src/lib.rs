@@ -24,16 +24,16 @@
 //!
 //! # Tool Profiles
 //!
-//! memnoth exposes 48 tools on the full profile (plus 6 agent-mode tools)
+//! memnoth exposes 51 tools on the full profile (plus 6 agent-mode tools)
 //! across 6 profiles:
 //!
 //! | Profile | Tools | Use Case |
 //! |---------|-------|----------|
 //! | `micro` | 4 | Minimal context (coding agents) |
 //! | `memory` | 21 | Memory-focused workflows, incl. the temporal quartet |
-//! | `code` | 23 | Code intelligence: KG navigation + fs/git toolbox |
+//! | `code` | 26 | Code intelligence: KG navigation + fs/git toolbox |
 //! | `coord` | 11 | Multi-agent coordination |
-//! | `full` | 48 | Complete feature set (no allowlist: Full means all) |
+//! | `full` | 51 | Complete feature set (no allowlist: Full means all) |
 //! | `agent` | 6 | Agent session management (HTTP transport only) |
 //!
 //! Membership is declared once per tool in `TOOL_PROFILES`; the counts above
@@ -65,6 +65,7 @@ use serde_json::{Value, json};
 
 mod agent;
 mod catalog;
+mod cli_graph;
 // The `tools/list` projection, so the two anti-drift rules (membership from the
 // shared table, stable order) live in one file rather than in the middle of the
 // dispatcher.
@@ -363,7 +364,7 @@ pub enum Profile {
     /// Code-intelligence profile: the KG navigation verbs, the same index
     /// health set, and the filesystem/git toolbox.
     Code,
-    /// Full profile: every non-agent tool (48). There is deliberately NO
+    /// Full profile: every non-agent tool (51). There is deliberately NO
     /// allowlist for Full — `allows` is unconditional for it, so a new tool
     /// is reachable the moment it is defined; never a second list.
     Full,
@@ -541,6 +542,7 @@ pub async fn run_stdio_server(db_path: PathBuf) -> Result<()> {
         profile_name(profile)
     );
 
+    ensure_vault_parent(&db_path)?;
     let engine = memnoth_engine::open_vault(&db_path)?;
     let coord = Coord::open(&db_path)?;
 
@@ -555,6 +557,22 @@ pub async fn run_stdio_server(db_path: PathBuf) -> Result<()> {
     )
     .await
 }
+/// Create the directory a vault path lives in.
+///
+/// SQLite reports a missing *directory* as "unable to open database file"
+/// (error 14), which is indistinguishable from a permissions problem — a first
+/// run from a fresh workspace looked like a broken install rather than an
+/// uncreated `.memnoth/`. Every entry point creates it here.
+fn ensure_vault_parent(db: &Path) -> Result<()> {
+    if let Some(parent) = db.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    Ok(())
+}
+
 /// Run one tool by name with no transport in front of it.
 ///
 /// This is the **same dispatcher** `tools/call` goes through: the profile gate,
@@ -578,6 +596,7 @@ pub fn call(
     if profile == Profile::Agent {
         anyhow::bail!("the agent profile needs the HTTP transport; use `memnoth mcp serve --http`");
     }
+    ensure_vault_parent(db)?;
     let engine = memnoth_engine::open_vault(db)?;
     let coord = Coord::open(db)?;
     let args = crate::kg_tools::with_default_workspace(name, args, Some(db));
@@ -1469,6 +1488,19 @@ fn report_mem_ingest_progress(seen: u64, rel: &str) {
     });
 }
 
+/// Whether a client armed a progress sink for this call.
+///
+/// `kg_index` uses it to decide who indexes: a client that asked for progress
+/// wants the per-file snapshots of the bundled indexer, and the CLI cannot
+/// narrate its own.
+pub(crate) fn kg_index_progress_armed() -> bool {
+    KG_INDEX_SINK.with(|slot| {
+        slot.try_borrow()
+            .map(|slot| slot.is_some())
+            .unwrap_or(false)
+    })
+}
+
 /// Forward one engine snapshot into the armed sink, if any.
 pub(crate) fn report_kg_index_progress(progress: &IndexProgress) {
     KG_INDEX_SINK.with(|slot| {
@@ -2218,6 +2250,30 @@ tool_def!(
     CacheClass::Session,
 );
 tool_def!(
+    TOOL_KG_CALLEES,
+    "kg_callees",
+    "What a symbol calls, as the names mentioned in its body",
+    Approval::ReadOnly,
+    CostClass::Moderate,
+    CacheClass::Session,
+);
+tool_def!(
+    TOOL_KG_DEF,
+    "kg_def",
+    "Where a symbol is defined, with its snippet",
+    Approval::ReadOnly,
+    CostClass::Moderate,
+    CacheClass::Session,
+);
+tool_def!(
+    TOOL_KG_REFS,
+    "kg_refs",
+    "Every place a symbol is mentioned",
+    Approval::ReadOnly,
+    CostClass::Moderate,
+    CacheClass::Session,
+);
+tool_def!(
     TOOL_KG_STATUS,
     "kg_status",
     "Code graph staleness",
@@ -2867,6 +2923,21 @@ fn mcp_registry() -> Registry {
     registry.add(McpTool {
         def: &TOOL_KG_TRACE,
         call: |args, _surface| crate::kg_tools::call("kg_trace", args),
+    });
+
+    registry.add(McpTool {
+        def: &TOOL_KG_CALLEES,
+        call: |args, _surface| crate::kg_tools::call("kg_callees", args),
+    });
+
+    registry.add(McpTool {
+        def: &TOOL_KG_DEF,
+        call: |args, _surface| crate::kg_tools::call("kg_def", args),
+    });
+
+    registry.add(McpTool {
+        def: &TOOL_KG_REFS,
+        call: |args, _surface| crate::kg_tools::call("kg_refs", args),
     });
 
     registry.add(McpTool {
@@ -5661,7 +5732,9 @@ pub(crate) fn rerank_cross_encoder_symbols(
     let by_id: HashMap<i64, &memnoth_codegraph::ScoredHit> =
         candidates.iter().map(|c| (c.symbol_id, c)).collect();
     let mut out: Vec<memnoth_codegraph::ScoredHit> = Vec::with_capacity(candidates.len());
-    for (idx, score) in scored.into_iter().enumerate() {
+    // The reranker's own order is what reorders these hits; the scores are not
+    // read again, so only the position matters here.
+    for (idx, _score) in scored.into_iter().enumerate() {
         if idx >= candidates.len() {
             break;
         }

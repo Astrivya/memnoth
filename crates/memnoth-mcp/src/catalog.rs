@@ -408,7 +408,7 @@ pub(crate) fn tool_definitions() -> Vec<Value> {
         ),
         tool(
             "kg_trace",
-            "Paginated direct callers of a symbol with a generation-stamped cursor. For the full flow picture, prefer kg_explore; use kg_trace when there are too many callers to show at once.",
+            "Paginated mentions of one symbol, one page at a time with a cursor. For the full picture including definitions and snippets, prefer kg_explore; use kg_trace when a symbol has more mentions than fit in one answer.",
             &[
                 opt(
                     "workspace",
@@ -423,12 +423,69 @@ pub(crate) fn tool_definitions() -> Vec<Value> {
                 opt(
                     "page_size",
                     "integer",
-                    "Direct callers per page, clamped to 5000 (default 20)",
+                    "Mentions per page, clamped to 500 (default 20)",
                 ),
                 opt(
                     "cursor",
                     "string",
                     "Opaque cursor from a previous page's next_cursor",
+                ),
+            ],
+            READ_ONLY,
+        ),
+        tool(
+            "kg_callees",
+            "What one symbol calls: the mentions inside its own declaration body, each with the source line that names them. The mirror of kg_impact (who calls this) — call it before changing a signature, to see the call sites the edit has to keep working. Mention-shaped, not resolved edges: a name in a comment inside the body counts, a same-named local in another body does not. Answers supported=false on a bundled graph that does not record which declaration a mention sits in, and names what to ask instead.",
+            &[
+                opt(
+                    "workspace",
+                    "string",
+                    "Workspace root (default: server cwd)",
+                ),
+                req(
+                    "symbol",
+                    "string",
+                    "Symbol qname or unique short name whose body to read",
+                ),
+                opt("limit", "integer", "Maximum callees to return (default 50)"),
+            ],
+            READ_ONLY,
+        ),
+        tool(
+            "kg_def",
+            "The declaration of a symbol: file, line and snippet, with resolved=false when nothing declares that name. The cheap spelling check before kg_impact, kg_refs or kg_callees; use kg_explore when you want every declaration of the name together with its mentions and the flow among them.",
+            &[
+                opt(
+                    "workspace",
+                    "string",
+                    "Workspace root (default: server cwd)",
+                ),
+                req(
+                    "symbol",
+                    "string",
+                    "Symbol qname or unique short name to look up",
+                ),
+            ],
+            READ_ONLY,
+        ),
+        tool(
+            "kg_refs",
+            "Every textual mention of a symbol: file, line, the source line itself, and `container` — the declaration the mention sits in. This is the plain 'where is this used' list; kg_impact walks higher-order callers to a depth, and kg_trace pages a mention set larger than one answer with a cursor. Mentions, not resolved call edges.",
+            &[
+                opt(
+                    "workspace",
+                    "string",
+                    "Workspace root (default: server cwd)",
+                ),
+                req(
+                    "symbol",
+                    "string",
+                    "Symbol qname or unique short name to list mentions of",
+                ),
+                opt(
+                    "limit",
+                    "integer",
+                    "Maximum references to return (default 100)",
                 ),
             ],
             READ_ONLY,
@@ -492,7 +549,7 @@ pub(crate) fn tool_definitions() -> Vec<Value> {
         ),
         tool(
             "kg_coverage",
-            "Index health: files grouped by parse status (ok/partial/unsupported/skipped/failed), generation, and the stale file count. Use to diagnose why a symbol is missing from results.",
+            "Index coverage: files, declarations, references and languages the graph holds, plus a staleness pass that stats every indexed file and names the changed ones. Use to diagnose why a symbol is missing from results.",
             &[
                 opt(
                     "workspace",
@@ -509,7 +566,7 @@ pub(crate) fn tool_definitions() -> Vec<Value> {
         ),
         tool(
             "kg_communities",
-            "Architecture map: the code graph's communities (deterministic label propagation over live CALLS edges), each with size, cohesion and representative symbols, plus the count of symbols outside any community. Use to answer \"what are the main subsystems and how internally coherent are they\" — a stable, index-derived view that does not change with directory layout. Same index, same clusters. Nothing is sent to a model to build it.",
+            "Architecture map: the code graph's communities (deterministic label propagation over live CALLS edges), each with size, cohesion and representative symbols, plus the count of symbols outside any community. Use to answer \"what are the main subsystems and how internally coherent are they\" — a stable, index-derived view that does not change with directory layout. Same index, same clusters. Nothing is sent to a model to build it. From a `memnoth kg` graph this answers supported=false: that graph has mentions, not call edges, so it could not partition what this report partitions.",
             &[
                 opt(
                     "workspace",
@@ -526,7 +583,7 @@ pub(crate) fn tool_definitions() -> Vec<Value> {
         ),
         tool(
             "kg_dead",
-            "Dead code scan: functions with zero live callers. Optional min loop-depth filter to surface deeply-nested orphaned logic first. Excludes test modules and public/exported API.",
+            "Dead exports: declarations of a public kind that no other file mentions, using the same rule as `memnoth kg dead-code`. A mention is textual, so a dynamic import or a string-built name does not count as a use.",
             &[
                 opt(
                     "workspace",
@@ -543,7 +600,7 @@ pub(crate) fn tool_definitions() -> Vec<Value> {
         ),
         tool(
             "kg_unresolved",
-            "Resolution residue: every call/ref the code graph could NOT bind, with the tail name for retry-on-new-symbol. High unresolved counts mean the index missed imports or needs re-index.",
+            "Resolution residue. From a `memnoth kg` graph this answers supported=false: the graph records where a name appears, not what it binds to, so an unresolved mention is indistinguishable from one never seen. `kg_impact` lists each mention with its source line.",
             &[
                 opt(
                     "workspace",
@@ -560,7 +617,7 @@ pub(crate) fn tool_definitions() -> Vec<Value> {
         ),
         tool(
             "kg_complexity",
-            "Functions ranked by transitive loop depth (deepest nested loop anywhere in their call subtree), with recursion flags. Use to find the riskiest functions to touch or test first.",
+            "Hotspots: files ranked by sqrt(commits x declarations), the same score `memnoth kg hotspots` uses. This is churn and size, not control-flow complexity — the index records no branch counts.",
             &[
                 opt(
                     "workspace",
@@ -573,7 +630,7 @@ pub(crate) fn tool_definitions() -> Vec<Value> {
         ),
         tool(
             "kg_changes",
-            "Git-diff impact: maps uncommitted changes (git diff --name-only) to the symbols they define, then computes the blast radius of each affected symbol — what your in-progress edit would break. Use BEFORE committing or pushing.",
+            "Git-diff impact: maps uncommitted changes (git diff --name-only) to the declarations they define, then reports how many files mention each one — the reachable surface of your in-progress edit. Use BEFORE committing or pushing.",
             &[
                 opt(
                     "workspace",
@@ -596,7 +653,7 @@ pub(crate) fn tool_definitions() -> Vec<Value> {
         // agents write the code, so they benefit most from the answers.
         tool(
             "kg_services",
-            "Deployment shape of the workspace: services declared in compose/Dockerfiles with their images and dependencies, calls that cross a service boundary (marked with whether the callee is served inside this repository), and the environment keys that are declared versus read. Answers \"what talks to what, and what env does it need\".",
+            "Service map: NOT AVAILABLE in this build — no layer reads compose files, route declarations or cross-service calls, so this answers supported=false with the reason instead of an empty map. Use kg_search to find a service's entry points by name.",
             &[
                 opt(
                     "workspace",
@@ -613,7 +670,7 @@ pub(crate) fn tool_definitions() -> Vec<Value> {
         ),
         tool(
             "kg_risk",
-            "Taint reach: from every entry point (routes, mains, roots nothing calls), which dangerous callees (shell, SQL, filesystem, network, deserialization) its code can reach, with the hop depth of each sink. This is a triage list of where untrusted input meets a sink — not a proof of exploitability.",
+            "Taint reach: NOT AVAILABLE in this build — it needs resolved call edges, and this index holds textual mentions that would over-count every same-named symbol. Answers supported=false rather than a fabricated map; kg_impact with depth=2 is the nearest real answer.",
             &[
                 opt(
                     "workspace",
@@ -626,7 +683,7 @@ pub(crate) fn tool_definitions() -> Vec<Value> {
         ),
         tool(
             "kg_why",
-            "Explain how one symbol reaches another along call edges — the shortest call path, step by step. Use when you need to know whether a change to A can affect B, or how a request gets from an entry point to a function. Reports \"unreachable within N hops\" as an answer rather than an error, and names which of the two symbols is missing or ambiguous when no path can be computed.",
+            "Call path between two symbols. From a `memnoth kg` graph this answers supported=false: a path needs directed call edges, and that graph knows which files mention which names, not who calls whom. Kg_impact on each end is the real evidence.",
             &[
                 opt(
                     "workspace",
@@ -647,7 +704,7 @@ pub(crate) fn tool_definitions() -> Vec<Value> {
         ),
         tool(
             "kg_doctor",
-            "One-screen health check for the code graph: completeness (coverage, files that failed to parse or were over the size cap), freshness (a full staleness sweep, not a sample), unresolved call-site rate, and whether semantic search is usable. Answers \"why does the graph miss the thing I am looking for?\" with a list of findings, each naming its own fix.",
+            "One-screen health check for the code graph: completeness (coverage, files that failed to parse or were over the size cap), freshness (a full staleness sweep, not a sample), unresolved call-site rate, and whether semantic search is usable. Answers \"why does the graph miss the thing I am looking for?\" with a list of findings, each naming its own fix. It checks the same graph the other kg_* tools answer from, so from a `memnoth kg` graph it reports that graph's staleness, schema age and per-language extraction instead, and lists what it cannot check.",
             &[opt(
                 "workspace",
                 "string",

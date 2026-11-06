@@ -1,6 +1,6 @@
 //! `memnoth-mcp` — the server's front door.
 //!
-//! The crate had every part of an MCP server and no way to start one: 48 tools, six profiles, two
+//! The crate had every part of an MCP server and no way to start one: 51 tools, six profiles, two
 //! transports, a gauntlet, and not a single `fn main`. This binary is only the door — choose a
 //! transport, choose a vault, run.
 //!
