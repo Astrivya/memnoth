@@ -8,12 +8,14 @@ pub mod error;
 pub use error::{CloudError, CloudResult, RetryExhausted};
 pub mod types;
 pub use types::{
-    ApiErrorResponse, ApiKeyInfo, BatchIngestItemResult, BatchIngestRequest, BatchIngestResponse,
-    BillingResponse, CreateKeyRequest, CreateKeyResponse, CreditExpiry, CreditGrant,
+    ApiErrorResponse, ApiKeyInfo, ApprovedAccountKey, BatchIngestItemResult, BatchIngestRequest,
+    BatchIngestResponse, CreateKeyRequest, CreateKeyResponse, CreditGrant, CreditLedgerEntry,
     CreditsResponse, DeviceApproveResponse, DeviceAuthResponse, IngestRequest, IngestResponse,
-    KeysResponse, McpTokenResponse, MeResponse, ModelInfo, ModelPricing, ModelUsage,
-    OrganizationInfo, OrganizationSummary, OrganizationsResponse, PricingResponse, ProjectInfo,
-    ProjectSettings, ProjectUsage, ProjectsResponse, RevokeKeyResponse, TokenResponse,
+    Invite, InviteCreated, InvitesResponse, KeysResponse, McpTokenResponse, Me, Member,
+    MemberAdded, MembersResponse, ModelInfo, ModelUsage, OrgEnvelope, OrgInfo, OrgSwitch,
+    OrganizationInfo, OrganizationsResponse, ProjectEnvelope, ProjectInfo, ProjectSettings,
+    ProjectUsage, ProjectsResponse, RevokeKeyResponse, Team, TeamDetail, TeamEnvelope, TeamMember,
+    TeamProject, TeamsResponse,
 };
 
 /// Response from GET /api/v1/models
@@ -46,8 +48,6 @@ pub struct UsageResponse {
     pub leaderboard: Vec<LeaderboardRow>,
     pub models: Vec<ModelRow>,
 }
-
-/// Aggregate usage totals.
 
 /// Aggregate usage totals.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -149,21 +149,10 @@ pub struct AcceptInviteResponse {
     pub role: String,
 }
 
-/// Telemetry preferences request (POST /api/v1/telemetry/preferences).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TelemetryPreferencesRequest {
-    /// Whether telemetry collection is enabled.
-    pub telemetry_enabled: bool,
-}
-
-/// Telemetry preferences response.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TelemetryPreferencesResponse {
-    /// Whether telemetry collection is enabled.
-    pub telemetry_enabled: bool,
-    /// When the preference was last updated.
-    pub updated_at: String,
-}
+// Telemetry is a **local** preference: the control plane has no endpoint for it,
+// and the call this client used to make (`POST /telemetry/preferences`) answered
+// 404 on every deployment. The setting lives in `config.toml`; see `mn telemetry`
+// and `mn privacy`.
 
 /// Device authorization request (POST /auth/device).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -181,10 +170,6 @@ pub struct ModelList {
 }
 
 const DEFAULT_BASE_URL: &str = "https://memnoth.astrivya.ai/api/v1";
-
-/// Typed HTTP client for the memnoth cloud API.
-
-/// Typed HTTP client for the memnoth cloud API.
 
 /// Typed HTTP client for the memnoth cloud API.
 #[derive(Debug, Clone)]
@@ -244,10 +229,10 @@ impl CloudClient {
         // CLI has no ambient cookie session to abuse, and the server asks for
         // the literal marker, so every client request carries it.
         headers.insert("x-memnoth-csrf", HeaderValue::from_static("1"));
-        if let Some(token) = &self.auth_token {
-            if let Ok(value) = HeaderValue::from_str(&format!("Bearer {}", token)) {
-                headers.insert(AUTHORIZATION, value);
-            }
+        if let Some(token) = &self.auth_token
+            && let Ok(value) = HeaderValue::from_str(&format!("Bearer {}", token))
+        {
+            headers.insert(AUTHORIZATION, value);
         }
         headers
     }
@@ -285,8 +270,11 @@ impl CloudClient {
         Self::handle_response(response)
     }
 
-    /// POST /api/v1/auth/token - Poll for device authorization token.
-    pub fn device_token(&self, device_code: &str) -> CloudResult<TokenResponse> {
+    /// POST /api/v1/auth/token — poll for the key an approval minted.
+    ///
+    /// The 200 body is the account contract (`api_key`, `account_id`, `email`,
+    /// `tier`, `status`), not an OAuth token envelope.
+    pub fn device_token(&self, device_code: &str) -> CloudResult<ApprovedAccountKey> {
         let url = self
             .base_url
             .join("auth/token")
@@ -305,8 +293,8 @@ impl CloudClient {
         Self::handle_response(response)
     }
 
-    /// GET /api/v1/me - Get current user info.
-    pub fn me(&self) -> CloudResult<MeResponse> {
+    /// GET /api/v1/me — who this credential is (subject, org, roles).
+    pub fn me(&self) -> CloudResult<Me> {
         let url = self
             .base_url
             .join("me")
@@ -322,21 +310,88 @@ impl CloudClient {
         Self::handle_response(response)
     }
 
-    /// GET /api/v1/org - Get organization info.
-    pub fn org(&self) -> CloudResult<OrganizationSummary> {
+    /// GET /api/v1/org — the tenant's identity.
+    ///
+    /// The server wraps it as `{"org": {…}}`; callers want the org, so the
+    /// envelope stops here rather than in every command.
+    pub fn org(&self) -> CloudResult<OrgInfo> {
+        let envelope: OrgEnvelope = Self::handle_response(self.get("org")?)?;
+        Ok(envelope.org)
+    }
+
+    /// GET — one request with the standard headers, no decoding.
+    fn get(&self, path: &str) -> CloudResult<reqwest::blocking::Response> {
         let url = self
             .base_url
-            .join("org")
+            .join(path)
             .map_err(|e| CloudError::InvalidUrl(e.to_string()))?;
-
-        let response = self
-            .client
+        self.client
             .get(url)
             .headers(self.headers())
             .send()
-            .map_err(|e| CloudError::NetworkError(e.to_string()))?;
+            .map_err(|e| CloudError::NetworkError(e.to_string()))
+    }
 
-        Self::handle_response(response)
+    /// POST — one request with the standard headers and a JSON body.
+    fn post<T: Serialize>(&self, path: &str, body: &T) -> CloudResult<reqwest::blocking::Response> {
+        let url = self
+            .base_url
+            .join(path)
+            .map_err(|e| CloudError::InvalidUrl(e.to_string()))?;
+        self.client
+            .post(url)
+            .headers(self.headers())
+            .json(body)
+            .send()
+            .map_err(|e| CloudError::NetworkError(e.to_string()))
+    }
+
+    /// PATCH — the partial update the org and project routes take.
+    fn patch<T: Serialize>(
+        &self,
+        path: &str,
+        body: &T,
+    ) -> CloudResult<reqwest::blocking::Response> {
+        let url = self
+            .base_url
+            .join(path)
+            .map_err(|e| CloudError::InvalidUrl(e.to_string()))?;
+        self.client
+            .patch(url)
+            .headers(self.headers())
+            .json(body)
+            .send()
+            .map_err(|e| CloudError::NetworkError(e.to_string()))
+    }
+
+    /// DELETE — no body; the caller only needs to know whether it was refused.
+    fn delete(&self, path: &str) -> CloudResult<reqwest::blocking::Response> {
+        let url = self
+            .base_url
+            .join(path)
+            .map_err(|e| CloudError::InvalidUrl(e.to_string()))?;
+        self.client
+            .delete(url)
+            .headers(self.headers())
+            .send()
+            .map_err(|e| CloudError::NetworkError(e.to_string()))
+    }
+
+    /// Expect success and ignore the body.
+    ///
+    /// The delete routes answer `204` and the two writes in `org.rs` answer
+    /// `{ "ok": true }`; neither is a shape worth a type, but a refusal still has
+    /// to become the same typed error every other call produces.
+    fn expect_ok(response: reqwest::blocking::Response) -> CloudResult<()> {
+        let status = response.status();
+        let text = response
+            .text()
+            .map_err(|e| CloudError::NetworkError(e.to_string()))?;
+        if status.is_success() {
+            Ok(())
+        } else {
+            Err(Self::status_to_error(status, text))
+        }
     }
 
     /// DELETE /api/v1/keys/current - Revoke current API key.
@@ -457,30 +512,6 @@ impl Default for CloudClient {
     }
 }
 impl CloudClient {
-    pub fn set_telemetry_preferences(
-        &self,
-        enabled: bool,
-    ) -> CloudResult<TelemetryPreferencesResponse> {
-        let url = self
-            .base_url
-            .join("telemetry/preferences")
-            .map_err(|e| CloudError::InvalidUrl(e.to_string()))?;
-
-        let request_body = TelemetryPreferencesRequest {
-            telemetry_enabled: enabled,
-        };
-
-        let response = self
-            .client
-            .post(url)
-            .headers(self.headers())
-            .json(&request_body)
-            .send()
-            .map_err(|e| CloudError::NetworkError(e.to_string()))?;
-
-        Self::handle_response(response)
-    }
-
     /// Accept an invite using a code.
     pub fn accept_invite(&self, code: &str) -> CloudResult<AcceptInviteResponse> {
         let url = self
@@ -538,37 +569,137 @@ impl CloudClient {
         Self::handle_response(response)
     }
 
-    /// GET /api/v1/pricing - Get model pricing.
-    pub fn pricing(&self) -> CloudResult<PricingResponse> {
-        let url = self
-            .base_url
-            .join("pricing")
-            .map_err(|e| CloudError::InvalidUrl(e.to_string()))?;
+    /// GET /api/v1/orgs — every org this credential can see.
+    pub fn organizations(&self) -> CloudResult<OrganizationsResponse> {
+        Self::handle_response(self.get("orgs")?)
+    }
 
-        let response = self
-            .client
-            .get(url)
-            .headers(self.headers())
-            .send()
-            .map_err(|e| CloudError::NetworkError(e.to_string()))?;
+    /// POST /api/v1/auth/session/org — move a browser session's org selection.
+    ///
+    /// Refused for an API key by design: a key is bound to the org it was
+    /// minted in. The CLI surfaces the refusal verbatim rather than retrying.
+    pub fn switch_org(&self, slug: &str) -> CloudResult<OrgSwitch> {
+        Self::handle_response(self.post("auth/session/org", &serde_json::json!({ "org": slug }))?)
+    }
 
+    /// GET /api/v1/projects
+    pub fn projects(&self) -> CloudResult<ProjectsResponse> {
+        Self::handle_response(self.get("projects")?)
+    }
+
+    /// POST /api/v1/projects
+    pub fn create_project(&self, name: &str, visibility: Option<&str>) -> CloudResult<ProjectInfo> {
+        let body = serde_json::json!({ "name": name, "visibility": visibility });
+        let envelope: ProjectEnvelope = Self::handle_response(self.post("projects", &body)?)?;
+        Ok(envelope.project)
+    }
+
+    /// GET /api/v1/api-keys — keys without their secrets.
+    pub fn api_keys(&self) -> CloudResult<KeysResponse> {
+        Self::handle_response(self.get("api-keys")?)
+    }
+
+    /// POST /api/v1/api-keys — mint a key. The response carries it once.
+    pub fn create_key(&self, request: CreateKeyRequest) -> CloudResult<CreateKeyResponse> {
+        Self::handle_response(self.post("api-keys", &request)?)
+    }
+
+    /// POST /api/v1/api-keys/{id}/revoke
+    pub fn revoke_key(&self, id: &str) -> CloudResult<RevokeKeyResponse> {
+        let response = self.post(&format!("api-keys/{id}/revoke"), &serde_json::json!({}))?;
         Self::handle_response(response)
     }
 
-    /// GET /api/v1/billing - Get combined billing info (credits + pricing).
-    pub fn billing(&self) -> CloudResult<BillingResponse> {
-        let url = self
-            .base_url
-            .join("billing")
-            .map_err(|e| CloudError::InvalidUrl(e.to_string()))?;
+    /// POST /api/v1/mcp/token — a short-lived bearer for the hosted MCP endpoint.
+    pub fn mcp_token(&self) -> CloudResult<McpTokenResponse> {
+        Self::handle_response(self.post("mcp/token", &serde_json::json!({}))?)
+    }
 
-        let response = self
-            .client
-            .get(url)
-            .headers(self.headers())
-            .send()
-            .map_err(|e| CloudError::NetworkError(e.to_string()))?;
-        Self::handle_response(response)
+    /// PATCH /api/v1/projects/{id} — rename, or change who can see it.
+    pub fn rename_project(&self, id: &str, name: &str) -> CloudResult<ProjectInfo> {
+        let body = serde_json::json!({ "name": name });
+        let envelope: ProjectEnvelope =
+            Self::handle_response(self.patch(&format!("projects/{id}"), &body)?)?;
+        Ok(envelope.project)
+    }
+
+    /// DELETE /api/v1/projects/{id} — the sessions it held survive, unassigned.
+    pub fn delete_project(&self, id: &str) -> CloudResult<()> {
+        Self::expect_ok(self.delete(&format!("projects/{id}"))?)
+    }
+
+    /// POST /api/v1/api-keys/revoke-all — every live key in the org, at once.
+    ///
+    /// An owner/admin action on the server; the refusal is reported verbatim.
+    pub fn revoke_all_keys(&self) -> CloudResult<RevokeKeyResponse> {
+        Self::handle_response(self.post("api-keys/revoke-all", &serde_json::json!({}))?)
+    }
+
+    /// GET /api/v1/members — the org's roster (an admin read).
+    pub fn members(&self) -> CloudResult<MembersResponse> {
+        Self::handle_response(self.get("members")?)
+    }
+
+    /// POST /api/v1/orgs/members — add an existing account to the org by email.
+    ///
+    /// It does not create an account: the server answers 404 for an address that
+    /// has never signed in. `create_invite` is the route that can bring someone new.
+    pub fn add_member(&self, email: &str, role: Option<&str>) -> CloudResult<MemberAdded> {
+        let body = serde_json::json!({ "email": email, "role": role });
+        Self::handle_response(self.post("orgs/members", &body)?)
+    }
+
+    /// PATCH /api/v1/orgs/members/{user_id} — set a member's org role.
+    pub fn set_member_role(&self, user_id: &str, role: &str) -> CloudResult<()> {
+        let body = serde_json::json!({ "role": role });
+        Self::expect_ok(self.patch(&format!("orgs/members/{user_id}"), &body)?)
+    }
+
+    /// DELETE /api/v1/orgs/members/{user_id} — removal takes their grants and
+    /// keys with it, so this answers 204 and nothing else.
+    pub fn remove_member(&self, user_id: &str) -> CloudResult<()> {
+        Self::expect_ok(self.delete(&format!("orgs/members/{user_id}"))?)
+    }
+
+    /// GET /api/v1/orgs/invites — pending invites only, never a credential.
+    pub fn invites(&self) -> CloudResult<InvitesResponse> {
+        Self::handle_response(self.get("orgs/invites")?)
+    }
+
+    /// POST /api/v1/orgs/invites — mint an invite and report how it was delivered.
+    pub fn create_invite(&self, email: &str, role: Option<&str>) -> CloudResult<InviteCreated> {
+        let body = serde_json::json!({ "email": email, "role": role });
+        Self::handle_response(self.post("orgs/invites", &body)?)
+    }
+
+    /// DELETE /api/v1/orgs/invites/{id} — withdraw one pending invite.
+    pub fn withdraw_invite(&self, id: &str) -> CloudResult<()> {
+        Self::expect_ok(self.delete(&format!("orgs/invites/{id}"))?)
+    }
+
+    /// PATCH /api/v1/org — rename the tenant (owner or admin).
+    pub fn rename_org(&self, name: &str) -> CloudResult<OrgInfo> {
+        let body = serde_json::json!({ "name": name });
+        let envelope: OrgEnvelope = Self::handle_response(self.patch("org", &body)?)?;
+        Ok(envelope.org)
+    }
+
+    /// GET /api/v1/teams — the org's groups, with the caller's own membership
+    /// and management rights on each row.
+    pub fn teams(&self) -> CloudResult<TeamsResponse> {
+        Self::handle_response(self.get("teams")?)
+    }
+
+    /// POST /api/v1/teams — any member may start one; they own it.
+    pub fn create_team(&self, name: &str) -> CloudResult<Team> {
+        let body = serde_json::json!({ "name": name });
+        let envelope: TeamEnvelope = Self::handle_response(self.post("teams", &body)?)?;
+        Ok(envelope.team)
+    }
+
+    /// GET /api/v1/teams/{id} — one team, its people and the projects it reaches.
+    pub fn team(&self, id: &str) -> CloudResult<TeamDetail> {
+        Self::handle_response(self.get(&format!("teams/{id}"))?)
     }
 
     fn compute_local_totals(receipts: &[LocalReceipt]) -> LocalTotals {
@@ -602,7 +733,7 @@ impl CloudClient {
         let local_totals = Self::compute_local_totals(&local_receipts);
 
         // Simple matching: match by timestamp proximity (within 5 minutes)
-        let mut matched = 0;
+        let matched = 0;
 
         // For now, just compare totals using the new API structure
         let delta = UsageDelta {
@@ -658,3 +789,5 @@ mod tests {
         assert!(params.since.is_none());
     }
 }
+#[cfg(test)]
+mod tests_wire;
