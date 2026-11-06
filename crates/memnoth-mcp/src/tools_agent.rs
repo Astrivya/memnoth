@@ -540,7 +540,41 @@ fn entity_chain(engine: &MemoryEngine, name: &str) -> Result<Vec<Value>> {
     }
     versions.extend(live);
     versions.sort_by_key(|v| v["valid_from"].as_i64().unwrap_or(0));
-    Ok(versions)
+
+    // The journal writes a snapshot when a revision is created, and the live row
+    // already is that revision: without folding, a belief revised once was listed
+    // twice (once as its row, once as its snapshot) and `count` said four versions
+    // for a two-step history. Fold on identity + validity window, and let the copy
+    // being dropped fill any field the kept copy lacks — the row carries the name,
+    // the snapshot carries `change_reason`. The CLI's `vault history` folds the
+    // same way in memnoth-engine's `vault_history`; the two must agree, because a
+    // caller reading one and then the other is reading the same verb.
+    let mut folded: Vec<Value> = Vec::new();
+    for row in versions {
+        let entity_id = row["entity_id"].as_i64();
+        let valid_from = row["valid_from"].as_i64();
+        let valid_to = row["valid_to"].as_i64();
+        let existing = folded.iter_mut().find(|kept| {
+            kept["entity_id"].as_i64() == entity_id
+                && kept["valid_from"].as_i64() == valid_from
+                && kept["valid_to"].as_i64() == valid_to
+        });
+        match existing {
+            Some(kept) => {
+                for field in ["change_reason", "name", "canonical_name", "snapshot"] {
+                    let missing = match kept.get(field) {
+                        None | Some(Value::Null) => true,
+                        Some(_) => false,
+                    };
+                    if missing && row.get(field).is_some_and(|value| !value.is_null()) {
+                        kept[field] = row[field].clone();
+                    }
+                }
+            }
+            None => folded.push(row),
+        }
+    }
+    Ok(folded)
 }
 
 pub(crate) fn vault_history(engine: &MemoryEngine, args: &Value) -> Result<Value> {
@@ -555,6 +589,13 @@ pub(crate) fn vault_history(engine: &MemoryEngine, args: &Value) -> Result<Value
 
 pub(crate) fn vault_asof(engine: &MemoryEngine, args: &Value, now: i64) -> Result<Value> {
     let name = arg_str(args, "name")?;
+    // Required in this tool's schema. Defaulting it to 0 answered "nothing was
+    // believed at the epoch" for a call that simply left the instant out.
+    if args.get("as_of_ms").is_none() {
+        anyhow::bail!(
+            "missing integer argument: as_of_ms (use the `now` tool for the current instant)"
+        );
+    }
     let as_of = arg_usize(args, "as_of_ms", 0) as i64;
     let chain = entity_chain(engine, &name)?;
     // the live row believed at as_of
