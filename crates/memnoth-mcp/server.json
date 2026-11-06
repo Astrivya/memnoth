@@ -12,13 +12,13 @@
           "transport": "http"
         },
         "code": {
-          "toolCount": 23
+          "toolCount": 26
         },
         "coord": {
           "toolCount": 11
         },
         "full": {
-          "toolCount": 48
+          "toolCount": 51
         },
         "memory": {
           "includes": [
@@ -75,10 +75,10 @@
         "//": "Bytes of the tools/list payload each profile makes a host pay - the context tax, published instead of asserted. Every rival in this category publishes this number (1.9K / ~7K / 11.6K / 170 tokens); memnoth published none. Filled in by `cargo test -p memnoth-mcp -- --ignored regenerate_manifest_schema_cost` after a build, and a test fails if these ever drift from the shipping definitions.",
         "bytesPerProfile": {
           "agent": 3396,
-          "code": 15280,
+          "code": 18016,
           "coord": 5772,
-          "full": 33743,
-          "memory": 17446,
+          "full": 36479,
+          "memory": 17561,
           "micro": 3199
         }
       },
@@ -113,7 +113,7 @@
             "full"
           ],
           "default": "full",
-          "description": "Tool surface to expose: micro (4 tools), memory (21), code (23), coord (11), full (48), agent (6, HTTP only). Default: full.",
+          "description": "Tool surface to expose: micro (4 tools), memory (21), code (26), coord (11), full (51), agent (6, HTTP only). Default: full.",
           "name": "MEMNOTH_MCP_PROFILE"
         }
       ],
