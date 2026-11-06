@@ -45,9 +45,10 @@ pub enum UpdateError {
 }
 
 /// Release channel for update checks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Channel {
+    #[default]
     Stable,
     Beta,
     Nightly,
@@ -71,12 +72,6 @@ impl Channel {
             "nightly" => Ok(Channel::Nightly),
             _ => bail!("Unknown channel: {}", s),
         }
-    }
-}
-
-impl Default for Channel {
-    fn default() -> Self {
-        Channel::Stable
     }
 }
 
@@ -441,12 +436,8 @@ pub fn should_notify(config: &UpdateConfig, cache: &UpdateCache) -> bool {
     }
 
     // Check if we already showed notification for this version
-    if cache.notification_shown {
-        if let Some(latest) = &cache.latest_version {
-            if latest == &config.current_version {
-                return false;
-            }
-        }
+    if cache.notification_shown && cache.latest_version.as_ref() == Some(&config.current_version) {
+        return false;
     }
 
     true
