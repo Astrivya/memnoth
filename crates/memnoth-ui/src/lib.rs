@@ -14,6 +14,4 @@ pub mod tree;
 pub mod util;
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-}
+mod tests {}

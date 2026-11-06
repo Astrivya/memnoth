@@ -84,7 +84,6 @@ pub struct DiffViewer {
     config: DiffConfig,
     hunks: Vec<DiffHunk>,
     state: ListState,
-    scroll_offset: u16,
     decided_count: usize,
     /// Side-by-side layout requested by the viewer.
     side_by_side: bool,
@@ -125,26 +124,24 @@ impl DiffViewer {
     }
 
     pub fn accept_current(&mut self) {
-        if let Some(idx) = self.state.selected() {
-            if let Some(hunk) = self.hunks.get_mut(idx) {
-                if !hunk.is_decided() {
-                    hunk.accepted = true;
-                    hunk.rejected = false;
-                    self.decided_count = self.hunks.iter().filter(|h| h.is_decided()).count();
-                }
-            }
+        if let Some(idx) = self.state.selected()
+            && let Some(hunk) = self.hunks.get_mut(idx)
+            && !hunk.is_decided()
+        {
+            hunk.accepted = true;
+            hunk.rejected = false;
+            self.decided_count = self.hunks.iter().filter(|h| h.is_decided()).count();
         }
     }
 
     pub fn reject_current(&mut self) {
-        if let Some(idx) = self.state.selected() {
-            if let Some(hunk) = self.hunks.get_mut(idx) {
-                if !hunk.is_decided() {
-                    hunk.rejected = true;
-                    hunk.accepted = false;
-                    self.decided_count = self.hunks.iter().filter(|h| h.is_decided()).count();
-                }
-            }
+        if let Some(idx) = self.state.selected()
+            && let Some(hunk) = self.hunks.get_mut(idx)
+            && !hunk.is_decided()
+        {
+            hunk.rejected = true;
+            hunk.accepted = false;
+            self.decided_count = self.hunks.iter().filter(|h| h.is_decided()).count();
         }
     }
 
@@ -515,14 +512,14 @@ pub fn parse_unified_diff(diff: &str, file_path: String) -> DiffViewer {
             }
             current_hunk = Some(hunk);
         } else if let Some(hunk) = current_hunk.as_mut() {
-            if line.starts_with('+') {
-                hunk.lines.push(DiffLine::Added(line[1..].to_string()));
+            if let Some(rest) = line.strip_prefix('+') {
+                hunk.lines.push(DiffLine::Added(rest.to_string()));
                 hunk.new_count += 1;
-            } else if line.starts_with('-') {
-                hunk.lines.push(DiffLine::Removed(line[1..].to_string()));
+            } else if let Some(rest) = line.strip_prefix('-') {
+                hunk.lines.push(DiffLine::Removed(rest.to_string()));
                 hunk.old_count += 1;
-            } else if line.starts_with(' ') {
-                hunk.lines.push(DiffLine::Context(line[1..].to_string()));
+            } else if let Some(rest) = line.strip_prefix(' ') {
+                hunk.lines.push(DiffLine::Context(rest.to_string()));
             }
         }
     }

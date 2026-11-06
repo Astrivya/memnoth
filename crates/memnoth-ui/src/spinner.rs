@@ -192,7 +192,7 @@ impl ProgressBar {
             return;
         }
         let width = ((area.width as u32 * 3 / 4) as u16).clamp(40, area.width);
-        let height = ((area.height as u32 * 1 / 4) as u16).clamp(6, area.height);
+        let height = ((area.height as u32 / 4) as u16).clamp(6, area.height);
         let popup = Rect::new(
             area.x + (area.width - width) / 2,
             area.y + (area.height - height) / 2,

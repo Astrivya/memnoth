@@ -116,18 +116,13 @@ impl Default for ToastManager {
 }
 
 /// Where toasts appear on screen
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ToastPosition {
     TopRight,
     TopLeft,
+    #[default]
     BottomRight,
     BottomLeft,
-}
-
-impl Default for ToastPosition {
-    fn default() -> Self {
-        ToastPosition::BottomRight
-    }
 }
 
 impl ToastManager {

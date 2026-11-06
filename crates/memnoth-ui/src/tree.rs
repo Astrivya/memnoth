@@ -98,7 +98,7 @@ impl Default for TreeConfig {
 
 /// Flattened tree entry for rendering
 #[derive(Debug, Clone)]
-struct FlatEntry {
+pub struct FlatEntry {
     depth: usize,
     id: String,
     label: String,
@@ -172,13 +172,12 @@ impl Tree {
 
     /// Toggle expansion of the currently selected node
     pub fn toggle_selected(&mut self) {
-        if let Some(selected) = self.state.selected() {
-            if let Some(id) = self.flattened.get(selected).map(|e| e.id.clone()) {
-                if let Some(node) = find_node_mut(&mut self.roots, &id) {
-                    node.toggle();
-                    self.rebuild_flattened();
-                }
-            }
+        if let Some(selected) = self.state.selected()
+            && let Some(id) = self.flattened.get(selected).map(|e| e.id.clone())
+            && let Some(node) = find_node_mut(&mut self.roots, &id)
+        {
+            node.toggle();
+            self.rebuild_flattened();
         }
     }
 
