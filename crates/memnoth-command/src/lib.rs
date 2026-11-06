@@ -15,6 +15,7 @@ pub mod registry;
 pub mod spec;
 pub mod test_parity;
 
+pub use commands::build_p0_registry;
 pub use registry::{CommandRegistry, RegistryBuilder};
 pub use spec::{AuthLevel, CommandSpec, DangerLevel, OverlayType, ParamSpec, ParamType, SlashSpec};
 pub use test_parity::assert_parity;

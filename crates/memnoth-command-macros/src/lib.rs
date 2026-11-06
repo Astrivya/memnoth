@@ -4,7 +4,7 @@
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{ItemFn, LitStr, parse_macro_input};
+use syn::{ItemFn, parse_macro_input};
 
 /// Derive macro for command registration.
 ///
@@ -26,7 +26,7 @@ use syn::{ItemFn, LitStr, parse_macro_input};
 #[proc_macro_attribute]
 pub fn command(attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as ItemFn);
-    let _args = parse_command_attr(attr);
+    parse_command_attr(attr);
 
     let fn_name = &input.sig.ident;
     let fn_name_str = fn_name.to_string();
@@ -49,6 +49,7 @@ pub fn command(attr: TokenStream, item: TokenStream) -> TokenStream {
                     name: #fn_name_str.to_string(),
                     description: "Auto-registered command".to_string(),
                     long_description: None,
+                    palette: None,
                     params: vec![],
                     overlay: memnoth_command::spec::OverlayType::None,
                     danger: memnoth_command::spec::DangerLevel::Safe,

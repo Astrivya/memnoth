@@ -1,7 +1,6 @@
 //! Core command specification types.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 
 /// Authentication level required to execute a command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,23 +58,42 @@ pub enum ParamType {
         completions: Option<Vec<String>>,
     },
     /// Integer parameter.
-    Integer { min: Option<i64>, max: Option<i64> },
+    Integer {
+        /// Smallest accepted value, or unbounded.
+        min: Option<i64>,
+        /// Largest accepted value, or unbounded.
+        max: Option<i64>,
+    },
     /// Float parameter.
-    Float { min: Option<f64>, max: Option<f64> },
+    Float {
+        /// Smallest accepted value, or unbounded.
+        min: Option<f64>,
+        /// Largest accepted value, or unbounded.
+        max: Option<f64>,
+    },
     /// Boolean flag.
     Boolean,
     /// Enum with fixed choices.
-    Enum { choices: Vec<String> },
+    Enum {
+        /// The values the argument may take.
+        choices: Vec<String>,
+    },
     /// Array of values.
     Array {
+        /// Type of each element.
         items: Box<ParamType>,
+        /// Fewest elements accepted, or unbounded.
         min_items: Option<usize>,
+        /// Most elements accepted, or unbounded.
         max_items: Option<usize>,
     },
     /// File path parameter.
     Path {
+        /// Refuse a path that is not already on disk.
         must_exist: bool,
+        /// A directory is acceptable.
         dir_ok: bool,
+        /// A regular file is acceptable.
         file_ok: bool,
     },
     /// JSON object parameter.
@@ -109,9 +127,6 @@ pub struct ParamSpec {
     pub positional: bool,
     /// Position index for positional args (0-based).
     pub position: Option<usize>,
-    /// Deprecated: use `completions` in ParamType::String instead.
-    #[deprecated]
-    pub completion_values: Option<Vec<String>>,
     /// Whether to hide from help/usage.
     pub hidden: bool,
     /// Deprecation notice.
@@ -135,7 +150,6 @@ impl ParamSpec {
             env: None,
             positional: false,
             position: None,
-            completion_values: None,
             hidden: false,
             deprecated: None,
         }
@@ -161,7 +175,6 @@ impl ParamSpec {
             env: None,
             positional: false,
             position: None,
-            completion_values: None,
             hidden: false,
             deprecated: None,
         }
@@ -180,7 +193,6 @@ impl ParamSpec {
             env: None,
             positional: false,
             position: None,
-            completion_values: None,
             hidden: false,
             deprecated: None,
         }
@@ -202,7 +214,6 @@ impl ParamSpec {
             env: None,
             positional: false,
             position: None,
-            completion_values: None,
             hidden: false,
             deprecated: None,
         }
@@ -225,7 +236,6 @@ impl ParamSpec {
             env: None,
             positional: false,
             position: None,
-            completion_values: None,
             hidden: false,
             deprecated: None,
         }
@@ -249,7 +259,6 @@ impl ParamSpec {
             env: None,
             positional: false,
             position: None,
-            completion_values: None,
             hidden: false,
             deprecated: None,
         }
@@ -276,7 +285,6 @@ impl ParamSpec {
             env: None,
             positional: false,
             position: None,
-            completion_values: None,
             hidden: false,
             deprecated: None,
         }
@@ -299,7 +307,6 @@ impl ParamSpec {
             env: None,
             positional: false,
             position: None,
-            completion_values: None,
             hidden: false,
             deprecated: None,
         }
@@ -318,7 +325,6 @@ impl ParamSpec {
             env: None,
             positional: false,
             position: None,
-            completion_values: None,
             hidden: false,
             deprecated: None,
         }
@@ -337,7 +343,6 @@ impl ParamSpec {
             env: None,
             positional: false,
             position: None,
-            completion_values: None,
             hidden: false,
             deprecated: None,
         }
@@ -356,7 +361,6 @@ impl ParamSpec {
             env: None,
             positional: false,
             position: None,
-            completion_values: None,
             hidden: false,
             deprecated: None,
         }
@@ -427,6 +431,10 @@ pub struct SlashSpec {
     pub long_description: Option<String>,
     /// Parameter specs in order.
     pub params: Vec<ParamSpec>,
+    /// The full slash line shown in the session palette, without the leading
+    /// `/` (for example `"vault asof [--at WHEN]"`). `None` means the command
+    /// exists but has no session palette row.
+    pub palette: Option<String>,
     /// Overlay type for rendering.
     pub overlay: OverlayType,
     /// Danger level.
