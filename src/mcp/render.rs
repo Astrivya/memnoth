@@ -41,9 +41,12 @@ pub fn render_doctor(report: &DoctorReport) -> String {
     text.push_str(&format!(
         "  token      {}\n",
         if report.token_present {
-            "MEMNOTH_MCP_TOKEN is set"
+            "MEMNOTH_MCP_TOKEN is set".to_string()
         } else {
-            "missing — mint one at /api-keys, then export MEMNOTH_MCP_TOKEN"
+            format!(
+                "missing — mint one at {}, then export MEMNOTH_MCP_TOKEN",
+                crate::context::console_url("api-keys")
+            )
         }
     ));
     if let Some(expires_at) = report.token_expires_at_ms {
@@ -226,16 +229,31 @@ pub fn render_test(report: &TestReport) -> String {
         if report.tools_list_ok { "ok" } else { "failed" }
     ));
     text.push_str(&format!("  tool count {}\n", report.tool_count));
-    text.push_str(&format!(
-        "  call {}    {}\n",
-        report.tool_called,
-        if report.call_ok { "ok" } else { "failed" }
-    ));
+    if !report.tool_called.is_empty() {
+        text.push_str(&format!(
+            "  call {}    {}\n",
+            report.tool_called,
+            if report.call_ok { "ok" } else { "failed" }
+        ));
+    }
 
-    if !report.call_ok {
-        if let Some(err) = report.call_result.get("error") {
-            text.push_str(&format!("  error      {}\n", err));
-        }
+    // A failed probe that prints no reason is the worst of both: the server is
+    // blamed and nothing says why. A tool-level failure carries its text, not an
+    // `error` key, so both are read.
+    if !report.call_ok
+        && let Some(why) = report
+            .call_result
+            .get("error")
+            .or_else(|| report.call_result.get("text"))
+    {
+        let why = match why {
+            serde_json::Value::String(text) => text.trim().to_string(),
+            other => other.to_string(),
+        };
+        text.push_str(&format!(
+            "  reason     {}\n",
+            why.replace('\n', "\n             ")
+        ));
     }
     text
 }

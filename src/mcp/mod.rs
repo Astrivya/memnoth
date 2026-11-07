@@ -114,7 +114,8 @@ pub struct TestReport {
     pub tool_count: usize,
     /// Whether the real tool call succeeded.
     pub call_ok: bool,
-    /// The tool that was called.
+    /// The tool that was called; empty when the test never got far enough to
+    /// choose one (no binary, failed handshake, failed `tools/list`).
     pub tool_called: String,
     /// The call result or error.
     pub call_result: Value,
@@ -239,6 +240,12 @@ pub fn serve(
     if http {
         command.arg("--http");
     }
+    // `--root` names the workspace. Without these two, the server answered from
+    // whatever directory the person's shell happened to be in, which is how a
+    // `kg_*` call came back pointing at `CLI/.memnoth` while it was asked about
+    // `web/`.
+    command.current_dir(&ctx.root);
+    command.env("MEMNOTH_MCP_WORKSPACE", ctx.root.display().to_string());
     if let Some(profile) = profile {
         command.env("MEMNOTH_MCP_PROFILE", profile.name());
     }
@@ -287,28 +294,12 @@ pub fn doctor(ctx: &AppContext) -> Result<DoctorReport> {
         None => Vec::new(),
     };
 
-    // Try to get token expiry from cloud API if authenticated. The typed client
-    // publishes the account endpoints, not this one, so this is the same single
-    // POST `mcp token` makes — through the HTTP surface rather than private fields.
+    // Expiry comes from the same mint `mcp token` makes: the response carries
+    // the deadline as an RFC 3339 instant (`expires_at`), not a lifetime.
     let token_expires_at_ms = ctx.auth_token().and_then(|api_key| {
-        const DEFAULT_API_URL: &str = "https://memnoth.astrivya.ai/api/v1";
-        let base = std::env::var("MEMNOTH_API_URL").unwrap_or_else(|_| DEFAULT_API_URL.to_string());
-        let endpoint = format!("{}/mcp/token", base.trim_end_matches('/'));
-        let http = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()
-            .ok()?;
-        let text = http
-            .post(&endpoint)
-            .bearer_auth(api_key)
-            .send()
-            .ok()?
-            .text()
-            .ok()?;
-        let token_response: memnoth_cloud_client::types::McpTokenResponse =
-            serde_json::from_str(&text).ok()?;
-        let now = chrono::Utc::now().timestamp_millis();
-        Some(now + (token_response.expires_in as i64 * 1000))
+        mint_mcp_token(&api_key)
+            .ok()
+            .map(|minted| epoch_ms_of(&minted.expires_at))
     });
 
     Ok(DoctorReport {
@@ -541,6 +532,14 @@ pub fn call(ctx: &AppContext, tool: &str, args_json: &str, profile: Profile) -> 
         "MEMNOTH_MCP_PROFILE".to_string(),
         profile.name().to_string(),
     );
+    // A `kg_*` tool chooses its workspace from `MEMNOTH_MCP_WORKSPACE` and then
+    // the server's cwd, not from `--root`, so a call made against one checkout
+    // silently read another (or none) and reported "no code graph". The CLI
+    // knows which workspace it was asked about, so it says so.
+    env.insert(
+        "MEMNOTH_MCP_WORKSPACE".to_string(),
+        ctx.root.display().to_string(),
+    );
     let args = vec!["--db".to_string(), ctx.vault_path.display().to_string()];
     let transport = StdioTransport::spawn(&binary.display().to_string(), &args, &env)
         .with_context(|| format!("cannot start the MCP server at {}", binary.display()))?;
@@ -581,6 +580,8 @@ fn run_selftest(
         .arg("--selftest")
         .arg("--db")
         .arg(&ctx.vault_path)
+        .current_dir(&ctx.root)
+        .env("MEMNOTH_MCP_WORKSPACE", ctx.root.display().to_string())
         .env("MEMNOTH_MCP_PROFILE", profile.name())
         .output()
         .with_context(|| format!("cannot run {}", binary.display()))?;
@@ -631,7 +632,7 @@ pub fn remove(
     } else {
         None
     };
-    let profile = Profile::Full;
+    let _profile = Profile::Full;
     let entry = Entry {
         url: url.clone(),
         token,
@@ -759,6 +760,48 @@ pub fn list(ctx: &AppContext) -> Result<ListReport> {
     })
 }
 
+/// Status tools a probe prefers, cheapest first: read-only, no arguments.
+const PROBE_PREFERENCE: &[&str] = &[
+    "mem_stats",
+    "kg_status",
+    "coord_status",
+    "git_status",
+    "fs_list",
+    "vault_top",
+    "now",
+];
+
+/// Whether a tool can be called with `{}`: no schema, or nothing required.
+fn takes_no_arguments(schema: &Value) -> bool {
+    match schema.get("required").and_then(Value::as_array) {
+        Some(required) => required.is_empty(),
+        None => true,
+    }
+}
+
+/// The tool `mcp test` should call.
+///
+/// The caller's own choice wins. Otherwise a cheap status read the profile
+/// publishes, and failing that any published tool that needs no arguments — a
+/// probe that fails on a missing argument says nothing about the server.
+fn probe_tool(requested: &str, advertised: &[(String, bool)]) -> Option<String> {
+    if !requested.is_empty() {
+        return Some(requested.to_string());
+    }
+    if let Some(name) = PROBE_PREFERENCE.iter().find(|name| {
+        advertised
+            .iter()
+            .any(|(tool, bare)| *bare && tool.as_str() == **name)
+    }) {
+        return Some((*name).to_string());
+    }
+    advertised
+        .iter()
+        .find(|(_, bare)| *bare)
+        .or_else(|| advertised.first())
+        .map(|(name, _)| name.clone())
+}
+
 /// `memnoth mcp test`.
 pub fn test(ctx: &AppContext, tool: Option<&str>, profile: Option<Profile>) -> Result<TestReport> {
     let profile =
@@ -766,7 +809,17 @@ pub fn test(ctx: &AppContext, tool: Option<&str>, profile: Option<Profile>) -> R
     let url = ctx.mcp_url();
     let token = ctx.mcp_token();
 
-    let tool_name = tool.unwrap_or("vault_status");
+    // The agent profile is HTTP-only, so a stdio probe would fail at initialize
+    // with the server's own refusal; say the useful thing instead.
+    if profile == Profile::Agent {
+        bail!(
+            "the agent profile needs the HTTP transport; use `memnoth mcp serve --http --profile agent`"
+        );
+    }
+
+    // The caller may name the probe; otherwise it is chosen after `tools/list`,
+    // from the tools this profile actually advertises.
+    let requested = tool.unwrap_or_default().to_string();
 
     // The probe talks to the same server process a host would: stdio, the
     // vault, and the profile under test. `Client::connect` performs the
@@ -776,7 +829,7 @@ pub fn test(ctx: &AppContext, tool: Option<&str>, profile: Option<Profile>) -> R
             tools_list_ok: false,
             tool_count: 0,
             call_ok: false,
-            tool_called: tool_name.to_string(),
+            tool_called: requested.clone(),
             call_result: json!({
                 "error": "no `memnoth-mcp` binary found; build `crates/memnoth-mcp` or set MEMNOTH_MCP_BIN"
             }),
@@ -790,6 +843,13 @@ pub fn test(ctx: &AppContext, tool: Option<&str>, profile: Option<Profile>) -> R
         "MEMNOTH_MCP_PROFILE".to_string(),
         profile.name().to_string(),
     );
+    // A `kg_*` probe reads its workspace from this, not from the process cwd:
+    // without it, `mcp test --profile code` asked about the directory the CLI
+    // happened to run in and blamed the server for having no graph.
+    env.insert(
+        "MEMNOTH_MCP_WORKSPACE".to_string(),
+        ctx.root.display().to_string(),
+    );
     if let Some(token) = token {
         env.insert("MEMNOTH_MCP_TOKEN".to_string(), token);
     }
@@ -802,8 +862,10 @@ pub fn test(ctx: &AppContext, tool: Option<&str>, profile: Option<Profile>) -> R
                 tools_list_ok: false,
                 tool_count: 0,
                 call_ok: false,
-                tool_called: tool_name.to_string(),
-                call_result: json!({ "error": format!("initialize failed: {error:#}") }),
+                tool_called: requested.clone(),
+                call_result: json!({
+                    "error": format!("cannot start `{}`: {error:#}", binary.display())
+                }),
                 url,
                 profile: profile.name().to_string(),
             });
@@ -817,23 +879,29 @@ pub fn test(ctx: &AppContext, tool: Option<&str>, profile: Option<Profile>) -> R
                 tools_list_ok: false,
                 tool_count: 0,
                 call_ok: false,
-                tool_called: tool_name.to_string(),
-                call_result: json!({ "error": format!("initialize failed: {error:#}") }),
+                tool_called: requested.clone(),
+                // `error:#` already starts with `initialize failed`, so no prefix.
+                call_result: json!({ "error": format!("{error:#}") }),
                 url,
                 profile: profile.name().to_string(),
             });
         }
     };
 
-    // Run tools/list
-    let tool_count = match client.refresh_tools() {
-        Ok(tools) => tools.len(),
+    // Run tools/list. The probe has to be a tool the profile publishes: the old
+    // default was `vault_status`, which no profile has ever advertised, so a
+    // healthy server answered `unknown tool` and `mcp test` blamed the wire.
+    let advertised = match client.refresh_tools() {
+        Ok(tools) => tools
+            .iter()
+            .map(|tool| (tool.name.clone(), takes_no_arguments(&tool.input_schema)))
+            .collect::<Vec<_>>(),
         Err(error) => {
             return Ok(TestReport {
                 tools_list_ok: false,
                 tool_count: 0,
                 call_ok: false,
-                tool_called: tool_name.to_string(),
+                tool_called: requested.clone(),
                 call_result: json!({ "error": format!("tools/list failed: {error:#}") }),
                 url,
                 profile: profile.name().to_string(),
@@ -841,9 +909,24 @@ pub fn test(ctx: &AppContext, tool: Option<&str>, profile: Option<Profile>) -> R
         }
     };
 
-    // Call the test tool. A tool that answers "no such file" is a working wire
-    // and a failed question, which is exactly what `call_ok` distinguishes.
-    match client.call(tool_name, json!({})) {
+    let tool_count = advertised.len();
+    let Some(tool_name) = probe_tool(&requested, &advertised) else {
+        return Ok(TestReport {
+            tools_list_ok: true,
+            tool_count,
+            call_ok: false,
+            tool_called: String::new(),
+            call_result: json!({
+                "error": format!("profile `{}` advertises no tools", profile.name())
+            }),
+            url,
+            profile: profile.name().to_string(),
+        });
+    };
+
+    // Call the probe. A tool that answers "no such file" is a working wire and a
+    // failed question, which is exactly what `call_ok` distinguishes.
+    match client.call(&tool_name, json!({})) {
         Ok(outcome) => {
             let call_ok = !outcome.is_error;
             let text = outcome.text();
@@ -851,7 +934,7 @@ pub fn test(ctx: &AppContext, tool: Option<&str>, profile: Option<Profile>) -> R
                 tools_list_ok: true,
                 tool_count,
                 call_ok,
-                tool_called: tool_name.to_string(),
+                tool_called: tool_name.clone(),
                 call_result: decode_content(outcome.content, text),
                 url,
                 profile: profile.name().to_string(),
@@ -861,7 +944,7 @@ pub fn test(ctx: &AppContext, tool: Option<&str>, profile: Option<Profile>) -> R
             tools_list_ok: true,
             tool_count,
             call_ok: false,
-            tool_called: tool_name.to_string(),
+            tool_called: tool_name.clone(),
             call_result: json!({ "error": format!("tools/call failed: {error:#}") }),
             url,
             profile: profile.name().to_string(),
@@ -869,50 +952,48 @@ pub fn test(ctx: &AppContext, tool: Option<&str>, profile: Option<Profile>) -> R
     }
 }
 
+/// Mint an MCP token through the typed client.
+///
+/// The body this endpoint answers with is `{token, endpoint, expires_at}` — a
+/// signed bearer and its deadline, not an OAuth envelope. Reading
+/// `expires_in` / `mcp_url` from it failed to parse on every mint, so the
+/// hosted-MCP path never actually held a token.
+fn mint_mcp_token(api_key: &str) -> Result<memnoth_cloud_client::McpTokenResponse> {
+    const DEFAULT_API_URL: &str = "https://memnoth.astrivya.ai/api/v1";
+    let base = std::env::var("MEMNOTH_API_URL").unwrap_or_else(|_| DEFAULT_API_URL.to_string());
+    let mut client = memnoth_cloud_client::CloudClient::with_base_url(&base)
+        .map_err(|e| anyhow::anyhow!("cannot build the cloud client: {e}"))?;
+    client.set_auth_token(api_key.to_string());
+    client
+        .mcp_token()
+        .map_err(|e| anyhow::anyhow!("failed to get MCP token: {e}"))
+}
+
+/// Epoch milliseconds the given RFC 3339 instant names (0 when unparseable).
+fn epoch_ms_of(rfc3339: &str) -> i64 {
+    chrono::DateTime::parse_from_rfc3339(rfc3339)
+        .map(|at| at.timestamp_millis())
+        .unwrap_or(0)
+}
+
 /// `memnoth mcp token`.
 pub fn token(ctx: &AppContext) -> Result<TokenReport> {
-    const DEFAULT_API_URL: &str = "https://memnoth.astrivya.ai/api/v1";
-
     let api_key = ctx
         .auth_token()
         .context("not authenticated; run `memnoth auth login` first")?;
 
-    // Minting an MCP token is one POST to the same endpoint the hosted client
-    // calls. It is issued here rather than through the typed client because
-    // that surface publishes the account endpoints, not this one.
-    let base = std::env::var("MEMNOTH_API_URL").unwrap_or_else(|_| DEFAULT_API_URL.to_string());
-    let url = format!("{}/mcp/token", base.trim_end_matches('/'));
-
-    let response = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(20))
-        .build()
-        .map_err(|e| anyhow::anyhow!("cannot build the HTTP client: {e}"))?
-        .post(&url)
-        .bearer_auth(api_key)
-        .send()
-        .map_err(|e| anyhow::anyhow!("network error: {e}"))?;
-
-    let status = response.status();
-    let text = response
-        .text()
-        .map_err(|e| anyhow::anyhow!("read error: {e}"))?;
-
-    if !status.is_success() {
-        return Err(anyhow::anyhow!("failed to get MCP token: {}", text));
-    }
-
-    let token_response: memnoth_cloud_client::types::McpTokenResponse =
-        serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("parse error: {e}"))?;
-
+    let minted = mint_mcp_token(&api_key)?;
+    let deadline_ms = epoch_ms_of(&minted.expires_at);
     let now = chrono::Utc::now().timestamp_millis();
-    let expires_at_ms = now + (token_response.expires_in as i64 * 1000);
 
     Ok(TokenReport {
-        token: token_response.token,
-        token_type: token_response.token_type,
-        expires_in: token_response.expires_in,
-        mcp_url: token_response.mcp_url,
-        expires_at_ms,
+        token: minted.token,
+        // The server mints a bearer and names no token type; `Bearer` is what
+        // the MCP transport sends with it.
+        token_type: "Bearer".to_string(),
+        expires_in: ((deadline_ms - now) / 1000).max(0) as u64,
+        mcp_url: minted.endpoint,
+        expires_at_ms: deadline_ms,
     })
 }
 
@@ -1093,7 +1174,7 @@ pub fn exposes(_ctx: &AppContext) -> Result<ExposesReport> {
 /// `memnoth mcp restart` implementation.
 pub fn restart_impl(
     ctx: &AppContext,
-    server: Option<String>,
+    _server: Option<String>,
     _force: bool,
 ) -> Result<RestartReport> {
     // For HTTP servers, we can't easily restart from the client side

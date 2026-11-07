@@ -136,12 +136,30 @@ impl ClientKind {
 }
 
 fn zed_settings_path(home: &Path) -> PathBuf {
-    if cfg!(windows)
-        && let Some(appdata) = std::env::var_os("APPDATA").map(PathBuf::from)
-    {
-        return appdata.join("Zed").join("settings.json");
+    // A home that actually holds a Zed settings file wins, wherever the platform
+    // would put it. Without this the Windows branch below read
+    // `%APPDATA%\Zed\settings.json` for every caller — including one that passed
+    // its own directory — so the answer came from the real user's file no matter
+    // which home was asked about, and a test could only pass on a machine that
+    // happened to have memnoth registered there.
+    let xdg = home.join(".config").join("zed").join("settings.json");
+    let roaming = home
+        .join("AppData")
+        .join("Roaming")
+        .join("Zed")
+        .join("settings.json");
+    if xdg.exists() {
+        return xdg;
     }
-    home.join(".config").join("zed").join("settings.json")
+    if cfg!(windows) {
+        if roaming.exists() {
+            return roaming;
+        }
+        if let Some(appdata) = std::env::var_os("APPDATA").map(PathBuf::from) {
+            return appdata.join("Zed").join("settings.json");
+        }
+    }
+    xdg
 }
 
 /// The registration to write: endpoint, and the token if there is one.
@@ -208,34 +226,47 @@ pub fn status(kind: ClientKind, home: &Path, expected_url: &str) -> ClientStatus
         }
     };
 
-    let entry = match kind {
-        ClientKind::Codex => read_codex_entry(&text),
+    let parsed = match kind {
+        ClientKind::Codex => read_codex_entry(&text).map(|entry| ParsedJson {
+            entry,
+            jsonc: false,
+        }),
         ClientKind::Claude | ClientKind::Cursor => {
             read_json_entry(&text, SERVER_NAME, "mcpServers")
         }
         ClientKind::Zed => read_json_entry(&text, SERVER_NAME, "context_servers"),
     };
 
-    match entry {
-        Err(error) => ClientStatus {
+    // A JSONC file still answers the question — is memnoth registered? — but the
+    // answer carries the fact that the file cannot be rewritten by us, so nobody
+    // reads "registered" as "the next `mcp add` will keep this file working".
+    let parsed = match parsed {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return ClientStatus {
+                client: kind.name().to_string(),
+                path: path_text,
+                present: true,
+                registered: false,
+                found: false,
+                ok: true,
+                detail: format!("cannot parse: {error}"),
+            };
+        }
+    };
+    let note = if parsed.jsonc { JSONC_NOTE } else { "" };
+
+    match parsed.entry {
+        None => ClientStatus {
             client: kind.name().to_string(),
             path: path_text,
             present: true,
             registered: false,
             found: false,
             ok: true,
-            detail: format!("cannot parse: {error}"),
+            detail: format!("no `{SERVER_NAME}` entry{note}"),
         },
-        Ok(None) => ClientStatus {
-            client: kind.name().to_string(),
-            path: path_text,
-            present: true,
-            registered: false,
-            found: false,
-            ok: true,
-            detail: format!("no `{SERVER_NAME}` entry"),
-        },
-        Ok(Some(entry)) => {
+        Some(entry) => {
             let registered = true;
             let url = entry.get("url").and_then(Value::as_str);
             let headers = match kind {
@@ -243,10 +274,12 @@ pub fn status(kind: ClientKind, home: &Path, expected_url: &str) -> ClientStatus
                 _ => entry.get("headers"),
             };
             let detail = match url {
-                Some(url) if url != expected_url => format!("registered, but url is {url}"),
+                Some(url) if url != expected_url => {
+                    format!("registered, but url is {url}{note}")
+                }
                 _ => match headers.and_then(|headers| headers.get("Authorization")) {
-                    Some(_) => "registered".to_string(),
-                    None => "registered without an Authorization header".to_string(),
+                    Some(_) => format!("registered{note}"),
+                    None => format!("registered without an Authorization header{note}"),
                 },
             };
             ClientStatus {
@@ -262,12 +295,160 @@ pub fn status(kind: ClientKind, home: &Path, expected_url: &str) -> ClientStatus
     }
 }
 
-fn read_json_entry(text: &str, name: &str, container: &str) -> Result<Option<Value>> {
-    let root: Value = serde_json::from_str(text).context("not valid JSON")?;
-    Ok(root
-        .get(container)
-        .and_then(|servers| servers.get(name))
-        .cloned())
+/// What a client's config said, and whether reading it needed JSONC rules.
+///
+/// `jsonc` is the reason this is not just `Option<Value>`: a file Zed wrote with
+/// comments is a file this build will never rewrite, and a status that did not
+/// say so would make a read-only observation look like an editable one.
+struct ParsedJson {
+    /// The `memnoth` entry, if the container holds one.
+    entry: Option<Value>,
+    /// Comments or trailing commas had to be stripped to read it.
+    jsonc: bool,
+}
+
+/// Appended to a status detail when the file is JSON-with-comments.
+const JSONC_NOTE: &str =
+    " (settings.json is JSON with comments; read-only — `mcp add` will not rewrite it)";
+
+/// Read a `memnoth` entry from a JSON or JSONC config.
+///
+/// Strict JSON is tried first, so an ordinary `mcp.json` is read by the same
+/// parser that writes it. Only when that fails does the JSONC pass run — Zed's
+/// `settings.json` is JSON-with-comments by design, and reporting a working
+/// config as broken is a check that cannot read the file it was written for.
+fn read_json_entry(text: &str, name: &str, container: &str) -> Result<ParsedJson> {
+    let (root, jsonc) = match serde_json::from_str::<Value>(text) {
+        Ok(root) => (root, false),
+        Err(error) => match serde_json::from_str::<Value>(&strip_jsonc(text)) {
+            Ok(root) => (root, true),
+            // The strict error is the one reported: it points at a character in
+            // the file the user can open, while the stripped copy is our
+            // invention and its columns mean nothing to them.
+            Err(_) => return Err(error).context("not valid JSON"),
+        },
+    };
+    Ok(ParsedJson {
+        entry: root
+            .get(container)
+            .and_then(|servers| servers.get(name))
+            .cloned(),
+        jsonc,
+    })
+}
+
+/// A JSONC text with comments and trailing commas removed, **for reading only**.
+///
+/// Deliberately not used by [`write_json`]: the stripped text is not the file the
+/// user typed. Rewriting a hand-edited settings file from a de-commented copy
+/// would delete every comment and reorder nothing — silently, and on a file whose
+/// comments are the only record of why each setting is there. So the write path
+/// keeps refusing a file it cannot parse strictly.
+fn strip_jsonc(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut without_comments = String::with_capacity(text.len());
+    let mut index = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    while index < chars.len() {
+        let ch = chars[index];
+        if in_string {
+            without_comments.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            index += 1;
+            continue;
+        }
+
+        if ch == '"' {
+            in_string = true;
+            without_comments.push(ch);
+            index += 1;
+            continue;
+        }
+
+        // A `//` inside a string never reaches here: `in_string` is handled above.
+        if ch == '/' && chars.get(index + 1) == Some(&'/') {
+            while index < chars.len() && chars[index] != '\n' {
+                index += 1;
+            }
+            // The newline is kept so a parse error still reports the right line.
+            continue;
+        }
+        if ch == '/' && chars.get(index + 1) == Some(&'*') {
+            index += 2;
+            while index < chars.len()
+                && !(chars[index] == '*' && chars.get(index + 1) == Some(&'/'))
+            {
+                index += 1;
+            }
+            index = (index + 2).min(chars.len());
+            // One space, so `1/*c*/2` cannot become the token `12`.
+            without_comments.push(' ');
+            continue;
+        }
+
+        without_comments.push(ch);
+        index += 1;
+    }
+
+    strip_trailing_commas(&without_comments)
+}
+
+/// Remove `,` that only whitespace separates from `}` or `]`, outside strings.
+fn strip_trailing_commas(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    // Byte index in `out` of the comma that is still a candidate, cleared by any
+    // token that is not whitespace or a closing bracket.
+    let mut pending: Option<usize> = None;
+
+    for ch in chars {
+        if in_string {
+            out.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => {
+                in_string = true;
+                pending = None;
+                out.push(ch);
+            }
+            ',' => {
+                pending = Some(out.len());
+                out.push(ch);
+            }
+            '}' | ']' => {
+                if let Some(at) = pending.take() {
+                    // The comma is ASCII, so the byte range is one character.
+                    out.replace_range(at..at + 1, " ");
+                }
+                out.push(ch);
+            }
+            ch if ch.is_whitespace() => out.push(ch),
+            ch => {
+                pending = None;
+                out.push(ch);
+            }
+        }
+    }
+
+    out
 }
 
 fn read_codex_entry(text: &str) -> Result<Option<Value>> {
@@ -743,5 +924,81 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    /// Zed's own settings file is JSON-with-comments, and reporting it as
+    /// "cannot parse" is a check that cannot read the file it exists for.
+    #[test]
+    fn a_zed_settings_file_with_comments_is_read_and_says_it_is_read_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".config").join("zed").join("settings.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{
+  // the UI font, not ours to change
+  "theme": "One Dark",
+  "context_servers": {
+    /* memnoth was registered by `mn mcp add` */
+    "memnoth": {
+      "url": "https://memnoth.astrivya.ai/mcp",
+      "headers": { "Authorization": "Bearer zed-token" },
+    },
+  },
+}
+"#,
+        )
+        .unwrap();
+
+        let status = status(
+            ClientKind::Zed,
+            dir.path(),
+            "https://memnoth.astrivya.ai/mcp",
+        );
+        assert!(status.registered, "{}", status.detail);
+        assert!(status.detail.contains("registered"), "{}", status.detail);
+        assert!(
+            status.detail.contains("JSON with comments"),
+            "a read-only file has to say so: {}",
+            status.detail
+        );
+        assert!(!status.detail.contains("zed-token"));
+    }
+
+    /// A comment marker inside a string is data, not a comment.
+    #[test]
+    fn comment_markers_inside_strings_survive_the_strip() {
+        let text = r#"{"url": "http://example.test//path", "note": "a /* b */ c"}"#;
+        let stripped = strip_jsonc(text);
+        let parsed: Value = serde_json::from_str(&stripped).expect("still JSON");
+        assert_eq!(parsed["url"], "http://example.test//path");
+        assert_eq!(parsed["note"], "a /* b */ c");
+    }
+
+    /// Comments between real members and a trailing comma before a closing
+    /// bracket both have to go, or the file still will not parse.
+    #[test]
+    fn comments_and_trailing_commas_outside_strings_are_removed() {
+        let text = "{\n  \"a\": 1, // one\n  /* two */ \"b\": [1, 2,],\n}";
+        let parsed: Value = serde_json::from_str(&strip_jsonc(text)).expect("parses");
+        assert_eq!(parsed["a"], 1);
+        assert_eq!(parsed["b"][1], 2);
+    }
+
+    /// Reading is tolerant; writing is not. A JSONC file the reader understands
+    /// is still never rewritten by `mcp add`, because the stripped copy is not
+    /// the file the person typed.
+    #[test]
+    fn a_jsonc_file_is_readable_but_still_never_rewritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let original = "{\n  // keep me\n  \"context_servers\": {},\n}\n";
+        std::fs::write(&path, original).unwrap();
+
+        let error = write_json(&path, "context_servers", &entry(), false)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("refusing to rewrite"), "{error}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
     }
 }
