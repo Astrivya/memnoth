@@ -19,7 +19,7 @@ use crate::types::{
     OrganizationsResponse, ProjectInfo, ProjectsResponse, Team, TeamDetail, TeamEnvelope,
     TeamsResponse,
 };
-use crate::{ModelRow, UsageResponse};
+use crate::{CloudClient, ModelRow, UsageResponse};
 
 /// `POST /api/v1/auth/token` answers with an account key, not an OAuth envelope.
 ///
@@ -692,4 +692,48 @@ fn the_ingest_batch_envelope_is_events_not_items() {
         .expect("the plane's ingest result must parse");
     assert_eq!(answer.accepted, 2);
     assert_eq!(answer.duplicates, 1);
+}
+
+/// A deployment root and an API base are both valid `MEMNOTH_CLOUD_URL` values.
+///
+/// Requests join bare paths (`get("projects")`), so the base has to carry
+/// `/api/v1`. It did not: an operator who pointed the CLI at `http://host:8790`
+/// got `http://host:8790/projects`, and every verb answered 404 while `mn auth
+/// whoami` — which joins an absolute `/api/v1/me` — worked, which is exactly the
+/// kind of half-broken that is hard to read from the outside.
+#[test]
+fn a_deployment_root_and_an_api_base_both_name_the_same_base() {
+    let base = |raw: &str| {
+        CloudClient::with_base_url(raw)
+            .expect("a plain http URL must parse")
+            .base_url()
+            .to_string()
+    };
+
+    assert_eq!(
+        base("http://127.0.0.1:8790"),
+        "http://127.0.0.1:8790/api/v1/"
+    );
+    assert_eq!(
+        base("http://127.0.0.1:8790/"),
+        "http://127.0.0.1:8790/api/v1/"
+    );
+    assert_eq!(
+        base("http://127.0.0.1:8790/api/v1"),
+        "http://127.0.0.1:8790/api/v1/"
+    );
+    assert_eq!(
+        base("http://127.0.0.1:8790/api/v1/"),
+        "http://127.0.0.1:8790/api/v1/"
+    );
+    // A plane mounted under a prefix keeps it: the API is under the same one.
+    assert_eq!(
+        base("https://plane.example/cloud"),
+        "https://plane.example/cloud/api/v1/"
+    );
+    // And the hosted default is unchanged, not doubled.
+    assert_eq!(
+        base("https://memnoth.astrivya.ai/api/v1"),
+        "https://memnoth.astrivya.ai/api/v1/"
+    );
 }

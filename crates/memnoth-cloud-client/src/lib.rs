@@ -220,16 +220,31 @@ impl CloudClient {
     }
 
     /// Create a new cloud client with a custom base URL.
+    ///
+    /// Accepts either an API base (`…/api/v1`) or a deployment root (`https://plane.example`),
+    /// because both are what an operator reasonably pastes into [`BASE_URL_ENV`]
+    /// and this client appends bare paths (`get("projects")`). A root was joined
+    /// as `…/projects`, which the router does not serve: every cloud verb except
+    /// the few that pass an absolute path (`/api/v1/me` in `auth.rs`) answered
+    /// 404, so `mn projects list` said "not found" against a plane that was
+    /// working fine.
     pub fn with_base_url(base_url: &str) -> CloudResult<Self> {
+        let mut base_url =
+            Url::parse(base_url).map_err(|e| CloudError::InvalidUrl(e.to_string()))?;
+
+        // The API lives under `/api/v1`. Append it when the caller gave a root
+        // or a wider prefix, keep it when they already named it.
+        let path = base_url.path().trim_end_matches('/').to_string();
+        let path = if path.ends_with("/api/v1") {
+            path
+        } else {
+            format!("{path}/api/v1")
+        };
+
         // The trailing slash is what makes `join("models")` append rather than
         // replace the last segment; `join("/")` would also throw away `/api/v1`
         // and land every request on the web router.
-        let mut base_url =
-            Url::parse(base_url).map_err(|e| CloudError::InvalidUrl(e.to_string()))?;
-        if !base_url.path().ends_with('/') {
-            let path = format!("{}/", base_url.path());
-            base_url.set_path(&path);
-        }
+        base_url.set_path(&format!("{path}/"));
 
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(30))
@@ -241,6 +256,14 @@ impl CloudClient {
             base_url,
             auth_token: None,
         })
+    }
+
+    /// The resolved base this client appends paths to, always ending in `/`.
+    ///
+    /// Resolved, not echoed: [`CloudClient::with_base_url`] adds `/api/v1` when
+    /// it was not given, so this is the URL a request is actually built from.
+    pub fn base_url(&self) -> &Url {
+        &self.base_url
     }
 
     /// Set the authentication token.
@@ -599,6 +622,27 @@ impl CloudClient {
     /// GET /api/v1/status - live, stale and known instances plus ingest totals.
     pub fn status(&self) -> CloudResult<PlaneStatus> {
         Self::handle_response(self.get("status")?)
+    }
+
+    /// POST /api/v1/feedback — one message against an org, for the operator queue.
+    ///
+    /// Returns the server's reply as it sent it: the filer reads `id`, the
+    /// operator console reads the row. Through this client rather than a
+    /// hand-built request because the route is a **mutating** one, and a write
+    /// without the `x-memnoth-csrf` marker is refused `403` before it is read —
+    /// which is what every `mn feedback send` did.
+    pub fn feedback(
+        &self,
+        message: &str,
+        category: &str,
+        include_context: bool,
+    ) -> CloudResult<serde_json::Value> {
+        let body = serde_json::json!({
+            "message": message,
+            "category": category,
+            "include_context": include_context,
+        });
+        Self::handle_response(self.post("feedback", &body)?)
     }
 
     /// GET /api/v1/credits - Get credits balance, grants, and expiry.
