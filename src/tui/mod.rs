@@ -27,13 +27,19 @@
 //! pressed, a command finishes, or a turn reports. A TUI that re-queries SQLite
 //! four times a second would be the most expensive thing in the process.
 pub mod app;
+pub mod jobs;
+pub mod login;
 pub mod overlays;
 pub mod panes;
+pub mod slash;
 pub mod theme;
 pub mod ui;
 use anyhow::{Context, Result};
 use crossterm::cursor::Show;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -50,14 +56,15 @@ use memnoth_sandbox::profiles::{ProfileName, load_sandbox_config};
 use memnoth_sandbox::rules::{RuleDecision, RuleSet, decide};
 use memnoth_session::{Role, Session, TurnReceipt, WriteReceipt};
 
-use crate::cli::{KgArgs, KgCommand, TeamsArgs, TeamsCommand, VaultArgs, VaultCommand, Verb};
+use crate::cli::{KgArgs, KgCommand, VaultArgs, VaultCommand, Verb};
 use crate::context::AppContext;
 use crate::output::{ellipsize, human_age, human_count};
 use crate::provider::{self, Tools};
 use crate::session::SessionStore;
+use crate::tui::app::VerbDone;
 use crate::tui::app::{
-    App, EntryRole, HELP, Home, Parsed, PendingShell, combined_search_answer, display_path,
-    parse_line,
+    App, Attention, EntryRole, Fact, Home, HomeState, Parsed, PendingShell, Step, TasksCommand,
+    combined_search_answer, display_path, parse_line,
 };
 /// What a running turn reports back to the screen.
 enum TurnEvent {
@@ -128,10 +135,20 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
     // The startup screen's facts are read before the terminal changes state:
     // a store that fails to open is a message here, not a half-drawn frame
     // after raw mode has already been entered.
-    let (graph, indexed) = graph_state(ctx);
+    let graph = graph_state(ctx);
     let mut app = App::new(name, resumed);
     app.config = ctx.config.clone();
     app.config_path = ctx.config_path.clone();
+    // Overlays that talk to the cloud (`/teams members`, `/keys create`,
+    // `/org invite`) need the invocation's paths and credentials, and the
+    // overlay trait only ever sees the app.
+    app.ctx = Some(ctx.clone());
+    // The ranking and the run counts are what this machine actually does, so
+    // they outlive the terminal: `/` after a restart already leads with the
+    // commands the person uses. A missing or unreadable file reads as no
+    // history, never as a failure to start.
+    app.slash
+        .adopt(crate::tui::slash::load_usage(&store.usage_path()));
 
     // A preference written by `mn set-theme` or `mn set-screen-reader` shapes
     // the next session; `/theme` still overrides it live.
@@ -145,13 +162,19 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
     }
     app.set_paths(display_path(&ctx.root), display_path(&ctx.vault_path));
     app.seed(&session);
-    app.home = Some(home(ctx, name, resumed, &graph, indexed));
-    app.graph = graph;
+    app.home = Some(home(ctx, name, resumed, &graph));
+    app.graph_attention = graph.attention.clone();
     app.context = context_pane(ctx, &session);
+    // Read before the first frame: the account line is part of what the screen
+    // opened with, not something that appears a redraw later.
+    app.account = crate::auth::signed_in_account();
 
     enable_raw_mode().context("cannot put the terminal in raw mode")?;
     let mut stdout = io::stdout();
-    if let Err(error) = execute!(stdout, EnterAlternateScreen) {
+    // Bracketed paste turns a paste into one event instead of a stream of
+    // synthesized keys, which is the difference between an API key arriving
+    // intact and one arriving with modifiers attached.
+    if let Err(error) = execute!(stdout, EnterAlternateScreen, EnableBracketedPaste) {
         let _ = disable_raw_mode();
         return Err(error).context("cannot enter the alternate screen");
     }
@@ -164,6 +187,10 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
     let mut busy: Option<Busy> = None;
     let mut approval: Option<Pending> = None;
     let mut finished = false;
+    // The first tool row of the turn in flight. Every running tool row from
+    // here on belongs to it, so the answer can resolve them without guessing
+    // from text.
+    let mut tools_from: Option<usize> = None;
     while !app.quit {
         // the answer is applied here, on the UI thread, so the session file has
         // exactly one writer.
@@ -172,12 +199,17 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
             finished = false;
             loop {
                 match current.rx.try_recv() {
+                    // A tool call is a row, not a sentence: the glyph is the
+                    // outcome, and it changes on the same line when the result
+                    // lands. That is the whole difference between a live record
+                    // and a scroll of past tense.
                     Ok(TurnEvent::Note(note)) => {
-                        app.push(EntryRole::Info, format!("  · {note}"));
+                        tools_from.get_or_insert(app.entries.len());
+                        app.push_tool(note);
                     }
                     Ok(TurnEvent::Ask { request, reply }) => {
                         app.approval = Some(format!(
-                            "{}\n\n{}\n\ny approve · n reject · ctrl-c quit",
+                            "{}\n\n{}\n\ny approve · n or esc reject",
                             request.title, request.body
                         ));
                         approval = Some(Pending {
@@ -191,7 +223,13 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
                         app.busy = false;
                         app.approval = None;
                         approval = None;
-                        settle(&mut app, &store, &mut session, &current, *result);
+                        let tools = tools_from
+                            .map(|from| app.entries.len().saturating_sub(from))
+                            .unwrap_or(0);
+                        if let Some(from) = tools_from.take() {
+                            app.resolve_tools(from);
+                        }
+                        settle(&mut app, &store, &mut session, &current, tools, *result);
                         break;
                     }
                     Err(TryRecvError::Empty) => break,
@@ -201,6 +239,9 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
                         app.busy = false;
                         app.approval = None;
                         approval = None;
+                        if let Some(from) = tools_from.take() {
+                            app.resolve_tools(from);
+                        }
                         app.push(
                             EntryRole::Error,
                             "the model turn stopped without an answer".to_string(),
@@ -219,22 +260,122 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
             }
         }
 
+        // Sign-in reports from its own thread. Drained before the draw, so a
+        // code that arrives is on screen in the very next frame, and a failure
+        // leaves the account as it was.
+        while let Ok(event) = app.login_rx.try_recv() {
+            match event {
+                login::LoginEvent::Code { user_code, url } => {
+                    // Held for the frame as well as written to the transcript:
+                    // the wait can outlive a cleared transcript or a scrolled
+                    // one, and a code only in history is a code to hunt for.
+                    app.login_prompt = Some(login::LoginPrompt {
+                        user_code: user_code.clone(),
+                        url: url.clone(),
+                    });
+                    // The link gets its own line: at the transcript's width a
+                    // URL trailed after a sentence wraps at whatever column it
+                    // runs out at, which reads as a second sentence rather than
+                    // an address to open. Its own indented line keeps evident
+                    // what it is, and lets the code sit under it.
+                    app.push(
+                        EntryRole::Info,
+                        format!(
+                            "sign in: open this link\n  {url}\n  enter code {user_code} — waiting for approval…"
+                        ),
+                    );
+                }
+                login::LoginEvent::Done { email, .. } => {
+                    app.login_busy = false;
+                    app.login_started = None;
+                    app.login_prompt = None;
+                    app.account = Some(email.clone());
+                    // The credential is stored by the time this arrives, so the
+                    // identity is stated here and nowhere else: no second line
+                    // waits on the organisation to say who signed in.
+                    app.push(EntryRole::Info, login::status_line(Some(&email)));
+                    refresh(ctx, &mut app, name, resumed, &session);
+                }
+                login::LoginEvent::Enriched { org_name, .. } => {
+                    app.push(EntryRole::Info, format!("organization {org_name}"));
+                }
+                login::LoginEvent::Cancelled => {
+                    app.login_busy = false;
+                    app.login_started = None;
+                    app.login_prompt = None;
+                    app.push(
+                        EntryRole::Info,
+                        "sign in cancelled — nothing was stored".to_string(),
+                    );
+                }
+                login::LoginEvent::Failed(message) => {
+                    app.login_busy = false;
+                    app.login_started = None;
+                    app.login_prompt = None;
+                    app.push(EntryRole::Error, format!("sign in failed: {message}"));
+                }
+            }
+        }
+
+        // Finished children are reaped and mirrored into the rail every tick;
+        // the poll is non-blocking, so this is also the only place a job's
+        // output becomes visible without a keypress.
+        app.sync_jobs();
+
+        // Provider tests finish on their own thread. Applying them here keeps
+        // the connect screen honest in the very next frame; nothing used to
+        // drain this channel, so every test stayed "Testing…" forever.
+        while let Some(result) = app.try_recv_provider_test_result() {
+            app.overlay_stack.deliver_provider_test(&result);
+        }
+
+        // Model lists do the same, for the same reason: `/model` asks the
+        // provider on a thread, and the answer lands here rather than inside a
+        // draw that would freeze the screen until the request timed out.
+        while let Some(result) = app.try_recv_models_loaded() {
+            app.overlay_stack.deliver_models(&result);
+        }
+
+        // An overlay collects its own background answer here: a team list, a
+        // minted key. Rendering is not where state changes, and a keypress is
+        // not guaranteed, so neither can drain a channel of its own.
+        //
+        // The stack is lifted out for the call: an overlay reports back by
+        // writing to the app (a transcript line, the prompt it fills in), and
+        // `&mut app.overlay_stack` beside `&mut app` is two borrows of one value.
+        {
+            let mut stack = std::mem::take(&mut app.overlay_stack);
+            stack.tick(&mut app);
+            app.overlay_stack = stack;
+        }
+
+        // Verbs run on their own thread so the screen stays live: `/stats`
+        // makes two cloud calls with a 30-second timeout each, and run inline
+        // that froze the frame in a way no one can tell from a hang.
+        while let Some(done) = app.try_recv_verb() {
+            finish_verb(&mut app, &store, &mut session, done);
+            refresh(ctx, &mut app, name, resumed, &session);
+        }
+
         terminal
             .draw(|frame| {
                 ui::draw(frame, &mut app);
             })
             .context("cannot draw the session")?;
-
         if event::poll(Duration::from_millis(150)).context("cannot poll the keyboard")? {
             match event::read().context("cannot read the keyboard")? {
                 // Focus, resize and mouse carry no command; the panes pick up
-                // the new size on the next draw. Paste is text and goes in the
-                // prompt, because losing a pasted stack trace is the worst
-                // thing a terminal agent can do with it.
+                // the new size on the next draw. Paste is text: the open overlay
+                // gets it first (an API key is always pasted into `/connect`),
+                // and with no overlay it goes in the prompt, because losing a
+                // pasted stack trace is the worst thing a terminal agent can do
+                // with it.
                 Event::FocusGained | Event::FocusLost => {}
                 Event::Paste(text) => {
-                    for ch in text.chars() {
-                        app.insert_char(ch);
+                    if !app.overlay_stack.handle_paste(&text) && !app.overlay_stack.has_overlay() {
+                        for ch in text.chars() {
+                            app.insert_char(ch);
+                        }
                     }
                 }
                 Event::Resize(_, _) => {}
@@ -309,13 +450,11 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
                                 while app.overlay_stack.pop().is_some() {}
                             }
                             Some(crate::tui::overlays::OverlayAction::Push(kind)) => {
-                                app.overlay_stack
-                                    .push(crate::tui::overlays::create_overlay(kind));
+                                open_overlay(&mut app, kind);
                             }
                             Some(crate::tui::overlays::OverlayAction::Replace(kind)) => {
                                 app.overlay_stack.pop();
-                                app.overlay_stack
-                                    .push(crate::tui::overlays::create_overlay(kind));
+                                open_overlay(&mut app, kind);
                             }
                             Some(crate::tui::overlays::OverlayAction::None) => {}
                         }
@@ -327,8 +466,33 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
                 Event::Key(_) => {}
             }
         }
+        // A cancel requested from the keyboard is honoured here, where the
+        // in-flight receiver lives. Dropping it discards the answer instead of
+        // letting a turn the person abandoned land in the transcript later.
+        if app.cancel_turn {
+            app.cancel_turn = false;
+            finished = false;
+            if let Some(current) = busy.take() {
+                drop(current);
+                app.busy = false;
+                app.approval = None;
+                approval = None;
+                app.push(
+                    EntryRole::Info,
+                    "turn cancelled — its answer will be discarded".to_string(),
+                );
+                refresh(ctx, &mut app, name, resumed, &session);
+            }
+        }
+
         if app.pending_submit {
             app.pending_submit = false;
+            // Remembered before the line is taken: `/` next time offers what was
+            // actually run, at the top, without a filter. The history is written
+            // now rather than on exit, so a session that is killed still keeps
+            // what it ran; a failed write costs a ranking, not a turn.
+            app.slash.record(&app.input);
+            let _ = crate::tui::slash::save_usage(&store.usage_path(), &app.slash.usage());
             if busy.is_some() {
                 // Queue the command instead of rejecting it
                 let line = app.take_input();
@@ -340,14 +504,17 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
                 busy = submit(&mut app, ctx, &store, &mut session);
                 refresh(ctx, &mut app, name, resumed, &session);
             }
+            // The line is gone, so the dropdown that described it goes too.
+            app.sync_slash();
         }
 
         // Process command queue when turn completes
-        if finished && !app.command_queue.is_empty() {
-            if let Some(queued_line) = app.command_queue.pop_front() {
-                app.input = queued_line;
-                app.pending_submit = true;
-            }
+        if finished
+            && !app.command_queue.is_empty()
+            && let Some(queued_line) = app.command_queue.pop_front()
+        {
+            app.input = queued_line;
+            app.pending_submit = true;
         }
     }
 
@@ -360,9 +527,10 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
 /// `/vault init` must be visible on the startup screen the next time it is
 /// shown, not only in the header.
 fn refresh(ctx: &AppContext, app: &mut App, name: &str, resumed: bool, session: &Session) {
-    let (graph, indexed) = graph_state(ctx);
-    app.home = Some(home(ctx, name, resumed, &graph, indexed));
-    app.graph = graph;
+    let graph = graph_state(ctx);
+    app.home = Some(home(ctx, name, resumed, &graph));
+    app.graph_attention = graph.attention.clone();
+    app.home_cursor = 0;
     app.context = context_pane(ctx, session);
 }
 
@@ -373,46 +541,256 @@ impl Drop for RestoreTerminal {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
         let mut out = io::stdout();
-        let _ = execute!(out, LeaveAlternateScreen, Show);
+        let _ = execute!(out, DisableBracketedPaste, LeaveAlternateScreen, Show);
         let _ = out.flush();
     }
 }
 
 fn handle_key(app: &mut App, key: KeyEvent, workspace_root: &Path) {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+
+    // The brief owns four keys while the prompt is empty: its `next` rows are
+    // selectable, and a list that looks selectable but is not was the defect
+    // this replaced. With text in the prompt the arrows are history again,
+    // exactly as they were.
+    if app.home_showing() && app.input.is_empty() && !app.slash.is_open() {
+        match key.code {
+            KeyCode::Up => {
+                app.home_move(-1);
+                return;
+            }
+            KeyCode::Down => {
+                app.home_move(1);
+                return;
+            }
+            KeyCode::Char(ch @ '1'..='3') if !ctrl => {
+                app.home_jump(ch.to_digit(10).unwrap_or(0) as usize);
+                return;
+            }
+            // `enter` runs the selected row: the command goes into the prompt and
+            // is submitted by the same path a typed line takes, so the transcript
+            // shows exactly what was run.
+            KeyCode::Enter => {
+                if let Some(command) = app.home_command() {
+                    app.input = command;
+                    app.cursor = app.input.chars().count();
+                    app.pending_submit = true;
+                }
+                return;
+            }
+            // `tab` puts the row in the prompt and stops there, leaving a space for
+            // the argument. It never runs: no key means two things in one surface.
+            KeyCode::Tab => {
+                if let Some(draft) = app.home_draft() {
+                    app.input = draft;
+                    app.cursor = app.input.chars().count();
+                }
+                return;
+            }
+            _ => {}
+        }
+    }
+
+    // A focused task rail owns four keys while the prompt is empty: the
+    // arrows walk jobs, Enter opens the selected job's output, and ctrl-x
+    // stops it. With text in the prompt the keys belong to the line, so a
+    // command can still be typed without leaving the rail.
+    if app.active_pane == 2 && app.input.is_empty() {
+        match key.code {
+            KeyCode::Up => {
+                app.tasks_pane.select_relative(-1);
+                return;
+            }
+            KeyCode::Down => {
+                app.tasks_pane.select_relative(1);
+                return;
+            }
+            KeyCode::Enter => {
+                if let Some(id) = app.tasks_pane.selected_task_id() {
+                    push_job_logs(app, &id);
+                }
+                return;
+            }
+            KeyCode::Char('x') if ctrl => {
+                if let Some(id) = app.tasks_pane.selected_task_id() {
+                    cancel_job(app, &id);
+                }
+                return;
+            }
+            _ => {}
+        }
+    }
+    // ctrl-g runs the fix the header is asking for. The command goes into the
+    // prompt and is submitted by the same path a typed line takes, so the
+    // transcript records exactly what ran. Empty line only: a half-written
+    // message is never thrown away to satisfy a status chip.
+    if ctrl && matches!(key.code, KeyCode::Char('g')) {
+        if app.input.is_empty()
+            && !app.slash.is_open()
+            && let Some(attention) = &app.graph_attention
+        {
+            app.input = attention.fix.clone();
+            app.cursor = app.input.chars().count();
+            app.pending_submit = true;
+        }
+        // Consumed even when there is nothing to fix, so the key cannot mean
+        // "insert a g" on one screen and "run the header's fix" on the next.
+        return;
+    }
+
+    let is_ctrl_c = ctrl && matches!(key.code, KeyCode::Char('c'));
+    // The second ctrl-c only quits when it follows the first without another
+    // key between them; a stale arm must never turn a later press into a quit.
+    if !is_ctrl_c {
+        app.ctrl_c_armed = false;
+    }
+
+    // While the `/` dropdown is open it owns the navigation keys: ↑/↓ walk the
+    // commands on screen, not the history behind it. Esc closes the list and
+    // leaves the line alone, so a wrong guess costs one key.
+    if app.slash.is_open() {
+        match key.code {
+            KeyCode::Up => {
+                app.slash.select_previous();
+                return;
+            }
+            KeyCode::Down => {
+                app.slash.select_next();
+                return;
+            }
+            KeyCode::PageUp => {
+                app.slash.page_up();
+                return;
+            }
+            KeyCode::PageDown => {
+                app.slash.page_down();
+                return;
+            }
+            KeyCode::Home => {
+                app.slash.first();
+                return;
+            }
+            KeyCode::End => {
+                app.slash.last();
+                return;
+            }
+            // Tab completes the line and stops there: the command is in the
+            // prompt to be read or extended, never run by a completion key.
+            KeyCode::Tab => {
+                if accept_slash(app).is_some() {
+                    app.pending_submit = false;
+                }
+                return;
+            }
+            // Enter completes a command, because a command is what the list is
+            // for. With arguments on offer Enter runs the line instead: the
+            // value is still being typed and tab is the key that fills it in,
+            // so no key means two things in one surface.
+            KeyCode::Enter => {
+                if app.slash.choosing_command()
+                    && let Some(submit) = accept_slash(app)
+                {
+                    app.pending_submit = submit;
+                    return;
+                }
+                // Nothing matched: the line typed is the command, and the
+                // ordinary Enter below runs it.
+            }
+            KeyCode::Esc => {
+                app.slash.close();
+                return;
+            }
+            _ => {}
+        }
+    }
 
     match key.code {
-        KeyCode::Char('c') if ctrl => app.quit = true,
+        KeyCode::Char('c') if ctrl => {
+            if app.busy {
+                if app.ctrl_c_armed {
+                    app.quit = true;
+                } else {
+                    app.ctrl_c_armed = true;
+                    app.cancel_turn = true;
+                    app.push(
+                        EntryRole::Info,
+                        "cancelling the turn — ctrl-c again to quit".to_string(),
+                    );
+                }
+            } else {
+                app.quit = true;
+            }
+        }
         KeyCode::Char('d') if ctrl => app.quit = true,
+        // The link a pending sign-in printed, opened without leaving the
+        // session: the same helper the command line uses, and only when there
+        // is a link to open. Nothing opens on its own — a browser that appears
+        // unbidden mid-edit is the surprise this key exists to avoid.
+        KeyCode::Char('o') if ctrl => {
+            if let Some(signin) = app.login_prompt.clone() {
+                match crate::auth::open_browser(&signin.url) {
+                    Ok(()) => app.push(EntryRole::Info, format!("opened {}", signin.url)),
+                    Err(error) => app.push(
+                        EntryRole::Error,
+                        format!("could not open a browser ({error}); select the link above"),
+                    ),
+                }
+            }
+        }
         KeyCode::Char('l') if ctrl => app.clear(),
         KeyCode::Char('a') if ctrl => app.move_home(),
         KeyCode::Char('e') if ctrl => app.move_end(),
+        KeyCode::F(1) => {
+            app.overlay_stack.push(crate::tui::overlays::create_overlay(
+                crate::tui::overlays::OverlayKind::Help,
+            ));
+        }
+        // Ctrl+M is Enter on terminals that fold the control bit into CR; where
+        // it is reported separately, it opens the same model browser as
+        // `/models`.
+        KeyCode::Char('m') if ctrl => {
+            open_overlay(app, crate::tui::overlays::OverlayKind::Models);
+        }
+        KeyCode::Char('t') if ctrl => app.toggle_tasks(),
+        KeyCode::Char(ch) if ctrl && ('1'..='4').contains(&ch) => {
+            app.focus_pane(ch as u8 - b'1');
+        }
         // Ctrl+K or Ctrl+P opens command palette (like VS Code / lazygit)
         KeyCode::Char('k') if ctrl => {
             app.overlay_stack.push(crate::tui::overlays::create_overlay(
                 crate::tui::overlays::OverlayKind::Palette,
             ));
         }
-        KeyCode::Char('p') if ctrl => {
-            app.overlay_stack.push(crate::tui::overlays::create_overlay(
-                crate::tui::overlays::OverlayKind::Palette,
-            ));
+        // ctrl-p used to open the same palette as ctrl-k. One key for one
+        // surface; ctrl-p is left to the terminal again.
+
+        // '/' starts a command, and the dropdown under the prompt lists them:
+        // a command is discovered instead of remembered. ctrl-k still opens the
+        // full palette for someone who wants the modal.
+        KeyCode::Char('/') => {
+            app.insert_char('/');
+            app.sync_slash();
         }
-        // '/' key opens command palette when input is empty (not typing a command)
-        KeyCode::Char('/') if app.input.trim().is_empty() && !app.busy => {
+        // '?' is help only when there is no line to ask about; otherwise it is
+        // a character in the question.
+        KeyCode::Char('?') if app.input.is_empty() => {
             app.overlay_stack.push(crate::tui::overlays::create_overlay(
-                crate::tui::overlays::OverlayKind::Palette,
+                crate::tui::overlays::OverlayKind::Help,
             ));
         }
         KeyCode::Tab => {
-            // @file fuzzy completion
+            // @file fuzzy completion wins while it is active; otherwise Tab is
+            // pane navigation, never a silent no-op.
             if app.input.contains('@') && !app.busy {
                 app.complete_path(workspace_root);
+            } else {
+                app.cycle_pane(true);
             }
         }
+        KeyCode::BackTab => app.cycle_pane(false),
         KeyCode::Char(ch) if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) => {
-            app.insert_char(ch)
+            app.insert_char(ch);
+            app.sync_slash();
         }
         KeyCode::Enter => {
             if !app.input.trim().is_empty() {
@@ -420,29 +798,58 @@ fn handle_key(app: &mut App, key: KeyEvent, workspace_root: &Path) {
             }
         }
         KeyCode::Esc => {
+            // A wait for approval is the thing in front of you, so esc ends it —
+            // but only where the prompt has nothing else for the key. The
+            // states below all claim esc first, and each of them keeps `/login`
+            // as the way out.
+            if app.esc_cancels_signin() {
+                stop_signin(app);
+                return;
+            }
             app.cancel_completion();
-            app.input.clear();
-            app.cursor = 0;
+            if app.busy {
+                // One Esc gets out of a running turn; the input that asked for
+                // it is left alone, because the person may want to edit it.
+                app.cancel_turn = true;
+                app.push(
+                    EntryRole::Info,
+                    "cancelling the turn — esc again is harmless".to_string(),
+                );
+            } else if app.input.is_empty() && app.home_showing() {
+                // esc cancels what is in front of you; on the brief that is the
+                // brief itself. It stays put when there is no transcript to
+                // return to.
+                app.close_home();
+            } else {
+                app.input.clear();
+                app.cursor = 0;
+                app.sync_slash();
+            }
         }
         KeyCode::Backspace => {
             app.cancel_completion();
             app.backspace();
+            app.sync_slash();
         }
         KeyCode::Delete => {
             app.cancel_completion();
             app.delete();
+            app.sync_slash();
         }
         KeyCode::Left => {
             app.cancel_completion();
             app.move_left();
+            app.sync_slash();
         }
         KeyCode::Right => {
             app.cancel_completion();
             app.move_right();
+            app.sync_slash();
         }
         KeyCode::Home => {
             app.cancel_completion();
             app.move_home();
+            app.sync_slash();
         }
         // End is "newest output", which is the key people reach for while a
         // transcript is running; ctrl-e is end-of-line.
@@ -483,13 +890,47 @@ fn submit(
             app.clear();
             None
         }
+        Parsed::Home => {
+            app.open_home();
+            None
+        }
         Parsed::Sessions => {
             let text = sessions_text(store);
             app.push(EntryRole::Info, text);
             None
         }
         Parsed::Run(verb) => {
-            run_verb(app, ctx, store, session, &line, &verb);
+            run_verb(app, ctx, &line, verb);
+            None
+        }
+        Parsed::TeamsOverlay => {
+            open_overlay(app, crate::tui::overlays::OverlayKind::Teams);
+            None
+        }
+        Parsed::KeyCreate {
+            name,
+            scope,
+            project,
+            expires_in_days,
+        } => {
+            // The flags that were typed are the form's starting values: a typed
+            // flag is never silently dropped on the way to another screen.
+            crate::tui::overlays::present(
+                app,
+                Box::new(crate::tui::overlays::KeyCreateOverlay::seeded(
+                    name,
+                    scope,
+                    project,
+                    expires_in_days,
+                )),
+            );
+            None
+        }
+        Parsed::Invite { email, role } => {
+            crate::tui::overlays::present(
+                app,
+                Box::new(crate::tui::overlays::InviteOverlay::seeded(email, role)),
+            );
             None
         }
         Parsed::Ask(words) => ask(app, ctx, store, session, &line, &words),
@@ -513,8 +954,12 @@ fn submit(
             open_overlay(app, crate::tui::overlays::OverlayKind::Help);
             None
         }
-        Parsed::ModelOverlay => {
-            open_overlay(app, crate::tui::overlays::OverlayKind::Model);
+        Parsed::ModelsOverlay => {
+            open_overlay(app, crate::tui::overlays::OverlayKind::Models);
+            None
+        }
+        Parsed::Tasks(command) => {
+            run_tasks(app, ctx, command);
             None
         }
         Parsed::SearchOverlay => {
@@ -545,31 +990,196 @@ fn submit(
             open_overlay(app, crate::tui::overlays::OverlayKind::Connect);
             None
         }
+        Parsed::Login => {
+            start_login(app, ctx);
+            None
+        }
+        Parsed::Logout => {
+            sign_out(app, ctx);
+            None
+        }
+        Parsed::PaletteOverlay => {
+            open_overlay(app, crate::tui::overlays::OverlayKind::Palette);
+            None
+        }
+        Parsed::CommandsOverlay => {
+            open_overlay(app, crate::tui::overlays::OverlayKind::Commands);
+            None
+        }
+        Parsed::Info(message) => {
+            app.push(EntryRole::Info, message);
+            None
+        }
         Parsed::Unknown(message) => {
             app.push(EntryRole::Error, message);
             None
         }
     }
 }
+/// `/tasks` and the keys the focused rail uses.
+///
+/// Every branch leaves a transcript line behind: a job that started silently
+/// is one the person has to go looking for, and a cancel that did nothing must
+/// say which of those two things happened.
+fn run_tasks(app: &mut App, ctx: &AppContext, command: TasksCommand) {
+    match command {
+        TasksCommand::Show => app.toggle_tasks(),
+        TasksCommand::Run(command) => match app.jobs.start(&command, &ctx.root) {
+            Ok(id) => {
+                app.sync_jobs();
+                app.focus_pane(2);
+                app.push(
+                    EntryRole::Info,
+                    format!("started {id}: {command}\n  /tasks logs {id} · /tasks cancel {id}"),
+                );
+            }
+            Err(error) => app.push(EntryRole::Error, format!("{error:#}")),
+        },
+        TasksCommand::Status => {
+            app.sync_jobs();
+            app.push(EntryRole::Info, app.jobs.status_text());
+        }
+        TasksCommand::Logs(id) => {
+            app.sync_jobs();
+            match id.or_else(|| app.tasks_pane.selected_task_id()) {
+                Some(id) => push_job_logs(app, &id),
+                None => app.push(
+                    EntryRole::Info,
+                    "no background jobs — /tasks run <command> starts one".to_string(),
+                ),
+            }
+        }
+        TasksCommand::Cancel(id) => cancel_job(app, &id),
+    }
+}
+
+/// Print the tail of one job into the transcript.
+fn push_job_logs(app: &mut App, id: &str) {
+    let Some(job) = app.jobs.get(id) else {
+        app.push(EntryRole::Error, format!("no job {id}"));
+        return;
+    };
+    let tail = job.tail(40);
+    let text = if tail.is_empty() {
+        format!("{} · {} · no output yet", id, job.status.label())
+    } else {
+        format!("{} · {}\n{}", id, job.status.label(), tail.join("\n"))
+    };
+    app.push(EntryRole::Answer, text);
+}
+
+/// Stop one job, reporting which of "stopped" and "already finished" happened.
+fn cancel_job(app: &mut App, id: &str) {
+    match app.jobs.cancel(id) {
+        Ok(true) => {
+            app.sync_jobs();
+            app.push(EntryRole::Info, format!("cancelled {id}"));
+        }
+        Ok(false) => app.push(EntryRole::Info, format!("{id} has already finished")),
+        Err(error) => app.push(EntryRole::Error, format!("{error:#}")),
+    }
+}
+
+/// Put the dropdown's highlighted command into the prompt.
+///
+/// A command that takes an argument stops with a trailing space rather than
+/// being submitted and rejected for the one it is missing. Returns whether the
+/// line should be run now, or `None` when nothing matched.
+fn accept_slash(app: &mut App) -> Option<bool> {
+    let (line, submit) = app.slash.accept()?;
+    // The pick is the whole line, space included: a command that needs an
+    // argument already carries the room for it, and a directory keeps its own
+    // slash instead.
+    app.input = line;
+    app.cursor = app.input.chars().count();
+    Some(submit)
+}
+
+/// Begin the device flow on a worker thread.
+///
+/// The poll blocks for up to a minute while someone finishes in the browser, so
+/// it cannot run on the frame: a frozen screen reads as a hang. The code and
+/// the URL arrive over the channel and land in the transcript.
+/// End a pending sign-in. The waiting thread answers within a tick.
+///
+/// Two keys reach this: esc where the prompt has nothing else for it, and
+/// `/login` a second time, which cancels in every state — a half-typed line and
+/// a running turn both own esc and would otherwise leave no way out.
+fn stop_signin(app: &mut App) {
+    app.login_cancel
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    app.push(EntryRole::Info, "cancelling sign in…".to_string());
+}
+
+fn start_login(app: &mut App, ctx: &AppContext) {
+    if app.login_busy {
+        stop_signin(app);
+        return;
+    }
+    if let Some(account) = &app.account {
+        app.push(
+            EntryRole::Info,
+            format!(
+                "{} · /logout first to use another account",
+                login::status_line(Some(account))
+            ),
+        );
+        return;
+    }
+    app.login_busy = true;
+    app.login_started = Some(std::time::Instant::now());
+    // A fresh flag per attempt: the previous one may still be set.
+    app.login_cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    app.push(
+        EntryRole::Info,
+        "sign in: asking memnoth cloud for a one-time code…".to_string(),
+    );
+    login::start(
+        ctx.clone(),
+        "memnoth-cli".to_string(),
+        app.login_tx.clone(),
+        app.login_cancel.clone(),
+    );
+}
+
+/// Forget this machine's credentials, revoking the token best-effort.
+///
+/// The verb is the same one `mn auth logout` runs, so the two doors cannot
+/// disagree about what signing out clears.
+fn sign_out(app: &mut App, ctx: &AppContext) {
+    let verb = Verb::Auth(crate::cli::AuthArgs {
+        action: crate::cli::AuthCommand::Logout(crate::cli::AuthLogoutArgs {}),
+    });
+    match crate::commands::execute(ctx, &verb) {
+        Ok(_) => {
+            app.account = None;
+            app.push(EntryRole::Info, "signed out".to_string());
+        }
+        Err(error) => app.push(EntryRole::Error, format!("sign out: {error:#}")),
+    }
+}
+
 /// Put one overlay on the stack.
 ///
 /// Every slash command that opens a modal comes through here, so "opening an
 /// overlay" has exactly one definition.
 fn open_overlay(app: &mut App, kind: crate::tui::overlays::OverlayKind) {
-    app.overlay_stack
-        .push(crate::tui::overlays::create_overlay(kind));
+    // Opening is also reading: the model browser loads the catalogue, the
+    // connect screen reads the keys, the team picker asks the org. None of them
+    // can do that from `show`, which has no `App`.
+    crate::tui::overlays::present(app, crate::tui::overlays::create_overlay(kind));
 }
 
-fn run_verb(
-    app: &mut App,
-    ctx: &AppContext,
-    store: &SessionStore,
-    session: &mut Session,
-    prompt: &str,
-    verb: &Verb,
-) {
-    // Handle theme and screen reader directly without command execution
-    match verb {
+/// Run a verb without stopping the screen.
+///
+/// Every verb that reaches here talks to a store, a graph or a cloud, and any of
+/// those can take long enough that a frozen frame is indistinguishable from a
+/// hang. The work therefore runs on a thread and reports over a channel the run
+/// loop drains: `/stats` used to block for up to a minute on two cloud calls.
+fn run_verb(app: &mut App, ctx: &AppContext, prompt: &str, verb: Verb) {
+    // Theme and screen reader are app state, not work: there is nothing to wait
+    // for, and a thread would only make them land a frame late.
+    match &verb {
         Verb::SetTheme(theme) => {
             app.theme = *theme;
             app.push(EntryRole::Info, format!("Theme set to {:?}", theme));
@@ -587,17 +1197,91 @@ fn run_verb(
     }
 
     app.push(EntryRole::User, prompt);
-    match crate::commands::execute(ctx, verb) {
+    // One at a time: two verbs in flight would interleave their answers in a
+    // transcript where each entry is filed against the line that asked.
+    if let Some(running) = app.running_verb.clone() {
+        app.push(
+            EntryRole::Info,
+            format!("still running: {running} — wait for it, or quit and start again"),
+        );
+        return;
+    }
+    app.running_verb = Some(prompt.to_string());
+
+    let ctx = ctx.clone();
+    let prompt = prompt.to_string();
+    let tx = app.verb_tx.clone();
+    std::thread::spawn(move || {
+        let result = crate::commands::execute(&ctx, &verb).map_err(|error| format!("{error:#}"));
+        let _ = tx.send(crate::tui::app::VerbDone { prompt, result });
+    });
+}
+
+/// Show a verb's answer, and file it against the line that asked for it.
+fn finish_verb(app: &mut App, store: &SessionStore, session: &mut Session, done: VerbDone) {
+    app.running_verb = None;
+    match done.result {
         Ok(outcome) => {
-            app.push(EntryRole::Answer, outcome.text.clone());
-            persist(app, store, session, prompt, &outcome.text);
+            let text = answer_with_next(&outcome.text, &outcome.data);
+
+            // A list-shaped answer opens a window rather than flattening a table
+            // into prose. It renders the same `data` the pipe gets, so the two
+            // doors cannot disagree about what the verb found; the full text is
+            // still what the session file keeps, so a resume reads as before.
+            match crate::tui::overlays::popover::PopoverOverlay::for_answer(
+                outcome.command,
+                &outcome.data,
+            ) {
+                Some(spec) => {
+                    let summary = spec.transcript_line();
+                    crate::tui::overlays::present(
+                        app,
+                        Box::new(crate::tui::overlays::PopoverOverlay::new(spec)),
+                    );
+                    app.push(
+                        EntryRole::Answer,
+                        format!(
+                            "{summary}\n  opened in a window — up/down to browse, enter to act, esc to close"
+                        ),
+                    );
+                    persist(app, store, session, &done.prompt, &text);
+                }
+                None => {
+                    app.push(EntryRole::Answer, text.clone());
+                    persist(app, store, session, &done.prompt, &text);
+                }
+            }
         }
-        Err(error) => {
-            let text = format!("{error:#}");
+        Err(text) => {
             app.push(EntryRole::Error, text.clone());
-            persist(app, store, session, prompt, &format!("error: {text}"));
+            persist(app, store, session, &done.prompt, &format!("error: {text}"));
         }
     }
+}
+
+/// The answer plus the commands it suggests, rewritten to run in this session.
+///
+/// Commands emit `memnoth vault …`; here the same line is `/vault …`, so the
+/// suggestion can be typed without the reader translating it first.
+fn answer_with_next(text: &str, data: &serde_json::Value) -> String {
+    let next: Vec<String> = crate::output::next_commands(data)
+        .into_iter()
+        .map(|command| match command.strip_prefix("memnoth ") {
+            Some(rest) => format!("/{rest}"),
+            None => command.to_string(),
+        })
+        .collect();
+    if next.is_empty() {
+        return text.to_string();
+    }
+    let mut out = text.trim_end().to_string();
+    out.push_str("\n\nnext\n");
+    for command in next {
+        out.push_str("  ");
+        out.push_str(&command);
+        out.push('\n');
+    }
+    out
 }
 
 /// A plain question: a model turn when one is configured, the two stores when
@@ -610,14 +1294,17 @@ fn ask(
     prompt: &str,
     words: &[String],
 ) -> Option<Busy> {
-    match provider::Settings::load(&ctx.config) {
+    // `app.config`, not `ctx.config`: the screens write the app's copy and save
+    // it, so a model picked in `/models` is the model the next turn uses. Reading
+    // the startup snapshot here is what used to make a switch need a restart.
+    match provider::Settings::load(&app.config) {
         Ok(settings) if settings.ready() => start_turn(app, ctx, session, prompt, settings),
         Ok(settings) => {
             app.push(
                 EntryRole::Info,
                 format!(
                     "no model key ({}): answering from the vault and the code graph.\n  \
-                     export it, then ask again — /model shows what this session would use.",
+                     export it, then ask again — /connect (or /models) shows what this session would use.",
                     settings.key_hint()
                 ),
             );
@@ -729,6 +1416,7 @@ fn settle(
     store: &SessionStore,
     session: &mut Session,
     busy: &Busy,
+    tools: usize,
     result: anyhow::Result<(provider::Answer, Vec<WriteReceipt>)>,
 ) {
     match result {
@@ -773,6 +1461,19 @@ fn settle(
                     .map(|pricing| pricing.cost_micros(input, output)),
                 turn_id: Some(turn_id),
             });
+            // What it cost and how it was reached, under the answer: the line
+            // that separates an answer from a claim. Both numbers are known
+            // here, so neither is guessed.
+            let total = input.saturating_add(output);
+            app.push(
+                EntryRole::Info,
+                format!(
+                    "evidence · {} {} · {} tokens",
+                    tools,
+                    if tools == 1 { "tool" } else { "tools" },
+                    human_count(total.min(usize::MAX as u64) as usize)
+                ),
+            );
             persist(app, store, session, &busy.prompt, &answer.text);
         }
         Err(error) => {
@@ -836,138 +1537,339 @@ fn persist(app: &mut App, store: &SessionStore, session: &mut Session, prompt: &
 }
 
 /// The startup screen. It names paths, not labels: the first support question
-/// is always "which vault did it open" — and it puts the thing this workspace
-/// is still missing at the top of `start here`, so the screen is a next step
-/// rather than a splash.
-fn home(ctx: &AppContext, name: &str, resumed: bool, graph: &str, indexed: bool) -> Home {
-    let vault_ready = ctx.vault_path.exists();
-    let (model, model_note, model_ready) = model_state(ctx);
+/// is always "which vault did it open" — and it puts what this workspace is
+/// still missing at the top of `next`, so the screen is a next step rather than
+/// a splash.
+///
+/// The first row that needs no setup is always in the list, even on a machine
+/// where everything is missing: a briefing that only lists prerequisites tells
+/// a new person the product does not work yet.
+fn home(ctx: &AppContext, name: &str, resumed: bool, graph: &GraphStatus) -> Home {
+    let (model, model_ready) = model_state(ctx);
+    let identity = crate::auth::signed_in_identity();
 
-    let mut steps: Vec<(String, String)> = Vec::new();
-    if !vault_ready {
-        steps.push((
-            "/vault init".to_string(),
-            "create the temporal vault for this machine".to_string(),
-        ));
+    let mut facts = vec![Fact {
+        label: "workspace",
+        value: display_path(&ctx.root),
+        state: HomeState::Ready,
+    }];
+    facts.push(vault_fact(ctx));
+    facts.push(Fact {
+        label: "graph",
+        value: graph.value.clone(),
+        state: if !graph.indexed {
+            HomeState::Missing
+        } else if graph.stale > 0 {
+            HomeState::Stale
+        } else {
+            HomeState::Ready
+        },
+    });
+    facts.push(Fact {
+        label: "model",
+        value: model.clone(),
+        state: if model_ready {
+            HomeState::Ready
+        } else {
+            HomeState::Missing
+        },
+    });
+
+    // The team is not a mode: it is the organisation the cached account is
+    // already in. Until shared sync ships, the row says where the work is.
+    match &identity {
+        Some(id) if id.in_team() => facts.push(Fact {
+            label: "team",
+            value: teams_line(ctx, id),
+            state: HomeState::Ready,
+        }),
+        _ => facts.push(Fact {
+            label: "cloud",
+            value: if identity.is_some() {
+                "connected · local only".to_string()
+            } else {
+                "not connected · /login".to_string()
+            },
+            state: HomeState::Ready,
+        }),
     }
-    if !indexed {
-        steps.push((
-            "/kg index".to_string(),
-            "build the code graph from this workspace".to_string(),
-        ));
+
+    let mut steps: Vec<Step> = Vec::new();
+    let mut setup = |command: &str, description: &str| {
+        steps.push(Step {
+            command: command.to_string(),
+            description: description.to_string(),
+            runnable: true,
+        });
+    };
+    if !ctx.vault_path.exists() {
+        setup("/vault init", "beliefs with dates, kept on this machine");
+    }
+    if !graph.indexed {
+        setup(
+            "/kg index",
+            "index the workspace so code questions have answers",
+        );
     }
     if !model_ready {
-        steps.push((
-            "/model".to_string(),
-            "wire a model so questions run as turns".to_string(),
-        ));
+        setup("/model", "wire a model so questions run as turns");
     }
-    steps.push((
-        "ask anything".to_string(),
-        "a turn with the vault and the graph as tools".to_string(),
-    ));
-    steps.push((
-        "/search".to_string(),
-        "answer from the two stores, no model needed".to_string(),
-    ));
+    // Setup takes at most two rows; the third always works, on a fresh machine
+    // as much as a warm one.
+    steps.truncate(2);
+    steps.push(Step {
+        command: "/search".to_string(),
+        description: "answer from both stores, no model needed".to_string(),
+        runnable: true,
+    });
 
     Home {
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        session: format!(
-            "session \"{name}\" ({})",
-            if resumed { "resumed" } else { "new" }
-        ),
-        workspace: display_path(&ctx.root),
-        vault: display_path(&ctx.vault_path),
-        vault_note: if vault_ready {
-            "ready".to_string()
-        } else {
-            "not initialised".to_string()
-        },
-        graph: graph.to_string(),
-        model,
-        model_note,
+        identity: identity_line(identity.as_ref(), name, resumed),
+        facts,
         steps,
+        invitation: model_ready
+            .then_some("a turn with the vault and the graph as tools".to_string()),
+        recent: if ctx.vault_path.exists() {
+            vault_recent(ctx)
+        } else {
+            Vec::new()
+        },
     }
+}
+
+/// `solo · not signed in · session "payments" (new)`, or the three facts a
+/// team account adds. The version rides on the line above.
+fn identity_line(identity: Option<&crate::auth::Identity>, name: &str, resumed: bool) -> String {
+    let mut who = match identity {
+        Some(id) if id.in_team() => format!("{} (team) · {}", id.org_name.trim(), id.email),
+        Some(id) => format!("solo · {}", id.email),
+        None => "solo · not signed in".to_string(),
+    };
+    if let Some(id) = identity
+        && id.in_team()
+        && !id.role.trim().is_empty()
+    {
+        who.push_str(" · ");
+        who.push_str(id.role.trim());
+    }
+    who.push_str(&format!(
+        " · session \"{name}\" ({})",
+        if resumed { "resumed" } else { "new" }
+    ));
+    who
+}
+
+/// The vault row: counters when it exists, the word `missing` when it does not.
+///
+/// `18 closed` is `entities_total - entities_current`: the beliefs this vault
+/// stopped standing behind. It is the number that makes the vault a vault
+/// rather than a notes file, and it costs one subtraction on counters the
+/// engine already returns.
+fn vault_fact(ctx: &AppContext) -> Fact {
+    if !ctx.vault_path.exists() {
+        return Fact {
+            label: "vault",
+            value: "missing".to_string(),
+            state: HomeState::Missing,
+        };
+    }
+    let value = match crate::vault::open_existing(ctx) {
+        Ok(engine) => match engine.stats() {
+            Ok(stats) => {
+                let closed = (stats.entities_total - stats.entities_current).max(0);
+                format!(
+                    "{} beliefs · {} closed · local only",
+                    thousands(stats.entities_current.max(0) as u64),
+                    thousands(closed as u64)
+                )
+            }
+            Err(_) => "unreadable · /doctor".to_string(),
+        },
+        Err(_) => "unreadable · /doctor".to_string(),
+    };
+    let state = if value.starts_with("unreadable") {
+        HomeState::Missing
+    } else {
+        HomeState::Ready
+    };
+    Fact {
+        label: "vault",
+        value,
+        state,
+    }
+}
+
+/// The team row. Presence and claims are local (one `coord.db`), so the row
+/// says `on this machine` rather than implying two laptops agree.
+fn teams_line(ctx: &AppContext, id: &crate::auth::Identity) -> String {
+    let mut line = id.org_name.trim().to_string();
+    if let Ok(coord) = memnoth_coord::Coord::open(&ctx.vault_path)
+        && let Ok(rows) = coord.status()
+    {
+        let active: Vec<_> = rows.iter().filter(|row| !row.stale).collect();
+        let claims: usize = active.iter().map(|row| row.active_claims.len()).sum();
+        if active.is_empty() {
+            line.push_str(" · on this machine");
+        } else {
+            line.push_str(&format!(
+                " · {} session(s) · {claims} claimed · on this machine",
+                active.len()
+            ));
+        }
+    } else {
+        line.push_str(" · on this machine");
+    }
+    line
+}
+
+/// The last three things this vault took in, newest first.
+///
+/// It is the product's own history, on the screen where a person decides what
+/// to ask. One indexed query with a limit; a slow vault shows no timeline
+/// rather than a stalling frame.
+fn vault_recent(ctx: &AppContext) -> Vec<String> {
+    let Ok(engine) = crate::vault::open_existing(ctx) else {
+        return Vec::new();
+    };
+    let Ok(mut stmt) = engine.connection().prepare(
+        "SELECT e.name, o.content, o.valid_from
+         FROM observations o JOIN entities e ON e.id = o.entity_id
+         WHERE o.valid_to IS NULL
+         ORDER BY o.valid_from DESC, o.id DESC
+         LIMIT 3",
+    ) else {
+        return Vec::new();
+    };
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    });
+    let Ok(rows) = rows else {
+        return Vec::new();
+    };
+    let now = now_ms();
+    rows.filter_map(Result::ok)
+        .map(|(entity, content, at)| {
+            format!(
+                "{}   {entity}   {}",
+                human_age(at, now),
+                content.split('\n').next().unwrap_or_default().trim()
+            )
+        })
+        .collect()
+}
+
+/// `1204` as `1,204`: a file count is read, not abbreviated.
+fn thousands(value: u64) -> String {
+    let digits = value.to_string();
+    let mut out = String::new();
+    for (index, ch) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
 }
 
 /// The model row, and whether a turn can actually run: the same settings
 /// `doctor` prints, reduced to what fits on one line.
-fn model_state(ctx: &AppContext) -> (String, String, bool) {
+///
+/// The value is the whole sentence — model, then `ready` or the key that is
+/// missing — because a fact row may not carry its own fix (§2.1).
+fn model_state(ctx: &AppContext) -> (String, bool) {
     match provider::Settings::load(&ctx.config) {
-        Ok(settings) if settings.ready() => (settings.describe(), "ready".to_string(), true),
+        Ok(settings) if settings.ready() => (format!("{} · ready", settings.describe()), true),
         Ok(settings) => (
-            settings.model.clone(),
-            format!("no key — export {}", settings.key_hint()),
-            false,
-        ),
-        Err(_) => (
-            "not configured".to_string(),
-            "config unreadable (/model)".to_string(),
-            false,
-        ),
-    }
-}
-
-/// `/model`: what a turn would use, and the exact config that changes it.
-fn model_text(ctx: &AppContext) -> String {
-    match provider::Settings::load(&ctx.config) {
-        Ok(settings) => {
-            let mut out = String::from("model\n");
-            out.push_str(&format!("  provider   {}\n", settings.kind.name()));
-            out.push_str(&format!("  model      {}\n", settings.model));
-            out.push_str(&format!("  endpoint   {}\n", settings.base_url));
-            out.push_str(&format!("  max tokens {}\n", settings.max_tokens));
-            match settings.pricing {
-                Some(pricing) => out.push_str(&format!(
-                    "  rates      ${:.2} in / ${:.2} out per Mtok (estimate)\n",
-                    pricing.input_per_mtok, pricing.output_per_mtok
-                )),
-                None => out.push_str("  rates      unset — cost will be reported as unknown\n"),
-            }
-            out.push_str(&format!(
-                "  key        {}\n",
-                if settings.ready() {
-                    "set".to_string()
-                } else {
-                    format!("missing — export {}", settings.key_hint())
-                }
-            ));
-            out.push_str(&format!(
-                "\nconfigure in {}\n\n\
-                 [provider]\nkind = \"{}\"\nmodel = \"{}\"\n# input_per_mtok = 3.0\n# output_per_mtok = 15.0\n\n\
-                 the key is an environment variable and is never written here:\n  \
-                 export MEMNOTH_API_KEY=…\n\n\
-                 a gateway or a local server is `provider.base_url` (OpenAI-compatible).",
-                ctx.config_path.display(),
-                settings.kind.name(),
+            format!(
+                "{} · no key — export {}",
                 settings.model,
-            ));
-            out
-        }
-        Err(error) => format!("model: misconfigured — {error:#}"),
+                settings.key_hint()
+            ),
+            false,
+        ),
+        Err(_) => ("not configured · /model".to_string(), false),
     }
 }
 
-/// One line about the graph, taken from the same `kg status` JSON `--json`
-/// prints, plus whether there is a graph at all.
-fn graph_state(ctx: &AppContext) -> (String, bool) {
+/// What the graph row says, and whether it is there at all.
+#[derive(Debug, Clone, Default)]
+struct GraphStatus {
+    /// `1,204 files · 9,830 symbols · 12 stale · 2m old`, or `missing`.
+    value: String,
+    /// Whether there is a graph to query.
+    indexed: bool,
+    /// Files changed since the last index.
+    stale: u64,
+    /// What the header says when this needs a person, with the verb that fixes
+    /// it. `None` when there is nothing to act on — decided here, beside the
+    /// facts, so the header never has to parse `value` back apart.
+    attention: Option<Attention>,
+}
+
+/// The graph row, taken from the same `kg status` JSON `--json` prints, plus
+/// how long ago the graph was last written.
+///
+/// The age is the field that makes `/kg index` worth remembering: `12 stale`
+/// with no date is a number, `12 stale · 2m old` is a decision.
+fn graph_state(ctx: &AppContext) -> GraphStatus {
     let verb = Verb::Kg(KgArgs {
         action: KgCommand::Status,
     });
     match crate::commands::execute(ctx, &verb) {
-        Ok(outcome) if outcome.data["indexed"].as_bool().unwrap_or(false) => (
-            format!(
+        Ok(outcome) if outcome.data["indexed"].as_bool().unwrap_or(false) => {
+            let stale = outcome.data["stale_files"].as_u64().unwrap_or(0);
+            let mut value = format!(
                 "{} files · {} symbols · {} stale",
-                outcome.data["files"].as_u64().unwrap_or(0),
-                outcome.data["symbols"].as_u64().unwrap_or(0),
-                outcome.data["stale_files"].as_u64().unwrap_or(0),
-            ),
-            true,
-        ),
-        Ok(_) => ("not indexed".to_string(), false),
-        Err(_) => ("unavailable".to_string(), false),
+                thousands(outcome.data["files"].as_u64().unwrap_or(0)),
+                thousands(outcome.data["symbols"].as_u64().unwrap_or(0)),
+                thousands(stale),
+            );
+            if let Some(age) = file_age(&ctx.graph_path) {
+                value.push_str(&format!(" · {age}"));
+            }
+            GraphStatus {
+                value,
+                indexed: true,
+                stale,
+                attention: (stale > 0).then(|| Attention {
+                    label: format!("graph {stale} stale"),
+                    fix: "/kg index".to_string(),
+                }),
+            }
+        }
+        Ok(_) => GraphStatus {
+            value: "missing".to_string(),
+            indexed: false,
+            stale: 0,
+            attention: Some(Attention {
+                label: "graph not indexed".to_string(),
+                fix: "/kg index".to_string(),
+            }),
+        },
+        Err(_) => GraphStatus {
+            value: "unavailable · /doctor".to_string(),
+            indexed: false,
+            stale: 0,
+            attention: Some(Attention {
+                label: "graph unavailable".to_string(),
+                fix: "/doctor".to_string(),
+            }),
+        },
     }
+}
+
+/// How long ago a file was written, in the words the fact rows use.
+fn file_age(path: &std::path::Path) -> Option<String> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    let ms = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_millis() as i64;
+    Some(human_age(ms, now_ms()))
 }
 
 /// The context pane: what the vault believes, and who else is in the room.
@@ -1012,7 +1914,7 @@ fn context_pane(ctx: &AppContext, session: &Session) -> String {
                 Err(error) => out.push_str(&format!("\nbrain unavailable ({error})\n")),
             }
         }
-        Err(_) => out.push_str("  not initialised\n  /vault init\n"),
+        Err(_) => out.push_str("  missing\n  /vault init\n"),
     }
 
     // Coordination lives in the same database; opening it is skipped when the
@@ -1100,7 +2002,7 @@ fn run_shell(app: &mut App, ctx: &AppContext, cmd: &str) {
     // Load sandbox config and check policy. A profile that cannot be resolved
     // is a refusal, not a default: an unenforced shell is worse than none.
     let config = load_sandbox_config(&ctx.root);
-    let profile = match ProfileName::Workspace.resolve_profile(&ctx.root, &config) {
+    let _profile = match ProfileName::Workspace.resolve_profile(&ctx.root, &config) {
         Ok(profile) => profile,
         Err(error) => {
             app.push(
@@ -1233,7 +2135,7 @@ fn run_init(app: &mut App, ctx: &AppContext) {
 }
 
 /// Edit project memory (vault).
-fn run_memory(app: &mut App, ctx: &AppContext) {
+fn run_memory(app: &mut App, _ctx: &AppContext) {
     app.push(EntryRole::User, "/memory".to_string());
     app.push(
         EntryRole::Info,
@@ -1242,12 +2144,94 @@ fn run_memory(app: &mut App, ctx: &AppContext) {
     );
 }
 
-/// `/sessions`: what is on disk and how to come back to it.
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::context::Config;
+
+    #[test]
+    fn next_commands_are_rewritten_for_the_session() {
+        let data = serde_json::json!({
+            "next_commands": ["memnoth vault status", "memnoth kg index"]
+        });
+        let text = answer_with_next("wrote 2 facts", &data);
+        assert!(text.starts_with("wrote 2 facts"), "{text}");
+        assert!(text.contains("\nnext\n  /vault status"), "{text}");
+        assert!(text.contains("  /kg index"), "{text}");
+    }
+
+    #[test]
+    fn an_answer_with_no_follow_ups_is_left_alone() {
+        let data = serde_json::json!({});
+        assert_eq!(answer_with_next("done", &data), "done");
+    }
+
+    /// A verb answers from its own thread, and the screen is usable until it does.
+    ///
+    /// `/stats` used to run inline with two cloud calls at a 30-second timeout
+    /// each, so the frame stopped until the network did — which is reported as
+    /// "hangs", not as "slow".
+    #[test]
+    fn a_verb_answers_without_freezing_the_screen() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = context(dir.path());
+        let store = SessionStore::new(ctx.sessions_dir.clone());
+        let (mut session, _) = store.load_or_create("s").unwrap();
+        let mut app = App::new("s", false);
+
+        run_verb(
+            &mut app,
+            &ctx,
+            "/kg status",
+            Verb::Kg(crate::cli::KgArgs {
+                action: crate::cli::KgCommand::Status,
+            }),
+        );
+        assert_eq!(app.running_verb.as_deref(), Some("/kg status"));
+
+        // A second verb is refused by name rather than queued: two answers would
+        // be filed against one prompt, or against none.
+        run_verb(
+            &mut app,
+            &ctx,
+            "/vault status",
+            Verb::Vault(crate::cli::VaultArgs {
+                action: crate::cli::VaultCommand::Status,
+            }),
+        );
+        assert_eq!(app.running_verb.as_deref(), Some("/kg status"));
+        assert!(
+            app.entries
+                .iter()
+                .any(|entry| entry.text.contains("still running")),
+            "the refusal has to be on screen, not silent"
+        );
+
+        let done = wait_for_verb(&mut app);
+        assert_eq!(done.prompt, "/kg status", "the answer knows its question");
+        finish_verb(&mut app, &store, &mut session, done);
+        assert_eq!(
+            app.running_verb, None,
+            "the slot frees when the answer lands"
+        );
+        assert!(
+            app.entries.iter().any(|entry| {
+                matches!(entry.role, EntryRole::Answer | EntryRole::Error)
+                    && !entry.text.trim().is_empty()
+            }),
+            "the answer is in the transcript"
+        );
+    }
+
+    fn wait_for_verb(app: &mut App) -> VerbDone {
+        for _ in 0..500 {
+            if let Some(done) = app.try_recv_verb() {
+                return done;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("the verb never answered on its thread");
+    }
 
     fn context(root: &std::path::Path) -> AppContext {
         AppContext {
@@ -1263,6 +2247,40 @@ mod tests {
             json: false,
             quiet: true,
         }
+    }
+
+    #[test]
+    fn the_brief_reports_a_fresh_workspace_and_always_leaves_a_runnable_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = context(dir.path());
+        let graph = graph_state(&ctx);
+        let home = home(&ctx, "payments", false, &graph);
+
+        assert!(home.identity.starts_with("solo"), "{}", home.identity);
+        assert!(
+            home.identity.contains("session \"payments\" (new)"),
+            "{}",
+            home.identity
+        );
+
+        let vault = home.facts.iter().find(|fact| fact.label == "vault");
+        let vault = vault.expect("the vault row is always there");
+        assert_eq!(vault.value, "missing");
+        assert_eq!(vault.state, HomeState::Missing);
+
+        // A briefing that only lists prerequisites tells a new person the
+        // product does not work yet.
+        assert!(
+            home.steps.iter().any(|step| step.runnable),
+            "{:?}",
+            home.steps
+        );
+        assert!(
+            home.steps.iter().any(|step| step.command == "/vault init"),
+            "{:?}",
+            home.steps
+        );
+        assert!(home.recent.is_empty(), "a fresh vault has no history");
     }
 
     fn receipt(input: u64, output: u64, cost: Option<u64>) -> TurnReceipt {
@@ -1312,5 +2330,128 @@ mod tests {
         let pane = context_pane(&ctx, &session);
         assert!(pane.contains("cost unknown"), "{pane}");
         assert!(!pane.contains("$0.00"), "{pane}");
+    }
+
+    /// One keystroke through the real key handler, which is where the dropdown
+    /// and the prompt agree or disagree.
+    fn press(app: &mut App, code: KeyCode) {
+        handle_key(
+            app,
+            KeyEvent::new(code, KeyModifiers::NONE),
+            std::path::Path::new("."),
+        );
+    }
+
+    #[test]
+    fn a_slash_opens_the_dropdown_and_the_arrows_walk_it() {
+        let mut app = App::new("s", false);
+        press(&mut app, KeyCode::Char('/'));
+        assert!(app.slash.is_open(), "a slash lists the commands");
+
+        let first = app.slash.selected_index();
+        press(&mut app, KeyCode::Down);
+        assert_ne!(
+            app.slash.selected_index(),
+            first,
+            "down moves the highlight, not the history"
+        );
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.slash.selected_index(), first, "up comes back");
+
+        // Navigating the list must never run the line it describes.
+        assert_eq!(app.input, "/");
+        assert!(!app.pending_submit);
+    }
+
+    #[test]
+    fn tab_fills_the_prompt_and_enter_runs_it() {
+        let mut app = App::new("s", false);
+        for ch in "/help".chars() {
+            press(&mut app, KeyCode::Char(ch));
+        }
+
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.input, "/help", "the pick lands in the prompt");
+        assert!(!app.pending_submit, "a completion key never runs the line");
+        assert!(!app.slash.is_open(), "the pick closes the list");
+
+        press(&mut app, KeyCode::Enter);
+        assert!(app.pending_submit, "enter on a finished line runs it");
+    }
+
+    /// ctrl-g, which the shared `press` helper cannot express (it sends no
+    /// modifiers).
+    fn press_ctrl(app: &mut App, ch: char) {
+        handle_key(
+            app,
+            KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL),
+            std::path::Path::new("."),
+        );
+    }
+
+    #[test]
+    fn ctrl_g_runs_the_fix_the_header_names() {
+        let mut app = App::new("s", false);
+        app.graph_attention = Some(Attention {
+            label: "graph not indexed".to_string(),
+            fix: "/kg index".to_string(),
+        });
+        press_ctrl(&mut app, 'g');
+        assert_eq!(app.input, "/kg index", "the fix lands in the prompt");
+        assert!(app.pending_submit, "and runs the way a typed line does");
+    }
+
+    #[test]
+    fn ctrl_g_leaves_a_half_written_line_alone() {
+        let mut app = App::new("s", false);
+        app.graph_attention = Some(Attention {
+            label: "graph not indexed".to_string(),
+            fix: "/kg index".to_string(),
+        });
+        app.input = "/vau".to_string();
+        press_ctrl(&mut app, 'g');
+        assert_eq!(app.input, "/vau", "typing is never overwritten");
+        assert!(!app.pending_submit, "and nothing runs unasked");
+    }
+
+    #[test]
+    fn esc_ends_a_pending_sign_in_only_when_the_prompt_has_nothing_for_it() {
+        // Nothing typed, no turn, no brief: the wait is the thing in front of
+        // you, and esc is the key that cancels what is in front of you.
+        let mut app = App::new("s", false);
+        app.login_busy = true;
+        press(&mut app, KeyCode::Esc);
+        assert!(
+            app.login_cancel.load(std::sync::atomic::Ordering::Relaxed),
+            "the wait was asked to stop"
+        );
+
+        // A half-typed line owns esc: it clears the line and leaves the sign-in
+        // alone, which `/login` still cancels.
+        let mut app = App::new("s", false);
+        app.login_busy = true;
+        app.input = "fix the parser".to_string();
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.input, "", "esc still clears the line");
+        assert!(
+            !app.login_cancel.load(std::sync::atomic::Ordering::Relaxed),
+            "a line in the prompt means the wait keeps going"
+        );
+    }
+
+    #[test]
+    fn esc_closes_the_dropdown_and_leaves_the_line_to_fix() {
+        let mut app = App::new("s", false);
+        for ch in "/vau".chars() {
+            press(&mut app, KeyCode::Char(ch));
+        }
+        assert!(app.slash.is_open());
+
+        press(&mut app, KeyCode::Esc);
+        assert!(!app.slash.is_open());
+        assert_eq!(
+            app.input, "/vau",
+            "closing the list is not clearing the line"
+        );
     }
 }
