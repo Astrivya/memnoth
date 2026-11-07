@@ -232,6 +232,20 @@ pub struct Pricing {
 }
 
 impl Pricing {
+    /// A model that costs nothing: the gateway's free tier, or a local model
+    /// behind a paid endpoint. Distinct from *unpriced*, which is a rate nobody
+    /// knows — a zero here is a number the screen may print.
+    pub const FREE: Self = Self {
+        input_per_mtok: 0.0,
+        output_per_mtok: 0.0,
+    };
+
+    /// Whether both rates are zero, so a bill of `$0.00` is the truth rather
+    /// than a rounding accident.
+    pub fn is_free(&self) -> bool {
+        self.input_per_mtok == 0.0 && self.output_per_mtok == 0.0
+    }
+
     /// Cost in micro-dollars, rounded. `None` would mean unpriced, which is why
     /// this returns `u64`: callers only hold a `Pricing` when they have rates.
     pub fn cost_micros(&self, input_tokens: u64, output_tokens: u64) -> u64 {
@@ -244,41 +258,118 @@ impl Pricing {
 
 /// The list price for a model, when one is known.
 ///
-/// Deliberately tiny and prefix-based: a table that tries to track every model
-/// is wrong within a release. Anything absent is reported as an unknown cost
-/// rather than guessed, and `provider.input_per_mtok`/`output_per_mtok` make it
-/// exact for whatever this deployment actually pays.
+/// The table is the published first-party rate for the model families this
+/// build offers in `mn models`, keyed by family rather than by dated id: a
+/// provider renames `claude-sonnet-4.5` to `claude-sonnet-4-5-20250929` and the
+/// price does not move with the spelling. Anything absent is reported as an
+/// unknown cost rather than guessed, and `provider.input_per_mtok` /
+/// `output_per_mtok` make it exact for whatever this deployment actually pays.
+///
+/// Reseller-hosted ids are deliberately absent: Llama on Groq, Together and
+/// Fireworks is three different prices for one model name, so a table keyed by
+/// the model alone would print a number the host did not charge.
 pub(crate) fn builtin_price(model: &str) -> Option<Pricing> {
     // A gateway names the model `vendor/model`; the vendor prefix is routing,
-    // not part of the price. `anthropic/claude-sonnet-4.5` is a Sonnet.
+    // not part of the price. `anthropic/claude-sonnet-4.5` is a Sonnet. Dots
+    // become dashes so `gpt-4.1-mini` and `gpt-4-1-mini` are one family.
     let model = model
         .rsplit('/')
         .next()
         .unwrap_or(model)
-        .to_ascii_lowercase();
-    const TABLE: [(&str, f64, f64); 7] = [
+        .to_ascii_lowercase()
+        .replace('.', "-");
+    // `kilo-auto/free`, `openrouter/free`, `ling-3.0-flash-vl:free`: the id
+    // already says what the gateway charges, so the price is a fact of the name
+    // rather than a guess. Leaving it unpriced printed "cost unknown" for a
+    // free model, which is the one case where the screen did know.
+    if model == "free" || model.ends_with("-free") || model.ends_with(":free") {
+        return Some(Pricing::FREE);
+    }
+    // USD per million tokens, as printed on the provider's pricing page.
+    const TABLE: &[(&str, f64, f64)] = &[
+        // Anthropic. The `claude-3-…` ids predate the `claude-<tier>-<n>`
+        // spelling and are pinned separately because their tiers are not the
+        // current ones: 3 Haiku is a quarter the price of 3.5 Haiku.
+        ("claude-opus-4", 15.0, 75.0),
+        ("claude-3-opus", 15.0, 75.0),
         ("claude-opus", 15.0, 75.0),
+        ("claude-sonnet-4", 3.0, 15.0),
+        ("claude-3-7-sonnet", 3.0, 15.0),
+        ("claude-3-5-sonnet", 3.0, 15.0),
+        ("claude-3-sonnet", 3.0, 15.0),
         ("claude-sonnet", 3.0, 15.0),
+        ("claude-haiku-4", 1.0, 5.0),
+        ("claude-3-5-haiku", 0.8, 4.0),
+        ("claude-3-haiku", 0.25, 1.25),
         ("claude-haiku", 1.0, 5.0),
-        ("gpt-4.1-mini", 0.4, 1.6),
-        ("gpt-4.1", 2.0, 8.0),
+        // OpenAI.
+        ("gpt-4-1-nano", 0.1, 0.4),
+        ("gpt-4-1-mini", 0.4, 1.6),
+        ("gpt-4-1", 2.0, 8.0),
         ("gpt-4o-mini", 0.15, 0.6),
         ("gpt-4o", 2.5, 10.0),
+        ("gpt-4-turbo", 10.0, 30.0),
+        ("gpt-3-5-turbo", 0.5, 1.5),
+        ("o1-mini", 1.1, 4.4),
+        ("o1-preview", 15.0, 60.0),
+        ("o3-mini", 1.1, 4.4),
+        ("o1", 15.0, 60.0),
+        // Google. `gemini-flash-1-5` is the gateway spelling of 1.5 Flash.
+        ("gemini-1-5-pro", 1.25, 5.0),
+        ("gemini-1-5-flash", 0.075, 0.3),
+        ("gemini-flash-1-5", 0.075, 0.3),
+        ("gemini-1-0-pro", 0.5, 1.5),
+        ("gemini-2-0-flash", 0.1, 0.4),
+        ("gemini-2-5-pro", 1.25, 10.0),
+        ("gemini-2-5-flash", 0.3, 2.5),
+        // DeepSeek, Mistral, Cohere, Perplexity: first-party list prices.
+        ("deepseek-chat", 0.27, 1.1),
+        ("deepseek-coder", 0.27, 1.1),
+        ("deepseek-reasoner", 0.55, 2.19),
+        ("mistral-large", 2.0, 6.0),
+        ("mistral-small", 0.2, 0.6),
+        ("codestral", 0.3, 0.9),
+        ("pixtral-12b", 0.15, 0.15),
+        ("command-r-plus", 2.5, 10.0),
+        ("command-r", 0.15, 0.6),
+        ("sonar-pro", 3.0, 15.0),
+        ("sonar", 1.0, 1.0),
     ];
-    // Longest prefix wins, so `gpt-4.1-mini` is not billed as `gpt-4.1` and a
-    // dated id (`claude-sonnet-4-5-20250929`) still matches.
+    // Longest family wins, so `gpt-4.1-mini` is not billed as `gpt-4.1`, and a
+    // dated id (`claude-3-5-sonnet-20241022`) still finds its family.
     let mut best: Option<Pricing> = None;
-    let mut best_len = 0; // Sentinel: every table prefix starts at 0 characters.
-    for (prefix, input, output) in TABLE {
-        if (model == prefix || model.starts_with(prefix)) && prefix.len() > best_len {
+    let mut best_len = 0; // Sentinel: every family is longer than zero characters.
+    for &(family, input, output) in TABLE {
+        if family.len() > best_len && contains_token(&model, family) {
             best = Some(Pricing {
                 input_per_mtok: input,
                 output_per_mtok: output,
             });
-            best_len = prefix.len();
+            best_len = family.len();
         }
     }
     best
+}
+
+/// Whether `needle` appears in `haystack` as one whole family name.
+///
+/// Model ids put the family in the middle (`llama-3-1-sonar-large-128k`), so a
+/// prefix test is not enough — but a bare `contains` would price `gpt-40` as
+/// `gpt-4`. The characters either side have to be separators.
+fn contains_token(haystack: &str, needle: &str) -> bool {
+    let bytes = haystack.as_bytes();
+    let mut from = 0;
+    while let Some(pos) = haystack[from..].find(needle) {
+        let start = from + pos;
+        let end = start + needle.len();
+        let before = start == 0 || !bytes[start - 1].is_ascii_alphanumeric();
+        let after = end == bytes.len() || !bytes[end].is_ascii_alphanumeric();
+        if before && after {
+            return true;
+        }
+        from = start + 1;
+    }
+    false
 }
 
 /// What this machine is actually configured for, after flags, env and defaults
@@ -2034,6 +2125,64 @@ mod tests {
         let mut tools = Toolbox::new(&ctx);
         let text = tools.call("read_file", &json!({"path": "a.txt"})).unwrap();
         assert_eq!(text, "hello\n");
+    }
+
+    #[test]
+    fn a_model_whose_id_says_free_is_priced_at_zero_not_left_unknown() {
+        // The gateway's own name for the rate is a fact, so "cost unknown" for
+        // it would understate what this machine knows.
+        assert_eq!(builtin_price("kilo-auto/free"), Some(Pricing::FREE));
+        assert_eq!(builtin_price("openrouter/free"), Some(Pricing::FREE));
+        assert_eq!(Pricing::FREE.cost_micros(1_000_000, 1_000_000), 0);
+        assert!(builtin_price("a-local-model").is_none());
+    }
+
+    #[test]
+    fn the_models_this_build_offers_have_their_published_rate() {
+        // These are the ids in the provider registry's own default lists: the
+        // models a person is actually offered. An unknown cost for one of them
+        // was a hole in the table, not a fact about the model.
+        for model in [
+            "claude-3-5-sonnet-20241022",
+            "claude-3-opus-20240229",
+            "claude-3-5-haiku-20241022",
+            "claude-3-haiku-20240307",
+            "gpt-4o",
+            "gpt-4o-mini",
+            "gpt-4-turbo",
+            "gpt-3.5-turbo",
+            "o1-mini",
+            "o1-preview",
+            "gemini-1.5-pro",
+            "gemini-1.5-flash",
+            "gemini-2.0-flash-exp",
+            "deepseek-chat",
+            "deepseek-coder",
+            "mistral-large-latest",
+            "codestral-latest",
+            "command-r-plus",
+            "command-r",
+            "llama-3.1-sonar-large-128k-online",
+            "anthropic/claude-sonnet-4.5",
+        ] {
+            assert!(builtin_price(model).is_some(), "{model} has no rate");
+        }
+        assert_eq!(
+            builtin_price("gemini-1.5-flash").unwrap().input_per_mtok,
+            0.075,
+            "a dotted id is the same family as its dashed spelling"
+        );
+        assert_eq!(
+            builtin_price("claude-3-haiku-20240307")
+                .unwrap()
+                .input_per_mtok,
+            0.25,
+            "3 Haiku is not 3.5 Haiku's price"
+        );
+        assert!(
+            builtin_price("meta-llama/llama-3.1-405b-instruct").is_none(),
+            "a reseller sets that price, so it stays unknown"
+        );
     }
 
     #[test]

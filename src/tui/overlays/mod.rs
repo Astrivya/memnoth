@@ -33,6 +33,9 @@ pub enum OverlayKind {
     Context,
     Diff,
     Rewind,
+    /// `/sessions` (alias `/resume`): every conversation on disk, with a title,
+    /// a preview, and the one you pick opened in place.
+    Sessions,
     Models,
     Permissions,
     Help,
@@ -226,6 +229,7 @@ pub fn create_overlay(kind: OverlayKind) -> Box<dyn Overlay> {
         OverlayKind::Search => Box::new(SearchOverlay::new()),
         OverlayKind::Context => Box::new(ContextOverlay::new()),
         OverlayKind::Diff => Box::new(DiffOverlay::new()),
+        OverlayKind::Sessions => Box::new(SessionsOverlay::new()),
         OverlayKind::Rewind => Box::new(RewindOverlay::new()),
         OverlayKind::Models => Box::new(ModelsOverlay::new()),
         OverlayKind::Help => Box::new(HelpOverlay::new()),
@@ -258,6 +262,7 @@ pub fn parse_slash_command(input: &str) -> Option<OverlayKind> {
     let input = input.trim_start_matches('/').trim();
     match input {
         "search" => Some(OverlayKind::Search),
+        "sessions" | "resume" => Some(OverlayKind::Sessions),
         "context" => Some(OverlayKind::Context),
         "diff" => Some(OverlayKind::Diff),
         "rewind" => Some(OverlayKind::Rewind),
@@ -292,6 +297,7 @@ pub(crate) mod popover;
 pub(crate) mod popover_specs;
 mod rewind;
 mod search;
+mod sessions;
 mod teams;
 
 pub use cloud_form::{InviteOverlay, KeyCreateOverlay};
@@ -306,4 +312,5 @@ pub use permissions::PermissionsOverlay;
 pub use popover::PopoverOverlay;
 pub use rewind::RewindOverlay;
 pub use search::SearchOverlay;
+pub use sessions::SessionsOverlay;
 pub use teams::TeamsOverlay;

@@ -60,11 +60,11 @@ use crate::cli::{KgArgs, KgCommand, VaultArgs, VaultCommand, Verb};
 use crate::context::AppContext;
 use crate::output::{ellipsize, human_age, human_count};
 use crate::provider::{self, Tools};
-use crate::session::SessionStore;
+use crate::session::{SessionStore, validate_name};
 use crate::tui::app::VerbDone;
 use crate::tui::app::{
-    App, Attention, EntryRole, Fact, Home, HomeState, Parsed, PendingShell, Step, TasksCommand,
-    combined_search_answer, display_path, parse_line,
+    App, Attention, EntryRole, Fact, Home, HomeState, Parsed, PendingShell, SessionSwitch, Step,
+    TasksCommand, combined_search_answer, display_path, parse_line,
 };
 /// What a running turn reports back to the screen.
 enum TurnEvent {
@@ -128,6 +128,12 @@ impl provider::Approver for AskOnScreen {
 /// named). Everything the screen shows is resolved before the terminal changes
 /// state, so a failure here is an ordinary error message rather than a broken
 /// terminal.
+///
+/// Every launch lands on the brief whatever the file holds, `--resume NAME`
+/// included: starting a tool should not mean being dropped into the middle of a
+/// conversation from last Tuesday. The conversation is still loaded — the next
+/// word typed continues it — and it is one `esc` away instead of being the first
+/// thing on screen.
 pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
     let store = SessionStore::new(ctx.sessions_dir.clone());
     let (mut session, resumed) = store.load_or_create(name)?;
@@ -162,7 +168,12 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
     }
     app.set_paths(display_path(&ctx.root), display_path(&ctx.vault_path));
     app.seed(&session);
-    app.home = Some(home(ctx, name, resumed, &graph));
+    // The brief is what a launch shows, over whatever the file held. Splitting
+    // the two — history loaded, brief in front — is what makes `mn` open the
+    // same way on a fresh machine and on the fortieth day of a session, while
+    // still leaving `esc` with something to show.
+    app.home_visible = true;
+    app.home = Some(home(ctx, name, resumed, &graph, &session));
     app.graph_attention = graph.attention.clone();
     app.context = context_pane(ctx, &session);
     // Read before the first frame: the account line is part of what the screen
@@ -256,7 +267,7 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
             if finished {
                 // Tokens and cost moved, so the pane is rebuilt from the
                 // session that just wrote them.
-                refresh(ctx, &mut app, name, resumed, &session);
+                refresh(ctx, &mut app, &session);
             }
         }
 
@@ -294,7 +305,7 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
                     // identity is stated here and nowhere else: no second line
                     // waits on the organisation to say who signed in.
                     app.push(EntryRole::Info, login::status_line(Some(&email)));
-                    refresh(ctx, &mut app, name, resumed, &session);
+                    refresh(ctx, &mut app, &session);
                 }
                 login::LoginEvent::Enriched { org_name, .. } => {
                     app.push(EntryRole::Info, format!("organization {org_name}"));
@@ -354,7 +365,7 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
         // that froze the frame in a way no one can tell from a hang.
         while let Some(done) = app.try_recv_verb() {
             finish_verb(&mut app, &store, &mut session, done);
-            refresh(ctx, &mut app, name, resumed, &session);
+            refresh(ctx, &mut app, &session);
         }
 
         terminal
@@ -481,7 +492,7 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
                     EntryRole::Info,
                     "turn cancelled — its answer will be discarded".to_string(),
                 );
-                refresh(ctx, &mut app, name, resumed, &session);
+                refresh(ctx, &mut app, &session);
             }
         }
 
@@ -502,10 +513,28 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
                 }
             } else {
                 busy = submit(&mut app, ctx, &store, &mut session);
-                refresh(ctx, &mut app, name, resumed, &session);
+                refresh(ctx, &mut app, &session);
             }
             // The line is gone, so the dropdown that described it goes too.
             app.sync_slash();
+        }
+
+        // A screen may ask for a different conversation — `/new`, or a row in
+        // the sessions picker — but it may not open one: the file is recorded
+        // here, by this loop, and a second writer is how a transcript forks.
+        // Taken before the draw so the next frame is already the new session,
+        // and never while a turn is in flight: the answer would land in a
+        // conversation nobody is looking at.
+        if let Some(switch) = app.pending_session.take() {
+            if busy.is_some() {
+                app.push(
+                    EntryRole::Info,
+                    "this turn is still recording into the session \u{2014} cancel it, then switch"
+                        .to_string(),
+                );
+            } else if let Err(error) = switch_session(ctx, &mut app, &store, &mut session, switch) {
+                app.push(EntryRole::Error, format!("{error:#}"));
+            }
         }
 
         // Process command queue when turn completes
@@ -526,9 +555,15 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
 /// Re-read what the frame shows after work has happened: a `/kg index` or a
 /// `/vault init` must be visible on the startup screen the next time it is
 /// shown, not only in the header.
-fn refresh(ctx: &AppContext, app: &mut App, name: &str, resumed: bool, session: &Session) {
+fn refresh(ctx: &AppContext, app: &mut App, session: &Session) {
     let graph = graph_state(ctx);
-    app.home = Some(home(ctx, name, resumed, &graph));
+    // Read from the app, not from parameters captured when the screen opened:
+    // `/new` and the sessions picker change which conversation this is, and a
+    // brief that kept naming the old one would be describing a file nobody is
+    // recording any more.
+    let name = app.name.clone();
+    let resumed = app.resumed;
+    app.home = Some(home(ctx, &name, resumed, &graph, session));
     app.graph_attention = graph.attention.clone();
     app.home_cursor = 0;
     app.context = context_pane(ctx, session);
@@ -894,9 +929,14 @@ fn submit(
             app.open_home();
             None
         }
+        Parsed::NewChat(name) => {
+            // Parked rather than performed: the `Session` and its writer belong
+            // to the run loop, and this function only has the screen.
+            app.pending_session = Some(SessionSwitch::New(name.unwrap_or_default()));
+            None
+        }
         Parsed::Sessions => {
-            let text = sessions_text(store);
-            app.push(EntryRole::Info, text);
+            open_overlay(app, crate::tui::overlays::OverlayKind::Sessions);
             None
         }
         Parsed::Run(verb) => {
@@ -1544,7 +1584,18 @@ fn persist(app: &mut App, store: &SessionStore, session: &mut Session, prompt: &
 /// The first row that needs no setup is always in the list, even on a machine
 /// where everything is missing: a briefing that only lists prerequisites tells
 /// a new person the product does not work yet.
-fn home(ctx: &AppContext, name: &str, resumed: bool, graph: &GraphStatus) -> Home {
+///
+/// `session` is the conversation this process is recording. Its size is shown
+/// rather than assumed absent: a launch always starts here, so the screen has
+/// to say that `esc` opens something — and how much of it there is.
+fn home(
+    ctx: &AppContext,
+    name: &str,
+    resumed: bool,
+    graph: &GraphStatus,
+    session: &Session,
+) -> Home {
+    let turns = session.turns().len();
     let (model, model_ready) = model_state(ctx);
     let identity = crate::auth::signed_in_identity();
 
@@ -1573,6 +1624,26 @@ fn home(ctx: &AppContext, name: &str, resumed: bool, graph: &GraphStatus) -> Hom
         } else {
             HomeState::Missing
         },
+    });
+
+    // What this machine has done, in the two numbers a person can act on: how
+    // many conversations exist to come back to, and what this one has cost.
+    // Both are reads of what is already on disk — the brief never counts
+    // something it did not measure.
+    let conversations = session_file_count(ctx);
+    facts.push(Fact {
+        label: "sessions",
+        value: if turns == 0 {
+            format!("{conversations} on disk · this one is new")
+        } else {
+            format!("{conversations} on disk · this one {turns} turn(s)")
+        },
+        state: HomeState::Ready,
+    });
+    facts.push(Fact {
+        label: "spend",
+        value: spend_line(ctx, session),
+        state: HomeState::Ready,
     });
 
     // The team is not a mode: it is the organisation the cached account is
@@ -1622,18 +1693,26 @@ fn home(ctx: &AppContext, name: &str, resumed: bool, graph: &GraphStatus) -> Hom
         description: "answer from both stores, no model needed".to_string(),
         runnable: true,
     });
+    // Only worth a row once there is something to come back to: a picker that
+    // opens on one empty conversation is a door into an empty room.
+    if conversations > 1 {
+        steps.push(Step {
+            command: "/sessions".to_string(),
+            description: "pick up a conversation you left".to_string(),
+            runnable: true,
+        });
+    }
 
     Home {
         identity: identity_line(identity.as_ref(), name, resumed),
         facts,
         steps,
+        // Turns, not messages: a briefing that says "6 earlier turns" for three
+        // questions and three answers is off by the half people count.
+        hidden_turns: turns,
         invitation: model_ready
             .then_some("a turn with the vault and the graph as tools".to_string()),
-        recent: if ctx.vault_path.exists() {
-            vault_recent(ctx)
-        } else {
-            Vec::new()
-        },
+        recent: recent_activity(ctx, name, session),
     }
 }
 
@@ -1699,6 +1778,80 @@ fn vault_fact(ctx: &AppContext) -> Fact {
     }
 }
 
+/// How many conversations exist on disk.
+///
+/// Counted from file names, not from parsed transcripts: the brief is rebuilt
+/// after every command, and `SessionStore::list` reads every session to derive
+/// its title — the wrong price to pay for one number.
+fn session_file_count(ctx: &AppContext) -> usize {
+    let Ok(entries) = std::fs::read_dir(&ctx.sessions_dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("jsonl"))
+        .count()
+}
+
+/// `148k tokens · ~$1.24`, or the truth that this conversation has not run yet.
+///
+/// The same numbers the context pane reports, from the same receipts, so the
+/// brief and the rail cannot quote two different bills.
+fn spend_line(ctx: &AppContext, session: &Session) -> String {
+    let tokens = session.input_tokens.saturating_add(session.output_tokens);
+    if tokens == 0 {
+        return "no turns yet".to_string();
+    }
+    let tokens = thousands(tokens);
+    match session_cost_micros(ctx, session) {
+        Some(0) => format!("{tokens} tokens · free"),
+        Some(micros) => format!("{tokens} tokens · ~${:.2}", micros as f64 / 1_000_000.0),
+        // No rate for this model: the token count is still a fact, the bill is
+        // not, and inventing one would put a number nobody measured on screen.
+        None => format!("{tokens} tokens"),
+    }
+}
+
+/// The rate that applies to this conversation: the configured one when it
+/// describes the same model, otherwise the built-in list price for the model.
+///
+/// A configured pair is what this deployment actually pays, so it outranks a
+/// published list price — but only for the model it was written for. An older
+/// conversation on another model is priced by that model's own family.
+fn session_rate(ctx: &AppContext, session: &Session) -> Option<provider::Pricing> {
+    if let Ok(settings) = provider::Settings::load(&ctx.config)
+        && settings.model == session.model
+        && let Some(pricing) = settings.pricing
+    {
+        return Some(pricing);
+    }
+    provider::builtin_price(&session.model)
+}
+
+/// What this session has cost, in micro-dollars, when it can be known.
+///
+/// Receipts written before a model had a price carry no `cost_micros`, so the
+/// rate in force is applied to their token counts here instead of leaving an
+/// older conversation permanently "cost unknown". `None` means the model has no
+/// price at all — the one answer that is not a number.
+///
+/// The brief and the context rail both call this, so the two cannot quote
+/// different bills for the same conversation.
+fn session_cost_micros(ctx: &AppContext, session: &Session) -> Option<u64> {
+    if session.receipts.is_empty() {
+        return None;
+    }
+    let rate = session_rate(ctx, session);
+    let mut total = 0u64;
+    for receipt in &session.receipts {
+        total += match receipt.cost_micros {
+            Some(micros) => micros,
+            None => rate?.cost_micros(receipt.input_tokens, receipt.output_tokens),
+        };
+    }
+    Some(total)
+}
+
 /// The team row. Presence and claims are local (one `coord.db`), so the row
 /// says `on this machine` rather than implying two laptops agree.
 fn teams_line(ctx: &AppContext, id: &crate::auth::Identity) -> String {
@@ -1722,12 +1875,12 @@ fn teams_line(ctx: &AppContext, id: &crate::auth::Identity) -> String {
     line
 }
 
-/// The last three things this vault took in, newest first.
+/// The last three things this vault took in, as `(when, row)`.
 ///
-/// It is the product's own history, on the screen where a person decides what
-/// to ask. One indexed query with a limit; a slow vault shows no timeline
-/// rather than a stalling frame.
-fn vault_recent(ctx: &AppContext) -> Vec<String> {
+/// The timestamp is returned rather than formatted because the activity strip
+/// merges this with conversations and sorts the result: an age printed before
+/// the sort would be the age of a row that is no longer in its place.
+fn vault_recent(ctx: &AppContext) -> Vec<(i64, String)> {
     let Ok(engine) = crate::vault::open_existing(ctx) else {
         return Vec::new();
     };
@@ -1750,15 +1903,65 @@ fn vault_recent(ctx: &AppContext) -> Vec<String> {
     let Ok(rows) = rows else {
         return Vec::new();
     };
-    let now = now_ms();
     rows.filter_map(Result::ok)
         .map(|(entity, content, at)| {
-            format!(
-                "{}   {entity}   {}",
-                human_age(at, now),
-                content.split('\n').next().unwrap_or_default().trim()
+            (
+                at,
+                format!(
+                    "{entity}   {}",
+                    content.split('\n').next().unwrap_or_default().trim()
+                ),
             )
         })
+        .collect()
+}
+
+/// The last three things that happened, newest first.
+///
+/// A home screen with no activity on it is a header: the facts say what exists
+/// and `next` says what to do, but neither says the tool has been used. Three
+/// sources answer that, all already on disk — the vault's own timeline, the
+/// conversations this machine has open, and when this one last ran. Nothing is
+/// counted here that was not measured.
+fn recent_activity(ctx: &AppContext, name: &str, session: &Session) -> Vec<String> {
+    let now = now_ms();
+    let mut rows: Vec<(i64, String)> = Vec::new();
+    if ctx.vault_path.exists() {
+        rows.extend(vault_recent(ctx));
+    }
+    // Two conversations, not three: this session's own row is usually the
+    // newest, and three files plus it would push the vault off the strip.
+    for summary in SessionStore::new(ctx.sessions_dir.clone()).recent(2) {
+        if summary.name == name || summary.title.is_empty() {
+            continue;
+        }
+        rows.push((
+            summary.modified_ms,
+            format!("{}   {}", summary.name, summary.title),
+        ));
+    }
+    if let Some(last) = session
+        .messages
+        .iter()
+        .rev()
+        .find(|message| matches!(message.role, Role::User))
+    {
+        let title = crate::session::title_of(session);
+        rows.push((
+            last.at_ms,
+            if title.is_empty() {
+                "this session".to_string()
+            } else {
+                format!("this session   {title}")
+            },
+        ));
+    }
+    rows.sort_by(|a, b| b.0.cmp(&a.0));
+    rows.into_iter()
+        .take(3)
+        // The age is a column, so it is padded: three rows of ragged ages read
+        // as three unrelated lines rather than as one timeline.
+        .map(|(at, row)| format!("{:<9} {row}", human_age(at, now)))
         .collect()
 }
 
@@ -1959,40 +2162,85 @@ fn context_pane(ctx: &AppContext, session: &Session) -> String {
             human_count(session.input_tokens.min(usize::MAX as u64) as usize),
             human_count(session.output_tokens.min(usize::MAX as u64) as usize),
         ));
-        let (micros, priced) = session.spend();
-        if priced > 0 {
+        match session_cost_micros(ctx, session) {
+            // A free model has a price: zero. Saying so beats a prompt to
+            // configure rates the provider does not charge.
+            Some(0) => out.push_str("  free\n"),
             // Labelled an estimate because the rate is a list price or a
             // configured one, not an invoice: cache reads and provider
             // rounding are not modelled here.
-            out.push_str(&format!(
+            Some(micros) => out.push_str(&format!(
                 "  ~${:.2} (estimate)\n",
                 micros as f64 / 1_000_000.0
-            ));
-        } else {
-            out.push_str("  cost unknown — set provider rates\n");
+            )),
+            None => out.push_str("  cost unknown — set provider rates\n"),
         }
     }
 
     out
 }
 
-/// `/sessions`: what is on disk and how to come back to it.
-fn sessions_text(store: &SessionStore) -> String {
-    let rows = store.list();
-    if rows.is_empty() {
-        return "No sessions yet. This one is created when you ask something.".to_string();
+/// Make `switch` the conversation this screen is recording.
+///
+/// Everything that identifies the session moves together — the name in the
+/// header, the resumed flag, the transcript and the panes built from it — so
+/// the frame after this cannot describe two conversations at once. The store is
+/// the only writer: `/new` writes its file immediately (a session that exists
+/// only in memory is a name the picker cannot show), and opening one reads the
+/// file rather than trusting the row it was chosen from.
+fn switch_session(
+    ctx: &AppContext,
+    app: &mut App,
+    store: &SessionStore,
+    session: &mut Session,
+    switch: SessionSwitch,
+) -> Result<()> {
+    match switch {
+        SessionSwitch::New(requested) => {
+            let name = if requested.trim().is_empty() {
+                store.next_name()
+            } else {
+                validate_name(&requested)?
+            };
+            let fresh = store.create(&name)?;
+            store.save(&fresh)?;
+            *session = fresh;
+            app.name = name;
+            app.resumed = false;
+            app.entries.clear();
+            // A fresh conversation has nothing to show yet, so it shows the
+            // brief — the same screen a launch gives, naming the new session.
+            app.home_visible = true;
+        }
+        SessionSwitch::Open(name) => {
+            *session = store.load(&name)?;
+            app.name = session.id.clone();
+            app.resumed = true;
+            app.entries.clear();
+            app.seed(session);
+            // The conversation is what was picked, so it is what is shown.
+            app.home_visible = false;
+        }
+        SessionSwitch::Rename { from, to } => {
+            let renamed = store.rename(&from, &to)?;
+            // The file moved, so the writer moves with it: `Session::id` is the
+            // file name, and leaving it behind would recreate the old path on
+            // the next save.
+            if app.name == from {
+                session.id = renamed.clone();
+                app.name = renamed.clone();
+            }
+            app.push(
+                EntryRole::Info,
+                format!("renamed \"{from}\" to \"{renamed}\""),
+            );
+        }
     }
-    let mut out = String::from("sessions\n");
-    for row in rows.iter().take(10) {
-        out.push_str(&format!(
-            "  {:<22} {:>4} msgs  {}\n",
-            ellipsize(&row.name, 22),
-            row.messages,
-            human_age(row.created_ms, now_ms()),
-        ));
-    }
-    out.push_str("\nresume with `memnoth --resume <name>`");
-    out
+    app.home_cursor = 0;
+    app.scroll = 0;
+    app.follow = true;
+    refresh(ctx, app, session);
+    Ok(())
 }
 
 /// Execute a shell command with sandbox policy checking.
@@ -2254,9 +2502,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = context(dir.path());
         let graph = graph_state(&ctx);
-        let home = home(&ctx, "payments", false, &graph);
+        let session = Session::new(crate::session::SESSION_MODEL);
+        let home = home(&ctx, "payments", false, &graph, &session);
 
-        assert!(home.identity.starts_with("solo"), "{}", home.identity);
+        // Not the `solo` prefix: whether this machine is signed in is the
+        // machine's business, and a test that fails on the developer's account
+        // tells nobody anything. What the brief must always say is which
+        // session it opened.
         assert!(
             home.identity.contains("session \"payments\" (new)"),
             "{}",
@@ -2330,6 +2582,97 @@ mod tests {
         let pane = context_pane(&ctx, &session);
         assert!(pane.contains("cost unknown"), "{pane}");
         assert!(!pane.contains("$0.00"), "{pane}");
+    }
+
+    #[test]
+    fn an_older_turn_is_priced_from_the_rate_in_force() {
+        // Receipts written before a model had a price carry no `cost_micros`.
+        // The rate is still known, so the bill is shown rather than leaving the
+        // conversation permanently "cost unknown".
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = context(dir.path());
+        let mut session = Session::new("claude-sonnet-4-5");
+        session.account(1_000_000, 0);
+        session.record_receipt(receipt(1_000_000, 0, None));
+
+        let pane = context_pane(&ctx, &session);
+        assert!(pane.contains("~$3.00 (estimate)"), "{pane}");
+        assert!(
+            spend_line(&ctx, &session).contains("~$3.00"),
+            "{}",
+            spend_line(&ctx, &session)
+        );
+    }
+
+    #[test]
+    fn a_configured_rate_prices_an_older_turn_on_that_model() {
+        // `[provider]` is what this deployment actually pays, so it outranks the
+        // published list price for the model it was written for.
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = context(dir.path());
+        ctx.config.provider = Some(crate::provider::ProviderConfig {
+            model: Some("claude-sonnet-4-5".to_string()),
+            input_per_mtok: Some(1.0),
+            output_per_mtok: Some(2.0),
+            ..Default::default()
+        });
+        let mut session = Session::new("claude-sonnet-4-5");
+        session.account(1_000_000, 0);
+        session.record_receipt(receipt(1_000_000, 0, None));
+
+        let pane = context_pane(&ctx, &session);
+        assert!(pane.contains("~$1.00 (estimate)"), "{pane}");
+        assert!(
+            spend_line(&ctx, &session).contains("~$1.00"),
+            "{}",
+            spend_line(&ctx, &session)
+        );
+    }
+
+    #[test]
+    fn a_free_model_says_free_rather_than_asking_for_rates() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = context(dir.path());
+        let mut session = Session::new("kilo-auto/free");
+        session.account(6_000, 228);
+        session.record_receipt(receipt(6_000, 228, None));
+
+        let pane = context_pane(&ctx, &session);
+        assert!(pane.contains("free"), "{pane}");
+        assert!(!pane.contains("cost unknown"), "{pane}");
+        assert!(
+            spend_line(&ctx, &session).ends_with("free"),
+            "{}",
+            spend_line(&ctx, &session)
+        );
+    }
+
+    #[test]
+    fn the_activity_strip_names_this_session_and_the_conversations_beside_it() {
+        // A home screen with no activity on it is a header: the strip is the
+        // only row that says the tool has been used.
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = context(dir.path());
+        let store = SessionStore::new(&ctx.sessions_dir);
+        let mut other = store.create("payments").unwrap();
+        store
+            .record(&mut other, "index the payments service", "indexed 412 files")
+            .unwrap();
+
+        let mut session = Session::new("claude-sonnet-4-5");
+        session.id = "session".to_string();
+        session.messages.push(memnoth_session::Message::new(
+            Role::User,
+            "why does the retry cap reset after a restart",
+        ));
+
+        let rows = recent_activity(&ctx, "session", &session);
+        assert!(rows.len() <= 3, "{rows:?}");
+        assert!(rows.iter().any(|row| row.contains("payments")), "{rows:?}");
+        assert!(
+            rows.iter().any(|row| row.contains("this session")),
+            "{rows:?}"
+        );
     }
 
     /// One keystroke through the real key handler, which is where the dropdown
