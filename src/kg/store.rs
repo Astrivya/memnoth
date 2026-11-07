@@ -18,7 +18,13 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, OpenFlags, params, params_from_iter};
 
 /// Bumped when the table shape changes; a different value forces a full rebuild.
-pub(crate) const SCHEMA_VERSION: i64 = 1;
+///
+/// 2: reference rows are written only for files this build can read declarations
+/// from, and not for generated modules. A graph built under v1 carries mentions
+/// from Markdown, CSS and lockfiles, so it is rebuilt rather than trusted.
+/// 3: `symbols.exported`, which is what makes `dead-code` and `unused-exports`
+/// mean anything outside Rust.
+pub(crate) const SCHEMA_VERSION: i64 = 3;
 
 /// The columns the incremental diff needs from a file row.
 ///
@@ -60,6 +66,8 @@ pub(crate) struct SymbolRow {
     pub end_line: usize,
     /// Enclosing declaration.
     pub container: Option<String>,
+    /// Whether the declaration is exported from its file.
+    pub exported: bool,
 }
 /// One reference row.
 #[derive(Debug, Clone)]
@@ -124,6 +132,26 @@ impl Graph {
     }
 
     fn init_schema(&self) -> Result<()> {
+        // A version bump can add a column, and `CREATE TABLE IF NOT EXISTS`
+        // cannot: an older file keeps its old shape and every write that names
+        // the new column fails. The graph is a derived artifact, so a mismatch
+        // is a drop and a rebuild, not a migration.
+        // The stamp alone is not proof: a build that wrote the new version and
+        // then failed on the new column leaves a file that claims to be current
+        // while having the old shape, and every later write fails the same way.
+        let stored = self.get_meta("schema").ok().flatten();
+        let stamped_current = stored
+            .as_deref()
+            .and_then(|value| value.parse::<i64>().ok())
+            == Some(SCHEMA_VERSION);
+        if !stamped_current || !self.column_exists("symbols", "exported") {
+            self.conn.execute_batch(
+                "DROP TABLE IF EXISTS refs;
+                 DROP TABLE IF EXISTS symbols;
+                 DROP TABLE IF EXISTS files;
+                 DROP TABLE IF EXISTS meta;",
+            )?;
+        }
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS meta (
                  key   TEXT PRIMARY KEY,
@@ -143,7 +171,8 @@ impl Graph {
                  kind      TEXT NOT NULL,
                  line      INTEGER NOT NULL,
                  end_line  INTEGER NOT NULL,
-                 container TEXT
+                 container TEXT,
+                 exported  INTEGER NOT NULL DEFAULT 0
              );
              CREATE INDEX IF NOT EXISTS symbols_name ON symbols(name);
              CREATE INDEX IF NOT EXISTS symbols_path ON symbols(path);
@@ -158,6 +187,21 @@ impl Graph {
              CREATE INDEX IF NOT EXISTS refs_path ON refs(path);",
         )?;
         self.set_meta("schema", &SCHEMA_VERSION.to_string())
+    }
+
+    /// Whether `table` has a column called `column`.
+    ///
+    /// Used to decide a rebuild, so it has to answer `false` rather than fail
+    /// when the table does not exist yet.
+    fn column_exists(&self, table: &str, column: &str) -> bool {
+        let Ok(mut statement) = self.conn.prepare(&format!("PRAGMA table_info({table})")) else {
+            return false;
+        };
+        let columns: Vec<String> = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default();
+        columns.iter().any(|name| name == column)
     }
 
     /// Whether this file is a graph this build understands.
@@ -286,8 +330,8 @@ impl Graph {
         symbols: &[super::extract::ExtractedSymbol],
     ) -> Result<()> {
         let mut statement = self.conn.prepare(
-            "INSERT INTO symbols (path, name, kind, line, end_line, container)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO symbols (path, name, kind, line, end_line, container, exported)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         )?;
         for symbol in symbols {
             statement.execute(params![
@@ -297,6 +341,7 @@ impl Graph {
                 symbol.line as i64,
                 symbol.end_line as i64,
                 symbol.container,
+                symbol.exported as i64,
             ])?;
         }
         Ok(())
@@ -375,7 +420,7 @@ impl Graph {
             return Ok(Vec::new());
         }
         let sql = format!(
-            "SELECT name, kind, path, line, end_line, COALESCE(container, '')
+            "SELECT name, kind, path, line, end_line, COALESCE(container, ''), exported
              FROM symbols WHERE name IN ({}) ORDER BY path, line",
             placeholders(names.len())
         );
@@ -388,6 +433,76 @@ impl Graph {
                 line: row.get::<_, i64>(3)?.max(0) as usize,
                 end_line: row.get::<_, i64>(4)?.max(0) as usize,
                 container: empty_to_none(row.get(5)?),
+                exported: row.get::<_, i64>(6).unwrap_or(0) != 0,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Every declaration in the graph, ordered by file then line.
+    ///
+    /// `definitions_for(&[])` deliberately answers nothing — an empty name set
+    /// is not a wildcard — so the whole-graph reports (`dead-code`,
+    /// `unused-exports`, `query kind:`) ask for this instead of passing an
+    /// empty list and silently getting zero rows back.
+    pub fn all_symbols(&self) -> Result<Vec<SymbolRow>> {
+        self.symbols_where("1 = 1", params![])
+    }
+
+    /// Declarations in the given files.
+    ///
+    /// File paths are workspace-relative with forward slashes, the same form
+    /// `files.path` stores. A lookup by *name* cannot answer an outline, which
+    /// is why this exists next to [`Self::definitions_for`].
+    pub fn symbols_in_paths(&self, paths: &[String]) -> Result<Vec<SymbolRow>> {
+        if paths.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.symbols_where(
+            &format!("path IN ({})", placeholders(paths.len())),
+            params_from_iter(paths.iter()),
+        )
+    }
+
+    /// Declarations under a directory prefix (or in one exact file).
+    ///
+    /// `prefix` may be empty for the whole graph. The directory boundary is
+    /// matched with a `/` so `src/app` cannot also match `src/apple`.
+    pub fn symbols_under(&self, prefix: &str) -> Result<Vec<SymbolRow>> {
+        let prefix = prefix.trim_matches('/');
+        if prefix.is_empty() {
+            return self.all_symbols();
+        }
+        self.symbols_where(
+            "(path = ?1 OR path LIKE ?2)",
+            params![prefix, format!("{prefix}/%")],
+        )
+    }
+
+    /// Shared SELECT behind the path-shaped lookups above.
+    fn symbols_where(
+        &self,
+        clause: &str,
+        parameters: impl rusqlite::Params,
+    ) -> Result<Vec<SymbolRow>> {
+        let sql = format!(
+            "SELECT name, kind, path, line, end_line, COALESCE(container, ''), exported
+             FROM symbols WHERE {clause} ORDER BY path, line"
+        );
+        let mut statement = self.conn.prepare(&sql)?;
+        let rows = statement.query_map(parameters, |row| {
+            Ok(SymbolRow {
+                name: row.get(0)?,
+                kind: row.get(1)?,
+                path: row.get(2)?,
+                line: row.get::<_, i64>(3)?.max(0) as usize,
+                end_line: row.get::<_, i64>(4)?.max(0) as usize,
+                container: empty_to_none(row.get(5)?),
+                exported: row.get::<_, i64>(6).unwrap_or(0) != 0,
             })
         })?;
         let mut out = Vec::new();
@@ -438,6 +553,28 @@ impl Graph {
         let rows = statement.query_map(params_from_iter(paths.iter()), |row| {
             row.get::<_, String>(0)
         })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// What one declaration's body mentions that is itself declared: the
+    /// caller → callee edges of the textual graph.
+    ///
+    /// `refs.container` is the innermost declaration around a mention, so this
+    /// answers "what does this function call" without a resolved call graph.
+    /// A mention that happens to sit inside a comment counts the same as code;
+    /// the reports that use this say so.
+    pub fn callees_of(&self, container: &str) -> Result<Vec<String>> {
+        let mut statement = self.conn.prepare(
+            "SELECT DISTINCT r.name
+             FROM refs r JOIN symbols s ON s.name = r.name
+             WHERE r.container = ?1
+             ORDER BY r.name",
+        )?;
+        let rows = statement.query_map([container], |row| row.get::<_, String>(0))?;
         let mut out = Vec::new();
         for row in rows {
             out.push(row?);
@@ -548,6 +685,7 @@ mod tests {
                 line: 1,
                 end_line: 1,
                 container: None,
+                exported: true,
             },
             super::super::extract::ExtractedSymbol {
                 name: "beta".into(),
@@ -555,12 +693,94 @@ mod tests {
                 line: 2,
                 end_line: 2,
                 container: None,
+                exported: false,
             },
         ];
         graph.insert_symbols("a.rs", &symbols).unwrap();
         let found = graph.definitions_for(&["alpha".to_string()]).unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].name, "alpha");
+        // `exported` survives the round trip: reports depend on it.
+        assert!(found[0].exported);
+        let beta = graph.definitions_for(&["beta".to_string()]).unwrap();
+        assert!(!beta[0].exported);
         assert!(graph.definitions_for(&[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_older_table_shape_is_dropped_rather_than_written_into() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("graph.db");
+        // A graph as an earlier build wrote it: no `exported` column.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 CREATE TABLE files (path TEXT PRIMARY KEY, language TEXT NOT NULL,
+                                     bytes INTEGER NOT NULL, mtime_ms INTEGER NOT NULL,
+                                     symbols INTEGER NOT NULL DEFAULT 0);
+                 CREATE TABLE symbols (id INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT NOT NULL,
+                                       name TEXT NOT NULL, kind TEXT NOT NULL, line INTEGER NOT NULL,
+                                       end_line INTEGER NOT NULL, container TEXT);
+                 CREATE TABLE refs (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
+                                    path TEXT NOT NULL, line INTEGER NOT NULL, container TEXT);
+                 INSERT INTO meta VALUES ('schema', '2');",
+            )
+            .unwrap();
+        }
+
+        let graph = Graph::open(&path).unwrap();
+        assert_eq!(
+            graph.get_meta("schema").unwrap(),
+            Some(SCHEMA_VERSION.to_string())
+        );
+        // The write names `exported`, so it only succeeds if the table was rebuilt.
+        graph
+            .insert_symbols(
+                "a.ts",
+                &[super::super::extract::ExtractedSymbol {
+                    name: "Hero".into(),
+                    kind: "function",
+                    line: 1,
+                    end_line: 4,
+                    container: None,
+                    exported: true,
+                }],
+            )
+            .unwrap();
+        assert_eq!(graph.counts().unwrap().symbols, 1);
+    }
+
+    #[test]
+    fn whole_graph_and_path_lookups_answer_where_name_lookup_cannot() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = Graph::open(&dir.path().join("graph.db")).unwrap();
+        let symbol = |name: &str, line: usize| super::super::extract::ExtractedSymbol {
+            name: name.into(),
+            kind: "fn",
+            line,
+            end_line: line,
+            container: None,
+            exported: true,
+        };
+        graph
+            .insert_symbols("src/app.ts", &[symbol("a", 1), symbol("b", 2)])
+            .unwrap();
+        graph
+            .insert_symbols("src/apple.ts", &[symbol("c", 1)])
+            .unwrap();
+
+        assert_eq!(graph.all_symbols().unwrap().len(), 3);
+        assert_eq!(
+            graph
+                .symbols_in_paths(&["src/app.ts".to_string()])
+                .unwrap()
+                .len(),
+            2
+        );
+        // A directory prefix stops at the separator: `src/app` is not `src/apple`.
+        assert_eq!(graph.symbols_under("src/app.ts").unwrap().len(), 2);
+        assert_eq!(graph.symbols_under("src").unwrap().len(), 3);
+        assert_eq!(graph.symbols_under("").unwrap().len(), 3);
     }
 }
