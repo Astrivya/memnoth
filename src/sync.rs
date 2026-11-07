@@ -4,7 +4,6 @@ use serde_json::{Value, json};
 use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -21,8 +20,10 @@ const MAX_QUEUE_SIZE_MB: u64 = 100;
 /// Maximum queue entries
 const MAX_QUEUE_ENTRIES: usize = 10000;
 /// Base retry delay in seconds
+#[cfg(test)]
 const BASE_RETRY_DELAY_SECS: u64 = 2;
 /// Maximum retry delay in seconds
+#[cfg(test)]
 const MAX_RETRY_DELAY_SECS: u64 = 300;
 /// Heartbeat interval in seconds
 const HEARTBEAT_INTERVAL_SECS: u64 = 30;
@@ -134,12 +135,11 @@ impl SyncQueue {
 
     /// Pop the next item for processing
     pub fn pop(&mut self) -> Option<QueuedSyncItem> {
-        self.items.pop_front().map(|item| {
-            let size = serde_json::to_vec(&item)
+        self.items.pop_front().inspect(|item| {
+            let size = serde_json::to_vec(item)
                 .map(|v| v.len() as u64)
                 .unwrap_or(0);
             self.total_size_bytes = self.total_size_bytes.saturating_sub(size);
-            item
         })
     }
 
@@ -172,6 +172,7 @@ fn now_secs() -> u64 {
 }
 
 /// Calculate exponential backoff delay
+#[cfg(test)]
 fn backoff_delay(attempt: u32) -> Duration {
     let delay = BASE_RETRY_DELAY_SECS * (2u64.pow(attempt.min(10)));
     Duration::from_secs(delay.min(MAX_RETRY_DELAY_SECS))
@@ -338,7 +339,7 @@ fn process_queue(ctx: &AppContext, client: &CloudClient, dry_run: bool) -> Resul
         errors: Vec::new(),
     };
 
-    while let Some(mut item) = queue.pop() {
+    while let Some(item) = queue.pop() {
         if dry_run {
             result.processed += 1;
             result.succeeded += 1;
@@ -526,7 +527,7 @@ fn run_watch_mode(
         }
 
         // Process queue
-        let mut queue = SyncQueue::load(queue_path)?;
+        let queue = SyncQueue::load(queue_path)?;
         if !queue.items.is_empty() {
             let result = process_queue(ctx, &client, dry_run)?;
             if result.processed > 0 {
@@ -550,7 +551,7 @@ fn run_watch_mode(
 }
 
 /// Get authenticated cloud client
-pub fn get_cloud_client(ctx: &AppContext) -> Result<CloudClient> {
+pub fn get_cloud_client(_ctx: &AppContext) -> Result<CloudClient> {
     let mut client = CloudClient::new().context("Failed to create cloud client")?;
 
     if let Ok(token) = std::env::var("MEMNOTH_API_KEY") {
@@ -652,10 +653,9 @@ fn privacy_enable(ctx: &AppContext) -> Result<Outcome> {
     config.privacy = Some(privacy);
     config.save(&ctx.config_path)?;
 
-    // Also send to cloud if authenticated
-    if let Ok(client) = get_cloud_client(ctx) {
-        let _ = client.set_telemetry_preferences(true);
-    }
+    // Nothing is pushed to the cloud: the control plane has no telemetry
+    // preference endpoint, and the local config is what `mn sync` consults
+    // before it sends anything. A call here only ever answered 404.
 
     Ok(Outcome::new(
         "privacy.enable",
@@ -672,10 +672,7 @@ fn privacy_disable(ctx: &AppContext) -> Result<Outcome> {
     config.privacy = Some(privacy);
     config.save(&ctx.config_path)?;
 
-    // Also send to cloud if authenticated
-    if let Ok(client) = get_cloud_client(ctx) {
-        let _ = client.set_telemetry_preferences(false);
-    }
+    // Local only, for the reason recorded in `privacy_enable`.
 
     Ok(Outcome::new(
         "privacy.disable",
@@ -785,7 +782,7 @@ mod tests {
     #[test]
     fn test_sync_queue_bounded() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join(SYNC_QUEUE_FILE);
+        let _path = dir.path().join(SYNC_QUEUE_FILE);
 
         let mut queue = SyncQueue::new();
 
