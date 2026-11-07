@@ -228,6 +228,10 @@ fn local_commands() -> Vec<PaletteItem> {
             description: "Graph staleness info".into(),
         },
         PaletteItem {
+            command: "/update".into(),
+            description: "Check for and install a new release".into(),
+        },
+        PaletteItem {
             command: "/kg impact".into(),
             description: "Blast radius of a symbol - /kg impact <symbol>".into(),
         },

@@ -33,9 +33,14 @@ const PREVIEW_TURNS: usize = 6;
 /// Longest single message line the preview keeps before it cuts.
 const PREVIEW_LINE: usize = 220;
 
-/// Below this width a side-by-side preview is a column of hyphens, so the list
-/// gets the whole frame instead.
+/// Below this width a side-by-side preview is a column of hyphens, so the
+/// preview moves under the list instead of disappearing: picking a conversation
+/// without seeing any of it is a guess.
 const SIDE_BY_SIDE: u16 = 90;
+
+/// Below this body height there is no room for a stacked preview either, and a
+/// three-line pane of half a sentence is worse than the list on its own.
+const COMPACT_PREVIEW_MIN_HEIGHT: u16 = 10;
 
 /// One conversation, as this screen holds it.
 #[derive(Debug, Clone)]
@@ -309,19 +314,40 @@ fn entry(summary: SessionSummary, current: &str) -> SessionEntry {
 }
 
 /// The preview text: what the session is, then how it ended.
+///
+/// The context block is the part a row cannot carry — which model, when it was
+/// opened, what it has cost — because those are the reasons to pick one
+/// conversation over another.
 fn describe(name: &str, session: &memnoth_session::Session) -> String {
     let created = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(session.created_ms)
         .map(|when| when.format("%Y-%m-%d %H:%M UTC").to_string())
         .unwrap_or_else(|| "unknown".to_string());
+    let tokens: i64 = session
+        .receipts
+        .iter()
+        .map(|receipt| receipt.total_tokens as i64)
+        .sum();
+    let cost_micros: u64 = session
+        .receipts
+        .iter()
+        .map(|receipt| receipt.cost_micros.unwrap_or(0))
+        .sum();
+    let model = if session.model.is_empty() {
+        "model unknown"
+    } else {
+        session.model.as_str()
+    };
     let mut out = format!(
-        "{name}\n{} · {created}\n{} messages\n\n",
-        if session.model.is_empty() {
-            "model unknown"
-        } else {
-            session.model.as_str()
-        },
+        "{name}\n{model} · {} messages\nopened {created}",
         session.messages.len()
     );
+    if tokens > 0 {
+        out.push_str(&format!(" · {} tokens", short_count(tokens)));
+    }
+    if cost_micros > 0 {
+        out.push_str(&format!(" · ${:.2}", cost_micros as f64 / 1_000_000.0));
+    }
+    out.push_str("\n\n");
 
     if session.messages.is_empty() {
         out.push_str("nothing said yet: this conversation is a name and an empty file");
@@ -347,6 +373,17 @@ fn describe(name: &str, session: &memnoth_session::Session) -> String {
         out.push_str(&format!("{who}: {}\n\n", ellipsize(&text, PREVIEW_LINE)));
     }
     out
+}
+
+/// A token count as a person reads it: `82.6k`, not `82600`.
+fn short_count(value: i64) -> String {
+    if value >= 1_000_000 {
+        format!("{:.1}M", value as f64 / 1_000_000.0)
+    } else if value >= 1_000 {
+        format!("{:.1}k", value as f64 / 1_000.0)
+    } else {
+        value.max(0).to_string()
+    }
 }
 
 /// Subsequence match, case already folded by the caller.
@@ -604,7 +641,18 @@ impl Overlay for SessionsOverlay {
                 .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
                 .split(body);
             self.render_list(frame, split[0]);
-            self.render_preview(frame, split[1]);
+            self.render_preview(frame, split[1], false);
+        } else if body.height >= COMPACT_PREVIEW_MIN_HEIGHT {
+            // The split is even: the list keeps enough rows to choose from, and
+            // the bottom half answers "which of these is it" without opening
+            // one. A taller list would push the preview to three lines of
+            // nothing; a taller preview would hide the rows it describes.
+            let split = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(body);
+            self.render_list(frame, split[0]);
+            self.render_preview(frame, split[1], true);
         } else {
             self.render_list(frame, body);
         }
@@ -647,7 +695,14 @@ impl SessionsOverlay {
                     Style::default()
                 };
                 let marker = if row.is_current { "· " } else { "  " };
-                let tail = row.tail();
+                // The tail is the first thing to go in a narrow window: a title
+                // cut to three characters so a timestamp can keep its column is
+                // a list that has stopped being a list.
+                let tail = if width >= 40 {
+                    row.tail()
+                } else {
+                    String::new()
+                };
                 let room = width.saturating_sub(2 + tail.chars().count() + 1);
                 let label = ellipsize(&row.label(), room.max(8));
                 let pad = width
@@ -693,14 +748,26 @@ impl SessionsOverlay {
         frame.render_stateful_widget(list, area, &mut self.list_state);
     }
 
-    /// The preview half: what the row is, then the last few messages.
-    fn render_preview(&self, frame: &mut Frame, area: Rect) {
+    /// The preview: what the row is, then the last few messages.
+    ///
+    /// `stacked` is the narrow frame, where the pane sits under the list and a
+    /// top border is the divider. The title names the conversation, so the
+    /// preview cannot be read against the wrong row.
+    fn render_preview(&self, frame: &mut Frame, area: Rect, stacked: bool) {
+        let title = match self.current() {
+            Some(row) => format!(
+                " preview · {} ",
+                ellipsize(&row.label(), area.width.saturating_sub(16) as usize)
+            ),
+            None => " preview ".to_string(),
+        };
+        let borders = if stacked { Borders::TOP } else { Borders::LEFT };
         let preview = Paragraph::new(self.preview.clone())
             .style(Style::default().fg(Color::Gray))
             .block(
                 Block::default()
-                    .borders(Borders::LEFT)
-                    .title(" preview ")
+                    .borders(borders)
+                    .title(title)
                     .style(Style::default().fg(Color::DarkGray)),
             )
             .wrap(Wrap { trim: true });
@@ -808,6 +875,69 @@ mod tests {
         overlay.handle_key(key(KeyCode::Char('d')), &mut app);
         assert!(!path.exists(), "the second press is the one that deletes");
         assert!(overlay.confirm_delete.is_none());
+    }
+
+    /// Draw the overlay the way the screen does and read the frame back.
+    fn draw(overlay: &mut SessionsOverlay, width: u16, height: u16) -> String {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        let app = App::new("newer", false);
+        terminal
+            .draw(|frame| overlay.render(frame, frame.area(), &app))
+            .expect("draw must not fail");
+        let buffer = terminal.backend().buffer();
+        let mut out = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                out.push_str(buffer[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
+    fn a_narrow_frame_puts_the_preview_under_the_list_with_its_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = two_sessions(dir.path());
+        let mut overlay = SessionsOverlay::new();
+        overlay.visible = true;
+        overlay.store = Some(store.clone());
+        overlay.read(&store, "newer");
+        overlay.load_preview();
+
+        let text = draw(&mut overlay, 80, 30);
+        let mut lines = text.lines();
+        let top = lines.by_ref().take(15).collect::<Vec<_>>().join("\n");
+        let bottom = lines.collect::<Vec<_>>().join("\n");
+
+        assert!(top.contains("the newer question"), "{top}");
+        assert!(
+            !top.contains("preview"),
+            "a narrow frame must not spend a column on the preview: {top}"
+        );
+        assert!(bottom.contains("preview"), "{bottom}");
+        assert!(bottom.contains("messages"), "{bottom}");
+        assert!(bottom.contains("opened"), "{bottom}");
+        assert!(bottom.contains("another answer"), "{bottom}");
+    }
+
+    #[test]
+    fn a_wide_frame_keeps_the_preview_beside_the_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = two_sessions(dir.path());
+        let mut overlay = SessionsOverlay::new();
+        overlay.visible = true;
+        overlay.store = Some(store.clone());
+        overlay.read(&store, "newer");
+        overlay.load_preview();
+
+        let text = draw(&mut overlay, 120, 30);
+        assert!(
+            text.lines()
+                .any(|line| line.contains("preview") && line.contains("the newer question")),
+            "the list and the preview share a row in a wide frame: {text}"
+        );
     }
 
     #[test]

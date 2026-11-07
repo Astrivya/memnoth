@@ -12,6 +12,10 @@
 *.db-wal
 *.db-shm
 
+# Local TUI smoke output (scripts/tui-smoke.py): a screen capture and a
+# throwaway workspace, not part of the product.
+/.smoke/
+
 # Release bundle assembled by scripts/dist.sh — the publishable copy is the
 # one attached to the release, not the working directory.
 /dist/

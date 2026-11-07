@@ -9,17 +9,13 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
+};
 
 use crate::output::ellipsize;
-use crate::tui::app::{App, EntryRole, Fact, Home, HomeState};
+use crate::tui::app::{App, EntryRole, Home};
 use crate::tui::slash::Row;
-
-/// Width of the label column in the brief's facts.
-const FACT_LABEL: usize = 12;
-
-/// Width of the command column in `next`.
-const STEP_COLUMN: usize = 20;
 
 /// Commands a completion list may show at once. Five is the most that can be
 /// read at a glance; past that the eye stops scanning and starts reading, which
@@ -410,6 +406,19 @@ fn draw_context_rail(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
     let mut lines = vec![rail_title("context")];
+    // Where this machine's sessions are filed, on the rail that already answers
+    // "what is this screen". Without it the only way to know is the console.
+    if let Some(project) = &app.project {
+        lines.push(Line::from(vec![
+            Span::styled("project ", Style::default().fg(Color::DarkGray)),
+            Span::styled(project.clone(), Style::default().fg(Color::Cyan)),
+        ]));
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled("project ", Style::default().fg(Color::DarkGray)),
+            Span::styled("unassigned", Style::default().fg(Color::Yellow)),
+        ]));
+    }
     for line in app.context.lines() {
         lines.push(Line::from(Span::styled(
             line.to_string(),
@@ -427,15 +436,14 @@ fn draw_tasks_rail(frame: &mut Frame, area: Rect, app: &App) {
     if inner.width == 0 || inner.height == 0 {
         return;
     }
-    let width = inner.width as usize;
     let mut lines: Vec<Line> = vec![rail_title("tasks")];
     if app.tasks_pane.tasks.is_empty() {
         lines.push(Line::from(Span::styled(
-            ellipsize("no background tasks", width),
+            "no background tasks",
             Style::default().fg(Color::Gray),
         )));
         lines.push(Line::from(Span::styled(
-            ellipsize("start one: /tasks run <cmd>", width),
+            "start one: /tasks run <cmd>",
             Style::default().fg(Color::DarkGray),
         )));
     } else {
@@ -449,18 +457,17 @@ fn draw_tasks_rail(frame: &mut Frame, area: Rect, app: &App) {
             };
             lines.push(Line::from(vec![
                 Span::styled(format!("{glyph} "), Style::default().fg(colour)),
-                Span::styled(
-                    ellipsize(&task.name, width.saturating_sub(2)),
-                    Style::default().fg(Color::White),
-                ),
+                Span::styled(task.name.clone(), Style::default().fg(Color::White)),
             ]));
         }
     }
     lines.push(Line::from(Span::styled(
-        ellipsize("enter logs · ctrl-x cancel", width),
+        "enter logs · ctrl-x cancel",
         Style::default().fg(Color::DarkGray),
     )));
-    frame.render_widget(Paragraph::new(lines), inner);
+    // The rail wraps at the width it was given: a name that does not fit used
+    // to be cut with `…`, which hid exactly which job it was.
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 /// The diff rail: a count of what this turn changed, or an honest empty state.
@@ -470,11 +477,10 @@ fn draw_diff_rail(frame: &mut Frame, area: Rect, app: &App) {
     if inner.width == 0 || inner.height == 0 {
         return;
     }
-    let width = inner.width as usize;
     let mut lines: Vec<Line> = vec![rail_title("diff")];
     if app.diff_pane.hunks.is_empty() {
         lines.push(Line::from(Span::styled(
-            ellipsize("no file changes this turn", width),
+            "no file changes this turn",
             Style::default().fg(Color::Gray),
         )));
     } else {
@@ -485,19 +491,16 @@ fn draw_diff_rail(frame: &mut Frame, area: Rect, app: &App) {
                 None => ("pending", Color::Yellow),
             };
             lines.push(Line::from(vec![
-                Span::styled(
-                    ellipsize(&hunk.file_path, width.saturating_sub(11)),
-                    Style::default().fg(Color::White),
-                ),
+                Span::styled(hunk.file_path.clone(), Style::default().fg(Color::White)),
                 Span::styled(format!("  {}", state.0), Style::default().fg(state.1)),
             ]));
         }
     }
     lines.push(Line::from(Span::styled(
-        ellipsize("/diff opens the full review", width),
+        "/diff opens the full review",
         Style::default().fg(Color::DarkGray),
     )));
-    frame.render_widget(Paragraph::new(lines), inner);
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 /// The completion list: one line per command, drawn against the prompt.
@@ -658,213 +661,12 @@ fn row_lines(row: &Row, column: usize, selected: bool, width: usize) -> Vec<Line
 /// The brief: what this session opened, what is missing, what to do next —
 /// then out of the way.
 ///
-/// There is no wordmark rule and no tagline. On a 24-row terminal they cost a
-/// sixth of the frame to restate the fact rows underneath them, and the version
-/// reads just as well on the line it already shares.
+/// The shape is [`crate::tui::home`]'s decision: width alone does not answer
+/// it, because a wide short window wants a strip and a tall narrow one wants
+/// stacked facts. That module also owns the rule that a value wraps instead of
+/// being cut at the frame edge.
 fn draw_home(frame: &mut Frame, area: Rect, home: &Home, cursor: usize) {
-    // No box and no `home` title. The screen is already the home; framing it
-    // only to label it costs two rows and two columns of a small frame.
-    let inner = Rect {
-        x: area.x + 2.min(area.width),
-        y: area.y,
-        width: area.width.saturating_sub(2),
-        height: area.height,
-    };
-    if inner.width == 0 || inner.height == 0 {
-        return;
-    }
-
-    let width = inner.width as usize;
-    let height = inner.height as usize;
-
-    let mut lines: Vec<Line> = Vec::new();
-
-    // Product name left, version right: the only ornament on the screen, and
-    // it fits on a line that would otherwise be blank.
-    let version = env!("CARGO_PKG_VERSION");
-    let pad = width
-        .saturating_sub("memnoth".len() + version.chars().count() + 1)
-        .max(1);
-    lines.push(Line::from(vec![
-        Span::styled(
-            "memnoth",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" ".repeat(pad)),
-        Span::styled(format!("{version} "), Style::default().fg(Color::DarkGray)),
-    ]));
-    lines.push(Line::from(Span::styled(
-        ellipsize(&home.identity, width),
-        Style::default().fg(Color::Gray),
-    )));
-
-    // The conversation behind the brief is named, not merely hidden. Every
-    // launch starts here, so on a session with history the one thing the screen
-    // must not leave ambiguous is whether `esc` closes it or opens what was
-    // already said. Counting the turns answers that with a number.
-    if home.hidden_turns > 0 {
-        let turns = match home.hidden_turns {
-            1 => "1 earlier turn".to_string(),
-            many => format!("{many} earlier turns"),
-        };
-        lines.push(Line::from(Span::styled(
-            ellipsize(&format!("{turns} · esc shows them"), width),
-            Style::default().fg(Color::DarkGray),
-        )));
-    }
-
-    // The blocks are built separately and then fitted, because on a short
-    // window something has to give and it must not be the action: a brief that
-    // lists five problems and no way to fix one is a complaint. Facts are the
-    // first thing trimmed, then the timeline; `next` keeps at least one row.
-    let mut facts: Vec<Line> = Vec::new();
-    if !home.facts.is_empty() {
-        facts.push(Line::from(""));
-        for fact in &home.facts {
-            facts.push(fact_row(fact, width));
-        }
-    }
-
-    let mut next_block: Vec<Line> = Vec::new();
-    if !home.steps.is_empty() {
-        next_block.push(Line::from(""));
-        next_block.push(Line::from(Span::styled(
-            "next",
-            Style::default().fg(Color::White),
-        )));
-        for (index, step) in home.steps.iter().enumerate() {
-            let selected = index == cursor && step.runnable;
-            let room = width.saturating_sub(2 + STEP_COLUMN);
-            let marker = if selected { "▸ " } else { "  " };
-            let marker_style = if selected {
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::DarkGray)
-            };
-            let command_style = if selected {
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::Gray)
-            };
-            let description_style = if selected {
-                Style::default().fg(Color::White)
-            } else {
-                Style::default().fg(Color::DarkGray)
-            };
-            next_block.push(Line::from(vec![
-                Span::styled(marker, marker_style),
-                Span::styled(format!("{:<STEP_COLUMN$}", step.command), command_style),
-                Span::styled(ellipsize_words(&step.description, room), description_style),
-            ]));
-        }
-        // The one row that is not a verb: it says what the prompt below it
-        // accepts. Never selectable, so it never looks like a dead button.
-        if height >= 20
-            && let Some(invitation) = &home.invitation
-        {
-            let room = width.saturating_sub(2 + STEP_COLUMN);
-            next_block.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled(
-                    format!("{:<STEP_COLUMN$}", "ask anything"),
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Span::styled(
-                    ellipsize_words(invitation, room),
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ]));
-        }
-    }
-
-    // 17 inner rows is a 24-row terminal: the footer and the header are
-    // already gone, so a higher gate would hide the timeline on the baseline
-    // screen the design is drawn at.
-    let mut recent: Vec<Line> = Vec::new();
-    if height >= 17 && !home.recent.is_empty() {
-        recent.push(Line::from(""));
-        recent.push(Line::from(Span::styled(
-            "recent activity",
-            Style::default().fg(Color::White),
-        )));
-        for row in home.recent.iter().take(3) {
-            recent.push(Line::from(Span::styled(
-                ellipsize(&format!("  {row}"), width),
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
-    }
-
-    // Fit, in the order the brief is worth reading. `next` drops to one command
-    // first; the activity strip then keeps its heading and a row. Only after
-    // that do the facts give way, because a fact with no way to act on it is a
-    // report, and a strip with no room is a header again.
-    if lines.len() + facts.len() + next_block.len() + recent.len() > height {
-        next_block.truncate(3); // blank, `next`, one command
-    }
-    while recent.len() > 2 && lines.len() + facts.len() + next_block.len() + recent.len() > height {
-        recent.pop();
-    }
-    let facts_room = height.saturating_sub(lines.len() + next_block.len() + recent.len());
-    if facts.len() > facts_room && facts.first().is_some_and(|line| line.spans.is_empty()) {
-        // The separator goes before a fact does.
-        facts.remove(0);
-    }
-    facts.truncate(facts_room);
-    lines.extend(facts);
-    lines.extend(next_block);
-    lines.extend(recent);
-    // The key hint lives in the footer, one line below, so it is stated once.
-    lines.truncate(height);
-    while lines.len() < height {
-        lines.push(Line::from(""));
-    }
-
-    frame.render_widget(Paragraph::new(lines), inner);
-}
-
-/// One label/value row: the label is ink, the value carries the state.
-///
-/// `missing` and `stale` are yellow, `ready` is white. The value says what is
-/// true; the fix for a problem is a row in `next`, never a suffix here.
-fn fact_row(fact: &Fact, width: usize) -> Line<'static> {
-    let value_style = match fact.state {
-        HomeState::Ready => Style::default().fg(Color::White),
-        HomeState::Missing | HomeState::Stale => Style::default().fg(Color::Yellow),
-    };
-    Line::from(vec![
-        Span::styled(
-            format!("{:<FACT_LABEL$}", fact.label),
-            Style::default().fg(Color::DarkGray),
-        ),
-        Span::styled(
-            ellipsize(&fact.value, width.saturating_sub(FACT_LABEL)),
-            value_style,
-        ),
-    ])
-}
-
-/// Cut to the last whole word that fits, so a narrow pane ends on a word
-/// instead of half of one. A single unbroken word still falls back to a hard
-/// cut, because dropping the note entirely would hide state.
-fn ellipsize_words(text: &str, width: usize) -> String {
-    if text.chars().count() <= width {
-        return text.to_string();
-    }
-    if width == 0 {
-        return String::new();
-    }
-    let cut: String = text.chars().take(width.saturating_sub(1)).collect();
-    match cut.rfind(' ') {
-        Some(index) if index > width / 2 => format!("{}…", &cut[..index]),
-        _ => format!("{cut}…"),
-    }
+    crate::tui::home::draw(frame, area, home, cursor);
 }
 
 fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
@@ -882,10 +684,22 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
         return;
     }
 
-    app.set_viewport(inner.width as usize, inner.height as usize);
+    // One column is reserved for the scrollbar for as long as the pane exists,
+    // not only while it overflows: text that re-wraps the moment a bar appears
+    // is a screen that jumps every time a turn lands.
+    let bar = inner.width > 4;
+    let text_width = inner.width.saturating_sub(u16::from(bar));
+    app.set_viewport(text_width as usize, inner.height as usize);
 
-    let visual = app.visual_lines(inner.width as usize);
+    let visual = app.visual_lines(text_width as usize);
     let max = visual.len().saturating_sub(inner.height as usize);
+    #[cfg(test)]
+    eprintln!(
+        "DEBUG transcript area={area:?} inner={inner:?} text_width={text_width} visual={} scroll_before={} follow={}",
+        visual.len(),
+        app.scroll,
+        app.follow
+    );
     if app.follow {
         app.scroll = max;
     } else {
@@ -896,18 +710,51 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
 
     let lines: Vec<Line> = visual[start..end]
         .iter()
-        .map(|(role, text)| {
+        .map(|(role, line)| {
             let (style, glyph) = style_for(*role);
-            Line::from(vec![
-                Span::styled(glyph, style.add_modifier(Modifier::BOLD)),
-                Span::styled(text.clone(), style),
-            ])
+            let mut spans = vec![Span::styled(glyph, style.add_modifier(Modifier::BOLD))];
+            for span in &line.spans {
+                // The row's colour belongs to the row; a span that named one
+                // (inline code, say) keeps it, and every span keeps its weight.
+                let mut patched = style.add_modifier(span.style.add_modifier);
+                if let Some(fg) = span.style.fg {
+                    patched = patched.fg(fg);
+                }
+                spans.push(Span::styled(span.content.clone(), patched));
+            }
+            Line::from(spans)
         })
         .collect();
-    // Lines are already wrapped to the pane, so this is a no-op guard: if the
-    // measured width ever disagrees with the render width, text wraps instead of
-    // being silently clipped.
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    // Lines are already wrapped to the pane, so they are drawn verbatim. The
+    // wrapper used to guard against a measured/render width mismatch, but it
+    // re-wraps to the render width: a line the widget measured one column wider
+    // than the wrapper did took a second row, and those extra rows pushed the
+    // newest line out of the view exactly when following it.
+    frame.render_widget(Paragraph::new(lines), inner);
+
+    // The scrollbar is the one affordance that says "there is more" without a
+    // word: the footer only names the keys once the view has already stopped
+    // following, and a reader who cannot see a bar has no reason to press them.
+    if bar && visual.len() > inner.height as usize {
+        let mut state = ScrollbarState::new(max).position(app.scroll);
+        let track = Rect {
+            x: area.x + area.width.saturating_sub(1),
+            y: area.y,
+            width: 1,
+            height: area.height,
+        };
+        frame.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .track_symbol(Some("│"))
+                .track_style(Style::default().fg(Color::DarkGray))
+                .thumb_symbol("▐")
+                .thumb_style(Style::default().fg(Color::Cyan)),
+            track,
+            &mut state,
+        );
+    }
 }
 
 fn draw_footer(
@@ -956,10 +803,31 @@ fn draw_footer(
         Span::styled(app.input.clone(), Style::default().fg(Color::White)),
         Span::styled(ghost, Style::default().fg(Color::DarkGray)),
     ]);
-    let hint = Line::from(Span::styled(
-        ellipsize(&footer_hint(app), area.width as usize),
-        Style::default().fg(Color::DarkGray),
-    ));
+    // The model shares the hint line, right-aligned: it is the fact a person
+    // checks before typing, and a whole row for it would cost the transcript a
+    // line on every frame. On a narrow terminal the hint gives way, never the
+    // model, because the hint is discoverable in `/help` and the model is not.
+    let model = app.model.clone();
+    let model_room = if (area.width as usize) >= 60 {
+        model.chars().count()
+    } else {
+        0
+    };
+    let hint_room = (area.width as usize).saturating_sub(model_room + 1);
+    let hint_text = ellipsize(&footer_hint(app), hint_room);
+    let pad = (area.width as usize).saturating_sub(hint_text.chars().count() + model_room);
+    let hint = Line::from(vec![
+        Span::styled(hint_text, Style::default().fg(Color::DarkGray)),
+        Span::raw(" ".repeat(pad)),
+        Span::styled(
+            if model_room == 0 {
+                String::new()
+            } else {
+                model
+            },
+            Style::default().fg(Color::Cyan),
+        ),
+    ]);
     frame.render_widget(Paragraph::new(vec![Line::from(""), input_line, hint]), area);
 
     if !counter.is_empty() && (area.width as usize) > counter.chars().count() + 4 {
@@ -1002,7 +870,7 @@ fn style_for(role: EntryRole) -> (Style, &'static str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::app::App;
+    use crate::tui::app::{App, Fact, HomeState};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -1101,6 +969,22 @@ mod tests {
         let text = screen(&mut app, 80, 25);
         assert!(text.contains("QWER-1234"), "{text}");
         assert!(text.contains("device=QWER-1234"), "{text}");
+    }
+
+    #[test]
+    fn the_model_sits_beside_the_prompt_until_the_terminal_is_too_narrow() {
+        // The model is what a person checks before typing; it belongs on the
+        // footer line, not behind `/models`.
+        let mut app = App::new("s", false);
+        app.model = "kilo/reflection/beam-free".to_string();
+        let wide = screen(&mut app, 80, 24);
+        assert!(wide.contains("kilo/reflection/beam-free"), "{wide}");
+
+        // A narrow footer keeps the keys: the model is recoverable with
+        // `/models`, the key hints are not obvious anywhere else.
+        let narrow = screen(&mut app, 44, 24);
+        assert!(!narrow.contains("kilo/reflection/beam-free"), "{narrow}");
+        assert!(narrow.contains("enter"), "{narrow}");
     }
 
     fn screen(app: &mut App, width: u16, height: u16) -> String {
@@ -1430,6 +1314,40 @@ mod tests {
         assert!(text.contains("y approve"), "{text}");
     }
 
+    /// At the bottom of a long transcript the newest line is the one on screen.
+    /// A view that follows but cuts the last rows is a view that hides the
+    /// answer it just received.
+    #[test]
+    fn following_shows_the_newest_line() {
+        let mut app = App::new("s", false);
+        for index in 0..40 {
+            app.push(EntryRole::Answer, format!("filler line {index:02}"));
+        }
+        app.push(EntryRole::Answer, "the newest line must be visible");
+        let text = screen(&mut app, 120, 40);
+        assert!(text.contains("the newest line must be visible"), "{text}");
+    }
+
+    /// The same, with the markdown answer the live check resumes: a wrapped
+    /// bullet and a final paragraph are the shapes that were clipped live.
+    #[test]
+    fn following_shows_the_last_line_of_a_markdown_answer() {
+        let mut app = App::new("s", false);
+        for index in 0..40 {
+            app.push(EntryRole::Answer, format!("filler line {index:02}"));
+        }
+        app.push(
+            EntryRole::Answer,
+            "**Temporal vault**\n\nA belief is a claim with a date it became true, never a \
+             fact that floats free of one.\n\n- Impact analysis — what breaks if you change a \
+             symbol, which is exactly the question this sentence is long enough to have to \
+             answer across several wrapped lines before it finally ends here (`kg_impact`)\n\
+             - Read files directly with line ranges\n\n`kg_impact_status` is one name, never italics.",
+        );
+        let text = screen(&mut app, 120, 40);
+        assert!(text.contains("never italics"), "{text}");
+    }
+
     #[test]
     fn a_wrapped_line_never_breaks_again_on_screen() {
         // The pane is 60 wide; the glyph spends two of those columns. Wrapping
@@ -1441,7 +1359,12 @@ mod tests {
         app.push(EntryRole::Answer, long);
         let text = screen(&mut app, 60, 24);
 
-        let wrapped = crate::tui::app::wrap_text(long, 60 - crate::tui::app::GUTTER);
+        // Wrapping to the pane width instead of the text width is what made the
+        // terminal re-wrap each full line. The draw records the text width it
+        // used, and `visual_lines` takes the glyph off that.
+        // The draw spends two columns on the gutter and one on the scrollbar
+        // column it reserves; `visual_lines` then takes the glyph off that.
+        let wrapped = crate::tui::app::wrap_text(long, 60 - 2 - 1 - crate::tui::app::GUTTER);
         let rows: Vec<&str> = text
             .lines()
             .skip(1)

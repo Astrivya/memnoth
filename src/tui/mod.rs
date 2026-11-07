@@ -27,8 +27,10 @@
 //! pressed, a command finishes, or a turn reports. A TUI that re-queries SQLite
 //! four times a second would be the most expensive thing in the process.
 pub mod app;
+pub mod home;
 pub mod jobs;
 pub mod login;
+pub mod markdown;
 pub mod overlays;
 pub mod panes;
 pub mod slash;
@@ -37,8 +39,8 @@ pub mod ui;
 use anyhow::{Context, Result};
 use crossterm::cursor::Show;
 use crossterm::event::{
-    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -66,6 +68,12 @@ use crate::tui::app::{
     App, Attention, EntryRole, Fact, Home, HomeState, Parsed, PendingShell, SessionSwitch, Step,
     TasksCommand, combined_search_answer, display_path, parse_line,
 };
+/// How far one wheel notch moves the transcript.
+///
+/// Three lines is a third of a mouse notch and a comfortable touchpad flick:
+/// one event never jumps a screen, and a long answer still scrolls quickly.
+const WHEEL_LINES: usize = 3;
+
 /// What a running turn reports back to the screen.
 enum TurnEvent {
     /// One tool call the model is about to make (or made).
@@ -185,6 +193,9 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
     // Read before the first frame: the account line is part of what the screen
     // opened with, not something that appears a redraw later.
     app.account = crate::auth::signed_in_account();
+    // Where sessions are filed, named on the context rail. Resolved once here: it
+    // is a setting, and a network call per frame to spell it out would be absurd.
+    app.project = crate::projects::filed_under(ctx);
     // The dashboard's row for this conversation exists from the moment the screen
     // opens, not only after the first turn: a session a person is about to work
     // in is a session their console should show. Fire-and-forget, so a plane that
@@ -196,7 +207,16 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
     // Bracketed paste turns a paste into one event instead of a stream of
     // synthesized keys, which is the difference between an API key arriving
     // intact and one arriving with modifiers attached.
-    if let Err(error) = execute!(stdout, EnterAlternateScreen, EnableBracketedPaste) {
+    // Mouse capture is what turns a wheel or a touchpad swipe into an event: a
+    // scrollbar that no gesture moves is a picture of scrollability, not
+    // scrollability. The trade is that the terminal stops doing its own
+    // selection; most terminals still select with shift held.
+    if let Err(error) = execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableBracketedPaste,
+        EnableMouseCapture
+    ) {
         let _ = disable_raw_mode();
         return Err(error).context("cannot enter the alternate screen");
     }
@@ -393,8 +413,8 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
             .context("cannot draw the session")?;
         if event::poll(Duration::from_millis(150)).context("cannot poll the keyboard")? {
             match event::read().context("cannot read the keyboard")? {
-                // Focus, resize and mouse carry no command; the panes pick up
-                // the new size on the next draw. Paste is text: the open overlay
+                // Focus and resize carry no command; the panes pick up the new
+                // size on the next draw. Paste is text: the open overlay
                 // gets it first (an API key is always pasted into `/connect`),
                 // and with no overlay it goes in the prompt, because losing a
                 // pasted stack trace is the worst thing a terminal agent can do
@@ -408,6 +428,20 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
                     }
                 }
                 Event::Resize(_, _) => {}
+                // The wheel is the one mouse event that carries a command: a
+                // touchpad swipe is a scroll, and a visible scrollbar no gesture
+                // moves is a lie. Overlays and the brief own their own keys, so
+                // the wheel belongs to the transcript.
+                Event::Mouse(mouse) if !app.overlay_stack.has_overlay() && !app.home_showing() => {
+                    match mouse.kind {
+                        MouseEventKind::ScrollUp => app.wheel(WHEEL_LINES, true),
+                        MouseEventKind::ScrollDown => app.wheel(WHEEL_LINES, false),
+                        // Clicks, drags and horizontal scroll: nothing on this
+                        // screen is clickable, and a selectable row that a click
+                        // did not select would be worse than no pointer at all.
+                        _ => {}
+                    }
+                }
                 Event::Mouse(_) => {}
                 // Windows reports press and release; acting on both would type
                 // every character twice. Every other `Event::Key` arm below
@@ -557,8 +591,24 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
                     "this turn is still recording into the session \u{2014} cancel it, then switch"
                         .to_string(),
                 );
-            } else if let Err(error) = switch_session(ctx, &mut app, &store, &mut session, switch) {
-                app.push(EntryRole::Error, format!("{error:#}"));
+                // The prompt waited for a switch that did not happen; firing it
+                // now would file it into the conversation the person left.
+                app.pending_prompt = None;
+            } else {
+                match switch_session(ctx, &mut app, &store, &mut session, switch) {
+                    Ok(()) => {
+                        // A question typed on the brief waited for the fresh
+                        // conversation this switch just created.
+                        if let Some(prompt) = app.pending_prompt.take() {
+                            app.input = prompt;
+                            busy = submit(&mut app, ctx, &store, &mut session);
+                        }
+                    }
+                    Err(error) => {
+                        app.pending_prompt = None;
+                        app.push(EntryRole::Error, format!("{error:#}"));
+                    }
+                }
             }
         }
 
@@ -603,6 +653,13 @@ fn refresh(ctx: &AppContext, app: &mut App, session: &Session) {
     app.graph_attention = graph.attention.clone();
     app.home_cursor = 0;
     app.context = context_pane(ctx, session);
+    // The label beside the prompt: the model the next turn will actually use,
+    // including the case where it cannot run because no key is configured.
+    app.model = match provider::Settings::load(&ctx.config) {
+        Ok(settings) if settings.ready() => settings.model,
+        Ok(settings) => format!("{} · no key", settings.model),
+        Err(_) => String::new(),
+    };
 }
 
 /// Leave raw mode and the alternate screen, on every path.
@@ -612,7 +669,13 @@ impl Drop for RestoreTerminal {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
         let mut out = io::stdout();
-        let _ = execute!(out, DisableBracketedPaste, LeaveAlternateScreen, Show);
+        let _ = execute!(
+            out,
+            DisableMouseCapture,
+            DisableBracketedPaste,
+            LeaveAlternateScreen,
+            Show
+        );
         let _ = out.flush();
     }
 }
@@ -938,6 +1001,16 @@ fn handle_key(app: &mut App, key: KeyEvent, workspace_root: &Path) {
         _ => {}
     }
 }
+/// Whether a submitted prompt must open a fresh conversation first.
+///
+/// The brief is drawn over a resumed file — that is what keeps its history one
+/// `esc` away — so a question typed at the brief belongs to a new conversation,
+/// never to the file standing behind it. An empty conversation is already
+/// fresh; switching there would create a second empty file for no reason.
+fn prompt_wants_fresh_chat(app: &App) -> bool {
+    app.home_showing() && !app.entries.is_empty()
+}
+
 /// Run one submitted line, returning a turn that is now in flight.
 fn submit(
     app: &mut App,
@@ -1009,7 +1082,20 @@ fn submit(
             );
             None
         }
-        Parsed::Ask(words) => ask(app, ctx, store, session, &line, &words),
+        Parsed::Ask(words) => {
+            // A prompt typed on the brief opens a fresh conversation, always.
+            // The brief is drawn over the resumed file — that is what keeps its
+            // history one `esc` away — so answering here filed the new question
+            // into a conversation the person had only glanced at. The loop owns
+            // the session file, so the line is parked with the switch and
+            // replayed once the fresh session exists.
+            if prompt_wants_fresh_chat(app) {
+                app.pending_session = Some(SessionSwitch::New(String::new()));
+                app.pending_prompt = Some(line);
+                return None;
+            }
+            ask(app, ctx, store, session, &line, &words)
+        }
         Parsed::Search(words) => {
             local_search(app, ctx, store, session, &line, &words);
             None
@@ -1344,6 +1430,7 @@ fn finish_verb(app: &mut App, store: &SessionStore, session: &mut Session, done:
     match done.result {
         Ok(outcome) => {
             let text = answer_with_next(&outcome.text, &outcome.data);
+            refresh_filing(app, &outcome);
 
             // A list-shaped answer opens a window rather than flattening a table
             // into prose. It renders the same `data` the pipe gets, so the two
@@ -1378,6 +1465,40 @@ fn finish_verb(app: &mut App, store: &SessionStore, session: &mut Session, done:
             persist(app, store, session, &done.prompt, &format!("error: {text}"));
         }
     }
+}
+
+/// Point the rail at what a projects verb just stored.
+///
+/// The rail is where a person sees which project their sessions are filed under,
+/// so `/projects use acme` has to change it in the same breath rather than at the
+/// next launch. The answer already carries the project it wrote, which is what
+/// keeps this off the network: [`crate::projects::filed_under`] resolves a name
+/// from the org, and a round trip here would put the cloud in front of the next
+/// frame.
+fn refresh_filing(app: &mut App, outcome: &crate::output::Outcome) {
+    let name = outcome
+        .data
+        .get("project")
+        .and_then(|project| project.get("name"))
+        .and_then(|name| name.as_str());
+    app.project = match outcome.command {
+        "projects.use" => outcome
+            .data
+            .get("project_id")
+            .and_then(|id| id.as_str())
+            .map(|id| match name {
+                Some(name) => format!("{name} ({id})"),
+                None => id.to_string(),
+            }),
+        // A delete that cleared this machine's choice leaves nothing to name; a
+        // delete of any other project left the choice alone.
+        "projects.delete"
+            if outcome.data.get("unset").and_then(|unset| unset.as_bool()) == Some(true) =>
+        {
+            None
+        }
+        _ => return,
+    };
 }
 
 /// The answer plus the commands it suggests, rewritten to run in this session.
@@ -2552,6 +2673,29 @@ mod tests {
     fn an_answer_with_no_follow_ups_is_left_alone() {
         let data = serde_json::json!({});
         assert_eq!(answer_with_next("done", &data), "done");
+    }
+
+    /// A question typed on the brief is a new conversation, not a message in
+    /// the file the brief happens to be standing in front of.
+    #[test]
+    fn a_prompt_typed_on_the_brief_is_a_new_conversation_not_the_old_one() {
+        let mut app = App::new("payments", true);
+        app.home = Some(Home::default());
+        // Order matters: an entry clears `home_visible`, which is the rule that
+        // keeps the brief from covering an answer. The state under test is the
+        // one `/home` and a launch produce: history, with the brief in front.
+        app.push(EntryRole::User, "the earlier question");
+        app.home_visible = true;
+        assert!(
+            prompt_wants_fresh_chat(&app),
+            "the brief over a resumed file must not absorb the new question"
+        );
+
+        app.entries.clear();
+        assert!(
+            !prompt_wants_fresh_chat(&app),
+            "an empty conversation is already fresh: switching would create a second empty file"
+        );
     }
 
     /// A verb answers from its own thread, and the screen is usable until it does.
