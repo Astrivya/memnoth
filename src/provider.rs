@@ -42,7 +42,7 @@ use serde_json::{Value, json};
 
 use crate::cli::{KgArgs, KgCommand, VaultArgs, VaultCommand, Verb};
 use crate::context::Config;
-use memnoth_auth::get_credential_sync;
+use memnoth_auth::{account_key_sync, get_credential_sync};
 
 /// Tokens a single reply may spend. Enough for a real answer, small enough that
 /// a runaway turn is cheap.
@@ -547,10 +547,7 @@ fn resolve_api_key(kind: Kind, provider_name: Option<&str>) -> (Option<String>, 
     }
 
     if matches!(kind, Kind::Memnoth)
-        && let Some(key) = get_credential_sync("memnoth")
-            .ok()
-            .flatten()
-            .filter(|key| !key.trim().is_empty())
+        && let Some(key) = account_key_sync()
     {
         return (Some(key), Some("account sign-in".to_string()));
     }

@@ -577,13 +577,11 @@ fn run_watch_mode(
 pub fn get_cloud_client(_ctx: &AppContext) -> Result<CloudClient> {
     let mut client = CloudClient::from_env().context("Failed to create cloud client")?;
 
-    if let Ok(token) = std::env::var("MEMNOTH_API_KEY") {
-        client.set_auth_token(token);
-    } else if let Ok(token) = std::env::var("MEMNOTH_MCP_TOKEN") {
-        client.set_auth_token(token);
-    } else if let Some(token) = memnoth_auth::get_credential_sync("api_key")? {
-        // The credential store is the same source `auth login` writes, so a
-        // logged-in machine syncs without exporting anything into the shell.
+    // One lookup, not three: `account_key_sync` is the documented order
+    // (environment, keychain, file) in one place, so a machine that signed in
+    // with its keychain available syncs without anyone exporting a key. Reading
+    // the file alone here is what made that machine look signed out.
+    if let Some(token) = memnoth_auth::account_key_sync() {
         client.set_auth_token(token);
     }
 

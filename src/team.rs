@@ -17,7 +17,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::context::AppContext;
 use crate::output::Outcome;
-use memnoth_auth::get_credential_sync;
 
 /// Path to the coordination database file.
 const COORD_DB_NAME: &str = "coord.db";
@@ -73,7 +72,7 @@ fn get_cloud_client(ctx: &AppContext) -> Result<CloudClient> {
     let mut client =
         CloudClient::with_base_url(&base_url).context("failed to create cloud client")?;
 
-    let token = get_credential_sync("api_key")?
+    let token = memnoth_auth::account_key_sync()
         .ok_or_else(|| anyhow::anyhow!("not authenticated; run `mn auth login` first"))?;
 
     client.set_auth_token(token);

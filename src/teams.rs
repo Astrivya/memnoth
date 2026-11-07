@@ -17,7 +17,6 @@ use anyhow::{Context, Result};
 
 use crate::context::AppContext;
 use crate::output::Outcome;
-use memnoth_auth::get_credential_sync;
 use memnoth_cloud_client::{
     AcceptInviteResponse, CloudClient, Team, TeamDetail, TeamMember, TeamProject, TeamsResponse,
 };
@@ -30,7 +29,7 @@ pub fn join(ctx: &AppContext, args: &crate::cli::TeamsJoinArgs) -> Result<Outcom
         CloudClient::with_base_url(&base_url).context("failed to create cloud client")?;
 
     // Get auth token from credential store (synchronous)
-    let token = get_credential_sync("api_key")?
+    let token = memnoth_auth::account_key_sync()
         .ok_or_else(|| anyhow::anyhow!("not authenticated; run `mn auth login` first"))?;
 
     client.set_auth_token(token);
