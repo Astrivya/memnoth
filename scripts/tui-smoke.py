@@ -143,6 +143,8 @@ def main() -> int:
         "MEMNOTH_API_KEY",
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
+        "KILO_API_KEY",
+        "KILOCODE_API_KEY",
         "GROQ_API_KEY",
         "MEMNOTH_MODEL",
     ):
@@ -175,16 +177,42 @@ def main() -> int:
         ("approved", "y", ("approved", "curl")),
         ("help", "/help\r", ("Global", "Overlays", "Commands", "Shortcuts")),
         ("help-tab", "\t", ("Search Overlay", "Diff Overlay")),
-        ("help-closed", "\x1b", ("transcript",)),
+        ("help-closed", "\x1b", ("enter send",)),
         ("context", "/context\r", ("Beliefs", "History")),
-        ("context-closed", "\x1b", ("transcript",)),
-        ("model", "/model\r", ("Providers", "Settings")),
-        ("model-closed", "\x1b", ("transcript",)),
+        ("context-closed", "\x1b", ("enter send",)),
+        (
+            "model",
+            "/model\r",
+            ("Models", "All", "Connected", "Favorites", "Reasoning"),
+        ),
+        # `/` filters the rows rather than reaching the prompt.
+        ("model-search", "/opus", ("search: opus", "Opus")),
+        # Esc clears the search; `q` closes. Two Esc bytes in one write arrive
+        # as a single alt-esc, so the close is its own step.
+        ("model-search-cleared", "\x1b", ("search: /",)),
+        ("model-closed", "q", ("enter send",)),
+        # The key is the connection: no model or URL field on this screen.
+        (
+            "connect",
+            "/connect\r",
+            ("Connect", "providers", "status", "last test"),
+        ),
+        # `k` opens a real field, with the caret in it and no glyph pretending
+        # to be one.
+        ("connect-key-open", "k", ("key for", "paste the key", "esc cancels")),
+        # A pasted key lands in that field, not in the prompt behind it.
+        (
+            "connect-key",
+            "\x1b[200~sk-test-not-stored\x1b[201~",
+            ("key for", "chars"),
+        ),
+        ("connect-key-cancelled", "\x1b", ("providers", "esc close")),
+        ("connect-closed", "q", ("enter send",)),
         ("sessions", "/sessions\r", ("session",)),
         ("palette", "\x0b", ("Command Palette",)),
         ("palette-filter", "recall", ("/vault recall",)),
         ("palette-insert", "\r", ("/vault recall",)),
-        ("palette-closed", "\x1b", ("transcript",)),
+        ("palette-closed", "\x1b", ("enter send",)),
         ("quit", ":q\r", ()),
     ]
 
