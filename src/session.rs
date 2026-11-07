@@ -269,8 +269,8 @@ impl SessionStore {
         if !path.exists() {
             bail!("no session named \"{name}\"");
         }
-        let mut session = Session::load(&path)
-            .with_context(|| format!("cannot read {}", path.display()))?;
+        let mut session =
+            Session::load(&path).with_context(|| format!("cannot read {}", path.display()))?;
         // The file name is the identity a person types, so it wins over the
         // header id — the same rule `load_or_create` applies. Without it, a
         // session renamed on disk would be saved back under its old name.
@@ -312,8 +312,7 @@ impl SessionStore {
         if !path.exists() {
             bail!("no session named \"{name}\"");
         }
-        std::fs::remove_file(&path)
-            .with_context(|| format!("cannot delete {}", path.display()))
+        std::fs::remove_file(&path).with_context(|| format!("cannot delete {}", path.display()))
     }
 
     /// Append one exchange and write the file.
@@ -343,7 +342,11 @@ pub(crate) fn title_of(session: &Session) -> String {
     else {
         return String::new();
     };
-    let flat = first.content.split_whitespace().collect::<Vec<_>>().join(" ");
+    let flat = first
+        .content
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     let mut out = String::with_capacity(flat.len().min(80));
     for (index, ch) in flat.chars().enumerate() {
         if index >= 72 {
