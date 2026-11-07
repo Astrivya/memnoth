@@ -112,6 +112,12 @@ pub enum Verb {
     Privacy(PrivacyArgs),
     /// Billing: invoices, plan, limits.
     Billing(BillingCommands),
+    /// Cloud projects: list, create, rename, delete.
+    Projects(ProjectsArgs),
+    /// API keys for this org: list, create, revoke.
+    Keys(KeysArgs),
+    /// The organization: show, rename, members, invites.
+    Org(OrgArgs),
     /// Open a deep-link to the memnoth cloud console.
     Open(OpenArgs),
     /// Skill management: add, list, remove, run, edit.
@@ -124,6 +130,20 @@ pub enum Verb {
     Feedback(FeedbackArgs),
     /// Configure model provider: add, list, remove, test connection.
     Connect(ConnectArgs),
+    /// Automation: git hooks, GitHub Actions and CI indexing.
+    Automation(AutomationArgs),
+    /// Git worktrees: create, list, clean and diff.
+    Worktree(WorktreeArgs),
+    /// Fan a task out across isolated worktrees.
+    Batch(BatchCmdArgs),
+    /// Run one command in parallel across worktrees.
+    Parallel(ParallelArgs),
+    /// Generate command documentation from the registry.
+    Docs(DocsArgs),
+    /// Serve the graph and vault over a local HTTP API.
+    Serve(ServeArgs),
+    /// Watch files and reindex incrementally.
+    Watch(WatchArgs),
 }
 /// `mn connect` — configure model provider with API key.
 #[derive(Debug, Args)]
@@ -615,6 +635,15 @@ pub struct TeamsArgs {
 pub enum TeamsCommand {
     /// Accept an invite code and join an organization.
     Join(TeamsJoinArgs),
+    /// List the org's teams.
+    #[command(name = "list")]
+    List(TeamsListArgs),
+    /// Create a team inside the org.
+    #[command(name = "create")]
+    Create(TeamsCreateArgs),
+    /// Show one team: its people and the projects it reaches.
+    #[command(name = "members")]
+    Members(TeamsMembersArgs),
     /// Claim a task from the shared board.
     Claim(TeamClaimArgs),
     /// Release a claimed task.
@@ -641,6 +670,38 @@ pub struct TeamsJoinArgs {
     /// The invite code (XXXX-XXXX format, hyphen optional).
     #[arg(value_name = "CODE")]
     pub code: String,
+}
+
+/// Arguments for `mn teams list`.
+#[derive(Debug, Args)]
+pub struct TeamsListArgs {
+    /// Output as JSON.
+    #[arg(long, global = true)]
+    pub json: bool,
+}
+
+/// Arguments for `mn teams create`.
+#[derive(Debug, Args)]
+pub struct TeamsCreateArgs {
+    /// Team name.
+    #[arg(value_name = "NAME")]
+    pub name: String,
+
+    /// Output as JSON.
+    #[arg(long, global = true)]
+    pub json: bool,
+}
+
+/// Arguments for `mn teams members`.
+#[derive(Debug, Args)]
+pub struct TeamsMembersArgs {
+    /// Team id, as `mn teams list` reports it.
+    #[arg(value_name = "ID")]
+    pub id: String,
+
+    /// Output as JSON.
+    #[arg(long, global = true)]
+    pub json: bool,
 }
 
 /// Arguments for `mn team claim`.
@@ -1058,6 +1119,313 @@ pub struct BillingLimitsArgs {
     pub json: bool,
 }
 
+/// `mn projects` — the org's projects, as the console lists them.
+#[derive(Debug, Args)]
+pub struct ProjectsArgs {
+    #[command(subcommand)]
+    pub action: ProjectsCommand,
+}
+
+/// Project subcommands.
+#[derive(Debug, Subcommand)]
+pub enum ProjectsCommand {
+    /// List the projects this credential can see.
+    #[command(name = "list")]
+    List(ProjectsListArgs),
+    /// Create a project.
+    #[command(name = "create")]
+    Create(ProjectsCreateArgs),
+    /// Rename a project.
+    #[command(name = "rename")]
+    Rename(ProjectsRenameArgs),
+    /// Delete a project. Its sessions are kept, unassigned.
+    #[command(name = "delete")]
+    Delete(ProjectsDeleteArgs),
+}
+
+/// Arguments for `mn projects list`.
+#[derive(Debug, Args)]
+pub struct ProjectsListArgs {
+    /// Output as JSON.
+    #[arg(long, global = true)]
+    pub json: bool,
+}
+
+/// Arguments for `mn projects create`.
+#[derive(Debug, Args)]
+pub struct ProjectsCreateArgs {
+    /// Project name.
+    #[arg(value_name = "NAME")]
+    pub name: String,
+
+    /// Who can see it without a grant: `org` (default) or `restricted`.
+    #[arg(long, value_name = "SCOPE")]
+    pub visibility: Option<String>,
+
+    /// Output as JSON.
+    #[arg(long, global = true)]
+    pub json: bool,
+}
+
+/// Arguments for `mn projects rename`.
+#[derive(Debug, Args)]
+pub struct ProjectsRenameArgs {
+    /// Project id.
+    #[arg(value_name = "ID")]
+    pub id: String,
+
+    /// The new name.
+    #[arg(value_name = "NAME")]
+    pub name: String,
+
+    /// Output as JSON.
+    #[arg(long, global = true)]
+    pub json: bool,
+}
+
+/// Arguments for `mn projects delete`.
+#[derive(Debug, Args)]
+pub struct ProjectsDeleteArgs {
+    /// Project id.
+    #[arg(value_name = "ID")]
+    pub id: String,
+
+    /// Delete without asking for confirmation.
+    #[arg(long)]
+    pub yes: bool,
+
+    /// Output as JSON.
+    #[arg(long, global = true)]
+    pub json: bool,
+}
+
+/// `mn keys` — the org's API keys. Never their secrets, except once on create.
+#[derive(Debug, Args)]
+pub struct KeysArgs {
+    #[command(subcommand)]
+    pub action: KeysCommand,
+}
+
+/// Key subcommands.
+#[derive(Debug, Subcommand)]
+pub enum KeysCommand {
+    /// List keys in this org, including revoked ones.
+    #[command(name = "list")]
+    List(KeysListArgs),
+    /// Mint a key. The secret is printed once and never stored.
+    #[command(name = "create")]
+    Create(KeysCreateArgs),
+    /// Revoke one key by id.
+    #[command(name = "revoke")]
+    Revoke(KeysRevokeArgs),
+    /// Revoke every live key in the org (owner or admin).
+    #[command(name = "revoke-all")]
+    RevokeAll(KeysRevokeAllArgs),
+}
+
+/// Arguments for `mn keys list`.
+#[derive(Debug, Args)]
+pub struct KeysListArgs {
+    /// Output as JSON.
+    #[arg(long, global = true)]
+    pub json: bool,
+}
+
+/// Arguments for `mn keys create`.
+#[derive(Debug, Args)]
+pub struct KeysCreateArgs {
+    /// A label so the key can be recognised later.
+    #[arg(long, value_name = "NAME")]
+    pub name: Option<String>,
+
+    /// The key's authority (`read` | `write` | `admin`); the server decides the default.
+    #[arg(long, value_name = "SCOPE")]
+    pub scope: Option<String>,
+
+    /// Bind the key to one project id instead of the whole org.
+    #[arg(long, value_name = "ID")]
+    pub project: Option<String>,
+
+    /// Stop working after this many days.
+    #[arg(long, value_name = "DAYS")]
+    pub expires_in_days: Option<i64>,
+
+    /// Output as JSON. The secret is in the envelope, so do not pipe it to a log.
+    #[arg(long, global = true)]
+    pub json: bool,
+}
+
+/// Arguments for `mn keys revoke`.
+#[derive(Debug, Args)]
+pub struct KeysRevokeArgs {
+    /// Key id, as `mn keys list` reports it.
+    #[arg(value_name = "ID")]
+    pub id: String,
+
+    /// Output as JSON.
+    #[arg(long, global = true)]
+    pub json: bool,
+}
+
+/// Arguments for `mn keys revoke-all`.
+#[derive(Debug, Args)]
+pub struct KeysRevokeAllArgs {
+    /// Revoke every key without asking for confirmation.
+    #[arg(long)]
+    pub yes: bool,
+
+    /// Output as JSON.
+    #[arg(long, global = true)]
+    pub json: bool,
+}
+
+/// `mn org` — the tenant's identity, its roster and its pending invites.
+#[derive(Debug, Args)]
+pub struct OrgArgs {
+    #[command(subcommand)]
+    pub action: OrgCommand,
+}
+
+/// Org subcommands.
+#[derive(Debug, Subcommand)]
+pub enum OrgCommand {
+    /// Show the org: name, plan, your role, and its counts.
+    #[command(name = "show")]
+    Show(OrgShowArgs),
+    /// Rename the org (owner or admin).
+    #[command(name = "rename")]
+    Rename(OrgRenameArgs),
+    /// List the org's members.
+    #[command(name = "members")]
+    Members(OrgMembersArgs),
+    /// Add an existing account to the org by email.
+    #[command(name = "add-member")]
+    AddMember(OrgAddMemberArgs),
+    /// Change a member's role: owner, admin or member.
+    #[command(name = "set-role")]
+    SetRole(OrgSetRoleArgs),
+    /// Remove a member, their project grants and their keys.
+    #[command(name = "remove-member")]
+    RemoveMember(OrgRemoveMemberArgs),
+    /// List pending invites.
+    #[command(name = "invites")]
+    Invites(OrgInvitesArgs),
+    /// Invite someone by email; the link and code are shown once.
+    #[command(name = "invite")]
+    Invite(OrgInviteArgs),
+    /// Withdraw a pending invite.
+    #[command(name = "withdraw")]
+    Withdraw(OrgWithdrawArgs),
+}
+
+/// Arguments for `mn org show`.
+#[derive(Debug, Args)]
+pub struct OrgShowArgs {
+    /// Output as JSON.
+    #[arg(long, global = true)]
+    pub json: bool,
+}
+
+/// Arguments for `mn org rename`.
+#[derive(Debug, Args)]
+pub struct OrgRenameArgs {
+    /// The new display name.
+    #[arg(value_name = "NAME")]
+    pub name: String,
+
+    /// Output as JSON.
+    #[arg(long, global = true)]
+    pub json: bool,
+}
+
+/// Arguments for `mn org members`.
+#[derive(Debug, Args)]
+pub struct OrgMembersArgs {
+    /// Output as JSON.
+    #[arg(long, global = true)]
+    pub json: bool,
+}
+
+/// Arguments for `mn org add-member`.
+#[derive(Debug, Args)]
+pub struct OrgAddMemberArgs {
+    /// The address of an account that already exists.
+    #[arg(value_name = "EMAIL")]
+    pub email: String,
+
+    /// Role to grant: owner, admin or member (default: member).
+    #[arg(long, value_name = "ROLE")]
+    pub role: Option<String>,
+
+    /// Output as JSON.
+    #[arg(long, global = true)]
+    pub json: bool,
+}
+
+/// Arguments for `mn org set-role`.
+#[derive(Debug, Args)]
+pub struct OrgSetRoleArgs {
+    /// The member's user id, as `mn org members` reports it.
+    #[arg(value_name = "USER_ID")]
+    pub user_id: String,
+
+    /// The new role: owner, admin or member.
+    #[arg(value_name = "ROLE")]
+    pub role: String,
+
+    /// Output as JSON.
+    #[arg(long, global = true)]
+    pub json: bool,
+}
+
+/// Arguments for `mn org remove-member`.
+#[derive(Debug, Args)]
+pub struct OrgRemoveMemberArgs {
+    /// The member's user id.
+    #[arg(value_name = "USER_ID")]
+    pub user_id: String,
+
+    /// Output as JSON.
+    #[arg(long, global = true)]
+    pub json: bool,
+}
+
+/// Arguments for `mn org invites`.
+#[derive(Debug, Args)]
+pub struct OrgInvitesArgs {
+    /// Output as JSON.
+    #[arg(long, global = true)]
+    pub json: bool,
+}
+
+/// Arguments for `mn org invite`.
+#[derive(Debug, Args)]
+pub struct OrgInviteArgs {
+    /// The invitee's email address.
+    #[arg(value_name = "EMAIL")]
+    pub email: String,
+
+    /// Role the invite carries: admin or member (default: member).
+    #[arg(long, value_name = "ROLE")]
+    pub role: Option<String>,
+
+    /// Output as JSON. The link and code are in the envelope.
+    #[arg(long, global = true)]
+    pub json: bool,
+}
+
+/// Arguments for `mn org withdraw`.
+#[derive(Debug, Args)]
+pub struct OrgWithdrawArgs {
+    /// Invite id, as `mn org invites` reports it.
+    #[arg(value_name = "ID")]
+    pub id: String,
+
+    /// Output as JSON.
+    #[arg(long, global = true)]
+    pub json: bool,
+}
+
 /// `mn usage` — show usage and costs, with local reconciliation.
 #[derive(Debug, Args)]
 pub struct UsageArgs {
@@ -1295,7 +1663,12 @@ pub enum AuthCommand {
 /// Arguments for `mn auth login`.
 #[derive(Debug, Args)]
 pub struct AuthLoginArgs {
-    /// Don't open the browser automatically.
+    /// Never offer to open a browser: print the link and wait for approval.
+    ///
+    /// The default already opens nothing. `mn auth login` prints the link and
+    /// then waits for a key — Enter opens it, `c` copies it, `q` cancels — so a
+    /// browser never appears unasked. This flag is for scripts and headless
+    /// machines, where there is nobody to press one.
     #[arg(long)]
     pub no_browser: bool,
 
@@ -1669,7 +2042,11 @@ pub enum KgCommand {
         /// Symbol name (`memnoth_engine::MemoryEngine`, `MemoryEngine`, or `open_vault`).
         symbol: String,
         /// How many hops of references to follow.
-        #[arg(long, default_value_t = 2)]
+        ///
+        /// 1 is "who mentions this symbol". 2 adds a hop through symbols
+        /// declared in those files, which is a weak signal: on a real component
+        /// it turned 2 mentions into 380 rows. Ask for it deliberately.
+        #[arg(long, default_value_t = 1)]
         depth: u32,
     },
     /// Find symbols by name.
@@ -1743,6 +2120,11 @@ pub enum KgCommand {
         /// Review staged changes instead of unstaged.
         #[arg(long)]
         staged: bool,
+        /// Review what this branch adds on top of a revision (`main`, a tag, a
+        /// sha) instead of the working tree. Refused together with `--staged`:
+        /// the two ask different questions.
+        #[arg(long, value_name = "REV")]
+        base: Option<String>,
     },
     /// Tests that cover a symbol.
     TestsFor {
@@ -2067,8 +2449,12 @@ pub struct WatchArgs {
     pub debounce: u64,
 
     /// Also watch vault files for changes.
-    #[arg(long)]
-    pub vault: bool,
+    ///
+    /// Not plain `--vault`: that is the global vault *path*, and two `vault`
+    /// arguments in one command tree made clap panic on every `memnoth watch`
+    /// before it ran a line.
+    #[arg(long = "vault-changes")]
+    pub vault_changes: bool,
 
     /// Run once and exit (no continuous watch).
     #[arg(long)]
