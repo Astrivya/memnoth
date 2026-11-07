@@ -59,7 +59,11 @@ pub fn ensure_config_dir() -> anyhow::Result<PathBuf> {
 
     #[cfg(unix)]
     {
-        use std::os::unix::fs::MetadataExt;
+        // `mode` and `from_mode` are both on this trait; importing only
+        // `MetadataExt` reads the mode and then cannot set it, which compiles
+        // on Windows — where the block is not built — and fails on every host
+        // the fix was for.
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
         let metadata = std::fs::metadata(&path)?;
         let mode = metadata.mode() & 0o777;
         if mode != 0o700 {
