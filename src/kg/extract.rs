@@ -31,6 +31,12 @@ pub(crate) struct ExtractedSymbol {
     pub end_line: usize,
     /// Enclosing declaration's name, when one is open at this line.
     pub container: Option<String>,
+    /// Whether the declaration is part of the file's public surface: `pub` in
+    /// Rust, `export` in the script languages, a top-level name where the
+    /// language has no keyword for it. Reports that answer "is this dead?"
+    /// need this, because for TypeScript every local `const` otherwise looked
+    /// like an unused export.
+    pub exported: bool,
 }
 
 /// Language label for a workspace-relative path.
@@ -63,18 +69,63 @@ pub(crate) fn language_for(relative_path: &str) -> &'static str {
     }
 }
 
+/// Whether this build can read declarations out of a language.
+///
+/// `language_for` labels a file even when nothing here can parse it (`json`,
+/// `css`, `markdown` are all `other`). A caller that is about to treat a file's
+/// text as evidence has to ask this rather than compare the label to `"other"`,
+/// because `other` is also what an unrecognised extension gets.
+pub(crate) fn has_scanner(language: &str) -> bool {
+    matches!(
+        language,
+        "rust"
+            | "typescript"
+            | "tsx"
+            | "javascript"
+            | "jsx"
+            | "python"
+            | "go"
+            | "java"
+            | "csharp"
+            | "kotlin"
+            | "swift"
+            | "scala"
+            | "cpp"
+            | "c"
+            | "php"
+            | "ruby"
+    )
+}
+
 /// Extract every declaration this scanner understands from `text`.
 pub(crate) fn extract(language: &str, text: &str) -> Vec<ExtractedSymbol> {
     match language {
-        "rust" => brace_extract(text, detect_rust),
-        "typescript" | "tsx" | "javascript" | "jsx" => brace_extract(text, detect_script),
+        "rust" => brace_extract(text, detect_rust, language),
+        "typescript" | "tsx" | "javascript" | "jsx" => brace_extract(text, detect_script, language),
         "python" => extract_python(text),
-        "go" => brace_extract(text, detect_go),
+        "go" => brace_extract(text, detect_go, language),
         "java" | "csharp" | "kotlin" | "swift" | "scala" | "cpp" | "c" | "php" => {
-            brace_extract(text, detect_typed)
+            brace_extract(text, detect_typed, language)
         }
         "ruby" => extract_ruby(text),
         _ => Vec::new(),
+    }
+}
+
+/// Whether a declaration is part of its file's public surface.
+///
+/// Only the languages that spell it out get keyword detection. Python, Go and
+/// Ruby have no such keyword, so their module-level names are the surface and a
+/// nested one is not — the same rule that makes `dead-code` mean something there.
+fn is_exported(language: &str, line: &str, container: Option<&str>) -> bool {
+    let trimmed = line.trim_start();
+    match language {
+        "rust" => trimmed.starts_with("pub"),
+        "typescript" | "tsx" | "javascript" | "jsx" => trimmed.starts_with("export"),
+        "java" | "csharp" | "kotlin" | "swift" | "scala" | "cpp" | "c" | "php" => {
+            trimmed.starts_with("public") || trimmed.starts_with("export")
+        }
+        _ => container.is_none(),
     }
 }
 
@@ -82,7 +133,7 @@ pub(crate) fn extract(language: &str, text: &str) -> Vec<ExtractedSymbol> {
 type Detect = fn(&str, i32) -> Option<(String, &'static str)>;
 
 /// Walk a brace language, pairing each declaration with the line its brace closes on.
-fn brace_extract(text: &str, detect: Detect) -> Vec<ExtractedSymbol> {
+fn brace_extract(text: &str, detect: Detect, language: &str) -> Vec<ExtractedSymbol> {
     struct Frame {
         index: usize,
         parent_depth: i32,
@@ -114,6 +165,7 @@ fn brace_extract(text: &str, detect: Detect) -> Vec<ExtractedSymbol> {
                 kind,
                 line: line_number,
                 end_line: line_number,
+                exported: is_exported(language, raw, container.as_deref()),
                 container: container.clone(),
             });
             if opens > 0 {
@@ -356,17 +408,57 @@ fn detect_script(line: &str, depth: i32) -> Option<(String, &'static str)> {
     }
     // A method is only recognised inside a body, where indentation plus a trailing
     // `{` is the shape every formatter produces. Keywords are excluded so
-    // `if (x) {` cannot be stored as a declaration.
+    // `if (x) {` cannot be stored as a declaration, and the shape check below
+    // excludes calls whose argument happens to end in `{` — `useEffect(() => {`
+    // was being stored as a method called `useEffect` in every component.
     if depth > 0
         && line.ends_with('{')
         && let Some(caps) = P.script_method.captures(line)
     {
         let name = caps[1].to_string();
-        if !KEYWORDS.contains(&name.as_str()) {
+        let from_name = &line[caps.get(1).map(|m| m.start()).unwrap_or(0)..];
+        if !KEYWORDS.contains(&name.as_str()) && is_method_shape(from_name) {
             return Some((name, "method"));
         }
     }
     None
+}
+
+/// Whether a line that starts at a method's name has a *declaration* shape:
+/// `name(args) {`, optionally through a return type (`name(a): R {`).
+///
+/// A call with a function argument also ends in `{` — `useEffect(() => {` — but
+/// after its argument list comes `=>`, and a declaration never has an operator
+/// between the parameter list and the body.
+fn is_method_shape(from_name: &str) -> bool {
+    let after_name =
+        from_name.trim_start_matches(|ch: char| ch.is_alphanumeric() || ch == '_' || ch == '$');
+    let Some(after_open) = after_name.trim_start().strip_prefix('(') else {
+        return false;
+    };
+    let mut depth = 1usize;
+    let mut end = None;
+    for (index, ch) in after_open.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    end = Some(index);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(end) = end else {
+        return false;
+    };
+    let after_params = after_open[end + 1..].trim();
+    after_params.ends_with('{')
+        && !after_params.contains('=')
+        && !after_params.contains(';')
+        && !after_params.contains(')')
 }
 
 fn detect_go(line: &str, _depth: i32) -> Option<(String, &'static str)> {
@@ -459,6 +551,7 @@ fn extract_python(text: &str) -> Vec<ExtractedSymbol> {
             kind,
             line: offset + 1,
             end_line: end,
+            exported: stack.is_empty(),
             container: stack.last().map(|(_, name)| name.clone()),
         });
         stack.push((indent, name));
@@ -510,6 +603,7 @@ fn extract_ruby(text: &str) -> Vec<ExtractedSymbol> {
             // blocks would guess. One line is honest; the reference scan still
             // finds mentions.
             end_line: offset + 1,
+            exported: container.is_empty(),
             container: container.last().map(|(_, name)| name.clone()),
         });
         container.push((indent, name));
@@ -653,6 +747,28 @@ mod tests {
         assert_eq!(load.end_line, 3);
         assert_eq!(load.container.as_deref(), Some("Store"));
         assert_eq!(symbols.iter().filter(|s| s.name == "other").count(), 1);
+    }
+
+    #[test]
+    fn a_call_with_a_function_argument_is_not_a_method() {
+        let source = "function Hero() {\n  useEffect(() => {\n    go();\n  }, []);\n}\n";
+        let symbols = extract("tsx", source);
+        assert!(
+            !symbols.iter().any(|symbol| symbol.name == "useEffect"),
+            "{symbols:?}"
+        );
+        assert!(symbols.iter().any(|symbol| symbol.name == "Hero"));
+    }
+
+    #[test]
+    fn a_method_with_a_return_type_is_still_a_method() {
+        let symbols = extract("typescript", "class A {\n  load(key): Row {\n  }\n}\n");
+        assert!(
+            symbols
+                .iter()
+                .any(|symbol| symbol.name == "load" && symbol.kind == "method"),
+            "{symbols:?}"
+        );
     }
 
     #[test]

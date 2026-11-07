@@ -27,8 +27,10 @@ mod render;
 mod store;
 
 pub use render::{
-    render_callees, render_callers, render_def, render_diff_impact, render_explore, render_impact,
-    render_index, render_refs, render_search, render_status,
+    render_callees, render_callers, render_callpath, render_cycles, render_dead_code, render_def,
+    render_deps, render_diff_impact, render_explore, render_hotspots, render_impact, render_index,
+    render_outline, render_owners, render_query, render_refs, render_review, render_search,
+    render_status, render_tests_for, render_tree, render_unused_exports,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -42,7 +44,7 @@ use serde::Serialize;
 use crate::context::AppContext;
 use extract::{ExtractedSymbol, KEYWORDS};
 use memnoth_search::workspace::{SearchScope, collect_file_entries, read_text_file};
-use store::{FileRow, Graph};
+use store::{FileRow, Graph, SymbolRow};
 
 /// Files larger than this are counted but not parsed.
 ///
@@ -156,10 +158,22 @@ pub struct ImpactHit {
     pub path: String,
     /// 1-based line.
     pub line: usize,
-    /// `definition` or `reference`.
+    /// `definition`, `call`, `reference` or `caller`.
+    ///
+    /// `call` and `reference` are the same relationship seen at different
+    /// confidence: a mention whose source line reads as `name(…)` is what a
+    /// person means by "this calls that", and everything else (a type position,
+    /// a re-export, prose in a doc comment) is an incidental mention. The test
+    /// is lexical — see [`is_call_shaped`] — so `call` is evidence of a call
+    /// site, not proof of a resolved edge.
     pub kind: String,
     /// The source line, trimmed, or a description when it could not be read.
     pub context: String,
+    /// Whether this row's source line is call-shaped.
+    ///
+    /// Kept beside `kind` because a caller wants to *filter* on it without
+    /// string-matching a label: `kind` is presentation, this is the fact.
+    pub call_shaped: bool,
 }
 
 /// What depends on a symbol.
@@ -173,6 +187,13 @@ pub struct ImpactReport {
     pub definitions: Vec<ImpactHit>,
     /// Mentions outside the declaration line.
     pub references: Vec<ImpactHit>,
+    /// Of `references`, the ones that name this symbol directly. The rest are
+    /// the optional second hop, which is a much weaker claim and is counted
+    /// apart so a 2-reference symbol cannot read as 380.
+    pub references_direct: usize,
+    /// Of `references`, the ones reached through a symbol declared in a file
+    /// that mentions this one (`0` at `--depth 1`).
+    pub references_transitive: usize,
     /// Distinct files involved (definitions + references).
     pub files: usize,
     /// Referencing files that look like tests.
@@ -380,6 +401,13 @@ pub struct TreeSymbol {
 #[derive(Debug, Clone, Serialize)]
 pub struct ReviewReport {
     pub staged: bool,
+    /// The revision the review was taken against, when one was named.
+    ///
+    /// Carried because the numbers below it only mean something next to the
+    /// question that produced them: "12 files" is a different claim under
+    /// `--base main` than it is for the working tree. `null` when no revision
+    /// was named, like every other optional field in this report.
+    pub base: Option<String>,
     pub changes: Vec<ReviewChange>,
     pub summary: ReviewSummary,
 }
@@ -541,15 +569,6 @@ pub struct ImportEdge {
     pub line: usize,
 }
 
-/// Watch result.
-#[derive(Debug, Clone, Serialize)]
-pub struct WatchReport {
-    pub watching: bool,
-    pub graph_path: String,
-    pub last_index: Option<String>,
-    pub files_watched: usize,
-}
-
 /// Graph DSL query result.
 #[derive(Debug, Clone, Serialize)]
 pub struct QueryReport {
@@ -566,15 +585,6 @@ pub struct QueryResult {
     pub file: String,
     pub line: usize,
     pub metadata: serde_json::Value,
-}
-
-/// Serve result.
-#[derive(Debug, Clone, Serialize)]
-pub struct ServeReport {
-    pub listening: bool,
-    pub port: u16,
-    pub endpoint: String,
-    pub graph_path: String,
 }
 
 /// A file the walker kept, with its text already read.
@@ -723,6 +733,14 @@ pub fn index(
         }
 
         for file in &files {
+            // Mentions are evidence only from files whose declarations this build
+            // can read. Markdown prose, CSS selectors, JSON schemas and lockfiles
+            // were producing a third of the reference table on a normal frontend
+            // repo, and every one of them surfaced as an `impact` row for a word
+            // that merely appeared in a document.
+            if !extract::has_scanner(file.language) || is_generated(&file.relative) {
+                continue;
+            }
             let rewritten = extracted.contains_key(&file.relative);
             if !rewritten && !scan_all {
                 continue;
@@ -852,6 +870,8 @@ pub fn impact(ctx: &AppContext, symbol: &str, depth: u32) -> Result<ImpactReport
             resolved: false,
             definitions: Vec::new(),
             references: Vec::new(),
+            references_direct: 0,
+            references_transitive: 0,
             files: 0,
             tests: Vec::new(),
             truncated: false,
@@ -885,25 +905,37 @@ pub fn impact(ctx: &AppContext, symbol: &str, depth: u32) -> Result<ImpactReport
             path: row.path,
             line: row.line,
             kind: "definition".to_string(),
+            // A declaration names the symbol; it never calls it.
+            call_shaped: false,
         })
         .collect();
 
     let mut references: Vec<ImpactHit> = graph
         .refs_for(&names, MAX_IMPACT_REFS)?
         .into_iter()
-        .map(|row| ImpactHit {
-            context: lines.get(&row.path, row.line).unwrap_or_else(|| {
-                match row.container.as_deref() {
-                    Some(container) => format!("{} mentioned in {container}", row.name),
-                    None => format!("{} mentioned", row.name),
-                }
-            }),
-            path: row.path,
-            line: row.line,
-            kind: "reference".to_string(),
+        .map(|row| {
+            let context =
+                lines
+                    .get(&row.path, row.line)
+                    .unwrap_or_else(|| match row.container.as_deref() {
+                        Some(container) => format!("{} mentioned in {container}", row.name),
+                        None => format!("{} mentioned", row.name),
+                    });
+            let call = lines
+                .raw(&row.path, row.line)
+                .is_some_and(|source| is_call_shaped(&source, &row.name));
+            ImpactHit {
+                context,
+                path: row.path,
+                line: row.line,
+                kind: if call { "call" } else { "reference" }.to_string(),
+                call_shaped: call,
+            }
         })
         .collect();
     let mut truncated = references.len() >= MAX_IMPACT_REFS;
+    // Everything built so far names the symbol itself; the hop below does not.
+    let direct = references.len();
 
     // One extra hop: symbols declared in the files that mention this one, then
     // whoever mentions *those*. It is what turns "who calls me" into "what else
@@ -937,6 +969,9 @@ pub fn impact(ctx: &AppContext, symbol: &str, depth: u32) -> Result<ImpactReport
             if !seen.insert((row.path.clone(), row.line)) {
                 continue;
             }
+            let call = lines
+                .raw(&row.path, row.line)
+                .is_some_and(|source| is_call_shaped(&source, &row.name));
             references.push(ImpactHit {
                 context: lines
                     .get(&row.path, row.line)
@@ -944,7 +979,12 @@ pub fn impact(ctx: &AppContext, symbol: &str, depth: u32) -> Result<ImpactReport
                     .unwrap_or_else(|| format!("depth 2 · {} mentioned", row.name)),
                 path: row.path,
                 line: row.line,
+                // A second-hop row is a mention of some *other* declaration, so
+                // it stays `reference`; `call_shaped` still describes the line,
+                // and a caller reading it must keep both hops apart by index
+                // (the first `references_direct` rows are this symbol's own).
                 kind: "reference".to_string(),
+                call_shaped: call,
             });
         }
     }
@@ -963,6 +1003,8 @@ pub fn impact(ctx: &AppContext, symbol: &str, depth: u32) -> Result<ImpactReport
         symbol: symbol.to_string(),
         resolved: true,
         definitions,
+        references_direct: direct,
+        references_transitive: references.len().saturating_sub(direct),
         references,
         files: files.len(),
         tests,
@@ -1087,19 +1129,27 @@ pub fn explore(ctx: &AppContext, symbol: &str) -> Result<ExploreReport> {
     };
 
     // Get references
-    let mut references: Vec<ImpactHit> = graph
+    let references: Vec<ImpactHit> = graph
         .refs_for(&names, MAX_IMPACT_REFS)?
         .into_iter()
-        .map(|row| ImpactHit {
-            context: lines.get(&row.path, row.line).unwrap_or_else(|| {
-                match row.container.as_deref() {
-                    Some(container) => format!("{} mentioned in {container}", row.name),
-                    None => format!("{} mentioned", row.name),
-                }
-            }),
-            path: row.path,
-            line: row.line,
-            kind: "reference".to_string(),
+        .map(|row| {
+            let context =
+                lines
+                    .get(&row.path, row.line)
+                    .unwrap_or_else(|| match row.container.as_deref() {
+                        Some(container) => format!("{} mentioned in {container}", row.name),
+                        None => format!("{} mentioned", row.name),
+                    });
+            let call = lines
+                .raw(&row.path, row.line)
+                .is_some_and(|source| is_call_shaped(&source, &row.name));
+            ImpactHit {
+                context,
+                path: row.path,
+                line: row.line,
+                kind: if call { "call" } else { "reference" }.to_string(),
+                call_shaped: call,
+            }
         })
         .collect();
     let mut truncated = references.len() >= MAX_IMPACT_REFS;
@@ -1158,16 +1208,24 @@ pub fn refs(ctx: &AppContext, symbol: &str, limit: usize) -> Result<RefsReport> 
     let references: Vec<ImpactHit> = graph
         .refs_for(&names, limit)?
         .into_iter()
-        .map(|row| ImpactHit {
-            context: lines.get(&row.path, row.line).unwrap_or_else(|| {
-                match row.container.as_deref() {
-                    Some(container) => format!("{} mentioned in {container}", row.name),
-                    None => format!("{} mentioned", row.name),
-                }
-            }),
-            path: row.path,
-            line: row.line,
-            kind: "reference".to_string(),
+        .map(|row| {
+            let context =
+                lines
+                    .get(&row.path, row.line)
+                    .unwrap_or_else(|| match row.container.as_deref() {
+                        Some(container) => format!("{} mentioned in {container}", row.name),
+                        None => format!("{} mentioned", row.name),
+                    });
+            let call = lines
+                .raw(&row.path, row.line)
+                .is_some_and(|source| is_call_shaped(&source, &row.name));
+            ImpactHit {
+                context,
+                path: row.path,
+                line: row.line,
+                kind: if call { "call" } else { "reference" }.to_string(),
+                call_shaped: call,
+            }
         })
         .collect();
     let truncated = references.len() >= limit;
@@ -1304,6 +1362,27 @@ pub fn def(ctx: &AppContext, symbol: &str) -> Result<DefReport> {
     })
 }
 
+/// The error a failed `git diff` becomes.
+///
+/// Outside a work tree git writes its entire usage text to stderr; pasting that
+/// into the answer buries the one fact that matters.
+fn git_diff_error(root: &Path, stderr: &[u8]) -> anyhow::Error {
+    let stderr = String::from_utf8_lossy(stderr);
+    let first = stderr
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("git diff failed");
+    if first.to_lowercase().contains("not a git repository") {
+        anyhow::anyhow!(
+            "not a git repository: {} — this verb reads `git diff`",
+            root.display()
+        )
+    } else {
+        anyhow::anyhow!("git diff failed: {first}")
+    }
+}
+
 /// `memnoth kg diff-impact`.
 pub fn diff_impact(ctx: &AppContext, staged: bool) -> Result<DiffImpactReport> {
     use std::process::Command;
@@ -1321,10 +1400,7 @@ pub fn diff_impact(ctx: &AppContext, staged: bool) -> Result<DiffImpactReport> {
         .context("running git diff")?;
 
     if !output.status.success() {
-        bail!(
-            "git diff failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        return Err(git_diff_error(&ctx.root, &output.stderr));
     }
 
     let changed_files: Vec<String> = String::from_utf8_lossy(&output.stdout)
@@ -1362,16 +1438,23 @@ pub fn diff_impact(ctx: &AppContext, staged: bool) -> Result<DiffImpactReport> {
             let refs = graph.refs_for(&names, MAX_IMPACT_REFS)?;
             let references: Vec<ImpactHit> = refs
                 .into_iter()
-                .map(|row| ImpactHit {
-                    context: lines.get(&row.path, row.line).unwrap_or_else(|| {
+                .map(|row| {
+                    let context = lines.get(&row.path, row.line).unwrap_or_else(|| {
                         match row.container.as_deref() {
                             Some(container) => format!("{} mentioned in {container}", row.name),
                             None => format!("{} mentioned", row.name),
                         }
-                    }),
-                    path: row.path,
-                    line: row.line,
-                    kind: "reference".to_string(),
+                    });
+                    let call = lines
+                        .raw(&row.path, row.line)
+                        .is_some_and(|source| is_call_shaped(&source, &row.name));
+                    ImpactHit {
+                        context,
+                        path: row.path,
+                        line: row.line,
+                        kind: if call { "call" } else { "reference" }.to_string(),
+                        call_shaped: call,
+                    }
                 })
                 .collect();
             total_refs += references.len();
@@ -1416,16 +1499,22 @@ fn find_callers(
     let refs = graph.refs_for(names, limit)?;
     let mut out = Vec::new();
     for row in refs {
-        out.push(ImpactHit {
-            context: lines.get(&row.path, row.line).unwrap_or_else(|| {
-                match row.container.as_deref() {
+        let context =
+            lines
+                .get(&row.path, row.line)
+                .unwrap_or_else(|| match row.container.as_deref() {
                     Some(container) => format!("{} called in {container}", row.name),
                     None => format!("{} called", row.name),
-                }
-            }),
+                });
+        let call = lines
+            .raw(&row.path, row.line)
+            .is_some_and(|source| is_call_shaped(&source, &row.name));
+        out.push(ImpactHit {
+            context,
             path: row.path,
             line: row.line,
             kind: "caller".to_string(),
+            call_shaped: call,
         });
     }
     Ok(out)
@@ -1465,16 +1554,22 @@ fn find_callees(
     let refs = graph.refs_for(&callee_names, limit)?;
     let mut out = Vec::new();
     for row in refs {
-        out.push(ImpactHit {
-            context: lines.get(&row.path, row.line).unwrap_or_else(|| {
-                match row.container.as_deref() {
+        let context =
+            lines
+                .get(&row.path, row.line)
+                .unwrap_or_else(|| match row.container.as_deref() {
                     Some(container) => format!("{} calls {container}", row.name),
                     None => format!("{} calls", row.name),
-                }
-            }),
+                });
+        let call = lines
+            .raw(&row.path, row.line)
+            .is_some_and(|source| is_call_shaped(&source, &row.name));
+        out.push(ImpactHit {
+            context,
             path: row.path,
             line: row.line,
             kind: "callee".to_string(),
+            call_shaped: call,
         });
     }
     Ok(out)
@@ -1550,14 +1645,10 @@ pub fn callpath(ctx: &AppContext, from: &str, to: &str) -> Result<CallpathReport
             break;
         }
 
-        // Get callees (symbols called by current)
-        let callees = graph.names_in_files(
-            &graph
-                .definitions_for(&[current.clone()])?
-                .iter()
-                .map(|d| d.path.clone())
-                .collect::<Vec<_>>(),
-        )?;
+        // Callees are the declarations this symbol's own body mentions. Asking
+        // for every symbol in the defining *file* — what this did — missed every
+        // call that crossed a file and reported sibling declarations as calls.
+        let callees = graph.callees_of(&current)?;
 
         for callee in callees {
             if visited.insert(callee.clone()) {
@@ -1575,7 +1666,9 @@ pub fn callpath(ctx: &AppContext, from: &str, to: &str) -> Result<CallpathReport
     let nodes = path
         .iter()
         .map(|name| {
-            let defs = graph.definitions_for(&[name.clone()]).unwrap_or_default();
+            let defs = graph
+                .definitions_for(std::slice::from_ref(name))
+                .unwrap_or_default();
             let (file, line) = defs
                 .first()
                 .map(|d| (d.path.clone(), d.line))
@@ -1599,64 +1692,145 @@ pub fn callpath(ctx: &AppContext, from: &str, to: &str) -> Result<CallpathReport
 }
 
 /// `memnoth kg outline` — structural outline of a file.
+///
+/// Symbols are looked up by *path*. They used to be looked up by name, which is
+/// the wrong column: the argument is a file, so every call answered "no symbols"
+/// for a file the graph had 30 rows for. A suffix (`landing/sections.tsx`) is
+/// accepted when it matches at least one stored file, because that is how someone
+/// refers to a file they are looking at rather than typing out.
 pub fn outline(ctx: &AppContext, file: &str) -> Result<OutlineReport> {
     let graph = open_for_read(ctx)?;
+    let wanted = workspace_relative(&ctx.root, file);
+    let paths = match_paths(&graph, &wanted);
 
-    let symbols = graph
-        .definitions_for(&[file.to_string()])
-        .unwrap_or_default()
-        .into_iter()
-        .map(|row| OutlineSymbol {
-            name: row.name,
-            kind: row.kind,
-            line: row.line,
-            end_line: row.end_line,
-            container: row.container,
-            children: Vec::new(),
-        })
-        .collect();
+    let rows = graph.symbols_in_paths(&paths).unwrap_or_default();
+    let mut taken = vec![false; rows.len()];
+    let symbols = nest_outline(&rows, &mut taken, None, 0);
 
     Ok(OutlineReport {
-        file: file.to_string(),
-        language: extract::language_for(file).to_string(),
+        file: if paths.len() == 1 {
+            paths[0].clone()
+        } else {
+            wanted
+        },
+        language: extract::language_for(&graph_path_label(&paths, file)).to_string(),
         symbols,
     })
+}
+
+/// The stored paths a user-supplied file argument means.
+///
+/// Exact match first; then suffix, which is how `landing/sections.tsx` finds
+/// `src/components/memnoth/landing/sections.tsx`. An ambiguous suffix returns
+/// every match rather than picking one arbitrarily.
+fn match_paths(graph: &Graph, wanted: &str) -> Vec<String> {
+    let exact = wanted
+        .trim_start_matches("./")
+        .trim_end_matches('/')
+        .to_string();
+    let Ok(files) = graph.existing_files() else {
+        return vec![exact];
+    };
+    if files.iter().any(|row| row.path == exact) {
+        return vec![exact];
+    }
+    let suffix = format!("/{}", exact.trim_start_matches('/'));
+    let matched: Vec<String> = files
+        .into_iter()
+        .map(|row| row.path)
+        .filter(|path| path.ends_with(&suffix))
+        .collect();
+    if matched.is_empty() {
+        vec![exact]
+    } else {
+        matched
+    }
+}
+
+fn graph_path_label(paths: &[String], fallback: &str) -> String {
+    paths
+        .first()
+        .cloned()
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+/// Build the outline tree: a declaration becomes a child of whatever container
+/// is open at its line. `depth` is bounded because a scanner that mis-pairs one
+/// brace can produce a cycle (a symbol whose container is itself).
+fn nest_outline(
+    rows: &[SymbolRow],
+    taken: &mut [bool],
+    parent: Option<&str>,
+    depth: usize,
+) -> Vec<OutlineSymbol> {
+    const MAX_DEPTH: usize = 8;
+    if depth > MAX_DEPTH {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for (index, row) in rows.iter().enumerate() {
+        if taken[index] {
+            continue;
+        }
+        let matches = match (parent, row.container.as_deref()) {
+            (None, None) => true,
+            (Some(wanted), Some(container)) => container == wanted,
+            _ => false,
+        };
+        if !matches {
+            continue;
+        }
+        taken[index] = true;
+        out.push(OutlineSymbol {
+            name: row.name.clone(),
+            kind: row.kind.clone(),
+            line: row.line,
+            end_line: row.end_line,
+            container: row.container.clone(),
+            children: nest_outline(rows, taken, Some(&row.name), depth + 1),
+        });
+    }
+    out
 }
 
 /// `memnoth kg tree` — symbol tree for a directory.
 pub fn tree(ctx: &AppContext, dir: &str) -> Result<TreeReport> {
     let graph = open_for_read(ctx)?;
+    let prefix = workspace_relative(&ctx.root, dir);
 
-    // Get all files under the directory
-    let files = graph.existing_files()?;
-    let dir_prefix = dir.trim_end_matches('/');
-    let dir_files: Vec<_> = files
-        .into_iter()
-        .filter(|f| f.path.starts_with(&format!("{}/", dir_prefix)) || f.path == dir_prefix)
-        .collect();
-
-    let mut entries = Vec::new();
-    for file in dir_files {
-        let symbols = graph
-            .definitions_for(&[file.path.clone()])
-            .unwrap_or_default()
-            .into_iter()
-            .map(|row| TreeSymbol {
+    // One query for the whole subtree, grouped by file. Asking per file with a
+    // *name* lookup (what this did before) returned nothing for every file.
+    let mut by_path: BTreeMap<String, Vec<TreeSymbol>> = BTreeMap::new();
+    for row in graph.symbols_under(&prefix).unwrap_or_default() {
+        by_path
+            .entry(row.path.clone())
+            .or_default()
+            .push(TreeSymbol {
                 name: row.name,
                 kind: row.kind,
                 line: row.line,
                 container: row.container,
-            })
-            .collect();
-
-        entries.push(TreeEntry {
-            language: extract::language_for(&file.path).to_string(),
-            path: file.path,
-            symbols,
-        });
+            });
+    }
+    // A file with no declarations is still part of the tree: it is how the
+    // reader learns the graph scanned it and found nothing.
+    for file in graph.existing_files().unwrap_or_default() {
+        let under = prefix.is_empty()
+            || file.path == prefix
+            || file.path.starts_with(&format!("{prefix}/"));
+        if under {
+            by_path.entry(file.path).or_default();
+        }
     }
 
-    entries.sort_by(|a, b| a.path.cmp(&b.path));
+    let entries = by_path
+        .into_iter()
+        .map(|(path, symbols)| TreeEntry {
+            language: extract::language_for(&path).to_string(),
+            path,
+            symbols,
+        })
+        .collect();
 
     Ok(TreeReport {
         dir: dir.to_string(),
@@ -1664,15 +1838,48 @@ pub fn tree(ctx: &AppContext, dir: &str) -> Result<TreeReport> {
     })
 }
 
+/// The `git diff` line a review runs, from the flags that ask for one.
+///
+/// `--staged` and `--base` are different questions — "what have I staged" versus
+/// "what has this branch added since it diverged" — so asking both is refused
+/// rather than silently answering whichever the code happens to check first.
+///
+/// The revision is three-dot (`rev...HEAD`): a review wants what this branch
+/// added, not every change on the base branch since the fork point, which is
+/// what a two-dot diff would mix in.
+fn review_git_args(staged: bool, base: Option<&str>) -> Result<Vec<String>> {
+    if staged && base.is_some() {
+        bail!(
+            "--staged and --base ask different questions: review what is staged, or what this \
+             branch adds on top of a revision, not both"
+        );
+    }
+
+    match base.map(str::trim) {
+        Some("") => bail!("--base needs a revision, e.g. `memnoth kg review --base main`"),
+        Some(rev) => Ok(vec![
+            "diff".to_string(),
+            "--name-only".to_string(),
+            format!("{rev}...HEAD"),
+        ]),
+        None if staged => Ok(vec![
+            "diff".to_string(),
+            "--cached".to_string(),
+            "--name-only".to_string(),
+        ]),
+        None => Ok(vec!["diff".to_string(), "--name-only".to_string()]),
+    }
+}
+
 /// `memnoth kg review` — graph-aware diff review.
-pub fn review(ctx: &AppContext, staged: bool) -> Result<ReviewReport> {
+pub fn review(ctx: &AppContext, staged: bool, base: Option<&str>) -> Result<ReviewReport> {
     use std::process::Command;
 
-    let git_args = if staged {
-        vec!["diff", "--cached", "--name-only"]
-    } else {
-        vec!["diff", "--name-only"]
-    };
+    let git_args = review_git_args(staged, base)?;
+    let base = base
+        .map(str::trim)
+        .filter(|rev| !rev.is_empty())
+        .map(str::to_string);
 
     let output = Command::new("git")
         .current_dir(&ctx.root)
@@ -1681,10 +1888,7 @@ pub fn review(ctx: &AppContext, staged: bool) -> Result<ReviewReport> {
         .context("running git diff")?;
 
     if !output.status.success() {
-        bail!(
-            "git diff failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        return Err(git_diff_error(&ctx.root, &output.stderr));
     }
 
     let changed_files: Vec<String> = String::from_utf8(output.stdout)
@@ -1697,6 +1901,7 @@ pub fn review(ctx: &AppContext, staged: bool) -> Result<ReviewReport> {
     if changed_files.is_empty() {
         return Ok(ReviewReport {
             staged,
+            base,
             changes: Vec::new(),
             summary: ReviewSummary {
                 files_changed: 0,
@@ -1713,11 +1918,15 @@ pub fn review(ctx: &AppContext, staged: bool) -> Result<ReviewReport> {
     let mut total_refs = 0;
 
     for file in &changed_files {
-        let symbols = graph.definitions_for(&[file.clone()]).unwrap_or_default();
+        // By path: `file` is a path, and `definitions_for` looks names up, so
+        // this answered "0 symbols" for every file that had any.
+        let symbols = graph
+            .symbols_in_paths(std::slice::from_ref(file))
+            .unwrap_or_default();
         let mut symbol_changes = Vec::new();
 
         for symbol in &symbols {
-            let refs = graph.refs_for(&[symbol.name.clone()], MAX_IMPACT_REFS)?;
+            let refs = graph.refs_for(std::slice::from_ref(&symbol.name), MAX_IMPACT_REFS)?;
             total_refs += refs.len();
 
             symbol_changes.push(ReviewSymbol {
@@ -1740,6 +1949,7 @@ pub fn review(ctx: &AppContext, staged: bool) -> Result<ReviewReport> {
 
     Ok(ReviewReport {
         staged,
+        base,
         changes,
         summary: ReviewSummary {
             files_changed: changed_files.len(),
@@ -1773,20 +1983,49 @@ pub fn tests_for(ctx: &AppContext, symbol: &str) -> Result<TestsForReport> {
 
     let test_paths = graph.ref_paths_for(&names, MAX_TEST_REFS)?;
     let mut tests = Vec::new();
+    let mut seen: HashSet<(String, usize)> = HashSet::new();
 
     for path in test_paths {
         if is_test_path(&path) {
-            let symbols = graph.definitions_for(&[path.clone()]).unwrap_or_default();
+            // By path, not by name: a path is never a symbol name.
+            let symbols = graph
+                .symbols_in_paths(std::slice::from_ref(&path))
+                .unwrap_or_default();
             let name = symbols
                 .first()
                 .map(|s| s.name.clone())
                 .unwrap_or(path.clone());
-            tests.push(TestCoverage {
-                line: symbols.first().map(|s| s.line).unwrap_or(0),
-                path,
-                test_name: name,
-                coverage_type: "direct".to_string(),
-            });
+            let line = symbols.first().map(|s| s.line).unwrap_or(0);
+            if seen.insert((path.clone(), line)) {
+                tests.push(TestCoverage {
+                    line,
+                    path,
+                    test_name: name,
+                    coverage_type: "direct".to_string(),
+                });
+            }
+        }
+    }
+
+    // Inline tests live in the file that declares the symbol, so no separate
+    // test path mentions it: `#[cfg(test)] mod tests { … }` is the only place
+    // they appear. The index records declarations, not cfg attributes, so the
+    // declaring file is read and the block found textually. A hit is only
+    // reported when a function inside that block actually names the symbol —
+    // a `mod tests` that never mentions it is not coverage of it.
+    let declaring: BTreeSet<String> = graph
+        .definitions_for(&names)?
+        .into_iter()
+        .map(|row| row.path)
+        .collect();
+    for path in declaring {
+        if is_test_path(&path) {
+            continue;
+        }
+        for hit in inline_tests_in(&ctx.root, &path, &names) {
+            if seen.insert((hit.path.clone(), hit.line)) {
+                tests.push(hit);
+            }
         }
     }
 
@@ -1876,28 +2115,93 @@ pub fn owners(ctx: &AppContext, path: &str) -> Result<OwnersReport> {
 pub fn dead_code(ctx: &AppContext) -> Result<DeadCodeReport> {
     let graph = open_for_read(ctx)?;
 
-    // Get all public symbols (those that look like exports)
-    let all_symbols = graph.definitions_for(&[])?;
-    let all_names: HashSet<_> = all_symbols.iter().map(|s| s.name.clone()).collect();
+    // Every declaration. `definitions_for(&[])` answers nothing by contract (an
+    // empty name set is not a wildcard), so asking a whole-graph question that
+    // way made this report say "no dead code" for every repository.
+    let all_symbols = graph.all_symbols()?;
+    let all_names: Vec<String> = all_symbols.iter().map(|s| s.name.clone()).collect();
 
-    // Get all referenced names
-    let all_refs = graph.refs_for(&all_names.iter().cloned().collect::<Vec<_>>(), MAX_REFS)?;
-    let referenced: HashSet<_> = all_refs.iter().map(|r| r.name.clone()).collect();
+    // A mention only counts as a use when it happens somewhere that does not
+    // declare the name. An export referenced from its own file is still dead:
+    // nothing outside can reach it.
+    let declaring: HashMap<String, HashSet<String>> =
+        all_symbols.iter().fold(HashMap::new(), |mut map, row| {
+            map.entry(row.name.clone())
+                .or_default()
+                .insert(row.path.clone());
+            map
+        });
+    let referenced: HashSet<String> = graph
+        .refs_for(&all_names, MAX_REFS)?
+        .into_iter()
+        .filter(|row| {
+            declaring
+                .get(&row.name)
+                .is_none_or(|files| !files.contains(&row.path))
+        })
+        .map(|row| row.name)
+        .collect();
+
+    // A module is the one kind the rule above gets wrong. `pub mod store;` is
+    // reached through the crate's own module tree, and the only line that can
+    // mention it by name is inside the file that declares it (`store::open` in
+    // that same module). Discarding that mention made every self-contained
+    // module read as "an export nothing outside reaches" — which is not even
+    // the right question for a module, whose parent is the reachability edge.
+    // The exception is scoped to `mod` so functions, types and constants keep
+    // the stricter rule.
+    let mut module_names: Vec<String> = all_symbols
+        .iter()
+        .filter(|row| row.kind == "mod")
+        .map(|row| row.name.clone())
+        .collect();
+    module_names.sort();
+    module_names.dedup();
+    let module_used: HashSet<String> = if module_names.is_empty() {
+        HashSet::new()
+    } else {
+        graph
+            .refs_for(&module_names, MAX_REFS)?
+            .into_iter()
+            .filter(|row| {
+                declaring
+                    .get(&row.name)
+                    .is_some_and(|files| files.contains(&row.path))
+            })
+            .map(|row| row.name)
+            .collect()
+    };
 
     // Find unreferenced public exports (functions, structs, enums, traits, etc.)
     let mut dead = Vec::new();
     for symbol in &all_symbols {
-        if matches!(
-            symbol.kind.as_str(),
-            "function" | "struct" | "enum" | "trait" | "type" | "const" | "static" | "mod"
-        ) && !referenced.contains(&symbol.name)
+        // `exported` is what makes this a report instead of a list of every
+        // local constant in the repository. Before it was stored, a frontend
+        // repo produced 787 "unreferenced exports" that were function-locals.
+        if symbol.exported
+            && matches!(
+                symbol.kind.as_str(),
+                "function"
+                    | "class"
+                    | "interface"
+                    | "struct"
+                    | "enum"
+                    | "trait"
+                    | "type"
+                    | "const"
+                    | "static"
+                    | "mod"
+            )
+            && !referenced.contains(&symbol.name)
+            && !module_used.contains(&symbol.name)
             && symbol.name.len() >= MIN_REF_NAME_LEN
+            && !symbol.name.starts_with('_')
         {
             dead.push(DeadExport {
                 name: symbol.name.clone(),
                 kind: symbol.kind.clone(),
                 file: symbol.path.clone(),
-                is_public: !symbol.name.starts_with('_'),
+                is_public: true,
                 line: symbol.line,
             });
         }
@@ -1921,7 +2225,7 @@ pub fn cycles(ctx: &AppContext) -> Result<CyclesReport> {
     let mut imports: HashMap<String, Vec<String>> = HashMap::new();
 
     for symbol in &all_symbols {
-        let refs = graph.refs_for(&[symbol.name.clone()], 1000)?;
+        let refs = graph.refs_for(std::slice::from_ref(&symbol.name), 1000)?;
         let mut imported = Vec::new();
         for ref_row in refs {
             if ref_row.path != symbol.path {
@@ -1986,7 +2290,7 @@ pub fn cycles(ctx: &AppContext) -> Result<CyclesReport> {
     }
 
     // Deduplicate cycles
-    cycles.sort_by(|a, b| a.length.cmp(&b.length));
+    cycles.sort_by_key(|a| a.length);
     cycles.dedup_by(|a, b| a.files == b.files);
 
     let total = cycles.len();
@@ -2028,7 +2332,7 @@ pub fn hotspots(ctx: &AppContext) -> Result<HotspotsReport> {
 
         // Complexity = number of symbols in file
         let symbols = graph
-            .definitions_for(&[file.path.clone()])
+            .definitions_for(std::slice::from_ref(&file.path))
             .unwrap_or_default();
         let complexity = symbols.len();
 
@@ -2062,36 +2366,43 @@ pub fn hotspots(ctx: &AppContext) -> Result<HotspotsReport> {
 pub fn unused_exports(ctx: &AppContext) -> Result<UnusedExportsReport> {
     let graph = open_for_read(ctx)?;
 
-    // Get all public exports (pub functions, structs, etc.)
-    let all_symbols = graph.definitions_for(&[])?;
-    let all_names: HashSet<_> = all_symbols.iter().map(|s| s.name.clone()).collect();
+    // Same whole-graph read as `dead-code`: no empty name set, and a mention in
+    // the declaring file is not a use by someone else.
+    let all_symbols = graph.all_symbols()?;
+    let all_names: Vec<String> = all_symbols.iter().map(|s| s.name.clone()).collect();
+    let declaring: HashMap<String, HashSet<String>> =
+        all_symbols.iter().fold(HashMap::new(), |mut map, row| {
+            map.entry(row.name.clone())
+                .or_default()
+                .insert(row.path.clone());
+            map
+        });
+    let referenced: HashSet<String> = graph
+        .refs_for(&all_names, MAX_REFS)?
+        .into_iter()
+        .filter(|row| {
+            declaring
+                .get(&row.name)
+                .is_none_or(|files| !files.contains(&row.path))
+        })
+        .map(|row| row.name)
+        .collect();
 
-    // Get all references
-    let all_refs = graph.refs_for(&all_names.iter().cloned().collect::<Vec<_>>(), MAX_REFS)?;
-    let referenced: HashSet<_> = all_refs.iter().map(|r| r.name.clone()).collect();
-
-    // Find unused public exports
+    // Find unused public exports. Export status comes from the extractor, so a
+    // TypeScript local is not mistaken for API surface.
     let mut unused = Vec::new();
     for symbol in &all_symbols {
-        // Check if it's a public export (pub keyword would be in container or name pattern)
-        let is_pub = symbol.name.starts_with("pub ")
-            || symbol
-                .container
-                .as_ref()
-                .map(|c| c.contains("pub"))
-                .unwrap_or(false)
-            || matches!(
-                symbol.kind.as_str(),
-                "function" | "struct" | "enum" | "trait" | "type" | "const" | "static"
-            );
-
-        if is_pub && !referenced.contains(&symbol.name) && symbol.name.len() >= MIN_REF_NAME_LEN {
+        if symbol.exported
+            && !referenced.contains(&symbol.name)
+            && symbol.name.len() >= MIN_REF_NAME_LEN
+            && !symbol.name.starts_with('_')
+        {
             unused.push(UnusedExport {
                 name: symbol.name.clone(),
                 kind: symbol.kind.clone(),
                 file: symbol.path.clone(),
                 line: symbol.line,
-                visibility: "public".to_string(),
+                visibility: "exported".to_string(),
             });
         }
     }
@@ -2115,7 +2426,7 @@ pub fn deps(ctx: &AppContext, file: &str) -> Result<DepsReport> {
     let mut edges = Vec::new();
 
     for symbol in &symbols {
-        let refs = graph.refs_for(&[symbol.name.clone()], MAX_IMPACT_REFS)?;
+        let refs = graph.refs_for(std::slice::from_ref(&symbol.name), MAX_IMPACT_REFS)?;
         for ref_row in refs {
             if ref_row.path != file {
                 edges.push(ImportEdge {
@@ -2151,7 +2462,10 @@ pub fn query(ctx: &AppContext, expr: &str) -> Result<QueryReport> {
         if let Some((prefix, value)) = part.split_once(':') {
             match prefix {
                 "kind" => {
-                    let all_symbols = graph.definitions_for(&[])?;
+                    // `definitions_for(&[])` means "no names", not "all names":
+                    // asking it for a kind filter returned an empty list for
+                    // every kind the graph had. `all_symbols` is the wildcard.
+                    let all_symbols = graph.all_symbols()?;
                     for symbol in all_symbols {
                         if symbol.kind == value {
                             results.push(QueryResult {
@@ -2165,7 +2479,10 @@ pub fn query(ctx: &AppContext, expr: &str) -> Result<QueryReport> {
                     }
                 }
                 "file" => {
-                    let symbols = graph.definitions_for(&[value.to_string()])?;
+                    // A path is not a name. `match_paths` accepts an exact
+                    // stored path or an unambiguous suffix of one.
+                    let paths = match_paths(&graph, &workspace_relative(&ctx.root, value));
+                    let symbols = graph.symbols_in_paths(&paths)?;
                     for symbol in symbols {
                         results.push(QueryResult {
                             symbol: symbol.name,
@@ -2223,6 +2540,26 @@ pub fn query(ctx: &AppContext, expr: &str) -> Result<QueryReport> {
         }
     }
 
+    // A bare word is the question people actually type (`kg query Globe`). Before
+    // this, only `prefix:value` parts were read, so a plain name matched nothing
+    // and looked like a broken index rather than unparsed input.
+    let known = ["kind", "file", "name", "refs", "callers"];
+    let interpreted = expr.split_whitespace().any(|part| {
+        part.split_once(':')
+            .is_some_and(|(prefix, _)| known.contains(&prefix))
+    });
+    if !interpreted && !expr.is_empty() {
+        for symbol in graph.like_name(expr, MAX_SEARCH_SCAN)? {
+            results.push(QueryResult {
+                symbol: symbol.name,
+                kind: symbol.kind,
+                file: symbol.path,
+                line: symbol.line,
+                metadata: serde_json::json!({ "context": "name-search" }),
+            });
+        }
+    }
+
     Ok(QueryReport {
         expr: expr.to_string(),
         count: results.len(),
@@ -2230,29 +2567,6 @@ pub fn query(ctx: &AppContext, expr: &str) -> Result<QueryReport> {
     })
 }
 
-/// `memnoth kg serve` — local HTTP/JSON API server.
-pub fn serve(ctx: &AppContext, port: u16) -> Result<ServeReport> {
-    // This is a placeholder - actual server would run in background
-    // For now, just return the serve report with the address
-    Ok(ServeReport {
-        listening: true,
-        port,
-        endpoint: format!("http://127.0.0.1:{port}"),
-        graph_path: ctx.graph_path.display().to_string(),
-    })
-}
-
-/// `memnoth kg watch` — watch for changes and reindex incrementally.
-pub fn watch(ctx: &AppContext) -> Result<WatchReport> {
-    // Placeholder - would start a file watcher
-    Ok(WatchReport {
-        watching: true,
-        graph_path: ctx.graph_path.display().to_string(),
-        // A watcher would stamp each rebuild here; this build does not run one.
-        last_index: None,
-        files_watched: 0,
-    })
-}
 fn last_segment(symbol: &str) -> Option<&str> {
     symbol
         .rsplit_once("::")
@@ -2282,6 +2596,141 @@ fn is_test_path(path: &str) -> bool {
         || name.ends_with(".spec.ts")
         || name.ends_with(".spec.tsx")
         || name.ends_with(".spec.js")
+}
+
+/// Test functions inside `#[cfg(test)]` blocks of one file that name `names`.
+///
+/// A unit test lives beside the code it covers, so no separate test path mentions
+/// the symbol and the by-path list cannot see it. The index stores declarations,
+/// not cfg attributes, so the declaring file is read and the block is found by
+/// braces; a function is only reported when its body names the symbol, because a
+/// `mod tests` that never mentions it is not coverage of it. Reported as
+/// `coverage_type: "inline"` so a caller can tell it from a file under `tests/`.
+fn inline_tests_in(root: &Path, relative: &str, names: &[String]) -> Vec<TestCoverage> {
+    let Ok(text) = std::fs::read_to_string(root.join(relative)) else {
+        return Vec::new();
+    };
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out = Vec::new();
+
+    let mut index = 0usize;
+    while index < lines.len() {
+        if !lines[index].contains("#[cfg(test)]") {
+            index += 1;
+            continue;
+        }
+        // The attribute owns the `mod` under it; doc comments and other
+        // attributes may sit between, so a few lines are allowed.
+        let mut module_line = None;
+        for offset in 0..4 {
+            let Some(candidate) = lines.get(index + offset) else {
+                break;
+            };
+            let trimmed = candidate.trim_start();
+            let is_module = trimmed.starts_with("mod ")
+                || trimmed.starts_with("pub mod ")
+                || trimmed.starts_with("pub(crate) mod ")
+                || trimmed.starts_with("pub(super) mod ");
+            if is_module {
+                module_line = Some(index + offset);
+                break;
+            }
+        }
+        let Some(module_line) = module_line else {
+            index += 1;
+            continue;
+        };
+        if !lines[module_line].contains('{') {
+            // `#[cfg(test)] mod tests;` — the tests are in another file, which
+            // the by-path list already covers.
+            index = module_line + 1;
+            continue;
+        }
+
+        // The module's body, by braces: from its `{` to the matching `}`.
+        let mut depth = 0i32;
+        let mut opened = false;
+        let mut end = lines.len();
+        for (cursor, line) in lines.iter().enumerate().skip(module_line) {
+            for ch in line.chars() {
+                match ch {
+                    '{' => {
+                        depth += 1;
+                        opened = true;
+                    }
+                    '}' => depth -= 1,
+                    _ => {}
+                }
+            }
+            if opened && depth <= 0 {
+                end = cursor;
+                break;
+            }
+        }
+
+        let mut functions: Vec<(String, usize)> = Vec::new();
+        for (cursor, line) in lines.iter().enumerate().take(end).skip(module_line + 1) {
+            let trimmed = line.trim_start();
+            let rest = trimmed
+                .strip_prefix("pub(crate) ")
+                .or_else(|| trimmed.strip_prefix("pub(super) "))
+                .or_else(|| trimmed.strip_prefix("pub "))
+                .or_else(|| trimmed.strip_prefix("async "))
+                .unwrap_or(trimmed);
+            let Some(rest) = rest.strip_prefix("fn ") else {
+                continue;
+            };
+            let name: String = rest
+                .chars()
+                .take_while(|ch| ch.is_alphanumeric() || *ch == '_')
+                .collect();
+            if !name.is_empty() {
+                functions.push((name, cursor));
+            }
+        }
+
+        for (position, (name, line_index)) in functions.iter().enumerate() {
+            let body_end = functions
+                .get(position + 1)
+                .map(|(_, next)| *next)
+                .unwrap_or(end);
+            let mentions = lines[*line_index + 1..body_end]
+                .iter()
+                .any(|text| mentions_name(text, names));
+            if mentions {
+                out.push(TestCoverage {
+                    path: relative.to_string(),
+                    line: *line_index + 1,
+                    test_name: name.clone(),
+                    coverage_type: "inline".to_string(),
+                });
+            }
+        }
+
+        index = end.max(module_line + 1);
+    }
+
+    out
+}
+
+/// Whether one source line names any of `names` as a whole identifier.
+fn mentions_name(text: &str, names: &[String]) -> bool {
+    let boundary = |ch: Option<char>| ch.is_none_or(|c| !c.is_alphanumeric() && c != '_');
+    names.iter().any(|name| {
+        if name.is_empty() {
+            return false;
+        }
+        let mut from = 0usize;
+        while let Some(found) = text[from..].find(name.as_str()) {
+            let start = from + found;
+            let end = start + name.len();
+            from = end;
+            if boundary(text[..start].chars().last()) && boundary(text[end..].chars().next()) {
+                return true;
+            }
+        }
+        false
+    })
 }
 
 /// One file's mention rows, bounded by the caller's remaining budget.
@@ -2316,6 +2765,7 @@ fn scan_refs(
     let mut out = Vec::new();
     for (offset, line) in text.lines().enumerate() {
         let line_number = offset + 1;
+        let line = code_part(line);
         if line.trim().is_empty() {
             continue;
         }
@@ -2341,6 +2791,39 @@ fn scan_refs(
     out
 }
 
+/// The code part of one line: a mention inside a comment is not a call.
+///
+/// Scanning whole lines made every doc comment a reference — `kg callers` listed
+/// prose lines as callers and each blast radius counted them — so a comment-only
+/// line is dropped and a trailing `//` comment is cut, unless the `//` sits
+/// inside a double-quoted string (a URL, usually). A block comment that spans
+/// lines is still scanned on the lines that do not start with `*`.
+fn code_part(line: &str) -> &str {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with('*') || (trimmed.starts_with('#') && !trimmed.starts_with("#[")) {
+        return "";
+    }
+    let bytes = line.as_bytes();
+    let mut in_string = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if in_string {
+            if byte == b'\\' {
+                index += 1;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+        } else if byte == b'"' {
+            in_string = true;
+        } else if byte == b'/' && bytes.get(index + 1) == Some(&b'/') {
+            return &line[..index];
+        }
+        index += 1;
+    }
+    line
+}
+
 /// The innermost declaration containing `line`, if any.
 fn enclosing(ranges: &[(usize, usize, &str)], line: usize) -> Option<String> {
     ranges
@@ -2348,6 +2831,37 @@ fn enclosing(ranges: &[(usize, usize, &str)], line: usize) -> Option<String> {
         .filter(|(start, end, _)| *start <= line && line <= *end)
         .min_by_key(|(start, end, _)| end - start)
         .map(|(_, _, name)| (*name).to_string())
+}
+
+/// A file or directory argument as the graph stores it.
+///
+/// Rows are workspace-relative with forward slashes, but a shell argument is
+/// whatever the user typed: `./src/a.ts`, `src\a.ts`, or an absolute path
+/// inside the workspace. All three have to become one string before they can
+/// join a stored row, and the absolute form also has to survive the `..` a
+/// `--root` may carry.
+fn workspace_relative(root: &Path, given: &str) -> String {
+    let given = given.trim().replace('\\', "/");
+    // One leading `./` only. `trim_start_matches("./")` also ate the start of a
+    // dotfile — `.github/workflows` became `github/workflows` — and left `.`
+    // alone, so `kg tree .` matched no stored path.
+    let trimmed = given.strip_prefix("./").unwrap_or(&given);
+    let trimmed = trimmed.trim_end_matches('/');
+    if trimmed.is_empty() || trimmed == "." {
+        return String::new();
+    }
+    let trimmed = trimmed.to_string();
+    if !Path::new(&trimmed).is_absolute() {
+        return trimmed;
+    }
+    let root_absolute = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let file_absolute = Path::new(&trimmed)
+        .canonicalize()
+        .unwrap_or_else(|_| PathBuf::from(&trimmed));
+    match file_absolute.strip_prefix(&root_absolute) {
+        Ok(relative) => relative.to_string_lossy().replace('\\', "/"),
+        Err(_) => trimmed,
+    }
 }
 
 /// Walk the workspace and read every file this build indexes.
@@ -2383,6 +2897,30 @@ fn walk(root: &Path) -> Vec<SourceFile> {
     }
     files.sort_by(|a, b| a.relative.cmp(&b.relative));
     files
+}
+
+/// Whether a path is machine output rather than something a person wrote.
+///
+/// These files still contribute declarations — `api.gen.ts` is real API surface
+/// worth finding — but not mentions: a generated module repeats every name it
+/// imports thousands of times, and that is the bulk of a misleading `impact`.
+fn is_generated(relative_path: &str) -> bool {
+    let lower = relative_path.to_ascii_lowercase();
+    let name = lower.rsplit('/').next().unwrap_or(&lower);
+    name.contains(".gen.")
+        || name.contains(".generated.")
+        || name.contains(".min.")
+        || name.ends_with(".map")
+        || matches!(
+            name,
+            "package-lock.json"
+                | "pnpm-lock.yaml"
+                | "yarn.lock"
+                | "bun.lockb"
+                | "cargo.lock"
+                | "composer.lock"
+                | "poetry.lock"
+        )
 }
 
 /// Paths the walker returns but this graph never wants.
@@ -2473,6 +3011,78 @@ fn root_label(root: &Path) -> String {
     root.display().to_string().replace('\\', "/")
 }
 
+/// Whether a source line mentions `name` in a call position.
+///
+/// The graph stores where a name appears, not what it binds to, so this is a
+/// lexical reading of the one line: `name(` is a call site, `name<…>(` is a call
+/// site with an explicit type argument, and `fn name(`, `name,` or `: name>` are
+/// not. It deliberately does not try to resolve shadowing — the reports that use
+/// it already say they are blast-radius evidence, and this narrows that evidence
+/// without upgrading it.
+fn is_call_shaped(source: &str, name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let bytes = source.as_bytes();
+    let mut from = 0usize;
+    while let Some(found) = source[from..].find(name) {
+        let start = from + found;
+        let end = start + name.len();
+        from = end;
+
+        // A whole word: `recallee(` must not count as a call to `callee`.
+        let before = source[..start].chars().last();
+        if before.is_some_and(|ch| ch.is_alphanumeric() || ch == '_') {
+            continue;
+        }
+        // A declaration line names the symbol, it does not call it. `.` and `:`
+        // are allowed on the left so `store::open(` and `self.open(` still read
+        // as calls.
+        let prefix = source[..start].trim_end();
+        if prefix.ends_with("fn") || prefix.ends_with("def") || prefix.ends_with("function") {
+            continue;
+        }
+
+        // Skip whitespace, then one `::<…>` turbofish or `<…>` type-argument
+        // list: `store::open::<u32>(1)` calls `open` just as `store::open(1)`
+        // does, and Rust's parser puts the colon before the angle bracket.
+        let mut cursor = end;
+        while bytes
+            .get(cursor)
+            .is_some_and(|byte| byte.is_ascii_whitespace() || *byte == b':')
+        {
+            cursor += 1;
+        }
+        if bytes.get(cursor) == Some(&b'<') {
+            let mut depth = 0usize;
+            while let Some(&byte) = bytes.get(cursor) {
+                match byte {
+                    b'<' => depth += 1,
+                    b'>' => {
+                        depth = depth.saturating_sub(1);
+                        if depth == 0 {
+                            cursor += 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                cursor += 1;
+            }
+            while bytes
+                .get(cursor)
+                .is_some_and(|byte| byte.is_ascii_whitespace())
+            {
+                cursor += 1;
+            }
+        }
+        if bytes.get(cursor) == Some(&b'(') {
+            return true;
+        }
+    }
+    false
+}
+
 /// Source lines for impact context, read once per file touched.
 struct LineCache<'a> {
     root: &'a Path,
@@ -2485,6 +3095,24 @@ impl<'a> LineCache<'a> {
             root,
             files: HashMap::new(),
         }
+    }
+
+    /// The line exactly as written (trimmed, not shortened).
+    ///
+    /// Classification needs the real text: the display copy is ellipsized, and a
+    /// call whose `(` falls past the cut would read as a plain mention.
+    fn raw(&mut self, relative: &str, line: usize) -> Option<String> {
+        let path: PathBuf = self.root.join(relative);
+        let lines =
+            self.files.entry(relative.to_string()).or_insert_with(
+                || match std::fs::read_to_string(&path) {
+                    Ok(text) => text.lines().map(str::to_string).collect(),
+                    Err(_) => Vec::new(),
+                },
+            );
+        lines
+            .get(line.saturating_sub(1))
+            .map(|text| text.trim().to_string())
     }
 
     fn get(&mut self, relative: &str, line: usize) -> Option<String> {
@@ -2507,6 +3135,36 @@ impl<'a> LineCache<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One question per review, and the revision lands in the diff range.
+    ///
+    /// This is the part of `review` that can be wrong without git: the flags are
+    /// turned into a command line here, before anything runs.
+    #[test]
+    fn a_review_asks_one_question_at_a_time() {
+        assert!(
+            review_git_args(true, Some("main")).is_err(),
+            "--staged plus --base must be refused, not silently resolved"
+        );
+
+        // Three dots: what this branch adds, not the base branch's own changes.
+        assert_eq!(
+            review_git_args(false, Some("main")).unwrap().join(" "),
+            "diff --name-only main...HEAD"
+        );
+        assert!(
+            review_git_args(false, Some("  ")).is_err(),
+            "a blank revision is not a revision"
+        );
+        assert_eq!(
+            review_git_args(true, None).unwrap().join(" "),
+            "diff --cached --name-only"
+        );
+        assert_eq!(
+            review_git_args(false, None).unwrap().join(" "),
+            "diff --name-only"
+        );
+    }
 
     fn context(root: PathBuf) -> AppContext {
         AppContext {
@@ -2692,5 +3350,179 @@ mod tests {
         index(&ctx, false, true, &mut |_| {}).unwrap();
         let status = super::status(&ctx).unwrap();
         assert_eq!(status.files, 3, "the graph itself must not be a file row");
+    }
+
+    #[test]
+    fn a_mention_inside_a_comment_is_not_a_reference() {
+        let (dir, ctx) = fixture();
+        std::fs::write(
+            dir.path().join("src/documented.rs"),
+            "/// Calls `callee` on purpose.\n// callee is named here too\npub fn documented() -> u32 {\n    crate::callee(2)\n}\n",
+        )
+        .unwrap();
+        index(&ctx, true, true, &mut |_| {}).unwrap();
+        let report = impact(&ctx, "callee", 1).unwrap();
+        let mentions = report
+            .references
+            .iter()
+            .filter(|hit| hit.path == "src/documented.rs")
+            .count();
+        assert_eq!(
+            mentions, 1,
+            "the call counts, the two comments do not: {:?}",
+            report.references
+        );
+    }
+
+    #[test]
+    fn a_call_path_follows_calls_rather_than_the_defining_file() {
+        let (_dir, ctx) = fixture();
+        index(&ctx, false, true, &mut |_| {}).unwrap();
+
+        let direct = callpath(&ctx, "caller", "callee").unwrap();
+        assert!(direct.resolved);
+        assert_eq!(direct.hops, 1);
+
+        // `other` (src/other.rs) calls `caller`, which calls `callee`: a hop that
+        // only a real edge crosses, and one the name-per-file walk could not see.
+        let indirect = callpath(&ctx, "other", "callee").unwrap();
+        assert!(indirect.resolved, "other -> caller -> callee exists");
+        let names: Vec<&str> = indirect
+            .path
+            .iter()
+            .map(|node| node.symbol.as_str())
+            .collect();
+        assert_eq!(names, ["other", "caller", "callee"]);
+
+        // A symbol in the same file that nothing calls is not a callee.
+        let invented = callpath(&ctx, "callee", "other").unwrap();
+        assert!(!invented.resolved, "callee does not call other");
+    }
+
+    #[test]
+    fn the_tree_of_the_workspace_root_lists_the_workspace() {
+        let (_dir, ctx) = fixture();
+        index(&ctx, false, true, &mut |_| {}).unwrap();
+        let report = tree(&ctx, ".").unwrap();
+        let paths: Vec<&str> = report
+            .entries
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect();
+        assert!(paths.contains(&"src/lib.rs"), "{paths:?}");
+    }
+
+    #[test]
+    fn an_argument_becomes_a_workspace_relative_path() {
+        let (_dir, ctx) = fixture();
+        assert_eq!(workspace_relative(&ctx.root, "."), "");
+        assert_eq!(workspace_relative(&ctx.root, "./src/"), "src");
+        // A dotfile keeps its dot: only one leading `./` is stripped.
+        assert_eq!(
+            workspace_relative(&ctx.root, ".github/workflows"),
+            ".github/workflows"
+        );
+    }
+
+    #[test]
+    fn tests_for_names_the_test_that_calls_the_symbol() {
+        let (_dir, ctx) = fixture();
+        index(&ctx, false, true, &mut |_| {}).unwrap();
+        let report = tests_for(&ctx, "callee").unwrap();
+        assert!(report.resolved);
+        let hit = report.tests.first().expect("tests/it.rs calls callee");
+        assert_eq!(hit.path, "tests/it.rs");
+        assert_eq!(hit.test_name, "it_works", "the declaration, not the path");
+        assert_eq!(hit.line, 1);
+    }
+
+    /// `pub mod store` is reached through the crate tree: the file that declares
+    /// it is exactly where its name is used (`store::open_vault()` in the same
+    /// module), so that mention must not leave it looking like dead API surface.
+    #[test]
+    fn a_module_used_only_inside_its_own_file_is_not_dead_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = context(dir.path().to_path_buf());
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("src/other.rs"),
+            "pub mod store {\n    pub fn open_vault() -> u32 {\n        1\n    }\n}\n\npub fn uses_it() -> u32 {\n    store::open_vault()\n}\n",
+        )
+        .unwrap();
+        index(&ctx, false, true, &mut |_| {}).unwrap();
+
+        let report = dead_code(&ctx).unwrap();
+        assert!(
+            !report.exports.iter().any(|export| export.name == "store"),
+            "a module is used by its own file: {:?}",
+            report.exports
+        );
+    }
+
+    /// A unit test lives in the file it covers, so the by-path list never sees
+    /// it; it is coverage all the same, and is labelled as inline.
+    #[test]
+    fn tests_for_counts_inline_cfg_test_modules() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = context(dir.path().to_path_buf());
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("src/lib.rs"),
+            "pub fn covered(value: u32) -> u32 {\n    value + 1\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn it_covers() {\n        assert_eq!(covered(1), 2);\n    }\n}\n",
+        )
+        .unwrap();
+        index(&ctx, false, true, &mut |_| {}).unwrap();
+
+        let report = tests_for(&ctx, "covered").unwrap();
+        let hit = report
+            .tests
+            .iter()
+            .find(|test| test.coverage_type == "inline")
+            .expect("the inline module names `covered`");
+        assert_eq!(hit.path, "src/lib.rs");
+        assert_eq!(hit.test_name, "it_covers");
+        assert_eq!(hit.line, 10, "the test function's own line");
+    }
+
+    /// The split is lexical, and it has to be honest about both sides: a call
+    /// site is a call, a bare reference is not, and a declaration is neither.
+    #[test]
+    fn call_shape_is_lexical_and_excludes_declarations() {
+        assert!(is_call_shaped("    target(1)", "target"));
+        assert!(is_call_shaped("let x = store::open::<u32> (1);", "open"));
+        assert!(!is_call_shaped("fn target(value: u32) -> u32 {", "target"));
+        assert!(!is_call_shaped("    target", "target"));
+        assert!(!is_call_shaped("let x = recallee(1);", "callee"));
+    }
+
+    #[test]
+    fn a_call_site_is_a_call_and_a_mention_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = context(dir.path().to_path_buf());
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("src/lib.rs"),
+            "pub fn target(value: u32) -> u32 {\n    value\n}\n\npub fn by_call() -> u32 {\n    target(1)\n}\n\npub fn by_mention() -> fn(u32) -> u32 {\n    target\n}\n",
+        )
+        .unwrap();
+        index(&ctx, false, true, &mut |_| {}).unwrap();
+
+        let report = refs(&ctx, "target", 50).unwrap();
+        assert!(report.resolved);
+        let call = report
+            .references
+            .iter()
+            .find(|hit| hit.call_shaped)
+            .unwrap_or_else(|| panic!("`target(1)` is a call site: {:?}", report.references));
+        assert_eq!(call.kind, "call");
+        assert_eq!(call.line, 6);
+
+        let mention = report
+            .references
+            .iter()
+            .find(|hit| hit.line == 10)
+            .unwrap_or_else(|| panic!("`target` alone is a mention: {:?}", report.references));
+        assert!(!mention.call_shaped);
+        assert_eq!(mention.kind, "reference");
     }
 }
