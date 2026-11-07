@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-beta.2] - 2026-11-07
+
+### Added - Code graph
+
+- `kg_index` is a tool the agent may call itself, and a graph question in a
+  workspace that has never been indexed builds the graph before answering —
+  derived data, so it is not a change a person has to approve, and the answer
+  says it was indexed just now rather than reporting it as if it had been there.
+
+### Added - Projects
+
+- `mn projects unassigned` prints the sessions no project has claimed, and `mn
+  projects file <session>` files one under the project `mn projects use` stored
+  (or `--project`). It writes the same row the console's assign button does,
+  and the session screen's rail shows the project a session is filed under.
+
 ### Added - MCP
 
 - `kg_callees`, `kg_def` and `kg_refs` — direct callees of a symbol, the one
@@ -17,6 +33,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `mn stats` answers from this machine's receipts when the cloud cannot: cache
+  reads, per-turn cost and the hours worked are local facts, so a signed-out or
+  offline machine gets a report instead of a sign-in error. The cloud row is
+  still the authority for org-wide spend and both are compared on one line.
+- The transcript renders the markdown the model writes — headings, bullets that
+  keep their indent when wrapped, fenced code and inline emphasis — instead of
+  showing the asterisks.
+- The home screen lays itself out for the window it was given: a wide short
+  terminal gets a strip, a tall narrow one stacked facts, and a value wraps
+  instead of being cut at the frame edge. The scroll wheel moves the
+  transcript, and the sessions overlay keeps a preview beside (or under) the
+  list rather than making a conversation a blind pick.
+- `/update` in the session screen: the same check `memnoth update` runs.
 - `/whoami` in the session screen: the same verb as `memnoth auth whoami`, so
   the account, organisation, role and key deadline cannot be described two
   ways. `memnoth auth whoami` now reports when the key expires and how long that
@@ -25,6 +54,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `mn update` installs the release archive it verified, unpacked the way the
+  installer unpacks it, instead of running the download as an executable. The
+  manifest records a digest per platform (`targets[].sha256`); a release-level
+  digest could only ever be right for one of the five, so the older field is
+  read only as a fallback. `MEMNOTH_UPDATE_BASE` points the updater at a
+  staging host, and `mn update --version <v>` installs one named release.
 - `memnoth auth login` prints the link and waits for a key instead of opening a
   browser: Enter opens it, `c` copies it, `q` cancels. The code, the link, the
   wait and the account are each reported as they happen instead of arriving as
@@ -41,6 +76,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `kg dead` reported nothing for a Rust repository: the filter accepted only a
+  `function` kind and the extractor stores Rust functions as `fn`. Methods are
+  no longer counted as unreferenced exports either — a method is reached
+  through its type, which turned the report into 737 rows of noise.
+- `kg cycles` counted a mention as an import, and counted it backwards: the
+  edge is now caller → callee, and a name declared in more than one file is not
+  an edge at all. The report used to open with 2,156 one-symbol cycles.
+- A reference report listed the same line twice when one line mentioned a name
+  twice (`add(add(a, b), b)`); one row per place, not per mention.
+- `install.sh` died on every clean machine under `set -u`: it read the unpacked
+  binary's path before setting it. Windows also gets `memnoth.exe` and `mn.exe`,
+  which is the name the rest of the system resolves.
 - Sign-in no longer stretches its poll interval on every pending answer, which
   let an approval sit unnoticed for up to thirty seconds. The interval the
   server names is the cadence; only a rate-limited poll lengthens it.

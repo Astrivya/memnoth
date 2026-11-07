@@ -124,7 +124,7 @@
       "transport": {
         "type": "stdio"
       },
-      "version": "0.1.0-beta.1"
+      "version": "0.1.0-beta.2"
     }
   ],
   "repository": {
@@ -132,6 +132,6 @@
     "url": "https://github.com/amruthjakku/memnoth"
   },
   "title": "Memnoth",
-  "version": "0.1.0-beta.1",
+  "version": "0.1.0-beta.2",
   "websiteUrl": "https://memnoth.astrivya.ai"
 }

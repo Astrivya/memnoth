@@ -42,7 +42,7 @@ The package ships the binary, so no separate memnoth install is required. Set
 
 ```bash
 npx -y @astrivya/mcp --version
-# 0.1.0-beta.1
+# 0.1.0-beta.2
 ```
 
 The `--version` flag works completely offline without spawning the binary.

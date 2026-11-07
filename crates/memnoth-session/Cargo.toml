@@ -1,6 +1,6 @@
 [package]
 name = "memnoth-session"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 license.workspace = true
 edition = "2024"
 description = "The turn log: session file format, receipts and rewinds, with no runtime in it"
