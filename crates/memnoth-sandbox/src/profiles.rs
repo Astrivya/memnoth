@@ -146,20 +146,26 @@ impl std::str::FromStr for ProfileName {
 /// name already present globally: last-write-wins would let a malicious
 /// workspace hollow out a user/enterprise custom profile while keeping the
 /// trusted name.
-pub fn load_sandbox_config(workspace: &Path) -> SandboxConfig {
+///
+/// A file that cannot be parsed is an error, not an empty config: a typo in a
+/// deny list would otherwise be reported once on stderr and then silently
+/// dropped, which is the one failure this policy engine exists to prevent. A
+/// missing file is not an error — that is how a machine that never configured
+/// a sandbox looks.
+pub fn load_sandbox_config(workspace: &Path) -> anyhow::Result<SandboxConfig> {
     let mut config = SandboxConfig::default();
 
     let global_path = memnoth_home().join(SANDBOX_CONFIG_FILENAME);
-    if let Some(global) = load_config_file(&global_path) {
+    if let Some(global) = load_config_file(&global_path)? {
         config = global;
     }
 
     let project_path = workspace
         .join(PROJECT_CONFIG_DIR)
         .join(SANDBOX_CONFIG_FILENAME);
-    let project = load_config_file(&project_path);
+    let project = load_config_file(&project_path)?;
 
-    merge_configs(&mut config, project)
+    Ok(merge_configs(&mut config, project))
 }
 
 /// Pure merge step behind [`load_sandbox_config`] (kept separate so the
@@ -180,13 +186,17 @@ fn merge_configs(config: &mut SandboxConfig, project: Option<SandboxConfig>) -> 
 /// with different content (for surfacing a loud warning, not for merging —
 /// the global definition always wins).
 pub fn sandbox_profile_conflicts(workspace: &Path) -> Vec<String> {
-    let global =
-        load_config_file(&memnoth_home().join(SANDBOX_CONFIG_FILENAME)).unwrap_or_default();
+    let global = load_config_file(&memnoth_home().join(SANDBOX_CONFIG_FILENAME))
+        .ok()
+        .flatten()
+        .unwrap_or_default();
     let project = load_config_file(
         &workspace
             .join(PROJECT_CONFIG_DIR)
             .join(SANDBOX_CONFIG_FILENAME),
     )
+    .ok()
+    .flatten()
     .unwrap_or_default();
     mismatched_profile_names(&global, &project)
 }
@@ -217,21 +227,29 @@ fn merge_project_profiles(config: &mut SandboxConfig, project: SandboxConfig) {
     }
 }
 
-fn load_config_file(path: &Path) -> Option<SandboxConfig> {
-    let content = std::fs::read_to_string(path).ok()?;
-    if content.trim().is_empty() {
-        return Some(SandboxConfig::default());
-    }
-    match toml::from_str(&content) {
-        Ok(config) => Some(config),
-        Err(e) => {
-            eprintln!(
-                "warning: failed to parse sandbox config {}: {e}",
+fn load_config_file(path: &Path) -> anyhow::Result<Option<SandboxConfig>> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(anyhow::anyhow!(
+                "{} cannot be read ({error}); refusing to run with a policy this machine \
+                 could not state",
                 path.display()
-            );
-            None
+            ));
         }
+    };
+    if content.trim().is_empty() {
+        return Ok(Some(SandboxConfig::default()));
     }
+    let config = toml::from_str(&content).map_err(|error| {
+        anyhow::anyhow!(
+            "{} does not parse ({error}); refusing to run with a policy that was silently \
+             replaced by the defaults",
+            path.display()
+        )
+    })?;
+    Ok(Some(config))
 }
 
 impl ProfileName {
@@ -461,7 +479,7 @@ pub fn resolve_failure_must_refuse(profile: &ProfileName, workspace: &Path) -> b
     if matches!(profile, ProfileName::Off) {
         return false;
     }
-    let config = load_sandbox_config(workspace);
+    let config = load_sandbox_config(workspace).unwrap_or_default();
     match profile {
         ProfileName::Custom(name) => config.profiles.get(name).is_some_and(|p| {
             if !p.deny.is_empty() {

@@ -672,20 +672,87 @@ pub fn exec(
         None
     };
 
-    // There is no sandbox in this build: the command runs as the current user,
-    // with the caller's network and filesystem access. `--policy`, `--network`
-    // and `--write-outside-workspace` are recorded in the answer and enforced
-    // nowhere, which is why the answer says so. `--timeout` *is* enforced below.
+    // The policy is enforced here, not recorded: a one-shot verb has nobody to
+    // ask, so an `ask` is a refusal and a `deny` is a refusal. `--network` and
+    // `--write-outside-workspace` shape the plan, and whether the plan becomes a
+    // process boundary is the backend's answer — Linux with `bwrap` says yes,
+    // every other platform says why not, and the answer prints that reason
+    // instead of the word "sandboxed".
+    let profile = match policy {
+        // `balanced` is the workspace profile: writes in the tree, reads
+        // everywhere, network allowed. The strict profile seals the network.
+        "strict" => memnoth_sandbox::profiles::ProfileName::Strict,
+        "balanced" => memnoth_sandbox::profiles::ProfileName::Workspace,
+        // `permissive` is the devbox: the same tree plus the toolchain
+        // directories, still no writes outside it.
+        _ => memnoth_sandbox::profiles::ProfileName::Devbox,
+    };
+    let rules_path = ctx.home.join("rules.txt");
+    let user_rules = match std::fs::read_to_string(&rules_path) {
+        Ok(text) => memnoth_sandbox::rules::parse_rules(&text)
+            .with_context(|| format!("{}: unparseable rule file", rules_path.display()))?,
+        Err(_) => Vec::new(),
+    };
+    let rule_set = memnoth_sandbox::rules::RuleSet::with_user_rules(user_rules);
+    let line = cmd.join(" ");
+    match memnoth_sandbox::rules::decide(&rule_set, "Bash", &line) {
+        memnoth_sandbox::rules::RuleDecision::Allow { .. } => {}
+        memnoth_sandbox::rules::RuleDecision::Deny { reason, rule } => {
+            bail!("denied by policy: {reason} (rule: {rule}); the command was not run")
+        }
+        memnoth_sandbox::rules::RuleDecision::Ask { reason, rule, .. } => bail!(
+            "this command needs confirmation: {reason} (rule: {rule}); \
+             `session exec` has nobody to ask, so it was not run"
+        ),
+    }
+
+    // The same loader `!cmd` and `/tasks run` use, so the three entry points
+    // cannot disagree about the policy: the global file, the project file, and
+    // a refusal when either does not parse.
+    let config = memnoth_sandbox::profiles::load_sandbox_config(&ctx.root)
+        .context("cannot read the sandbox policy; the command was not run")?;
+    let mut plan = memnoth_sandbox::backend::BackendPlan::build(
+        memnoth_sandbox::backend::OsBackend::host(),
+        &profile,
+        &ctx.root,
+        &config,
+    )
+    .context("cannot build the sandbox plan; the command was not run")?;
+    // `--network` is the one way to open the network for a profile that seals
+    // it; it can never close one the profile left open, because a flag that
+    // looks like a permission must not also be able to revoke one.
+    if network && plan.restrict_network {
+        plan.restrict_network = false;
+    }
+    // `--write-outside-workspace` widens the writable roots to the whole
+    // filesystem. Stated as a bind of `/` so the plan says what it means.
+    if write_outside
+        && !plan
+            .read_write
+            .iter()
+            .any(|root| root == &PathBuf::from("/"))
+    {
+        plan.read_write.push(PathBuf::from("/"));
+    }
+
+    let mut argv = cmd.clone();
+    let confinement = memnoth_sandbox::confine(&plan, &ctx.root, &argv);
+    let (program, args) = match confinement.confined_argv() {
+        Some((program, args)) => (program, args),
+        None => (argv.remove(0), argv),
+    };
+
     let request = json!({
         "profile": policy,
         "network": network,
         "write_outside_workspace": write_outside,
         "timeout_seconds": timeout,
         "workspace": ctx.root.display().to_string(),
+        "sandbox": confinement.describe(),
     });
 
-    let mut child = std::process::Command::new(&cmd[0])
-        .args(&cmd[1..])
+    let mut child = std::process::Command::new(&program)
+        .args(&args)
         .current_dir(&ctx.root)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -765,8 +832,9 @@ pub fn exec(
     let data = json!({
         "command": cmd,
         "policy": policy,
-        "policy_enforced": false,
-        "sandbox": "none",
+        "policy_enforced": true,
+        "sandbox": confinement.describe(),
+        "sandbox_enforced": confinement.is_enforced(),
         "network_allowed": network,
         "write_outside_allowed": write_outside,
         "timeout_seconds": timeout,
@@ -778,10 +846,15 @@ pub fn exec(
         "session": session,
     });
 
+    // One sentence per axis, because a single "sandboxed" would be false on
+    // exactly the machines where it matters most. Policy is enforced on every
+    // platform (it is this binary's own decision); filesystem and network are
+    // enforced only where a backend exists.
+    let boundary = confinement.describe();
     let note = if timeout > 0 {
-        "note: no sandbox in this build — the command ran unconfined; policy, network and write-outside are recorded, not enforced (--timeout is enforced)"
+        format!("note: policy enforced; {boundary}; --timeout is enforced")
     } else {
-        "note: no sandbox in this build — the command ran unconfined; policy, network and write-outside are recorded, not enforced (no --timeout was set)"
+        format!("note: policy enforced; {boundary}; no --timeout was set")
     };
 
     let text = if timed_out {

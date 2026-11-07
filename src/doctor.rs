@@ -567,21 +567,57 @@ fn instruction_section(ctx: &AppContext) -> Section {
 }
 
 /// The sandbox config for this machine, read the same way the governor reads
-/// it. A missing or unparseable file is the ungoverned default, which is why
-/// this reports "0 profiles defined" rather than failing the whole report.
-fn sandbox_config(ctx: &AppContext) -> memnoth_sandbox::SandboxConfig {
-    let path = ctx.home.join("sandbox.toml");
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|text| toml::from_str(&text).ok())
-        .unwrap_or_default()
+/// it — including the refusal: a file that does not parse is reported here
+/// rather than quietly becoming "0 profiles defined", because that number is
+/// exactly what a dropped deny list looks like.
+fn sandbox_config(ctx: &AppContext) -> Result<memnoth_sandbox::SandboxConfig, String> {
+    memnoth_sandbox::profiles::load_sandbox_config(&ctx.root).map_err(|error| {
+        // A TOML parse error is several lines; the report is one line per fact,
+        // so it is flattened rather than allowed to break the section.
+        format!("{error:#}")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    })
 }
 
 fn sandbox_section(ctx: &AppContext) -> Section {
-    let config = sandbox_config(ctx);
+    let (config, config_error) = match sandbox_config(ctx) {
+        Ok(config) => (config, None),
+        Err(error) => (memnoth_sandbox::SandboxConfig::default(), Some(error)),
+    };
     let conflicts = memnoth_sandbox::profiles::sandbox_profile_conflicts(&ctx.root);
+    // The backend question is answered by asking it, not by looking at a config
+    // file: `profiles 3 defined` printed a number for a year while nothing was
+    // confined, which is how a policy engine came to read as a sandbox.
+    let confinement = match &config_error {
+        // A policy that cannot be read is not a policy: the commands that
+        // would have run under it are refused, so the report says that instead
+        // of describing a plan nobody will use.
+        Some(_) => memnoth_sandbox::Confinement::Unavailable {
+            reason: "the sandbox policy cannot be read, so commands are refused (see `policy` \
+                     above)"
+                .to_string(),
+        },
+        None => match memnoth_sandbox::backend::BackendPlan::build(
+            memnoth_sandbox::backend::OsBackend::host(),
+            &memnoth_sandbox::profiles::ProfileName::Workspace,
+            &ctx.root,
+            &config,
+        ) {
+            Ok(plan) => memnoth_sandbox::confine(&plan, &ctx.root, &["true".to_string()]),
+            Err(error) => memnoth_sandbox::Confinement::Unavailable {
+                reason: format!("{error:#}"),
+            },
+        },
+    };
     let mut text = String::from("sandbox\n");
     text.push_str(&format!("  profiles   {} defined\n", config.profiles.len()));
+    if let Some(error) = &config_error {
+        text.push_str(&format!("  policy     {error}\n"));
+    }
+    text.push_str("  rules      enforced (every !cmd, /tasks run and session exec)\n");
+    text.push_str(&format!("  backend    {}\n", confinement.describe()));
     match config.governor() {
         Some(governor) => text.push_str(&format!(
             "  governed   {governor} (project config ignored)\n"
@@ -600,6 +636,10 @@ fn sandbox_section(ctx: &AppContext) -> Section {
             "profiles": config.profiles.len(),
             "governor": config.governor(),
             "conflicts": conflicts,
+            "rules_enforced": true,
+            "backend_enforced": confinement.is_enforced(),
+            "backend": confinement.describe(),
+            "config_error": config_error,
         }),
     }
 }
