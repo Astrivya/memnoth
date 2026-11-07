@@ -142,6 +142,11 @@ pub struct Config {
     /// Vault file, when the user wants a different default than `~/.memnoth`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vault: Option<String>,
+    /// The cloud project every session from this machine is filed under, as
+    /// `mn projects use` stores it. Read by `report` and `sync` when a row does
+    /// not name one; `MEMNOTH_PROJECT_ID` still wins over it for a single run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
     /// `[provider]`: which model answers a session turn. Holds the endpoint and
     /// the model, never the key — that is `MEMNOTH_API_KEY`.
     #[serde(skip_serializing_if = "Option::is_none")]

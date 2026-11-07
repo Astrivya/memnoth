@@ -21,7 +21,8 @@ use crate::cli::{
     McpArgs, McpCommand, OrgAddMemberArgs, OrgArgs, OrgCommand, OrgInvitesArgs, OrgMembersArgs,
     OrgRemoveMemberArgs, OrgRenameArgs, OrgSetRoleArgs, OrgShowArgs, OrgWithdrawArgs, ParallelArgs,
     ProjectsArgs, ProjectsCommand, ProjectsCreateArgs, ProjectsDeleteArgs, ProjectsListArgs,
-    ProjectsRenameArgs, ServeArgs, SkillAddArgs, SkillArgs, SkillCommand, SkillEditArgs,
+    ProjectsRenameArgs, ProjectsUseArgs, ServeArgs, SkillAddArgs, SkillArgs, SkillCommand,
+    SkillEditArgs,
     SkillListArgs, SkillRemoveArgs, SkillRunArgs, StatsArgs, SyncArgs, TeamsArgs, TeamsCommand,
     TeamsCreateArgs, TeamsJoinArgs, TeamsListArgs, TeamsMembersArgs, UsageArgs, VaultArgs,
     VaultCommand, Verb, WatchArgs, WhoamiArgs, WorktreeArgs, WorktreeCleanArgs, WorktreeCommand,
@@ -2507,7 +2508,7 @@ fn parse_mcp(args: &[String]) -> Parsed {
 
 /// The project verbs, as `/projects --help` would write them.
 const PROJECTS_USAGE: &str = "usage: /projects <list | create <name> [--visibility org|restricted] | rename <id> <name> | \
-     delete <id> --yes>";
+     delete <id> --yes | use <id> | use --clear>";
 
 /// `/projects` — the org's projects, from inside the session.
 fn parse_projects(args: &[String]) -> Parsed {
@@ -2567,6 +2568,19 @@ fn parse_projects(args: &[String]) -> Parsed {
                 action: ProjectsCommand::Delete(ProjectsDeleteArgs {
                     id: id.clone(),
                     yes: true,
+                    json: false,
+                }),
+            }))
+        }
+        // A bare `use` prints the current choice; `--clear` stops filing. The
+        // id is checked against the org's list by the verb itself, so a typo is
+        // answered with the projects that exist rather than stored.
+        "use" => {
+            let (flags, positional) = split_flags(rest);
+            Parsed::Run(Verb::Projects(ProjectsArgs {
+                action: ProjectsCommand::Use(ProjectsUseArgs {
+                    id: positional.first().cloned(),
+                    clear: flags.contains_key("clear"),
                     json: false,
                 }),
             }))
@@ -3498,6 +3512,31 @@ mod tests {
             Parsed::Run(Verb::Keys(KeysArgs {
                 action: KeysCommand::List(_)
             }))
+        ));
+    }
+
+    /// `use` is the verb that files this machine's sessions, so both of its
+    /// shapes have to reach the CLI: an id to store, and `--clear` to stop.
+    #[test]
+    fn the_project_use_verb_parses_with_and_without_an_id() {
+        assert!(matches!(
+            parse_line("/projects use 4f2a"),
+            Parsed::Run(Verb::Projects(ProjectsArgs {
+                action: ProjectsCommand::Use(ProjectsUseArgs { ref id, clear: false, .. })
+            })) if id.as_deref() == Some("4f2a")
+        ));
+        assert!(matches!(
+            parse_line("/projects use --clear"),
+            Parsed::Run(Verb::Projects(ProjectsArgs {
+                action: ProjectsCommand::Use(ProjectsUseArgs { clear: true, .. })
+            }))
+        ));
+        // Bare `use` asks which project this machine is filing under.
+        assert!(matches!(
+            parse_line("/projects use"),
+            Parsed::Run(Verb::Projects(ProjectsArgs {
+                action: ProjectsCommand::Use(ProjectsUseArgs { ref id, clear: false, .. })
+            })) if id.is_none()
         ));
     }
 

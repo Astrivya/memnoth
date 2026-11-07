@@ -2,9 +2,14 @@
 //!
 //! A project is the org-scoped container a session is filed under; the console
 //! has a page for creating, renaming and deleting them, and until now the CLI
-//! could only point at that page. These four verbs speak the same routes
-//! (`/api/v1/projects`, `/api/v1/projects/{id}`) so the two surfaces cannot
-//! disagree about what a project is.
+//! could only point at that page. The five read and write verbs speak the same
+//! routes (`/api/v1/projects`, `/api/v1/projects/{id}`) so the two surfaces
+//! cannot disagree about what a project is.
+//!
+//! `use` is the one that is not about the org's list but about this machine:
+//! it stores the project id in `config.toml`, which is what every session row
+//! reads when it is reported. Without it a session lands in the console's
+//! unassigned queue, where someone has to file it by hand after the work is done.
 //!
 //! Two choices worth naming:
 //!
@@ -37,6 +42,7 @@ pub fn run(ctx: &AppContext, args: &crate::cli::ProjectsArgs) -> Result<Outcome>
             rename_project(ctx, &rename.id, &rename.name)
         }
         crate::cli::ProjectsCommand::Delete(delete) => delete_project(ctx, &delete.id, delete.yes),
+        crate::cli::ProjectsCommand::Use(args) => use_project(ctx, args),
     }
 }
 
@@ -145,14 +151,142 @@ fn delete_project(ctx: &AppContext, id: &str, yes: bool) -> Result<Outcome> {
 
     client.delete_project(id)?;
 
+    // A stored choice pointing at a project that no longer exists would refuse
+    // every later report on this machine (the plane answers 404 for an unknown
+    // project), so it is cleared together with the project it named.
+    let unset = set_project(ctx, None)
+        .ok()
+        .flatten()
+        .filter(|held| held == id);
+
     Ok(Outcome::new(
         "projects.delete",
         format!(
-            "Deleted project {label}. Its sessions are now unassigned.\nConsole: {}\n",
+            "Deleted project {label}. Its sessions are now unassigned.{}\nConsole: {}\n",
+            if unset.is_some() {
+                "\nThis machine was filing under it; that choice is cleared too."
+            } else {
+                ""
+            },
             crate::context::console_url("projects")
         ),
-        json!({ "deleted": true, "id": id }),
+        json!({ "deleted": true, "id": id, "unset": unset.is_some() }),
     ))
+}
+
+/// `mn projects use <id> [--clear]` — file every session from this machine under
+/// one project, or stop doing that.
+///
+/// The choice is written to `~/.memnoth/config.toml`, which [`crate::report`] and
+/// [`crate::sync`] read for every row they send. The id is checked against the
+/// org's list before it is stored: a typo here would otherwise surface only when
+/// a finished session was refused, with the work already done and the row left
+/// unassigned.
+fn use_project(ctx: &AppContext, args: &crate::cli::ProjectsUseArgs) -> Result<Outcome> {
+    if args.clear {
+        let previous = set_project(ctx, None)?;
+        let text = match previous {
+            Some(previous) => format!(
+                "Sessions from this machine are unassigned again (was {previous}).\n"
+            ),
+            None => "No project was set; sessions are still unassigned.\n".to_string(),
+        };
+        return Ok(Outcome::new(
+            "projects.use",
+            text,
+            json!({ "project_id": null }),
+        ));
+    }
+
+    // A bare `use` answers the question rather than changing anything: which
+    // project is this machine reporting to. It reads only the local config, so it
+    // works signed out.
+    let Some(id) = args
+        .id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    else {
+        return Ok(current_project(ctx));
+    };
+
+    let client = signed_in_client(ctx)?;
+    let response = client.projects()?;
+    let Some(project) = response.projects.iter().find(|project| project.id == id) else {
+        let known: Vec<String> = response
+            .projects
+            .iter()
+            .map(|project| format!("  {}  {}", project.id, project.name))
+            .collect();
+        anyhow::bail!(
+            "{id} is not a project this credential can see; nothing was changed.\n{}",
+            if known.is_empty() {
+                "There are no projects yet: `mn projects create <name>`.".to_string()
+            } else {
+                format!("Projects you can see:\n{}", known.join("\n"))
+            }
+        );
+    };
+
+    set_project(ctx, Some(project.id.clone()))?;
+
+    let text = format!(
+        "Sessions from this machine are now filed under {} ({}).\n\
+         Applies to every session this config file is read for; MEMNOTH_PROJECT_ID still wins \
+         over it for one run.\n",
+        project.name, project.id
+    );
+
+    Ok(Outcome::new(
+        "projects.use",
+        text,
+        json!({ "project_id": project.id, "project": project_json(project) }),
+    ))
+}
+
+/// Which project this machine is filing under, from the config and the env.
+fn current_project(ctx: &AppContext) -> Outcome {
+    let stored = ctx
+        .config()
+        .project
+        .clone()
+        .filter(|id| !id.trim().is_empty());
+    let env = std::env::var("MEMNOTH_PROJECT_ID")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    let text = match (&stored, &env) {
+        (_, Some(env)) => format!(
+            "MEMNOTH_PROJECT_ID files reports under {env}, which overrides the stored choice{}.\n",
+            stored
+                .as_deref()
+                .map(|id| format!(" ({id})"))
+                .unwrap_or_default()
+        ),
+        (Some(id), None) => format!(
+            "Sessions from this machine are filed under {id}.\n\
+             `mn projects use --clear` stops that.\n"
+        ),
+        (None, None) => "No project set: sessions report as unassigned.\n\
+                          `mn projects use <id>` files them under one.\n"
+            .to_string(),
+    };
+
+    Outcome::new(
+        "projects.use",
+        text,
+        json!({ "project_id": stored, "env_project_id": env }),
+    )
+}
+
+/// Write (or clear) the stored project, returning what was there before.
+fn set_project(ctx: &AppContext, project: Option<String>) -> Result<Option<String>> {
+    let mut config = ctx.config_mut();
+    let previous = config.project.take();
+    config.project = project;
+    config.save(&ctx.config_path)?;
+    Ok(previous)
 }
 
 /// The answer when the person says no: not a failure, so the exit code is 0.

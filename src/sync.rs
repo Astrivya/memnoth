@@ -322,7 +322,7 @@ fn collect_session_data(ctx: &AppContext, mode: SyncPrivacyMode) -> Result<Vec<S
             files: files.len() as i64,
             cost_micros,
             workspace: ctx.root.to_string_lossy().to_string(),
-            project_id: crate::report::project_id(),
+            project_id: crate::report::project_id(ctx),
             control_url: None,
             events,
             started_at: Some(crate::report::rfc3339(header.created_ms)),
