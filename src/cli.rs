@@ -2480,6 +2480,11 @@ pub struct ServeArgs {
     #[arg(long)]
     pub cors: bool,
 
+    /// Bearer token every request must present (default: `MEMNOTH_SERVE_TOKEN`,
+    /// then `~/.memnoth/serve.token`, created on first use).
+    #[arg(long, value_name = "SECRET")]
+    pub token: Option<String>,
+
     /// Path to serve the kg index from (default: workspace .memnoth/graph.db).
     #[arg(long, value_name = "PATH")]
     pub graph_path: Option<String>,

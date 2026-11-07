@@ -436,6 +436,7 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
                         port: *port,
                         host: "127.0.0.1".to_string(),
                         cors: false,
+                        token: None,
                         graph_path: None,
                         json: ctx.json,
                     },
