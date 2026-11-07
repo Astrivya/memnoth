@@ -6,29 +6,27 @@
 
 use anyhow::{Context, Result};
 use serde_json::json;
-use std::io::{self, Write};
+use std::io;
 use tokio::runtime::Runtime;
 
 use crate::context::{AppContext, Config};
 use crate::output::Outcome;
-use crate::provider::{Kind, ProviderConfig};
+use crate::provider::Kind;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use memnoth_auth::{CredentialStore, MultiCredentialStore};
-use memnoth_cloud_client::CloudClient;
-use memnoth_ui::{
-    confirm::ConfirmDialog,
-    spinner::Spinner,
-    table::{Column, Row, Table},
-};
+use memnoth_auth::MultiCredentialStore;
+use memnoth_ui::{confirm::ConfirmDialog, spinner::Spinner};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
-/// Known provider configurations with defaults
-fn known_providers() -> Vec<ProviderInfo> {
+/// Known provider configurations with defaults.
+///
+/// One list for the whole binary: `mn connect` and the `/connect` overlay both
+/// read it, so a preset added here is offered in both places.
+pub(crate) fn known_providers() -> Vec<ProviderInfo> {
     vec![
         ProviderInfo {
             name: "anthropic",
@@ -47,6 +45,14 @@ fn known_providers() -> Vec<ProviderInfo> {
             env_var: "OPENAI_API_KEY",
         },
         ProviderInfo {
+            name: "kilo",
+            display_name: "Kilo Gateway",
+            kind: Kind::Kilo,
+            default_base_url: "https://ai-gateway.kilo.ai/api/v1",
+            default_model: "anthropic/claude-sonnet-4.5",
+            env_var: "KILO_API_KEY",
+        },
+        ProviderInfo {
             name: "openrouter",
             display_name: "OpenRouter",
             kind: Kind::OpenAi,
@@ -62,17 +68,25 @@ fn known_providers() -> Vec<ProviderInfo> {
             default_model: "",
             env_var: "",
         },
+        ProviderInfo {
+            name: "memnoth",
+            display_name: "Memnoth (managed)",
+            kind: Kind::Memnoth,
+            default_base_url: "https://memnoth.astrivya.ai/api/v1",
+            default_model: "memnoth-default",
+            env_var: "MEMNOTH_API_KEY",
+        },
     ]
 }
 
 #[derive(Debug, Clone)]
-struct ProviderInfo {
-    name: &'static str,
-    display_name: &'static str,
-    kind: Kind,
-    default_base_url: &'static str,
-    default_model: &'static str,
-    env_var: &'static str,
+pub(crate) struct ProviderInfo {
+    pub(crate) name: &'static str,
+    pub(crate) display_name: &'static str,
+    pub(crate) kind: Kind,
+    pub(crate) default_base_url: &'static str,
+    pub(crate) default_model: &'static str,
+    pub(crate) env_var: &'static str,
 }
 
 /// Credential key prefix for provider API keys
@@ -85,7 +99,7 @@ fn get_store() -> Result<MultiCredentialStore> {
 }
 
 /// Store a provider's API key securely
-fn store_provider_key(name: &str, key: &str) -> Result<()> {
+pub(crate) fn store_provider_key(name: &str, key: &str) -> Result<()> {
     let store = get_store()?;
     let key_name = format!("{}{}", PROVIDER_KEY_PREFIX, name);
     let rt = Runtime::new()?;
@@ -94,7 +108,7 @@ fn store_provider_key(name: &str, key: &str) -> Result<()> {
 }
 
 /// Get a provider's API key
-fn get_provider_key(name: &str) -> Result<Option<String>> {
+pub(crate) fn get_provider_key(name: &str) -> Result<Option<String>> {
     let store = get_store()?;
     let key_name = format!("{}{}", PROVIDER_KEY_PREFIX, name);
     let rt = Runtime::new()?;
@@ -103,7 +117,7 @@ fn get_provider_key(name: &str) -> Result<Option<String>> {
 }
 
 /// Remove a provider's API key
-fn remove_provider_key(name: &str) -> Result<()> {
+pub(crate) fn remove_provider_key(name: &str) -> Result<()> {
     let store = get_store()?;
     let key_name = format!("{}{}", PROVIDER_KEY_PREFIX, name);
     let rt = Runtime::new()?;
@@ -157,7 +171,7 @@ fn connect_add_non_interactive(
     // Update config.toml
     let config_path = &ctx.config_path;
     let mut config: Config = if config_path.exists() {
-        let content = std::fs::read_to_string(&config_path)?;
+        let content = std::fs::read_to_string(config_path)?;
         toml::from_str(&content).context("Failed to parse config.toml")?
     } else {
         Config::default()
@@ -165,6 +179,7 @@ fn connect_add_non_interactive(
 
     let mut provider_config = config.provider.unwrap_or_default();
     provider_config.kind = Some(provider_info.kind.name().to_string());
+    provider_config.name = Some(provider_info.name.to_string());
     provider_config.model = args
         .model
         .clone()
@@ -180,7 +195,7 @@ fn connect_add_non_interactive(
     let base_url = provider_config.base_url.clone();
 
     config.provider = Some(provider_config);
-    config.save(&config_path)?;
+    config.save(config_path)?;
 
     let text = format!(
         "Provider '{}' configured successfully.\nConfig updated: {}",
@@ -241,7 +256,7 @@ fn connect_add_interactive(ctx: &AppContext, args: &crate::cli::ConnectAddArgs) 
     // Update config.toml
     let config_path = &ctx.config_path;
     let mut config: Config = if config_path.exists() {
-        let content = std::fs::read_to_string(&config_path)?;
+        let content = std::fs::read_to_string(config_path)?;
         toml::from_str(&content).context("Failed to parse config.toml")?
     } else {
         Config::default()
@@ -249,6 +264,7 @@ fn connect_add_interactive(ctx: &AppContext, args: &crate::cli::ConnectAddArgs) 
 
     let mut provider_config = config.provider.unwrap_or_default();
     provider_config.kind = Some(provider_info.kind.name().to_string());
+    provider_config.name = Some(provider_info.name.to_string());
     provider_config.model = args
         .model
         .clone()
@@ -262,7 +278,7 @@ fn connect_add_interactive(ctx: &AppContext, args: &crate::cli::ConnectAddArgs) 
     let base_url = provider_config.base_url.clone();
 
     config.provider = Some(provider_config);
-    config.save(&config_path)?;
+    config.save(config_path)?;
 
     // Cleanup terminal
     disable_raw_mode()?;
@@ -334,23 +350,21 @@ fn select_provider_tui(
             f.render_widget(list, area);
         })?;
 
-        if let Event::Key(key) = event::read()? {
-            if key.kind == KeyEventKind::Press {
-                match key.code {
-                    KeyCode::Up => {
-                        if selected > 0 {
-                            selected -= 1;
-                        }
-                    }
-                    KeyCode::Down => {
-                        if selected < providers.len() - 1 {
-                            selected += 1;
-                        }
-                    }
-                    KeyCode::Enter => return Ok(selected),
-                    KeyCode::Esc => anyhow::bail!("Cancelled"),
-                    _ => {}
+        if let Event::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press
+        {
+            match key.code {
+                KeyCode::Up => {
+                    selected = selected.saturating_sub(1);
                 }
+                KeyCode::Down => {
+                    if selected < providers.len() - 1 {
+                        selected += 1;
+                    }
+                }
+                KeyCode::Enter => return Ok(selected),
+                KeyCode::Esc => anyhow::bail!("Cancelled"),
+                _ => {}
             }
         }
     }
@@ -365,10 +379,10 @@ fn get_api_key_tui(
     let env_var = provider_info.env_var;
 
     // Check if key exists in environment
-    if !env_var.is_empty() {
-        if let Ok(env_key) = std::env::var(env_var) {
-            input = env_key;
-        }
+    if !env_var.is_empty()
+        && let Ok(env_key) = std::env::var(env_var)
+    {
+        input = env_key;
     }
 
     loop {
@@ -416,21 +430,21 @@ fn get_api_key_tui(
             f.render_widget(paragraph, area);
         })?;
 
-        if let Event::Key(key) = event::read()? {
-            if key.kind == KeyEventKind::Press {
-                match key.code {
-                    KeyCode::Char(c) => input.push(c),
-                    KeyCode::Backspace => {
-                        input.pop();
-                    }
-                    KeyCode::Enter => {
-                        if !input.is_empty() {
-                            return Ok(input);
-                        }
-                    }
-                    KeyCode::Esc => anyhow::bail!("Cancelled"),
-                    _ => {}
+        if let Event::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press
+        {
+            match key.code {
+                KeyCode::Char(c) => input.push(c),
+                KeyCode::Backspace => {
+                    input.pop();
                 }
+                KeyCode::Enter => {
+                    if !input.is_empty() {
+                        return Ok(input);
+                    }
+                }
+                KeyCode::Esc => anyhow::bail!("Cancelled"),
+                _ => {}
             }
         }
     }
@@ -459,12 +473,12 @@ fn test_connection_tui(
         })?;
 
         // Run test in background check
-        if event::poll(std::time::Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press && key.code == KeyCode::Esc {
-                    anyhow::bail!("Cancelled");
-                }
-            }
+        if event::poll(std::time::Duration::from_millis(50))?
+            && let Event::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press
+            && key.code == KeyCode::Esc
+        {
+            anyhow::bail!("Cancelled");
         }
 
         // Actually test the connection (run once)
@@ -508,10 +522,10 @@ fn test_connection_tui(
 
                     // Wait for key press
                     loop {
-                        if let Event::Key(key) = event::read()? {
-                            if key.kind == KeyEventKind::Press {
-                                break;
-                            }
+                        if let Event::Key(key) = event::read()?
+                            && key.kind == KeyEventKind::Press
+                        {
+                            break;
                         }
                     }
                     return Ok(());
@@ -548,13 +562,13 @@ fn test_connection_tui(
 
                     // Wait for key press
                     loop {
-                        if let Event::Key(key) = event::read()? {
-                            if key.kind == KeyEventKind::Press {
-                                match key.code {
-                                    KeyCode::Esc => anyhow::bail!("Cancelled"),
-                                    KeyCode::Enter => return Ok(()),
-                                    _ => {}
-                                }
+                        if let Event::Key(key) = event::read()?
+                            && key.kind == KeyEventKind::Press
+                        {
+                            match key.code {
+                                KeyCode::Esc => anyhow::bail!("Cancelled"),
+                                KeyCode::Enter => return Ok(()),
+                                _ => {}
                             }
                         }
                     }
@@ -585,20 +599,39 @@ fn confirm_save_tui(
             dialog.render(f, area);
         })?;
 
-        if let Event::Key(key) = event::read()? {
-            if key.kind == KeyEventKind::Press {
-                if let Some(response) = dialog.handle_key(key) {
-                    return Ok(response == memnoth_ui::confirm::ConfirmResponse::Yes);
-                }
-            }
+        if let Event::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press
+            && let Some(response) = dialog.handle_key(key)
+        {
+            return Ok(response == memnoth_ui::confirm::ConfirmResponse::Yes);
         }
     }
 }
 
-/// Test provider connection by making a simple API call
-fn test_provider_connection(kind: Kind, base_url: &str, model: &str, api_key: &str) -> Result<()> {
+/// What a connectivity probe observed.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Probe {
+    /// Time to the reply, in milliseconds.
+    pub(crate) latency_ms: u128,
+    /// Models the provider advertises, when its catalogue endpoint answers.
+    pub(crate) model_count: usize,
+}
+
+/// Send one minimal completion, the way a turn would.
+///
+/// This is the only connectivity test in the binary: the provider's own wire
+/// shape, its own model, its own auth header. A gateway that answers 401 here
+/// answers 401 on a real turn, which is the point — the old TUI test asked the
+/// Memnoth catalogue endpoint about every provider and therefore always failed.
+pub(crate) fn probe_provider(
+    kind: Kind,
+    base_url: &str,
+    model: &str,
+    api_key: &str,
+) -> Result<Probe> {
     let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(15))
+        .user_agent(concat!("memnoth/", env!("CARGO_PKG_VERSION")))
         .build()?;
 
     let (url, body) = match kind {
@@ -611,7 +644,7 @@ fn test_provider_connection(kind: Kind, base_url: &str, model: &str, api_key: &s
             });
             (url, body)
         }
-        Kind::OpenAi | Kind::Memnoth => {
+        Kind::OpenAi | Kind::Memnoth | Kind::Kilo => {
             let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
             let body = json!({
                 "model": model,
@@ -633,24 +666,41 @@ fn test_provider_connection(kind: Kind, base_url: &str, model: &str, api_key: &s
                 .header("x-api-key", api_key)
                 .header("anthropic-version", "2023-06-01");
         }
-        Kind::OpenAi | Kind::Memnoth => {
+        Kind::OpenAi | Kind::Memnoth | Kind::Kilo => {
             req = req.header("Authorization", format!("Bearer {}", api_key));
         }
     }
 
+    let started = std::time::Instant::now();
     let response = req.send()?;
+    let latency_ms = started.elapsed().as_millis();
 
     if !response.status().is_success() {
         let status = response.status();
         let text = response.text().unwrap_or_default();
-        anyhow::bail!("API error {}: {}", status, text);
+        let detail = crate::provider::scrub_secrets(&truncate(&text, 300), Some(api_key));
+        anyhow::bail!("API error {}: {}", status, detail);
     }
 
-    Ok(())
+    // The count is a nice-to-have: a provider that serves completions but not a
+    // model list is connected, not broken.
+    let model_count = crate::provider::fetch_provider_models(kind, base_url, Some(api_key))
+        .map(|models| models.len())
+        .unwrap_or(0);
+
+    Ok(Probe {
+        latency_ms,
+        model_count,
+    })
+}
+
+/// Test provider connection by making a simple API call
+fn test_provider_connection(kind: Kind, base_url: &str, model: &str, api_key: &str) -> Result<()> {
+    probe_provider(kind, base_url, model, api_key).map(|_| ())
 }
 
 /// Run `mn connect list` - list configured providers
-pub fn connect_list(ctx: &AppContext, args: &crate::cli::ConnectListArgs) -> Result<Outcome> {
+pub fn connect_list(ctx: &AppContext, _args: &crate::cli::ConnectListArgs) -> Result<Outcome> {
     let stored_keys = list_provider_keys()?;
     let config: Config = Config::load(&ctx.config_path)?;
     let provider_config = config.provider;
@@ -661,19 +711,29 @@ pub fn connect_list(ctx: &AppContext, args: &crate::cli::ConnectListArgs) -> Res
         let providers = known_providers();
         let info = providers.iter().find(|p| p.name == name);
 
+        // `name` is the identity: two OpenAI-compatible gateways share a
+        // `kind`, so kind alone would mark both rows active.
         let is_active = provider_config
             .as_ref()
-            .and_then(|p| p.kind.as_ref())
-            .map(|k| info.map(|i| i.kind.name() == k.as_str()).unwrap_or(false))
+            .map(|configured| {
+                configured.name.as_deref() == Some(name.as_str())
+                    || (configured.name.is_none()
+                        && configured.kind.as_deref() == info.map(|info| info.kind.name()))
+            })
             .unwrap_or(false);
 
-        let model = provider_config
-            .as_ref()
+        // Only the active row can claim the config's model and endpoint; the
+        // other rows show what their preset would be, not what this one is.
+        let active = provider_config.as_ref().filter(|_| is_active);
+        let model = active
             .and_then(|p| p.model.clone())
+            .or_else(|| info.map(|i| i.default_model.to_string()))
+            .filter(|model| !model.is_empty())
             .unwrap_or_else(|| "—".to_string());
-        let base_url = provider_config
-            .as_ref()
+        let base_url = active
             .and_then(|p| p.base_url.clone())
+            .or_else(|| info.map(|i| i.default_base_url.to_string()))
+            .filter(|url| !url.is_empty())
             .unwrap_or_else(|| "—".to_string());
 
         rows.push(json!({
@@ -743,17 +803,18 @@ pub fn connect_remove(ctx: &AppContext, args: &crate::cli::ConnectRemoveArgs) ->
     // If this was the active provider, clear config
     let config_path = &ctx.config_path;
     let mut config: Config = if config_path.exists() {
-        let content = std::fs::read_to_string(&config_path)?;
+        let content = std::fs::read_to_string(config_path)?;
         toml::from_str(&content).context("Failed to parse config.toml")?
     } else {
         Config::default()
     };
 
-    if let Some(ref provider) = config.provider {
-        if provider.kind.as_deref() == Some(name.as_str()) {
-            config.provider = None;
-            config.save(&config_path)?;
-        }
+    if let Some(ref provider) = config.provider
+        && (provider.name.as_deref() == Some(name.as_str())
+            || provider.kind.as_deref() == Some(name.as_str()))
+    {
+        config.provider = None;
+        config.save(config_path)?;
     }
 
     let text = format!("Provider '{}' removed.", name);
@@ -771,6 +832,7 @@ pub fn connect_test(ctx: &AppContext, args: &crate::cli::ConnectTestArgs) -> Res
     let provider_name = args
         .provider
         .as_ref()
+        .or(provider_config.name.as_ref())
         .or(provider_config.kind.as_ref())
         .context("No provider specified and no default configured")?;
 
@@ -786,27 +848,41 @@ pub fn connect_test(ctx: &AppContext, args: &crate::cli::ConnectTestArgs) -> Res
         .find(|p| p.name == provider_name.as_str())
         .context(format!("Unknown provider: {}", provider_name))?;
 
-    let base_url = args
-        .provider
-        .as_ref()
-        .and_then(|_| provider_config.base_url.as_deref())
+    // Overrides from the config describe the active provider; testing a
+    // different one must use that preset's own endpoint and model.
+    let testing_active = provider_config
+        .name
+        .as_deref()
+        .map(|name| name == provider_name.as_str())
+        .unwrap_or_else(|| provider_config.kind.as_deref() == Some(provider_name.as_str()));
+
+    let base_url = provider_config
+        .base_url
+        .as_deref()
+        .filter(|_| testing_active)
         .unwrap_or(provider_info.default_base_url);
     let model = provider_config
         .model
         .as_deref()
+        .filter(|_| testing_active)
         .unwrap_or(provider_info.default_model);
     let kind = provider_info.kind;
 
     // Test connection
-    test_provider_connection(kind, base_url, model, &api_key)?;
+    let probe = probe_provider(kind, base_url, model, &api_key)?;
 
-    let text = format!("Connection to '{}' successful!", provider_info.display_name);
+    let text = format!(
+        "Connection to '{}' successful — {} ms, {} models advertised",
+        provider_info.display_name, probe.latency_ms, probe.model_count
+    );
     let data = json!({
         "provider": provider_name,
         "kind": kind.name(),
         "model": model,
         "base_url": base_url,
         "success": true,
+        "latency_ms": probe.latency_ms,
+        "model_count": probe.model_count,
     });
 
     Ok(Outcome::new("connect.test", text, data))
@@ -827,11 +903,13 @@ mod tests {
     #[test]
     fn test_known_providers() {
         let providers = known_providers();
-        assert_eq!(providers.len(), 4);
+        assert_eq!(providers.len(), 6);
         assert!(providers.iter().any(|p| p.name == "anthropic"));
         assert!(providers.iter().any(|p| p.name == "openai"));
+        assert!(providers.iter().any(|p| p.name == "kilo"));
         assert!(providers.iter().any(|p| p.name == "openrouter"));
         assert!(providers.iter().any(|p| p.name == "custom"));
+        assert!(providers.iter().any(|p| p.name == "memnoth"));
     }
 
     #[test]
