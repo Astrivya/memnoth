@@ -78,10 +78,8 @@ fn build_console_url(args: &crate::cli::OpenArgs, ctx: &AppContext) -> Result<St
     let mut query = format!("?workspace={}", encode_query_component(workspace_name));
 
     // The session a reader asked for, as the drawer the console actually has.
-    if is_sessions {
-        if let Some(id) = args.session_id.as_deref() {
-            query.push_str(&format!("&session={}", encode_query_component(id)));
-        }
+    if is_sessions && let Some(id) = args.session_id.as_deref() {
+        query.push_str(&format!("&session={}", encode_query_component(id)));
     }
     url.push_str(&query);
 
