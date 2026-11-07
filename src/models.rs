@@ -5,7 +5,7 @@ use std::fs;
 
 use crate::output::Outcome;
 use crate::{AppContext, Config};
-use memnoth_auth::get_credential_sync;
+use memnoth_auth::account_key_sync;
 use memnoth_cloud_client::CloudClient;
 
 /// The provider a catalog entry belongs to.
@@ -116,9 +116,7 @@ fn get_connected_providers(config: &Config) -> HashSet<String> {
     }
 
     // Check credential store for stored keys
-    if let Ok(Some(key)) = get_credential_sync("memnoth")
-        && !key.is_empty()
-    {
+    if account_key_sync().is_some() {
         if let Some(provider_config) = &config.provider {
             if let Some(kind) = &provider_config.kind {
                 providers.insert(kind.to_lowercase());

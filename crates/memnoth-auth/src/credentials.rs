@@ -32,6 +32,44 @@ impl CredentialEntry {
     }
 }
 
+/// The credential key `mn auth login` writes, and the only key an account-scoped
+/// read may use.
+///
+/// Named once because it was not: `auth.rs` stores the key under `api_key`, and
+/// four readers asked for a credential called `memnoth` — the *keyring service*
+/// name, which is not a key and is never written. A signed-in machine therefore
+/// looked signed out to `mn models`, `mn provider`'s managed slot, `mn setup`
+/// and `mn feedback`, while `mn sync` in the same shell was authenticated.
+pub const ACCOUNT_KEY: &str = "api_key";
+
+/// The account key this machine holds, if any. Whitespace-only counts as none.
+///
+/// Resolved in the order this crate documents — environment, OS keychain, file —
+/// rather than file-only. `mn auth login` writes through a store that prefers the
+/// keychain, so a machine whose keychain accepted the key had it there and nowhere
+/// else: `mn sync` and `mn teams` looked in the file, found nothing, and reported
+/// a signed-in machine as signed out while `mn auth status` in the same shell was
+/// fine. The keychain read is blocking here because the callers that need this
+/// most — the TUI's report thread and the sync queue — are not async.
+pub fn account_key_sync() -> Option<String> {
+    for var in ["MEMNOTH_API_KEY", "MEMNOTH_MCP_TOKEN"] {
+        if let Ok(value) = std::env::var(var)
+            && !value.trim().is_empty()
+        {
+            return Some(value.trim().to_string());
+        }
+    }
+
+    if let Some(key) = KeyringCredentialStore::new("memnoth").get_blocking(ACCOUNT_KEY) {
+        return Some(key);
+    }
+
+    get_credential_sync(ACCOUNT_KEY)
+        .ok()
+        .flatten()
+        .filter(|key| !key.trim().is_empty())
+}
+
 /// Synchronously read a credential from the default credentials file.
 /// This is a blocking alternative for contexts that cannot be async.
 pub fn get_credential_sync(key: &str) -> anyhow::Result<Option<String>> {
@@ -139,6 +177,18 @@ impl KeyringCredentialStore {
     /// Default service name for memnoth CLI credentials.
     pub fn memnoth() -> Self {
         Self::new("memnoth-cli")
+    }
+
+    /// Read one credential without an executor.
+    ///
+    /// The keychain API underneath is blocking anyway; this is the same call the
+    /// async `get` makes, without a runtime the report thread does not have.
+    pub fn get_blocking(&self, key: &str) -> Option<String> {
+        keyring::Entry::new(&self.service, key)
+            .ok()?
+            .get_password()
+            .ok()
+            .filter(|value| !value.trim().is_empty())
     }
 }
 

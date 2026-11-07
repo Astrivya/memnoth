@@ -21,8 +21,8 @@ pub mod redaction;
 
 pub use cache::{TokenCache, TokenInfo, WhoamiCache, WhoamiInfo};
 pub use credentials::{
-    CredentialStore, FileCredentialStore, KeyringCredentialStore, MultiCredentialStore,
-    get_credential_sync,
+    ACCOUNT_KEY, CredentialStore, FileCredentialStore, KeyringCredentialStore,
+    MultiCredentialStore, account_key_sync, get_credential_sync,
 };
 pub use priority::{TokenSource, resolve_token};
 pub use redaction::{redact_header_value, redact_token};

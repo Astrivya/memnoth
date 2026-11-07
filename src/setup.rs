@@ -227,10 +227,7 @@ fn run_auth_step(ctx: &AppContext, state: &mut SetupState) -> Result<()> {
     state.print_progress(Step::Auth, "checking authentication...");
 
     // Check if we have a cached token
-    let has_token = memnoth_auth::get_credential_sync("memnoth")
-        .ok()
-        .flatten()
-        .is_some()
+    let has_token = memnoth_auth::account_key_sync().is_some()
         || std::env::var("MEMNOTH_API_KEY").is_ok()
         || std::env::var("ANTHROPIC_API_KEY").is_ok()
         || std::env::var("OPENAI_API_KEY").is_ok()
@@ -342,10 +339,7 @@ fn run_provider_step(_ctx: &AppContext, state: &mut SetupState) -> Result<()> {
             {
                 "kilo"
             } else if std::env::var("MEMNOTH_API_KEY").is_ok()
-                || memnoth_auth::get_credential_sync("memnoth")
-                    .ok()
-                    .flatten()
-                    .is_some()
+                || memnoth_auth::account_key_sync().is_some()
             {
                 "memnoth"
             } else {
