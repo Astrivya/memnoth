@@ -43,7 +43,7 @@ pub fn run(ctx: &AppContext, args: &crate::cli::OpenArgs) -> Result<Outcome, Err
 ///
 /// The mount lives in [`crate::context::console_url`]; this function only decides
 /// which console route a verb means.
-fn build_console_url(args: &crate::cli::OpenArgs, ctx: &AppContext) -> Result<String> {
+fn build_console_url(args: &crate::cli::OpenArgs, _ctx: &AppContext) -> Result<String> {
     let page = args.page.to_lowercase();
     // Decided before the match because the catch-all arm moves `page`.
     let is_sessions = page.starts_with("session");
@@ -69,18 +69,17 @@ fn build_console_url(args: &crate::cli::OpenArgs, ctx: &AppContext) -> Result<St
     };
     let mut url = crate::context::console_url(&route);
 
-    // Add workspace context as query parameter if available
-    let workspace_name = ctx
-        .root
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("workspace");
-    let mut query = format!("?workspace={}", encode_query_component(workspace_name));
-
     // The session a reader asked for, as the drawer the console actually has.
-    if is_sessions && let Some(id) = args.session_id.as_deref() {
-        query.push_str(&format!("&session={}", encode_query_component(id)));
-    }
+    //
+    // No `?workspace=`: every link used to carry one, and no console route reads
+    // it — the sessions page validates `day`, `session` and `project` and drops
+    // anything else. A parameter nothing consumes is a promise to the reader that
+    // the page is filtered by this directory, which it is not.
+    let query = if is_sessions && let Some(id) = args.session_id.as_deref() {
+        format!("?session={}", encode_query_component(id))
+    } else {
+        String::new()
+    };
     url.push_str(&query);
 
     Ok(url)
@@ -88,9 +87,9 @@ fn build_console_url(args: &crate::cli::OpenArgs, ctx: &AppContext) -> Result<St
 
 /// Percent-encode one query-string value (RFC 3986 unreserved set kept literal).
 ///
-/// A workspace name is a directory name, so it can hold a space or an `&`. The
-/// console would read either as a different workspace, so the value is encoded
-/// here rather than trusted.
+/// A session id comes from a file name, so it can hold a space or an `&`. The
+/// console would read either as a different id, so the value is encoded here
+/// rather than trusted.
 fn encode_query_component(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for byte in value.bytes() {
