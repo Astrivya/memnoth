@@ -10,8 +10,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crate::cli::{PrivacyArgs, PrivacyCommand, SyncArgs};
 use crate::context::AppContext;
 use crate::output::Outcome;
-use memnoth_cloud_client::{BatchIngestRequest, BatchIngestResponse, CloudClient, IngestRequest};
-use memnoth_session::{Header, TurnReceipt, WriteReceipt};
+use memnoth_cloud_client::{CloudClient, HeartbeatRequest, SessionReport};
+use memnoth_session::{Header, Message, Role, TurnReceipt, WriteReceipt};
 
 /// Sync queue file name
 const SYNC_QUEUE_FILE: &str = "queue.jsonl";
@@ -29,10 +29,14 @@ const MAX_RETRY_DELAY_SECS: u64 = 300;
 const HEARTBEAT_INTERVAL_SECS: u64 = 30;
 
 /// A queued sync item
+///
+/// `item` is the session row the dashboard reads, not an event: the console's
+/// Sessions page and its usage charts are both built from `POST /api/v1/sessions`,
+/// and an event log the plane stores but no page renders is not a sync.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueuedSyncItem {
     pub id: String,
-    pub item: IngestRequest,
+    pub item: SessionReport,
     pub attempts: u32,
     pub created_at: u64,
     pub last_attempt: Option<u64>,
@@ -212,7 +216,7 @@ fn check_privacy_gate(ctx: &AppContext) -> Result<bool> {
 }
 
 /// Get privacy mode for sync (what data to include)
-fn get_sync_privacy_mode(ctx: &AppContext) -> SyncPrivacyMode {
+pub(crate) fn get_sync_privacy_mode(ctx: &AppContext) -> SyncPrivacyMode {
     let config = ctx.config();
     let privacy_config = config.privacy.as_ref();
 
@@ -235,15 +239,12 @@ pub enum SyncPrivacyMode {
     Full,
 }
 
-/// A millisecond epoch timestamp as RFC3339, for the ingest payload.
-fn rfc3339(ms: i64) -> String {
-    chrono::DateTime::from_timestamp_millis(ms)
-        .unwrap_or_else(chrono::Utc::now)
-        .to_rfc3339()
-}
-
-/// Collect session data for sync based on privacy mode
-fn collect_session_data(ctx: &AppContext, mode: SyncPrivacyMode) -> Result<Vec<IngestRequest>> {
+/// Collect one session row per local session file, shaped for the dashboard.
+///
+/// One row per file, keyed by the session's own id: the plane upserts on that
+/// id, so syncing the same machine twice updates the rows it already has instead
+/// of growing a second copy of every session.
+fn collect_session_data(ctx: &AppContext, mode: SyncPrivacyMode) -> Result<Vec<SessionReport>> {
     let sessions_dir = &ctx.sessions_dir;
     let mut items = Vec::new();
 
@@ -272,12 +273,14 @@ fn collect_session_data(ctx: &AppContext, mode: SyncPrivacyMode) -> Result<Vec<I
             continue;
         };
 
-        // Parse the rest as turn receipts and write receipts: tokens and cost
-        // come from the former, the count of distinct edited files from the
-        // latter. Neither carries the session identity — that is the header.
+        // Parse the rest as turn receipts, write receipts and messages: tokens
+        // and cost come from the first, the count of distinct edited files from
+        // the second, and the transcript summary from the third. None of them
+        // carries the session identity — that is the header.
         let mut total_tokens = 0u64;
         let mut cost_micros = 0i64;
         let mut files: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut messages: Vec<(Role, String)> = Vec::new();
         let mut last_ms = header.created_ms;
 
         for line in lines {
@@ -292,36 +295,39 @@ fn collect_session_data(ctx: &AppContext, mode: SyncPrivacyMode) -> Result<Vec<I
             } else if let Ok(write) = serde_json::from_str::<WriteReceipt>(line) {
                 files.insert(write.path);
                 last_ms = last_ms.max(write.at_ms);
+            } else if let Ok(message) = serde_json::from_str::<Message>(line) {
+                messages.push((message.role, message.content));
+                last_ms = last_ms.max(message.at_ms);
             }
         }
 
-        // Build ingest request based on privacy mode
-        let request = IngestRequest {
-            session_id: header.id,
-            workspace: ctx.root.to_string_lossy().to_string(),
+        // The privacy filter is one decision, in one place: the transcript is
+        // what a mode withholds, and `metadata-only` withholds all of it.
+        let events = crate::report::transcript(mode, &messages);
+
+        items.push(SessionReport {
+            id: header.id,
+            name: path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or_default()
+                .to_string(),
+            repo: String::new(),
+            branch: String::new(),
             model: header.model,
-            tokens: total_tokens,
-            files: files.len() as u64,
+            // A file on disk is a conversation that has stopped writing, which
+            // is what the plane needs to roll it into usage.
+            status: "finished".to_string(),
+            tokens: total_tokens as i64,
+            files: files.len() as i64,
             cost_micros,
-            event_type: "closed".to_string(),
-            timestamp: rfc3339(last_ms),
-            project_id: None,
-        };
-
-        // Apply privacy filter
-        match mode {
-            SyncPrivacyMode::MetadataOnly => {
-                // Keep only essential metadata - already minimal
-            }
-            SyncPrivacyMode::Balanced => {
-                // Already includes file count but not content
-            }
-            SyncPrivacyMode::Full => {
-                // Could include more detail here if needed
-            }
-        }
-
-        items.push(request);
+            workspace: ctx.root.to_string_lossy().to_string(),
+            project_id: crate::report::project_id(),
+            control_url: None,
+            events,
+            started_at: Some(crate::report::rfc3339(header.created_ms)),
+            ended_at: Some(crate::report::rfc3339(last_ms)),
+        });
     }
 
     Ok(items)
@@ -346,23 +352,20 @@ fn process_queue(ctx: &AppContext, client: &CloudClient, dry_run: bool) -> Resul
             continue;
         }
 
-        let request = BatchIngestRequest {
-            items: vec![item.item.clone()],
-            dry_run: Some(false),
-        };
+        let request = item.item.clone();
 
-        match client.ingest_batch(request) {
+        match client.record_session(&request) {
             Ok(response) => {
                 result.processed += 1;
-                if response.accepted {
+                if response.ok {
                     result.succeeded += 1;
                 } else {
                     result.failed += 1;
                     result
                         .errors
-                        .push(format!("Batch rejected: {:?}", response.results));
+                        .push("the plane did not confirm the session".to_string());
                     // Re-queue for retry
-                    queue.requeue(item, "Batch rejected".to_string())?;
+                    queue.requeue(item, "session not confirmed".to_string())?;
                 }
             }
             Err(e) => {
@@ -394,12 +397,22 @@ struct SyncResult {
     errors: Vec<String>,
 }
 
-/// Send heartbeat to cloud
+/// Tell the plane this machine is alive.
+///
+/// This used to `GET /api/v1/me` and call it a heartbeat, which told the plane
+/// nothing it did not already know from the credential: `/api/v1/status` counts
+/// *instances*, and an instance exists because `POST /api/v1/instances/heartbeat`
+/// upserted one. A machine that only signed in therefore never appeared.
 fn send_heartbeat(client: &CloudClient) -> Result<()> {
-    // For now, just a simple GET to /api/v1/me as heartbeat
-    // Could be a dedicated endpoint in the future
-    let _ = client.me()?;
-    Ok(())
+    client
+        .heartbeat(&HeartbeatRequest {
+            instance_id: crate::report::instance_id(),
+            surface: "cli".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            sessions_live: 0,
+        })
+        .map(|_| ())
+        .map_err(|error| anyhow::anyhow!("{error}"))
 }
 
 /// Run sync command (enhanced)
@@ -423,22 +436,26 @@ pub fn run_sync(ctx: &AppContext, args: &SyncArgs) -> Result<Outcome> {
     }
 
     if args.dry_run {
-        // For dry run, just show what would be synced
+        // A dry run reports what it *would* send and sends nothing: the old one
+        // posted the batch with a `dry_run` flag the plane's ingest route has
+        // never had, so "dry" meant "real write that answered 400".
         let items = collect_session_data(ctx, mode)?;
-        let request = BatchIngestRequest {
-            items: items.clone(),
-            dry_run: Some(true),
-        };
-
-        let response: BatchIngestResponse = client.ingest_batch(request)?;
 
         return Ok(Outcome::new(
             "sync.dry_run",
-            format!("Dry run: {} items would be synced", items.len()),
+            format!("Dry run: {} sessions would be synced", items.len()),
             json!({
                 "items_count": items.len(),
-                "accepted": response.accepted,
-                "batch_id": response.batch_id,
+                "sessions": items
+                    .iter()
+                    .map(|item| json!({
+                        "id": item.id,
+                        "model": item.model,
+                        "tokens": item.tokens,
+                        "files": item.files,
+                        "cost_micros": item.cost_micros,
+                    }))
+                    .collect::<Vec<_>>(),
                 "privacy_mode": format!("{:?}", mode),
             }),
         ));
@@ -715,14 +732,19 @@ fn privacy_show_data(ctx: &AppContext) -> Result<Outcome> {
 
     for item in &items {
         text.push_str(&format!(
-            "  Session: {} ({})\n  Model: {}\n  Tokens: {} (cost: ${:.4})\n  Files: {}\n  Project: {}\n\n",
-            item.session_id,
-            item.timestamp,
+            "  Session: {} ({})\n  Model: {}\n  Tokens: {} (cost: ${:.4})\n  Files: {}\n  Project: {}\n  Transcript: {}\n\n",
+            item.id,
+            item.started_at.as_deref().unwrap_or("unknown"),
             item.model,
             item.tokens,
             item.cost_micros as f64 / 1_000_000.0,
             item.files,
             item.project_id.as_deref().unwrap_or("none"),
+            if item.events.is_some() {
+                "summary only"
+            } else {
+                "withheld by privacy mode"
+            },
         ));
     }
 
@@ -754,16 +776,16 @@ mod tests {
         let mut queue = SyncQueue::new();
         let item = QueuedSyncItem {
             id: "test-1".to_string(),
-            item: IngestRequest {
-                session_id: "sess-1".to_string(),
+            item: SessionReport {
+                id: "sess-1".to_string(),
                 workspace: "/test".to_string(),
                 model: "test-model".to_string(),
                 tokens: 100,
                 files: 5,
                 cost_micros: 1000,
-                event_type: "closed".to_string(),
-                timestamp: chrono::Utc::now().to_rfc3339(),
-                project_id: None,
+                status: "finished".to_string(),
+                started_at: Some(chrono::Utc::now().to_rfc3339()),
+                ..SessionReport::default()
             },
             attempts: 0,
             created_at: now_secs(),
@@ -790,16 +812,16 @@ mod tests {
         for i in 0..MAX_QUEUE_ENTRIES + 100 {
             let item = QueuedSyncItem {
                 id: format!("test-{}", i),
-                item: IngestRequest {
-                    session_id: format!("sess-{}", i),
+                item: SessionReport {
+                    id: format!("sess-{}", i),
                     workspace: "/test".to_string(),
                     model: "test-model".to_string(),
                     tokens: 100,
                     files: 5,
                     cost_micros: 1000,
-                    event_type: "closed".to_string(),
-                    timestamp: chrono::Utc::now().to_rfc3339(),
-                    project_id: None,
+                    status: "finished".to_string(),
+                    started_at: Some(chrono::Utc::now().to_rfc3339()),
+                    ..SessionReport::default()
                 },
                 attempts: 0,
                 created_at: now_secs(),

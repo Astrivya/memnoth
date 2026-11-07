@@ -8,14 +8,15 @@ pub mod error;
 pub use error::{CloudError, CloudResult, RetryExhausted};
 pub mod types;
 pub use types::{
-    ApiErrorResponse, ApiKeyInfo, ApprovedAccountKey, BatchIngestItemResult, BatchIngestRequest,
-    BatchIngestResponse, CreateKeyRequest, CreateKeyResponse, CreditGrant, CreditLedgerEntry,
-    CreditsResponse, DeviceApproveResponse, DeviceAuthResponse, IngestRequest, IngestResponse,
-    Invite, InviteCreated, InvitesResponse, KeysResponse, McpTokenResponse, Me, Member,
-    MemberAdded, MembersResponse, ModelInfo, ModelUsage, OrgEnvelope, OrgInfo, OrgSwitch,
-    OrganizationInfo, OrganizationsResponse, ProjectEnvelope, ProjectInfo, ProjectSettings,
-    ProjectUsage, ProjectsResponse, RevokeKeyResponse, Team, TeamDetail, TeamEnvelope, TeamMember,
-    TeamProject, TeamsResponse,
+    ApiErrorResponse, ApiKeyInfo, ApprovedAccountKey, BatchIngestRequest, BatchIngestResponse,
+    CreateKeyRequest, CreateKeyResponse, CreditGrant, CreditLedgerEntry, CreditsResponse,
+    DeviceApproveResponse, DeviceAuthResponse, HeartbeatAck, HeartbeatRequest, IngestCounts,
+    IngestEvent, InstanceCounts, Invite, InviteCreated, InvitesResponse, KeysResponse,
+    McpTokenResponse, Me, Member, MemberAdded, MembersResponse, ModelInfo, ModelUsage, OkResponse,
+    OrgEnvelope, OrgInfo, OrgSwitch, OrganizationInfo, OrganizationsResponse, PlaneStatus,
+    ProjectEnvelope, ProjectInfo, ProjectSettings, ProjectUsage, ProjectsResponse,
+    RevokeKeyResponse, SessionReport, Team, TeamDetail, TeamEnvelope, TeamMember, TeamProject,
+    TeamsResponse,
 };
 
 /// Response from GET /api/v1/models
@@ -534,22 +535,37 @@ impl CloudClient {
 
         Self::handle_response(response)
     }
-    /// POST /api/v1/ingest/batch - Send batch ingest data.
-    pub fn ingest_batch(&self, request: BatchIngestRequest) -> CloudResult<BatchIngestResponse> {
-        let url = self
-            .base_url
-            .join("ingest/batch")
-            .map_err(|e| CloudError::InvalidUrl(e.to_string()))?;
+    /// POST /api/v1/ingest/batch - Send one surface's queued events.
+    ///
+    /// The plane deduplicates on `(org, event_id)`, so a batch that is retried
+    /// after a timeout is a no-op and answers with `duplicates` instead of a
+    /// second copy of every event.
+    pub fn ingest_batch(&self, request: &BatchIngestRequest) -> CloudResult<BatchIngestResponse> {
+        Self::handle_response(self.post("ingest/batch", request)?)
+    }
 
-        let response = self
-            .client
-            .post(url)
-            .headers(self.headers())
-            .json(&request)
-            .send()
-            .map_err(|e| CloudError::NetworkError(e.to_string()))?;
+    /// POST /api/v1/sessions - record (or update) one session row.
+    ///
+    /// The dashboard reads these rows: this is what puts a local conversation on
+    /// the console's Sessions page, and closing it is what rolls its tokens into
+    /// the usage charts. The plane upserts on `id`, so a session is reported
+    /// opened, then updated as it runs, then closed — the same id every time.
+    pub fn record_session(&self, session: &SessionReport) -> CloudResult<OkResponse> {
+        Self::handle_response(self.post("sessions", session)?)
+    }
 
-        Self::handle_response(response)
+    /// POST /api/v1/instances/heartbeat - say this machine is alive.
+    ///
+    /// `/api/v1/status` counts instances, and an instance only exists because it
+    /// beat: without this the console can report every session as history and
+    /// never say that the machine that ran it is still there.
+    pub fn heartbeat(&self, beat: &HeartbeatRequest) -> CloudResult<HeartbeatAck> {
+        Self::handle_response(self.post("instances/heartbeat", beat)?)
+    }
+
+    /// GET /api/v1/status - live, stale and known instances plus ingest totals.
+    pub fn status(&self) -> CloudResult<PlaneStatus> {
+        Self::handle_response(self.get("status")?)
     }
 
     /// GET /api/v1/credits - Get credits balance, grants, and expiry.

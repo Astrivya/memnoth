@@ -48,6 +48,7 @@ pub mod org;
 pub mod output;
 pub mod projects;
 pub mod provider;
+pub mod report;
 pub mod serve;
 pub mod session;
 pub mod session_cmd;

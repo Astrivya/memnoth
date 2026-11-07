@@ -537,20 +537,27 @@ fn stream_events(mut stream: TcpStream, root: &str, log: &SharedLog) {
     if stream.write_all(head.as_bytes()).is_err() {
         return;
     }
+    // The cursor is read *before* the ready line goes out, not after it.
+    //
+    // The other order has a window — between the client seeing "ready" and this
+    // thread reading `total` — in which an event that arrives is already counted
+    // by the cursor and therefore never delivered: the client waits forever and
+    // the stream looks quiet. Reading first can only repeat an event, and a
+    // repeated line is visible where a lost one is not.
+    let mut cursor = log.lock().map(|log| log.total).unwrap_or(0);
+
     // A first line immediately: a client that connects only to prove the server
     // is live must not have to wait for somebody to save a file.
     let ready = serde_json::json!({
         "event": "ready",
         "watching": root,
-        "events": log.lock().map(|log| log.total).unwrap_or(0),
+        "events": cursor,
     })
     .to_string()
         + "\n";
     if stream.write_all(ready.as_bytes()).is_err() || stream.flush().is_err() {
         return;
     }
-
-    let mut cursor = log.lock().map(|log| log.total).unwrap_or(0);
     let mut last_write = Instant::now();
     loop {
         let (lines, next) = match log.lock() {
