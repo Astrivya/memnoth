@@ -559,7 +559,14 @@ pub struct SessionReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control_url: Option<String>,
     /// The bounded transcript summary; `None` means "not reported".
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ///
+    /// Sent as `null` rather than left out. The plane takes this field as a
+    /// value, not an optional one, so omitting it (which is what
+    /// `skip_serializing_if` did for `metadata-only` mode and for a session that
+    /// ended before its first turn) made the whole row fail with `422 missing
+    /// field \`events\`` — every session a privacy-conscious machine finished.
+    /// One explicit `null` costs 12 bytes and says the same thing.
+    #[serde(default)]
     pub events: Option<serde_json::Value>,
     /// RFC 3339. Absent, the plane stamps the row with its own clock.
     #[serde(default, skip_serializing_if = "Option::is_none")]
