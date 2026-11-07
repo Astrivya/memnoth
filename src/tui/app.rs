@@ -118,6 +118,11 @@ pub struct PendingShell {
     pub command: String,
     /// The sandbox policy decision.
     pub decision: RuleDecision,
+    /// Whether yes starts a background job (`/tasks run`) rather than running
+    /// it in the foreground (`!cmd`). One box, two destinations: a person who
+    /// approved a command should not be asked again because it moved to the
+    /// rail.
+    pub background: bool,
 }
 
 impl PendingShell {
@@ -146,6 +151,9 @@ impl PendingShell {
         text.push_str(&format!("\n\n{reason}"));
         if !reason.contains(rule) {
             text.push_str(&format!("  [rule: {rule}]"));
+        }
+        if self.background {
+            text.push_str("\n\nthis starts a background job (/tasks logs to read it)");
         }
         text.push_str("\n\ny run · n or esc cancel");
         text
@@ -453,6 +461,10 @@ pub struct App {
     pub command_queue: VecDeque<String>,
     /// Pending shell command (`!cmd`) awaiting sandbox policy confirmation.
     pub pending_shell: Option<PendingShell>,
+    /// Whether the "not confined" line has been printed this session. Said
+    /// once, because it is true of every command and repeating it under each
+    /// one would train the reader to skip the line that matters.
+    pub sandbox_notice_shown: bool,
     /// UI theme variant
     pub theme: Theme,
     /// Screen reader mode
@@ -589,6 +601,7 @@ impl App {
             completion: CompletionState::default(),
             command_queue: VecDeque::new(),
             pending_shell: None,
+            sandbox_notice_shown: false,
             theme: Theme::Default,
             screen_reader: ScreenReaderMode::Off,
             transcript_pane: TranscriptPane::new(),
@@ -2443,6 +2456,7 @@ fn parse_serve(args: &[String]) -> Parsed {
             .cloned()
             .unwrap_or_else(|| "127.0.0.1".to_string()),
         cors: flags.contains_key("cors"),
+        token: flags.get("token").cloned(),
         graph_path: flags.get("graph-path").cloned(),
         json: flags.contains_key("json"),
     }))
