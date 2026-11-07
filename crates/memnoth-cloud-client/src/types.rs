@@ -513,6 +513,42 @@ pub struct IngestCounts {
     pub last_event_ms_ago: Option<i64>,
 }
 
+/// `GET /api/v1/sessions` — the rows the console's Sessions page reads.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SessionsResponse {
+    #[serde(default)]
+    pub sessions: Vec<CloudSession>,
+}
+
+/// One recorded session, as the plane stores it.
+///
+/// A read shape, not a report: `SessionReport` is what this machine sends, this
+/// is what comes back with the plane's own fields — `project_id` among them,
+/// which is how a person finds what is still unassigned.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CloudSession {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub tokens: i64,
+    #[serde(default)]
+    pub cost_usd: f64,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub project_name: Option<String>,
+    #[serde(default)]
+    pub started_at: String,
+    #[serde(default)]
+    pub ended_at: Option<String>,
+}
+
 /// The answer every write route gives when it has nothing else to say.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OkResponse {

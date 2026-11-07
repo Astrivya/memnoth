@@ -610,6 +610,23 @@ impl CloudClient {
         Self::handle_response(self.post("sessions", session)?)
     }
 
+    /// GET /api/v1/sessions — every row this credential can see.
+    ///
+    /// The console's Sessions page and this call read the same rows, which is
+    /// what makes "what is still unassigned" answerable from a terminal.
+    pub fn sessions(&self) -> CloudResult<types::SessionsResponse> {
+        Self::handle_response(self.get("sessions")?)
+    }
+
+    /// PATCH /api/v1/sessions/{id} — file a session under a project, or unfile it.
+    ///
+    /// The row is the same one the console's assign button writes: attribution
+    /// is one fact, not two surfaces with an opinion each.
+    pub fn assign_session(&self, id: &str, project: Option<&str>) -> CloudResult<OkResponse> {
+        let body = serde_json::json!({ "project_id": project });
+        Self::handle_response(self.patch(&format!("sessions/{id}"), &body)?)
+    }
+
     /// POST /api/v1/instances/heartbeat - say this machine is alive.
     ///
     /// `/api/v1/status` counts instances, and an instance only exists because it

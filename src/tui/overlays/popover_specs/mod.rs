@@ -17,11 +17,13 @@ use crate::tui::overlays::popover::PopoverSpec;
 pub(crate) mod kg;
 pub(crate) mod local;
 pub(crate) mod ops;
+pub(crate) mod projects;
 pub(crate) mod vault;
 
 /// The bespoke spec for this command, if its family has one.
 pub fn spec(command: &str, data: &Value) -> Option<PopoverSpec> {
     kg::spec(command, data)
+        .or_else(|| projects::spec(command, data))
         .or_else(|| vault::spec(command, data))
         .or_else(|| local::spec(command, data))
         .or_else(|| ops::spec(command, data))
