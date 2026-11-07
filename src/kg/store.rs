@@ -517,8 +517,11 @@ impl Graph {
         if names.is_empty() || limit == 0 {
             return Ok(Vec::new());
         }
+        // One row per place, not per mention: `add(add(a, b), b)` mentions
+        // `add` twice on the same line, and the report listed the same line
+        // twice. DISTINCT collapses those without hiding a second call site.
         let sql = format!(
-            "SELECT name, path, line, COALESCE(container, '')
+            "SELECT DISTINCT name, path, line, COALESCE(container, '')
              FROM refs WHERE name IN ({})
              ORDER BY path, line LIMIT {}",
             placeholders(names.len()),
