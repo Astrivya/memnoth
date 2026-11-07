@@ -42,6 +42,15 @@ pub enum UpdateError {
 
     #[error("Semver error: {0}")]
     Semver(#[from] semver::Error),
+
+    #[error(
+        "Refusing to downgrade from {current} to {wanted}: a downgrade is not an update. \
+         Pass `--version {wanted}` to ask for that version deliberately."
+    )]
+    Downgrade { current: String, wanted: String },
+
+    #[error("The downloaded binary is not usable: {0}")]
+    NewBinaryFailed(String),
 }
 
 /// Release channel for update checks.
@@ -139,11 +148,23 @@ pub struct UpdateConfig {
     pub quiet: bool,
 }
 
+/// The public key baked into this build, if the release was built with one.
+///
+/// A key compiled into the binary is what makes signature verification
+/// meaningful: a key read from the same host as the manifest would be signed
+/// by whoever served the manifest.
+pub fn compiled_in_pubkey() -> Option<String> {
+    option_env!("MEMNOTH_MINISIGN_PUBKEY")
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(str::to_string)
+}
+
 impl Default for UpdateConfig {
     fn default() -> Self {
         Self {
             dist_base_url: "https://releases.memnoth.astrivya.ai".to_string(),
-            minisign_pubkey: None,
+            minisign_pubkey: compiled_in_pubkey(),
             cosign_pubkey: None,
             channel: Channel::Stable,
             current_version: "0.1.0-beta.1".to_string(),
@@ -223,40 +244,123 @@ pub fn verify_minisign(
     Ok(())
 }
 
-/// Verify sigstore/cosign signature over SHA256SUMS file.
+/// Verify a sigstore/cosign signature over the SHA256SUMS file.
+///
+/// This build has no sigstore verifier, and the honest answer to "check this"
+/// when the check cannot be performed is an error. The previous version read
+/// the file, dropped every argument and returned `Ok(())`, which meant a
+/// release that advertised a cosign signature it could not check installed
+/// with the same message as one that had been checked — a verification that
+/// verifies nothing is worse than none, because the person stops looking.
 pub fn verify_cosign(sha256sums_path: &Path, signature_b64: &str, pubkey_path: &str) -> Result<()> {
-    // sigstore verification - this is a placeholder for the actual implementation
-    // The sigstore crate provides verification but requires specific setup
-    // For now, we accept the signature and log that verification would happen
-    let _artifact = fs::read(sha256sums_path)?;
-    let _signature = signature_b64;
-    let _pubkey = pubkey_path;
-
-    // TODO: Implement full sigstore verification when the crate API stabilizes
-    // This would involve:
-    // 1. Loading the public key from pubkey_path
-    // 2. Decoding the base64 signature
-    // 3. Using sigstore::verify to check the artifact
-
-    Ok(())
+    let _ = fs::read(sha256sums_path)?;
+    let _ = (signature_b64, pubkey_path);
+    bail!(UpdateError::SignatureVerification(
+        "this build cannot verify cosign signatures; refusing to treat it as verified ".to_string()
+    ))
 }
 
-/// Verify all signatures for a release.
+/// Verify a release's signatures and refuse one that is not actually checked.
+///
+/// The policy is fail-closed in both directions:
+///
+/// - a signature the manifest offers but this build cannot check (a cosign
+///   signature, or a minisign signature with no configured key) is a refusal —
+///   an unverifiable claim is not a verified one;
+/// - a manifest with no signature at all is a refusal too, because a checksum
+///   served by the same host as the artifact only proves the download was not
+///   corrupted in transit, not that it came from us.
+///
+/// `--no-verify` exists for a deliberate, local decision to install anyway; it
+/// is not a default.
 pub fn verify_signatures(
     sha256sums_path: &Path,
     manifest: &Manifest,
     config: &UpdateConfig,
 ) -> Result<()> {
-    // Verify minisign if available
-    if let (Some(sig), Some(pubkey)) = (&manifest.signatures.minisign, &config.minisign_pubkey) {
-        verify_minisign(sha256sums_path, sig, pubkey)?;
+    let mut verified = 0usize;
+
+    if let Some(signature) = &manifest.signatures.minisign {
+        let Some(pubkey) = config.minisign_pubkey.as_deref() else {
+            bail!(UpdateError::SignatureVerification(
+                "the release carries a minisign signature and this machine has no public key \
+                 configured, so it cannot be checked"
+                    .to_string()
+            ));
+        };
+        verify_minisign(sha256sums_path, signature, pubkey)?;
+        verified += 1;
     }
 
-    // Verify cosign if available
-    if let (Some(sig), Some(pubkey)) = (&manifest.signatures.cosign, &config.cosign_pubkey) {
-        verify_cosign(sha256sums_path, sig, pubkey)?;
+    if let Some(signature) = &manifest.signatures.cosign {
+        let Some(pubkey) = config.cosign_pubkey.as_deref() else {
+            bail!(UpdateError::SignatureVerification(
+                "the release carries a cosign signature and this machine has no public key \
+                 configured, so it cannot be checked"
+                    .to_string()
+            ));
+        };
+        verify_cosign(sha256sums_path, signature, pubkey)?;
+        verified += 1;
     }
 
+    if verified == 0 {
+        bail!(UpdateError::SignatureVerification(
+            "the release is unsigned; a checksum from the same host as the artifact is not a \
+             signature"
+                .to_string()
+        ));
+    }
+
+    Ok(())
+}
+
+/// Whether installing `manifest_version` over `current` is a downgrade.
+///
+/// A downgrade is not an update: it is how a caller is walked back onto a
+/// version with a known bug. It is allowed only when someone asked for that
+/// version by name, and the caller says so by passing `explicit`.
+pub fn check_version_policy(current: &str, manifest_version: &str, explicit: bool) -> Result<()> {
+    let current = Version::parse(current.trim_start_matches('v'))?;
+    let wanted = Version::parse(manifest_version.trim_start_matches('v'))?;
+    if wanted < current && !explicit {
+        bail!(UpdateError::Downgrade {
+            current: current.to_string(),
+            wanted: wanted.to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Run the freshly downloaded binary and require it to report the version the
+/// manifest promised.
+///
+/// This is the update's only real proof that the artifact is the program it
+/// claims to be, and it happens *before* the swap. Verifying afterwards would
+/// mean the broken binary is already in place, and "roll back" would then have
+/// to replace a running executable on Windows, which cannot be done.
+pub fn verify_new_binary(new_exe: &Path, expected_version: &str) -> Result<()> {
+    let output = process::Command::new(new_exe)
+        .arg("--version")
+        .output()
+        .with_context(|| format!("the downloaded binary at {} did not run", new_exe.display()))?;
+
+    if !output.status.success() {
+        bail!(UpdateError::NewBinaryFailed(format!(
+            "exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    let reported = String::from_utf8_lossy(&output.stdout);
+    let expected = expected_version.trim_start_matches('v');
+    if !reported.contains(expected) {
+        bail!(UpdateError::NewBinaryFailed(format!(
+            "reported {:?} instead of {expected}",
+            reported.trim()
+        )));
+    }
     Ok(())
 }
 
@@ -486,7 +590,21 @@ pub fn passive_check(config: &UpdateConfig) -> Result<Option<UpdateCheckResult>>
 }
 
 /// Download and verify update, then apply it.
-pub fn apply_update(config: &UpdateConfig, manifest: &Manifest) -> Result<()> {
+///
+/// `explicit_version` says the caller named this version on the command line,
+/// which is the only thing that makes a downgrade deliberate.
+///
+/// The order is the point, and it is the same order the `mn update` command
+/// takes: refuse what can be refused without the network (a managed install, a
+/// missing artifact for this platform, a version older than the running one),
+/// then fetch the signature and check it, and only then fetch the binary. The
+/// version check used to sit after a full download, so a downgrade was refused
+/// after the bytes it refused had already been transferred.
+pub fn apply_update(
+    config: &UpdateConfig,
+    manifest: &Manifest,
+    explicit_version: bool,
+) -> Result<()> {
     // Detect managed install
     if let Some(manager) = detect_managed_install() {
         bail!(UpdateError::ManagedInstall { manager });
@@ -502,7 +620,10 @@ pub fn apply_update(config: &UpdateConfig, manifest: &Manifest) -> Result<()> {
         .find(|t| t.triple == target_triple)
         .ok_or_else(|| anyhow!("No release artifact for target: {}", target_triple))?;
 
-    // Download to temp file
+    // A manifest that would walk this machine backwards is refused before a
+    // byte of the artifact is sent.
+    check_version_policy(&config.current_version, &manifest.version, explicit_version)?;
+
     let temp_dir = std::env::temp_dir();
     let temp_exe = temp_dir.join(format!("memnoth-update-{}.tmp", process::id()));
     let download_url = format!(
@@ -512,13 +633,35 @@ pub fn apply_update(config: &UpdateConfig, manifest: &Manifest) -> Result<()> {
         target.filename
     );
 
+    // The signature covers the checksum file, not the artifact directly, so the
+    // checksum file is fetched and checked first: a signature over a list of
+    // hashes is only worth something if the hash used below came from it.
+    let sums_url = format!(
+        "{}/dist/{}/SHA256SUMS",
+        config.dist_base_url,
+        config.channel.dist_subdir()
+    );
+    let sums_path = temp_dir.join(format!("memnoth-update-{}.SHA256SUMS", process::id()));
+    download_file(&sums_url, &sums_path)?;
+    let signatures = verify_signatures(&sums_path, manifest, config);
+    let _ = fs::remove_file(&sums_path);
+    signatures?;
+
     download_file(&download_url, &temp_exe)?;
 
     // Verify checksum
-    verify_checksum(&temp_exe, &manifest.checksums.sha256)?;
+    if let Err(error) = verify_checksum(&temp_exe, &manifest.checksums.sha256) {
+        let _ = fs::remove_file(&temp_exe);
+        return Err(error);
+    }
 
-    // TODO: Download and verify SHA256SUMS file and signatures
-    // For now, we verify the binary checksum directly
+    // Prove the artifact runs and is the version it claims, before it replaces
+    // anything. On Windows there is no way back after the swap: the running
+    // executable cannot be renamed.
+    if let Err(error) = verify_new_binary(&temp_exe, &manifest.version) {
+        let _ = fs::remove_file(&temp_exe);
+        return Err(error);
+    }
 
     // Atomic swap
     atomic_swap(&current_exe, &temp_exe)?;
@@ -718,6 +861,90 @@ mod tests {
         // Verify checksum matches
         let sums_content = fs::read_to_string(dist_dir.join("SHA256SUMS")).unwrap();
         assert!(sums_content.contains(&sha256));
+    }
+
+    fn manifest_with(signatures: Signatures) -> Manifest {
+        Manifest {
+            version: "1.0.0".to_string(),
+            channel: Channel::Stable,
+            targets: vec![Target {
+                triple: "x86_64-windows".to_string(),
+                filename: "memnoth.exe".to_string(),
+            }],
+            checksums: Checksums {
+                sha256: "abc123".to_string(),
+            },
+            signatures,
+            published_at: Utc::now(),
+            notes: None,
+        }
+    }
+
+    #[test]
+    fn an_unsigned_release_is_refused() {
+        let dir = tempdir().unwrap();
+        let sums = dir.path().join("SHA256SUMS");
+        fs::write(&sums, b"abc123  memnoth.exe\n").unwrap();
+
+        let manifest = manifest_with(Signatures {
+            minisign: None,
+            cosign: None,
+        });
+        let error = verify_signatures(&sums, &manifest, &UpdateConfig::default())
+            .expect_err("an unsigned release must not install");
+        assert!(error.to_string().contains("unsigned"), "{error}");
+    }
+
+    #[test]
+    fn a_signature_without_a_key_is_refused_rather_than_skipped() {
+        let dir = tempdir().unwrap();
+        let sums = dir.path().join("SHA256SUMS");
+        fs::write(&sums, b"abc123  memnoth.exe\n").unwrap();
+
+        let manifest = manifest_with(Signatures {
+            minisign: Some("not-actually-a-signature".to_string()),
+            cosign: None,
+        });
+        // `default()` may carry a key compiled into this build; the case under
+        // test is a machine that has none.
+        let config = UpdateConfig {
+            minisign_pubkey: None,
+            cosign_pubkey: None,
+            ..Default::default()
+        };
+        let error = verify_signatures(&sums, &manifest, &config)
+            .expect_err("a signature nobody can check is not a verified release");
+        assert!(error.to_string().contains("no public key"), "{error}");
+    }
+
+    #[test]
+    fn cosign_verification_fails_closed() {
+        // This build has no sigstore verifier. The old implementation returned
+        // Ok(()) after reading the file, so a signed-by-anyone release passed.
+        let dir = tempdir().unwrap();
+        let sums = dir.path().join("SHA256SUMS");
+        fs::write(&sums, b"abc123  memnoth.exe\n").unwrap();
+        assert!(verify_cosign(&sums, "c2ln", "/tmp/key").is_err());
+    }
+
+    #[test]
+    fn a_downgrade_needs_to_be_said_out_loud() {
+        assert!(check_version_policy("1.2.0", "1.3.0", false).is_ok());
+        assert!(check_version_policy("1.2.0", "1.2.0", false).is_ok());
+
+        let error = check_version_policy("1.2.0", "1.0.0", false)
+            .expect_err("an update must not walk the machine backwards");
+        assert!(error.to_string().contains("downgrade"), "{error}");
+
+        // Naming the version is what makes it deliberate.
+        assert!(check_version_policy("1.2.0", "1.0.0", true).is_ok());
+    }
+
+    #[test]
+    fn an_artifact_that_does_not_run_is_refused() {
+        let dir = tempdir().unwrap();
+        let missing = dir.path().join("not-a-binary");
+        assert!(verify_new_binary(&missing, "1.0.0").is_err());
     }
 
     #[test]
