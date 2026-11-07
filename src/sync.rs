@@ -481,6 +481,12 @@ pub fn run_sync(ctx: &AppContext, args: &SyncArgs) -> Result<Outcome> {
 
     // Process queue
     let result = process_queue(ctx, &client, false)?;
+    // Reloaded rather than reported from the snapshot taken before processing:
+    // that snapshot says one item is pending after the run that queued and sent
+    // it, which reads as a sync that did nothing.
+    let queue_stats = SyncQueue::load(&queue_path)
+        .map(|queue| queue.stats())
+        .unwrap_or_else(|_| json!({}));
 
     let text = if result.failed == 0 {
         format!("Synced {} items successfully", result.succeeded)
@@ -499,7 +505,7 @@ pub fn run_sync(ctx: &AppContext, args: &SyncArgs) -> Result<Outcome> {
             "succeeded": result.succeeded,
             "failed": result.failed,
             "errors": result.errors,
-            "queue_stats": queue.stats(),
+            "queue_stats": queue_stats,
         }),
     ))
 }
@@ -569,7 +575,7 @@ fn run_watch_mode(
 
 /// Get authenticated cloud client
 pub fn get_cloud_client(_ctx: &AppContext) -> Result<CloudClient> {
-    let mut client = CloudClient::new().context("Failed to create cloud client")?;
+    let mut client = CloudClient::from_env().context("Failed to create cloud client")?;
 
     if let Ok(token) = std::env::var("MEMNOTH_API_KEY") {
         client.set_auth_token(token);

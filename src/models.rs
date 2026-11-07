@@ -26,7 +26,7 @@ pub fn run(ctx: &AppContext, args: &crate::cli::ModelsArgs) -> Result<Outcome> {
 
 /// `mn models` — list available models from the cloud.
 fn models_list(ctx: &AppContext, args: &crate::cli::ModelsListArgs) -> Result<Outcome> {
-    let client = CloudClient::new()?;
+    let client = CloudClient::from_env()?;
     let list = client.models()?;
 
     // The context already loaded config.toml for this invocation.
@@ -333,7 +333,7 @@ fn model_to_json(m: &memnoth_cloud_client::ModelEntry) -> serde_json::Value {
 
 /// `mn model use <id>` — set default model (persisted to config).
 fn model_use(ctx: &AppContext, args: &crate::cli::ModelUseArgs) -> Result<Outcome> {
-    let client = CloudClient::new()?;
+    let client = CloudClient::from_env()?;
     let list = client.models()?;
 
     // Verify model exists

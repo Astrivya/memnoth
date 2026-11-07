@@ -228,7 +228,7 @@ pub(crate) fn human_duration(wait: Duration) -> String {
 
 /// Login with a pre-provided token (CI/paste path).
 fn login_with_token(ctx: &AppContext, token: &str) -> Result<Outcome> {
-    let mut client = CloudClient::new().context("failed to create cloud client")?;
+    let mut client = CloudClient::from_env().context("failed to create cloud client")?;
     client.set_auth_token(token.to_string());
 
     // Verify the token works by fetching who it is. `/me` is a token's view of
@@ -296,7 +296,7 @@ pub struct SignedIn {
 /// session screen draws it in a frame. Sharing only the request is what keeps
 /// one flow behind both surfaces.
 pub fn begin_device_login(client_name: &str) -> Result<(CloudClient, DeviceAuthResponse)> {
-    let client = CloudClient::new().context("failed to create cloud client")?;
+    let client = CloudClient::from_env().context("failed to create cloud client")?;
     let mut auth = client
         .device_auth(DeviceAuthRequest {
             client_name: client_name.to_string(),
@@ -483,7 +483,7 @@ pub fn store_login(token: &ApprovedAccountKey, tier: Option<&str>) -> Result<Sig
 /// sign-in survives without. The caller keeps the credential it stored and
 /// prints whatever error this returns as one line.
 pub fn enrich_login(token: &ApprovedAccountKey, tier: Option<&str>) -> Result<SignedIn> {
-    let mut authed = CloudClient::new().context("failed to create cloud client")?;
+    let mut authed = CloudClient::from_env().context("failed to create cloud client")?;
     authed.set_auth_token(token.api_key.clone());
     let org = authed.org().context("failed to fetch the organization")?;
 
@@ -669,7 +669,7 @@ pub fn logout(ctx: &AppContext, _args: &AuthLogoutArgs) -> Result<Outcome> {
 
     if let Some(token) = store.get_sync("api_key")? {
         // Try to revoke it on the server
-        let mut client = CloudClient::new().context("failed to create cloud client")?;
+        let mut client = CloudClient::from_env().context("failed to create cloud client")?;
         client.set_auth_token(token);
         let _ = client.revoke_current_key(); // Best effort
     }

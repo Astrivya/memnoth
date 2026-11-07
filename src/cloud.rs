@@ -29,7 +29,7 @@ pub fn run(ctx: &AppContext, args: &CloudArgs) -> Result<Outcome> {
 /// answering 401 on the first request. A write command that cannot say "sign
 /// in first" is a command that looks broken.
 pub fn signed_in_client(ctx: &AppContext) -> Result<CloudClient> {
-    let mut client = CloudClient::new().context("Failed to create cloud client")?;
+    let mut client = CloudClient::from_env().context("Failed to create cloud client")?;
 
     let token = std::env::var("MEMNOTH_API_KEY")
         .ok()
@@ -50,7 +50,7 @@ pub fn signed_in_client(ctx: &AppContext) -> Result<CloudClient> {
 }
 
 fn get_cloud_client(ctx: &AppContext) -> Result<CloudClient> {
-    let mut client = CloudClient::new().context("Failed to create cloud client")?;
+    let mut client = CloudClient::from_env().context("Failed to create cloud client")?;
 
     // Environment first, so an exported key wins over the stored one.
     if let Ok(token) = std::env::var("MEMNOTH_API_KEY") {

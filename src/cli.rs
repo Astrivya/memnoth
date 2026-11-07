@@ -1519,7 +1519,7 @@ pub struct CloudArgs {
 /// Cloud subcommands.
 #[derive(Debug, Subcommand)]
 pub enum CloudCommand {
-    /// Sync local data to the cloud (POST /api/v1/ingest/batch).
+    /// Sync local sessions to the cloud (POST /api/v1/sessions).
     #[command(name = "sync")]
     Sync(SyncArgs),
     /// Manage cloud profile configuration.

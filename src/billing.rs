@@ -248,7 +248,7 @@ fn render_limits(org: &OrgInfo, credits: Option<&CreditsResponse>) -> String {
 }
 
 fn get_cloud_client(ctx: &AppContext) -> Result<CloudClient> {
-    let mut client = CloudClient::new()?;
+    let mut client = CloudClient::from_env()?;
 
     if let Some(token) = ctx.auth_token() {
         client.set_auth_token(token);

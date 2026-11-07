@@ -140,7 +140,8 @@ fn send(job: &Job) {
             return;
         }
     };
-    let report = body(&job.ctx, &job.name, &job.session, job.event);
+    let mode = crate::sync::get_sync_privacy_mode(&job.ctx);
+    let report = body(&job.ctx.root, mode, &job.name, &job.session, job.event);
     if let Err(error) = client.record_session(&report) {
         append_log(
             Some(&job.ctx),
@@ -166,13 +167,22 @@ fn send(job: &Job) {
 }
 
 /// The row this event describes.
-fn body(ctx: &AppContext, name: &str, session: &Session, event: Event) -> SessionReport {
+///
+/// Takes the workspace root and the privacy mode rather than the whole context,
+/// so the row a session becomes can be checked without a machine to read one
+/// from.
+fn body(
+    root: &std::path::Path,
+    mode: SyncPrivacyMode,
+    name: &str,
+    session: &Session,
+    event: Event,
+) -> SessionReport {
     let (cost_micros, _) = session.spend();
     let mut files: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     for write in &session.writes {
         files.insert(write.path.as_str());
     }
-    let mode = crate::sync::get_sync_privacy_mode(ctx);
     let messages: Vec<(Role, String)> = session
         .messages
         .iter()
@@ -192,7 +202,7 @@ fn body(ctx: &AppContext, name: &str, session: &Session, event: Event) -> Sessio
         tokens: session.input_tokens.saturating_add(session.output_tokens) as i64,
         files: files.len() as i64,
         cost_micros: cost_micros as i64,
-        workspace: ctx.root.to_string_lossy().to_string(),
+        workspace: root.to_string_lossy().to_string(),
         project_id: project_id(),
         control_url: None,
         events: transcript(mode, &messages),
@@ -339,6 +349,74 @@ fn append_log(ctx: Option<&AppContext>, line: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use memnoth_session::TurnReceipt;
+
+    /// The row a session becomes: cumulative while it runs, closed when it ends.
+    ///
+    /// `ended_at` is the field that decides whether the plane ever counts the
+    /// session's tokens, so "finished" and "has an end" have to arrive together —
+    /// a closed row without one is a session that renders on the page and is
+    /// never rolled into usage.
+    #[test]
+    fn a_session_runs_then_closes_and_only_the_close_has_an_end() {
+        let mut session = Session::new("memnoth/auto");
+        session.id = "s-test".to_string();
+        session.user("fix the login redirect");
+        session.account(100, 50);
+        session.record_receipt(TurnReceipt {
+            at_ms: 1,
+            total_tokens: 150,
+            prefix_hash: String::new(),
+            layer_tokens: [0; 4],
+            pieces: 0,
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            cost_micros: Some(2_000),
+            turn_id: Some(1),
+        });
+
+        let running = body(
+            std::path::Path::new("/w"),
+            SyncPrivacyMode::Balanced,
+            "session",
+            &session,
+            Event::Updated,
+        );
+        assert_eq!(running.id, "s-test");
+        assert_eq!(running.status, "running");
+        assert_eq!(running.tokens, 150);
+        assert_eq!(running.cost_micros, 2_000);
+        assert!(
+            running.ended_at.is_none(),
+            "a running session has not ended"
+        );
+        assert!(running.events.is_some(), "balanced mode reports a summary");
+
+        let closed = body(
+            std::path::Path::new("/w"),
+            SyncPrivacyMode::Balanced,
+            "session",
+            &session,
+            Event::Finished,
+        );
+        assert_eq!(closed.status, "finished");
+        assert!(
+            closed.ended_at.is_some(),
+            "the close is what rolls up usage"
+        );
+
+        // And the one mode that withholds text withholds it here too.
+        let quiet = body(
+            std::path::Path::new("/w"),
+            SyncPrivacyMode::MetadataOnly,
+            "session",
+            &session,
+            Event::Finished,
+        );
+        assert!(quiet.events.is_none());
+    }
 
     fn messages() -> Vec<(Role, String)> {
         vec![
