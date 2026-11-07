@@ -2,18 +2,21 @@
 
 use anyhow::{Context, Result};
 use memnoth_worktree::{
-    BatchConfig, BatchResult, ParallelConfig, ParallelResult, WorktreeInfo,
-    clean_worktree, create_worktree, diff_worktrees, execute_batch, execute_parallel, list_worktrees,
+    BatchConfig, BatchResult, ParallelConfig, ParallelResult, WorktreeInfo, clean_worktree,
+    create_worktree, diff_worktrees, execute_batch, execute_parallel, list_worktrees,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use crate::cli::{BatchArgs, ParallelArgs, WorktreeArgs, WorktreeCommand, WorktreeCleanArgs, WorktreeCreateArgs, WorktreeDiffArgs, WorktreeListArgs};
+use crate::cli::{
+    BatchCmdArgs, ParallelArgs, WorktreeArgs, WorktreeCleanArgs, WorktreeCommand,
+    WorktreeCreateArgs, WorktreeDiffArgs, WorktreeListArgs,
+};
 use crate::context::AppContext;
 use crate::output::{ErrorOutcome, Outcome};
 
 /// Execute worktree commands.
 pub fn run(ctx: &AppContext, args: &WorktreeArgs) -> Result<Outcome, ErrorOutcome> {
-    let repo_root = get_repo_root(ctx)?;
+    let repo_root = get_repo_root(ctx).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
 
     match &args.action {
         WorktreeCommand::Create(create_args) => run_create(&repo_root, create_args, ctx.json),
@@ -23,9 +26,9 @@ pub fn run(ctx: &AppContext, args: &WorktreeArgs) -> Result<Outcome, ErrorOutcom
     }
 }
 
-/// Execute batch command.
-pub fn run_batch(ctx: &AppContext, args: &BatchArgs) -> Result<Outcome, ErrorOutcome> {
-    let repo_root = get_repo_root(ctx)?;
+/// Execute a batch task across isolated worktrees.
+pub fn run_batch(ctx: &AppContext, args: &BatchCmdArgs) -> Result<Outcome, ErrorOutcome> {
+    let repo_root = get_repo_root(ctx).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
 
     let config = BatchConfig {
         task: args.task.clone(),
@@ -36,47 +39,29 @@ pub fn run_batch(ctx: &AppContext, args: &BatchArgs) -> Result<Outcome, ErrorOut
         workdir: args.workdir.clone(),
     };
 
-    let runtime = tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
-    let results = runtime.block_on(execute_batch(&repo_root, config))?;
+    let runtime = tokio::runtime::Runtime::new()
+        .map_err(|e| ErrorOutcome::from_anyhow(&anyhow::Error::from(e)))?;
+    let results = runtime
+        .block_on(execute_batch(&repo_root, config))
+        .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
 
-    if args.json || args.format == "json" {
-        let data = serde_json::to_value(&results)
-            .context("serialize batch results")
-            .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
-        Ok(Outcome::new("batch", render_batch_text(&results), data))
-    } else {
-        Ok(Outcome::new("batch", render_batch_text(&results), serde_json::json!({})))
-    }
+    // Serialized on every run, not only under `--json`: the TUI builds its
+    // window from this value, and a window fed an empty object has nothing to
+    // show even though the batch did real work.
+    let data = serde_json::to_value(&results)
+        .context("serialize batch results")
+        .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+    Ok(Outcome::new("batch", render_batch_text(&results), data))
 }
-/// Execute batch command (top-level mn batch).
-pub fn run_batch_cmd(ctx: &AppContext, args: &crate::cli::BatchCmdArgs) -> Result<Outcome, ErrorOutcome> {
-    let repo_root = get_repo_root(ctx)?;
 
-    let config = BatchConfig {
-        task: args.task.clone(),
-        workers: args.workers,
-        claim_glob: args.claim_glob.clone(),
-        claim_ttl_secs: args.claim_ttl,
-        command: args.command.clone(),
-        workdir: args.workdir.clone(),
-    };
-
-    let runtime = tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
-    let results = runtime.block_on(execute_batch(&repo_root, config))?;
-
-    if args.json || args.format == "json" {
-        let data = serde_json::to_value(&results)
-            .context("serialize batch results")
-            .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
-        Ok(Outcome::new("batch", render_batch_text(&results), data))
-    } else {
-        Ok(Outcome::new("batch", render_batch_text(&results), serde_json::json!({})))
-    }
+/// `mn batch` — the top-level verb.
+pub fn run_batch_cmd(ctx: &AppContext, args: &BatchCmdArgs) -> Result<Outcome, ErrorOutcome> {
+    run_batch(ctx, args)
 }
 
 /// Execute parallel command.
 pub fn run_parallel(ctx: &AppContext, args: &ParallelArgs) -> Result<Outcome, ErrorOutcome> {
-    let repo_root = get_repo_root(ctx)?;
+    let repo_root = get_repo_root(ctx).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
 
     let config = ParallelConfig {
         command: args.command.clone(),
@@ -85,89 +70,110 @@ pub fn run_parallel(ctx: &AppContext, args: &ParallelArgs) -> Result<Outcome, Er
         max_concurrent: args.max_concurrent,
     };
 
-    let runtime = tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
-    let results = runtime.block_on(execute_parallel(&repo_root, config))?;
+    let runtime = tokio::runtime::Runtime::new()
+        .map_err(|e| ErrorOutcome::from_anyhow(&anyhow::Error::from(e)))?;
+    let results = runtime
+        .block_on(execute_parallel(&repo_root, config))
+        .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
 
-    if args.json {
-        let data = serde_json::to_value(&results)
-            .context("serialize parallel results")
-            .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
-        Ok(Outcome::new("parallel", render_parallel_text(&results), data))
-    } else {
-        Ok(Outcome::new("parallel", render_parallel_text(&results), serde_json::json!({})))
-    }
+    // Same rule as `batch`: the answer is always a document, never an empty
+    // placeholder standing in for the table that was printed.
+    let data = serde_json::to_value(&results)
+        .context("serialize parallel results")
+        .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+    Ok(Outcome::new(
+        "parallel",
+        render_parallel_text(&results),
+        data,
+    ))
 }
 
 fn get_repo_root(ctx: &AppContext) -> Result<PathBuf> {
-    // Use the vault root as the repo root, or current directory
-    if let Some(vault_root) = &ctx.vault_root {
-        Ok(vault_root.clone())
-    } else {
-        std::env::current_dir().context("failed to get current directory")
-    }
+    // The workspace root is resolved once in `AppContext`; worktrees live under it.
+    Ok(ctx.root.clone())
 }
 
-fn run_create(repo_root: &PathBuf, args: &WorktreeCreateArgs, json: bool) -> Result<Outcome, ErrorOutcome> {
-    let wt = create_worktree(repo_root, &args.name, args.branch.as_deref(), args.base.as_deref())
+fn run_create(
+    repo_root: &Path,
+    args: &WorktreeCreateArgs,
+    _json: bool,
+) -> Result<Outcome, ErrorOutcome> {
+    let wt = create_worktree(
+        repo_root,
+        &args.name,
+        args.branch.as_deref(),
+        args.base.as_deref(),
+    )
+    .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+
+    let text = format!(
+        "Created worktree '{}' at {} (branch: {}, commit: {})",
+        args.name,
+        wt.path.display(),
+        wt.branch,
+        wt.commit
+    );
+
+    // The created worktree is the answer, in either rendering: `--json` and the
+    // popover window must see the path and branch that were just made.
+    let data = serde_json::to_value(&wt)
+        .context("serialize worktree")
         .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
-
-    let text = format!("Created worktree '{}' at {} (branch: {}, commit: {})",
-        args.name, wt.path.display(), wt.branch, wt.commit);
-
-    if json {
-        let data = serde_json::to_value(&wt)
-            .context("serialize worktree")
-            .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
-        Ok(Outcome::new("worktree.create", text, data))
-    } else {
-        Ok(Outcome::new("worktree.create", text, serde_json::json!({})))
-    }
+    Ok(Outcome::new("worktree.create", text, data))
 }
 
-fn run_list(repo_root: &PathBuf, args: &WorktreeListArgs, json: bool) -> Result<Outcome, ErrorOutcome> {
-    let worktrees = list_worktrees(repo_root)
-        .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+fn run_list(
+    repo_root: &Path,
+    _args: &WorktreeListArgs,
+    _json: bool,
+) -> Result<Outcome, ErrorOutcome> {
+    let worktrees = list_worktrees(repo_root).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
 
     let text = render_worktree_list(&worktrees);
 
-    if json || args.json {
-        let data = serde_json::to_value(&worktrees)
-            .context("serialize worktrees")
-            .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
-        Ok(Outcome::new("worktree.list", text, data))
-    } else {
-        Ok(Outcome::new("worktree.list", text, serde_json::json!({})))
-    }
+    // The list is a bare array, which is what the popover spec reads. Emitting
+    // `{}` in the human path made the window impossible and left `--json` as the
+    // only door onto data the verb already had.
+    let data = serde_json::to_value(&worktrees)
+        .context("serialize worktrees")
+        .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+    Ok(Outcome::new("worktree.list", text, data))
 }
 
-fn run_clean(repo_root: &PathBuf, args: &WorktreeCleanArgs, json: bool) -> Result<Outcome, ErrorOutcome> {
-    clean_worktree(repo_root, &args.name, args.force)
-        .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+fn run_clean(
+    repo_root: &Path,
+    args: &WorktreeCleanArgs,
+    _json: bool,
+) -> Result<Outcome, ErrorOutcome> {
+    clean_worktree(repo_root, &args.name, args.force).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
 
     let text = format!("Removed worktree '{}'", args.name);
 
-    if json {
-        Ok(Outcome::new("worktree.clean", text, serde_json::json!({"name": args.name})))
-    } else {
-        Ok(Outcome::new("worktree.clean", text, serde_json::json!({})))
-    }
+    // Which worktree was removed is the whole answer, so it is in the data too.
+    Ok(Outcome::new(
+        "worktree.clean",
+        text,
+        serde_json::json!({"name": args.name}),
+    ))
 }
 
-fn run_diff(repo_root: &PathBuf, args: &WorktreeDiffArgs, json: bool) -> Result<Outcome, ErrorOutcome> {
+fn run_diff(
+    repo_root: &Path,
+    args: &WorktreeDiffArgs,
+    _json: bool,
+) -> Result<Outcome, ErrorOutcome> {
     let diff = diff_worktrees(repo_root, &args.from, args.to.as_deref(), &args.paths)
         .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
 
-    if json || args.json {
-        let data = serde_json::json!({
-            "from": args.from,
-            "to": args.to,
-            "paths": args.paths,
-            "diff": diff
-        });
-        Ok(Outcome::new("worktree.diff", diff.clone(), data))
-    } else {
-        Ok(Outcome::new("worktree.diff", diff, serde_json::json!({})))
-    }
+    // The two sides of the comparison travel with the diff: a window that shows
+    // a patch without naming what it is against is a patch you cannot place.
+    let data = serde_json::json!({
+        "from": args.from,
+        "to": args.to,
+        "paths": args.paths,
+        "diff": diff
+    });
+    Ok(Outcome::new("worktree.diff", diff.clone(), data))
 }
 
 fn render_worktree_list(worktrees: &[WorktreeInfo]) -> String {
@@ -189,16 +195,21 @@ fn render_batch_text(results: &[BatchResult]) -> String {
     let mut lines = Vec::new();
     for r in results {
         let status = match (r.exit_code, &r.error) {
-            (Some(0), None) => "✓",
-            (Some(code), None) => &format!("✗ exit {}", code),
-            (_, Some(e)) => &format!("✗ {}", e),
+            (Some(0), None) => "✓".to_string(),
+            (Some(code), None) => format!("✗ exit {code}"),
+            (None, None) => "✗ no exit status".to_string(),
+            (_, Some(e)) => format!("✗ {e}"),
         };
         lines.push(format!(
             "{} {}  ({}ms)  {}",
             status,
             r.worker_id,
             r.duration_ms,
-            if r.stdout.is_empty() { "(no output)" } else { r.stdout.lines().next().unwrap_or("") }
+            if r.stdout.is_empty() {
+                "(no output)"
+            } else {
+                r.stdout.lines().next().unwrap_or("")
+            }
         ));
         if !r.stderr.is_empty() {
             for line in r.stderr.lines() {
@@ -213,16 +224,21 @@ fn render_parallel_text(results: &[ParallelResult]) -> String {
     let mut lines = Vec::new();
     for r in results {
         let status = match (r.exit_code, &r.error) {
-            (Some(0), None) => "✓",
-            (Some(code), None) => &format!("✗ exit {}", code),
-            (_, Some(e)) => &format!("✗ {}", e),
+            (Some(0), None) => "✓".to_string(),
+            (Some(code), None) => format!("✗ exit {code}"),
+            (None, None) => "✗ no exit status".to_string(),
+            (_, Some(e)) => format!("✗ {e}"),
         };
         lines.push(format!(
             "{} {}  ({}ms)  {}",
             status,
             r.target,
             r.duration_ms,
-            if r.stdout.is_empty() { "(no output)" } else { r.stdout.lines().next().unwrap_or("") }
+            if r.stdout.is_empty() {
+                "(no output)"
+            } else {
+                r.stdout.lines().next().unwrap_or("")
+            }
         ));
         if !r.stderr.is_empty() {
             for line in r.stderr.lines() {
