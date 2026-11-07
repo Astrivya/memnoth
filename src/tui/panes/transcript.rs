@@ -2,15 +2,27 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation,
-    ScrollbarState, Wrap,
+    Block, Borders, List, ListItem, ListState, Scrollbar, ScrollbarOrientation, ScrollbarState,
 };
 
-use crate::tui::app::{App, Entry, EntryRole};
+use crate::tui::app::{App, EntryRole};
+
+/// One entry's recorded time as `HH:MM`.
+///
+/// Local time, because this is read next to a wall clock rather than compared
+/// across machines. A negative or zero `at_ms` (a session header with no time)
+/// clamps to the epoch rather than panicking on a `Duration`.
+fn clock(at_ms: i64) -> String {
+    chrono::DateTime::<chrono::Local>::from(
+        std::time::UNIX_EPOCH + std::time::Duration::from_millis(at_ms.max(0) as u64),
+    )
+    .format("%H:%M")
+    .to_string()
+}
 
 /// Transcript pane showing the conversation history
 #[derive(Debug, Default)]
@@ -44,7 +56,7 @@ impl TranscriptPane {
         }
 
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        let _shift = key.modifiers.contains(KeyModifiers::SHIFT);
 
         match key.code {
             KeyCode::Up => {
@@ -139,9 +151,15 @@ impl TranscriptPane {
                 let (role_style, role_glyph) = style_for(entry.role);
                 let mut lines = Vec::new();
 
-                // Timestamp if enabled
+                // The row's own recorded time, in local time to the minute.
+                // A stamp reading differently from the same turn in the session
+                // file would be a second truth, so this formats the entry's
+                // `at_ms` and nothing else.
                 if self.show_timestamps {
-                    // TODO: Add timestamp to Entry struct when available
+                    lines.push(Line::from(Span::styled(
+                        clock(entry.at_ms),
+                        Style::default().fg(Color::DarkGray),
+                    )));
                 }
 
                 // Role and content
@@ -222,6 +240,9 @@ fn style_for(role: EntryRole) -> (Style, &'static str) {
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             "✗",
         ),
+        // The glyph is the state: running, then done in place.
+        EntryRole::Tool => (Style::default().fg(Color::Cyan), "▌"),
+        EntryRole::ToolDone => (Style::default().fg(Color::Green), "✓"),
     }
 }
 
@@ -234,11 +255,9 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
     let mut current = String::new();
 
     for word in text.split_whitespace() {
-        if current.len() + word.len() + 1 > width {
-            if !current.is_empty() {
-                lines.push(current);
-                current = String::new();
-            }
+        if current.len() + word.len() + 1 > width && !current.is_empty() {
+            lines.push(current);
+            current = String::new();
         }
         if !current.is_empty() {
             current.push(' ');

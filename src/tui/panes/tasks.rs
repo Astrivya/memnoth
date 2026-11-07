@@ -5,9 +5,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{
-    Block, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph, Tabs, Wrap,
-};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 
 use crate::tui::app::App;
 
@@ -50,7 +48,7 @@ pub struct TasksPane {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TasksTab {
+pub enum TasksTab {
     All,
     Running,
     Completed,
@@ -92,6 +90,29 @@ impl TasksPane {
         }
     }
 
+    /// Move the selection within the visible tab.
+    pub fn select_relative(&mut self, delta: isize) {
+        let count = self.filtered_tasks().len();
+        if count == 0 {
+            self.selected = 0;
+            self.list_state.select(None);
+            return;
+        }
+        let next = (self.selected as isize + delta).clamp(0, count as isize - 1);
+        self.selected = next as usize;
+        self.list_state.select(Some(self.selected));
+        if self.detail_view {
+            self.update_detail_content();
+        }
+    }
+
+    /// The id of the highlighted task.
+    pub fn selected_task_id(&self) -> Option<String> {
+        self.filtered_tasks()
+            .get(self.selected)
+            .map(|task| task.id.clone())
+    }
+
     /// Update task status
     pub fn update_task(
         &mut self,
@@ -124,7 +145,7 @@ impl TasksPane {
         }
 
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        let _shift = key.modifiers.contains(KeyModifiers::SHIFT);
 
         match key.code {
             KeyCode::Tab => {
@@ -160,19 +181,19 @@ impl TasksPane {
             }
             KeyCode::Char('r') if ctrl => {
                 // Retry failed task
-                if let Some(task) = self.filtered_tasks().get(self.selected) {
-                    if task.status == TaskStatus::Failed {
-                        // In real implementation, would restart the task
-                    }
+                if let Some(task) = self.filtered_tasks().get(self.selected)
+                    && task.status == TaskStatus::Failed
+                {
+                    // In real implementation, would restart the task
                 }
                 true
             }
             KeyCode::Char('x') if ctrl => {
                 // Cancel running task
-                if let Some(task) = self.filtered_tasks().get(self.selected) {
-                    if task.status == TaskStatus::Running || task.status == TaskStatus::Pending {
-                        // In real implementation, would cancel the task
-                    }
+                if let Some(task) = self.filtered_tasks().get(self.selected)
+                    && (task.status == TaskStatus::Running || task.status == TaskStatus::Pending)
+                {
+                    // In real implementation, would cancel the task
                 }
                 true
             }
@@ -195,13 +216,9 @@ impl TasksPane {
                 }
                 true
             }
-            KeyCode::Esc => {
-                if self.detail_view {
-                    self.detail_view = false;
-                    true
-                } else {
-                    false
-                }
+            KeyCode::Esc if self.detail_view => {
+                self.detail_view = false;
+                true
             }
             _ => false,
         }
@@ -286,7 +303,7 @@ impl TasksPane {
     }
 
     fn render_tabs(&self, frame: &mut Frame, area: Rect) {
-        let titles = vec!["All", "Running", "Completed", "Failed"];
+        let titles = ["All", "Running", "Completed", "Failed"];
         let counts = [
             self.tasks.len(),
             self.tasks

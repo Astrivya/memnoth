@@ -5,7 +5,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::tui::app::App;
 
@@ -211,13 +211,9 @@ impl DiffPane {
                 }
                 true
             }
-            KeyCode::Esc => {
-                if self.detail_view {
-                    self.detail_view = false;
-                    true
-                } else {
-                    false
-                }
+            KeyCode::Esc if self.detail_view => {
+                self.detail_view = false;
+                true
             }
             _ => false,
         }
@@ -450,12 +446,12 @@ fn parse_unified_diff(diff: &str, file_path: String) -> Vec<InlineDiffHunk> {
             i += 1;
             while i < lines.len() && !lines[i].starts_with("@@ ") {
                 let l = lines[i];
-                if l.starts_with('+') {
-                    hunk_lines.push(DiffLine::Added(l[1..].to_string()));
-                } else if l.starts_with('-') {
-                    hunk_lines.push(DiffLine::Removed(l[1..].to_string()));
-                } else if l.starts_with(' ') {
-                    hunk_lines.push(DiffLine::Context(l[1..].to_string()));
+                if let Some(rest) = l.strip_prefix('+') {
+                    hunk_lines.push(DiffLine::Added(rest.to_string()));
+                } else if let Some(rest) = l.strip_prefix('-') {
+                    hunk_lines.push(DiffLine::Removed(rest.to_string()));
+                } else if let Some(rest) = l.strip_prefix(' ') {
+                    hunk_lines.push(DiffLine::Context(rest.to_string()));
                 } else if l.starts_with('\\') {
                     // No newline at end of file marker
                 } else {
