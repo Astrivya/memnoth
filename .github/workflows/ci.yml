@@ -1,0 +1,100 @@
+name: CI
+
+# This repository is the product: the `memnoth` binary and its library crates.
+# The site and the control plane live elsewhere with their own pipelines, so
+# every gate here is about this workspace and nothing else.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+# A second push to the same branch makes the first run's answer obsolete.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  format:
+    name: cargo fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      # The whole workspace, not just the binary: every crate is formatted, so a
+      # new member cannot arrive unformatted.
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: cargo clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # `-D warnings` across the workspace and all targets: a new warning fails
+      # review here instead of accumulating in a library nobody reads.
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The whole workspace, not just the binary: the vault, graph and session
+      # behaviour the CLI is a thin shell over is tested in those crates.
+      # `--locked` also fails here when Cargo.lock drifts from a manifest.
+      - run: cargo test --workspace --locked
+
+  surfaces:
+    name: surfaces answer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Both binaries: the surfaces script drives `mn`, and its MCP steps are
+      # skipped by name (never counted as a pass) unless the server is here.
+      - run: cargo build --bin mn --locked
+      - run: cargo build -p memnoth-mcp --bin memnoth-mcp --locked
+
+      # The published profile counts are generated from `TOOL_PROFILES`, so a
+      # drift between the README table and the code fails here instead of
+      # shipping a table that describes a different server.
+      - name: Published tool counts match TOOL_PROFILES
+        run: python3 scripts/check_surface.py --binary target/debug/mn
+
+      # Start each long-running surface for real and require an answer. A banner
+      # in front of a thread that binds nothing passes every unit test and fails
+      # this, which is the whole point of running it in CI.
+      - name: Every long-running surface answers
+        env:
+          MEMNOTH_MCP_BIN: target/debug/memnoth-mcp
+        run: bash scripts/smoke-surfaces.sh target/debug/mn
