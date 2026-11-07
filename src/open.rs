@@ -8,8 +8,7 @@ use crate::output::{ErrorOutcome, Outcome};
 
 /// Run `mn open`.
 pub fn run(ctx: &AppContext, args: &crate::cli::OpenArgs) -> Result<Outcome, ErrorOutcome> {
-    let base_url = get_console_base_url()?;
-    let url = build_console_url(&base_url, args, ctx)?;
+    let url = build_console_url(args, ctx)?;
 
     if args.json {
         let data = serde_json::json!({
@@ -39,54 +38,34 @@ pub fn run(ctx: &AppContext, args: &crate::cli::OpenArgs) -> Result<Outcome, Err
     ))
 }
 
-/// Get the console base URL from config or default.
-fn get_console_base_url() -> Result<String> {
-    // Check environment variable first
-    if let Ok(url) = std::env::var("MEMNOTH_CONSOLE_URL") {
-        return Ok(url.trim_end_matches('/').to_string());
-    }
-
-    // Check config for custom endpoint
-    // Default to the production console
-    Ok("https://console.memnoth.astrivya.ai".to_string())
-}
-
 /// Build the console URL based on page and parameters.
-fn build_console_url(
-    base_url: &str,
-    args: &crate::cli::OpenArgs,
-    ctx: &AppContext,
-) -> Result<String> {
+///
+/// The mount lives in [`crate::context::console_url`]; this function only decides
+/// which console route a verb means.
+fn build_console_url(args: &crate::cli::OpenArgs, ctx: &AppContext) -> Result<String> {
     let page = args.page.to_lowercase();
-    let mut url = match page.as_str() {
-        "dashboard" | "dash" => format!("{}/dashboard", base_url),
-        "projects" | "project" => {
-            if let Some(id) = &args.project_id {
-                format!("{}/projects/{}", base_url, id)
-            } else {
-                format!("{}/projects", base_url)
-            }
-        }
-        "sessions" | "session" => {
-            if let Some(id) = &args.session_id {
-                format!("{}/sessions/{}", base_url, id)
-            } else {
-                format!("{}/sessions", base_url)
-            }
-        }
-        "settings" | "config" => format!("{}/settings", base_url),
-        "usage" | "costs" | "billing" => format!("{}/usage", base_url),
-        "org" | "organization" => format!("{}/org", base_url),
-        "teams" | "team" => format!("{}/teams", base_url),
-        "api-keys" | "apikeys" | "keys" => format!("{}/api-keys", base_url),
-        "workspaces" | "workspace" => format!("{}/workspaces", base_url),
-        "connectors" | "integrations" => format!("{}/connectors", base_url),
-        "sharing" | "share" => format!("{}/sharing", base_url),
-        _ => {
-            // Allow arbitrary paths
-            format!("{}/{}", base_url.trim_end_matches('/'), page)
-        }
+    let route = match page.as_str() {
+        "dashboard" | "dash" => "dashboard".to_string(),
+        "projects" | "project" => match &args.project_id {
+            Some(id) => format!("projects/{id}"),
+            None => "projects".to_string(),
+        },
+        "sessions" | "session" => match &args.session_id {
+            Some(id) => format!("sessions/{id}"),
+            None => "sessions".to_string(),
+        },
+        "settings" | "config" => "settings".to_string(),
+        "usage" | "costs" | "billing" => "usage".to_string(),
+        "org" | "organization" => "org".to_string(),
+        "teams" | "team" => "teams".to_string(),
+        "api-keys" | "apikeys" | "keys" => "api-keys".to_string(),
+        "workspaces" | "workspace" => "workspaces".to_string(),
+        "connectors" | "integrations" => "connectors".to_string(),
+        "sharing" | "share" => "sharing".to_string(),
+        // An arbitrary path is still a console route, never an origin path.
+        _ => page,
     };
+    let mut url = crate::context::console_url(&route);
 
     // Add workspace context as query parameter if available
     let workspace_name = ctx
@@ -132,7 +111,7 @@ fn open_browser(url: &str) -> Result<()> {
     {
         // Use cmd /c start to open in default browser
         Command::new("cmd").args(["/c", "start", "", url]).spawn()?;
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(target_os = "linux")]

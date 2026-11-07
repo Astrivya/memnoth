@@ -15,7 +15,7 @@
 //! has to parse prose to find a failure.
 
 use anyhow::Result;
-use chrono::{DateTime, NaiveDate, TimeZone, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -65,6 +65,26 @@ impl Outcome {
             data,
         }
     }
+}
+
+/// Confirm a destructive action, or assume yes with `--yes`.
+///
+/// The default is **no**: an unread question (a pipe, a closed stdin) must not
+/// revoke a key or delete a project. `--yes` exists for scripts, where there is
+/// nobody to ask and the caller has already decided.
+pub fn confirm(prompt: &str, yes: bool) -> bool {
+    use std::io::Write;
+
+    if yes {
+        return true;
+    }
+    print!("{prompt} [y/N] ");
+    let _ = std::io::stdout().flush();
+    let mut input = String::new();
+    if std::io::stdin().read_line(&mut input).is_err() {
+        return false;
+    }
+    matches!(input.trim().to_lowercase().as_str(), "y" | "yes")
 }
 
 /// Exit codes for the CLI.
@@ -172,7 +192,7 @@ impl ErrorOutcome {
             CloudError::AuthError(message) => {
                 Self::new(ExitCode::Auth, format!("not signed in: {}", bare(message)))
                     .with_fix("run `memnoth auth login` (or set MEMNOTH_API_KEY)")
-                    .with_docs_url("https://memnoth.astrivya.ai/docs/cli#auth")
+                    .with_docs_url(crate::context::docs_url("cli#auth"))
             }
             CloudError::CreditsExhausted(message) => Self::new(
                 ExitCode::Auth,
@@ -296,23 +316,44 @@ pub fn emit(json: bool, outcome: &Outcome) {
         );
     } else {
         println!("{}", outcome.text.trim_end());
+        let next = next_commands(&outcome.data);
+        if !next.is_empty() {
+            println!();
+            println!("next");
+            for command in next {
+                println!("  {command}");
+            }
+        }
     }
 }
 
+/// The follow-ups an outcome names, ready to print or run.
+///
+/// Commands put them in `data.next_commands` so the text can stay a report;
+/// showing them is what turns a result into the next keystroke.
+pub fn next_commands(data: &serde_json::Value) -> Vec<&str> {
+    data.get("next_commands")
+        .and_then(|value| value.as_array())
+        .map(|items| items.iter().filter_map(|item| item.as_str()).collect())
+        .unwrap_or_default()
+}
+
 /// Print a failure, in the same shape a success uses.
+///
+/// `error` stays a string so `jq -r .error` gives the sentence a caller can show;
+/// the machine fields that used to be nested inside it sit beside it, because an
+/// envelope a script has to destructure twice is an envelope it will misread.
 pub fn emit_error(json: bool, error: &ErrorOutcome) {
     if json {
         let body = json!({
             "ok": false,
             "command": null,
             "version": env!("CARGO_PKG_VERSION"),
-            "error": {
-                "code": error.code,
-                "message": error.message,
-                "cause": error.cause,
-                "fix": error.fix,
-                "docs": error.docs_url,
-            },
+            "error": error.message,
+            "code": error.code,
+            "cause": error.cause,
+            "fix": error.fix,
+            "docs": error.docs_url,
         });
         println!(
             "{}",
@@ -371,7 +412,7 @@ pub fn parse_when(input: &str) -> Result<i64> {
 
 /// Epoch milliseconds as RFC 3339, for JSON that has be readable.
 pub fn rfc3339(ms: i64) -> String {
-    let dt = DateTime::from_timestamp_millis(ms).unwrap_or_else(|| Utc::now());
+    let dt = DateTime::from_timestamp_millis(ms).unwrap_or_else(Utc::now);
     dt.to_rfc3339()
 }
 
@@ -444,19 +485,51 @@ pub fn human_count(value: usize) -> String {
 }
 
 /// Truncate to `width` characters, with an ellipsis when it had to cut.
+///
+/// Width is counted in characters, not bytes. Slicing by byte offset lands in
+/// the middle of a multi-byte character whenever the cut falls there — the `·`
+/// separators in the footer hint are two bytes each — and that panicked the
+/// whole screen on a resize.
 pub fn ellipsize(text: &str, width: usize) -> String {
-    if text.len() <= width {
+    if width == 0 {
+        return String::new();
+    }
+    if text.chars().count() <= width {
         return text.to_string();
     }
-    if width <= 1 {
+    if width == 1 {
         return "…".to_string();
     }
-    format!("{}…", &text[..width - 1])
+    let mut out: String = text.chars().take(width - 1).collect();
+    out.push('…');
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ellipsize_cuts_on_a_character_not_a_byte() {
+        // Every `·`, `↑`, `↓`, `←` and `→` is multi-byte, so a byte slice at
+        // 39 lands inside one of them — the exact cut that used to panic on a
+        // resize.
+        let hint =
+            "enter send · ↑↓ history · ←→ edit · pgup/pgdn scroll · end newest · ctrl-c quit";
+        let out = ellipsize(hint, 40);
+        assert_eq!(out.chars().count(), 40, "{out:?}");
+        assert!(out.ends_with('…'), "{out:?}");
+        // Whatever the cut lands on, what is kept is a whole-character prefix.
+        assert!(hint.starts_with(out.trim_end_matches('…')), "{out:?}");
+
+        // A width inside a character, and the degenerate widths, must not panic.
+        for width in 0..hint.chars().count() + 2 {
+            let cut = ellipsize(hint, width);
+            assert!(cut.chars().count() <= width.max(1), "{width}: {cut:?}");
+        }
+        assert_eq!(ellipsize(hint, 0), "");
+        assert_eq!(ellipsize(hint, 1), "…");
+    }
 
     #[test]
     fn test_exit_codes() {
