@@ -1,4 +1,19 @@
-//! Context overlay: view and manage vault context, beliefs, and coordination.
+//! `/context`: what this workspace's vault currently believes, and what it
+//! recently recorded.
+//!
+//! Everything here is read, never invented. The two lists are the same reads
+//! `memnoth vault asof` and `memnoth vault timeline` answer with — one
+//! implementation behind the verb and the screen, so the overlay cannot drift
+//! from the command a person would otherwise type.
+//!
+//! A state with no rows (no vault yet, an unreadable vault, an empty vault)
+//! renders as words: an empty table would say "nothing is known", and "nothing
+//! could be read" is not that.
+//!
+//! Two tabs were removed rather than kept: a coordination list no local surface
+//! writes (agent presence lives in the cloud), and actions no key could perform
+//! (pin, copy, compact). A screen that only shows what it read has no such
+//! problem.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
@@ -7,52 +22,60 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap};
 
+use crate::context::AppContext;
+use crate::output::ErrorOutcome;
 use crate::tui::app::App;
 use crate::tui::overlays::{Overlay, OverlayAction, OverlayKind};
 
+/// How many entities and events one open reads. The overlay is a glance, not an
+/// export: `memnoth vault asof --limit` is where a longer list comes from.
+const LIMIT: usize = 200;
+
+/// What the overlay is showing.
 #[derive(Debug, Default)]
 pub struct ContextOverlay {
     visible: bool,
     tabs: Vec<ContextTab>,
     active_tab: usize,
-    vault_beliefs: Vec<BeliefEntry>,
-    coordination: Vec<CoordinationEntry>,
+    /// Live entities, as `vault asof` reports them.
+    beliefs: Vec<Belief>,
+    /// Recent entity versions, as `vault timeline` reports them.
+    activity: Vec<Activity>,
+    /// Why a list is empty, when the reason is worth saying.
+    note: Option<String>,
     selected: usize,
     list_state: ListState,
     detail_view: bool,
     detail_content: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ContextTab {
     Beliefs,
-    Coordination,
-    History,
+    Activity,
 }
 
+/// One entity the vault believes right now.
 #[derive(Debug, Clone)]
-struct BeliefEntry {
+struct Belief {
     name: String,
     kind: String,
-    content: String,
+    confidence: f64,
+    summary: String,
     updated: String,
-    version: u64,
-    contradicted: bool,
+    /// The observations that make the entity true, newest first.
+    facts: Vec<String>,
 }
 
+/// One version of one entity: the activity feed.
 #[derive(Debug, Clone)]
-struct CoordinationEntry {
-    agent: String,
-    role: String,
-    last_seen: String,
-    status: CoordinationStatus,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CoordinationStatus {
-    Active,
-    Idle,
-    Away,
+struct Activity {
+    at: String,
+    name: String,
+    kind: String,
+    /// `active` or `closed`, as the timeline reports it.
+    state: &'static str,
+    summary: String,
 }
 
 impl ContextOverlay {
@@ -60,11 +83,7 @@ impl ContextOverlay {
         let mut state = ListState::default();
         state.select(Some(0));
         Self {
-            tabs: vec![
-                ContextTab::Beliefs,
-                ContextTab::Coordination,
-                ContextTab::History,
-            ],
+            tabs: vec![ContextTab::Beliefs, ContextTab::Activity],
             list_state: state,
             ..Default::default()
         }
@@ -74,64 +93,126 @@ impl ContextOverlay {
     fn tab(&self) -> ContextTab {
         self.tabs
             .get(self.active_tab)
-            .cloned()
+            .copied()
             .unwrap_or(ContextTab::Beliefs)
     }
 
-    fn load_mock_data(&mut self) {
-        // Mock data - replace with actual vault/coordination reads
-        self.vault_beliefs = vec![
-            BeliefEntry {
-                name: "architecture".to_string(),
-                kind: "decision".to_string(),
-                content: "Use event sourcing for session replay".to_string(),
-                updated: "2024-01-15 14:32".to_string(),
-                version: 3,
-                contradicted: false,
-            },
-            BeliefEntry {
-                name: "search-indexing".to_string(),
-                kind: "decision".to_string(),
-                content: "Use tantivy for full-text, embedding for semantic".to_string(),
-                updated: "2024-01-10 09:15".to_string(),
-                version: 1,
-                contradicted: false,
-            },
-            BeliefEntry {
-                name: "rust-version".to_string(),
-                kind: "fact".to_string(),
-                content: "MSRV is 1.75".to_string(),
-                updated: "2024-01-05 16:45".to_string(),
-                version: 2,
-                contradicted: true,
-            },
-        ];
+    /// Read the vault and replace both lists.
+    ///
+    /// Two independent reads: a timeline that fails must not empty a belief
+    /// list that succeeded, so each failure paints its own tab.
+    fn reload(&mut self, ctx: &AppContext) {
+        self.note = None;
 
-        self.coordination = vec![
-            CoordinationEntry {
-                agent: "memnoth-kg".to_string(),
-                role: "indexer".to_string(),
-                last_seen: "2m ago".to_string(),
-                status: CoordinationStatus::Active,
+        match crate::vault::asof(ctx, None, None, LIMIT) {
+            Ok(outcome) => self.beliefs = beliefs_from(&outcome.data),
+            Err(error) => {
+                self.beliefs.clear();
+                self.note = Some(describe(&error));
+            }
+        }
+
+        match crate::vault::timeline(ctx, LIMIT, None, None, false) {
+            Ok(outcome) => self.activity = activity_from(&outcome.data),
+            Err(error) => {
+                self.activity.clear();
+                // The belief read's message wins when both fail: for a missing
+                // vault they say the same thing, and repeating it twice reads
+                // as two problems.
+                if self.note.is_none() {
+                    self.note = Some(describe(&error));
+                }
+            }
+        }
+
+        if self.beliefs.is_empty() && self.note.is_none() {
+            self.note = Some(format!(
+                "the vault holds nothing yet — record a fact with\n  /vault remember \
+                 <name> -- <fact>\n\n({})",
+                ctx.vault_path.display()
+            ));
+        }
+
+        self.clamp();
+    }
+
+    fn rows(&self) -> usize {
+        match self.tab() {
+            ContextTab::Beliefs => self.beliefs.len(),
+            ContextTab::Activity => self.activity.len(),
+        }
+    }
+
+    fn clamp(&mut self) {
+        let len = self.rows();
+        if len == 0 {
+            self.selected = 0;
+            self.list_state.select(None);
+        } else {
+            self.selected = self.selected.min(len - 1);
+            self.list_state.select(Some(self.selected));
+        }
+    }
+
+    fn select(&mut self, index: usize) {
+        if self.rows() == 0 {
+            return;
+        }
+        self.selected = index.min(self.rows() - 1);
+        self.list_state.select(Some(self.selected));
+    }
+
+    fn open_detail(&mut self) {
+        self.detail_view = true;
+        self.detail_content = match self.tab() {
+            ContextTab::Beliefs => match self.beliefs.get(self.selected) {
+                Some(belief) => {
+                    let mut text = format!(
+                        "{}\n\nkind        {}\nconfidence  {:.2}\nupdated     {}\n\n{}",
+                        belief.name, belief.kind, belief.confidence, belief.updated, belief.summary
+                    );
+                    if belief.facts.is_empty() {
+                        text.push_str("\n\nno observation recorded for it yet");
+                    } else {
+                        text.push_str("\n\nobservations");
+                        for fact in &belief.facts {
+                            text.push_str(&format!("\n  · {fact}"));
+                        }
+                    }
+                    text.push_str(&format!(
+                        "\n\n/vault history {} — every version it ever had",
+                        belief.name
+                    ));
+                    text
+                }
+                None => "nothing selected".to_string(),
             },
-            CoordinationEntry {
-                agent: "memnoth-search".to_string(),
-                role: "searcher".to_string(),
-                last_seen: "5m ago".to_string(),
-                status: CoordinationStatus::Idle,
+            ContextTab::Activity => match self.activity.get(self.selected) {
+                Some(row) => format!(
+                    "{}\n\nkind        {}\nwhen        {}\nstate       {}\n\n{}",
+                    row.name, row.kind, row.at, row.state, row.summary
+                ),
+                None => "nothing selected".to_string(),
             },
-            CoordinationEntry {
-                agent: "human-dev".to_string(),
-                role: "developer".to_string(),
-                last_seen: "just now".to_string(),
-                status: CoordinationStatus::Active,
-            },
-        ];
+        };
+    }
+
+    /// A line explaining a screen that has no rows, and therefore needs words.
+    fn state_text(&self) -> String {
+        if let Some(note) = &self.note {
+            return note.clone();
+        }
+        match self.tab() {
+            ContextTab::Activity => {
+                "no recorded versions — /vault remember records one".to_string()
+            }
+            ContextTab::Beliefs => "nothing is believed right now".to_string(),
+        }
     }
 
     fn render_beliefs(&mut self, frame: &mut Frame, area: Rect) {
         let items: Vec<ListItem> = self
-            .vault_beliefs
+            .beliefs
             .iter()
             .enumerate()
             .map(|(i, b)| {
@@ -144,18 +225,24 @@ impl ContextOverlay {
                 } else {
                     Style::default()
                 };
-
-                let contradiction_mark = if b.contradicted { " ⚠" } else { "" };
+                let summary = if b.summary.trim().is_empty() {
+                    b.facts
+                        .first()
+                        .map(String::as_str)
+                        .unwrap_or("")
+                        .to_string()
+                } else {
+                    b.summary.clone()
+                };
                 let lines = vec![
                     Line::from(vec![
                         Span::styled(format!("[{}] ", b.kind), Style::default().fg(Color::Cyan)),
                         Span::styled(&b.name, style),
-                        Span::styled(contradiction_mark, style.fg(Color::Red)),
-                        Span::styled(format!("  v{}", b.version), style.fg(Color::DarkGray)),
+                        Span::styled(format!("  {:.2}", b.confidence), style.fg(Color::DarkGray)),
                     ]),
                     Line::from(vec![
                         Span::styled("    ", Style::default()),
-                        Span::styled(&b.content, style.fg(Color::Gray)),
+                        Span::styled(ellipsize(&summary, 120), style.fg(Color::Gray)),
                         Span::styled(format!("  ({})", b.updated), style.fg(Color::DarkGray)),
                     ]),
                 ];
@@ -167,18 +254,18 @@ impl ContextOverlay {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(" Vault Beliefs "),
+                    .title(format!(" Vault Beliefs ({}) ", self.beliefs.len())),
             )
             .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
         frame.render_stateful_widget(list, area, &mut self.list_state);
     }
 
-    fn render_coordination(&mut self, frame: &mut Frame, area: Rect) {
+    fn render_activity(&mut self, frame: &mut Frame, area: Rect) {
         let items: Vec<ListItem> = self
-            .coordination
+            .activity
             .iter()
             .enumerate()
-            .map(|(i, c)| {
+            .map(|(i, row)| {
                 let selected = i == self.selected;
                 let style = if selected {
                     Style::default()
@@ -188,27 +275,26 @@ impl ContextOverlay {
                 } else {
                     Style::default()
                 };
-
-                let status_char = match c.status {
-                    CoordinationStatus::Active => "●",
-                    CoordinationStatus::Idle => "○",
-                    CoordinationStatus::Away => "◌",
+                let state_color = if row.state == "active" {
+                    Color::Green
+                } else {
+                    Color::DarkGray
                 };
-                let status_color = match c.status {
-                    CoordinationStatus::Active => Color::Green,
-                    CoordinationStatus::Idle => Color::Yellow,
-                    CoordinationStatus::Away => Color::DarkGray,
-                };
-
-                let lines = vec![Line::from(vec![
-                    Span::styled(
-                        format!("{} ", status_char),
-                        Style::default().fg(status_color),
-                    ),
-                    Span::styled(&c.agent, style),
-                    Span::styled(format!(" ({})", c.role), style.fg(Color::Cyan)),
-                    Span::styled(format!("  {}", c.last_seen), style.fg(Color::DarkGray)),
-                ])];
+                let lines = vec![
+                    Line::from(vec![
+                        Span::styled(row.at.clone(), Style::default().fg(Color::DarkGray)),
+                        Span::styled(format!("  {}", row.name), style),
+                        Span::styled(
+                            format!("  [{}]", row.kind),
+                            Style::default().fg(Color::Cyan),
+                        ),
+                        Span::styled(format!("  {}", row.state), style.fg(state_color)),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("    ", Style::default()),
+                        Span::styled(ellipsize(&row.summary, 120), style.fg(Color::Gray)),
+                    ]),
+                ];
                 ListItem::new(lines).style(style)
             })
             .collect();
@@ -217,65 +303,8 @@ impl ContextOverlay {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(" Coordination "),
+                    .title(format!(" Recent Versions ({}) ", self.activity.len())),
             )
-            .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
-        frame.render_stateful_widget(list, area, &mut self.list_state);
-    }
-
-    fn render_history(&mut self, frame: &mut Frame, area: Rect) {
-        let history_items = vec![
-            (
-                "2024-01-15 14:32",
-                "architecture",
-                "v3",
-                "Updated decision: event sourcing for replay",
-            ),
-            (
-                "2024-01-10 09:15",
-                "search-indexing",
-                "v1",
-                "Created: tantivy + embeddings",
-            ),
-            (
-                "2024-01-05 16:45",
-                "rust-version",
-                "v2",
-                "Correction: MSRV is 1.75 not 1.70",
-            ),
-        ];
-
-        let items: Vec<ListItem> = history_items
-            .iter()
-            .enumerate()
-            .map(|(i, (time, name, version, desc))| {
-                let selected = i == self.selected;
-                let style = if selected {
-                    Style::default()
-                        .bg(Color::Blue)
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                };
-
-                let lines = vec![
-                    Line::from(vec![
-                        Span::styled(*time, Style::default().fg(Color::DarkGray)),
-                        Span::styled(format!("  {}", name), style),
-                        Span::styled(format!("  {}", version), style.fg(Color::Cyan)),
-                    ]),
-                    Line::from(vec![
-                        Span::styled("    ", Style::default()),
-                        Span::styled(*desc, style.fg(Color::Gray)),
-                    ]),
-                ];
-                ListItem::new(lines).style(style)
-            })
-            .collect();
-
-        let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title(" History "))
             .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
         frame.render_stateful_widget(list, area, &mut self.list_state);
     }
@@ -292,11 +321,22 @@ impl Overlay for ContextOverlay {
 
     fn show(&mut self) {
         self.visible = true;
-        self.load_mock_data();
         self.active_tab = 0;
         self.selected = 0;
-        self.list_state.select(Some(0));
         self.detail_view = false;
+        self.detail_content.clear();
+    }
+
+    /// Reading needs the app's context, which `show` does not have.
+    fn on_open(&mut self, app: &mut App) {
+        match app.ctx.clone() {
+            Some(ctx) => self.reload(&ctx),
+            None => {
+                self.note =
+                    Some("no workspace context — open this from a session, not a test".to_string());
+                self.clamp();
+            }
+        }
     }
 
     fn hide(&mut self) {
@@ -310,7 +350,6 @@ impl Overlay for ContextOverlay {
         }
 
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
 
         match key.code {
             KeyCode::Esc => {
@@ -322,163 +361,63 @@ impl Overlay for ContextOverlay {
                 }
             }
             KeyCode::Tab => {
-                if !self.detail_view {
+                if !self.detail_view && !self.tabs.is_empty() {
                     self.active_tab = (self.active_tab + 1) % self.tabs.len();
                     self.selected = 0;
-                    self.list_state.select(Some(0));
+                    self.clamp();
                 }
             }
             KeyCode::BackTab => {
-                if !self.detail_view {
+                if !self.detail_view && !self.tabs.is_empty() {
                     self.active_tab = (self.active_tab + self.tabs.len() - 1) % self.tabs.len();
                     self.selected = 0;
-                    self.list_state.select(Some(0));
+                    self.clamp();
                 }
             }
             KeyCode::Up => {
                 if !self.detail_view && self.selected > 0 {
-                    self.selected -= 1;
-                    self.list_state.select(Some(self.selected));
+                    self.select(self.selected - 1);
                 }
             }
             KeyCode::Down => {
-                if !self.detail_view {
-                    let len = match self.tab() {
-                        ContextTab::Beliefs => self.vault_beliefs.len(),
-                        ContextTab::Coordination => self.coordination.len(),
-                        ContextTab::History => 0,
-                    };
-                    if self.selected + 1 < len {
-                        self.selected += 1;
-                        self.list_state.select(Some(self.selected));
-                    }
+                if !self.detail_view && self.selected + 1 < self.rows() {
+                    self.select(self.selected + 1);
                 }
             }
             KeyCode::PageUp => {
                 if !self.detail_view {
-                    self.selected = self.selected.saturating_sub(10);
-                    self.list_state.select(Some(self.selected));
+                    self.select(self.selected.saturating_sub(10));
                 }
             }
             KeyCode::PageDown => {
                 if !self.detail_view {
-                    let len = match self.tab() {
-                        ContextTab::Beliefs => self.vault_beliefs.len(),
-                        ContextTab::Coordination => self.coordination.len(),
-                        ContextTab::History => 0,
-                    };
-                    self.selected = (self.selected + 10).min(len.saturating_sub(1));
-                    self.list_state.select(Some(self.selected));
+                    self.select(self.selected.saturating_add(10));
                 }
             }
             KeyCode::Home => {
                 if !self.detail_view {
-                    self.selected = 0;
-                    self.list_state.select(Some(0));
+                    self.select(0);
                 }
             }
             KeyCode::End => {
                 if !self.detail_view {
-                    let len = match self.tab() {
-                        ContextTab::Beliefs => self.vault_beliefs.len(),
-                        ContextTab::Coordination => self.coordination.len(),
-                        ContextTab::History => 0,
-                    };
-                    self.selected = len.saturating_sub(1);
-                    self.list_state.select(Some(self.selected));
+                    self.select(self.rows().saturating_sub(1));
                 }
             }
             KeyCode::Enter => {
                 if !self.detail_view {
-                    self.detail_view = true;
-                    match self.tab() {
-                        ContextTab::Beliefs => {
-                            if let Some(b) = self.vault_beliefs.get(self.selected) {
-                                self.detail_content = format!(
-                                    "Name: {}\nKind: {}\nVersion: {}\nUpdated: {}\nContradicted: {}\n\n{}",
-                                    b.name,
-                                    b.kind,
-                                    b.version,
-                                    b.updated,
-                                    if b.contradicted { "YES" } else { "no" },
-                                    b.content
-                                );
-                            }
-                        }
-                        ContextTab::Coordination => {
-                            if let Some(c) = self.coordination.get(self.selected) {
-                                self.detail_content = format!(
-                                    "Agent: {}\nRole: {}\nLast seen: {}\nStatus: {:?}",
-                                    c.agent, c.role, c.last_seen, c.status
-                                );
-                            }
-                        }
-                        _ => {}
-                    }
+                    self.open_detail();
                 }
             }
-            KeyCode::Char('c') if ctrl => {
-                // Copy current entry
-                if !self.detail_view {
-                    match self.tab() {
-                        ContextTab::Beliefs => {
-                            if let Some(b) = self.vault_beliefs.get(self.selected) {
-                                app.push(
-                                    crate::tui::app::EntryRole::Info,
-                                    format!("Copied belief: {}", b.name),
-                                );
-                            }
-                        }
-                        ContextTab::Coordination => {
-                            if let Some(c) = self.coordination.get(self.selected) {
-                                app.push(
-                                    crate::tui::app::EntryRole::Info,
-                                    format!("Copied agent: {}", c.agent),
-                                );
-                            }
-                        }
-                        _ => {}
-                    }
+            // `r` rereads the vault. Nothing is said in the transcript: the
+            // list changing is the answer, and a note that says "refreshed"
+            // would be noise on every press.
+            KeyCode::Char('r') if !ctrl => {
+                if let Some(ctx) = app.ctx.clone() {
+                    self.reload(&ctx);
+                    self.detail_view = false;
+                    self.detail_content.clear();
                 }
-            }
-            KeyCode::Char('p') => {
-                // Pin current entry
-                if !self.detail_view {
-                    match self.tab() {
-                        ContextTab::Beliefs => {
-                            if let Some(b) = self.vault_beliefs.get(self.selected) {
-                                app.push(
-                                    crate::tui::app::EntryRole::Info,
-                                    format!("Pinned belief: {}", b.name),
-                                );
-                            }
-                        }
-                        ContextTab::Coordination => {
-                            if let Some(c) = self.coordination.get(self.selected) {
-                                app.push(
-                                    crate::tui::app::EntryRole::Info,
-                                    format!("Pinned agent: {}", c.agent),
-                                );
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            KeyCode::Char('r') => {
-                // Refresh
-                self.load_mock_data();
-                app.push(
-                    crate::tui::app::EntryRole::Info,
-                    "Context refreshed".to_string(),
-                );
-            }
-            KeyCode::Char('x') if ctrl => {
-                // Compact context
-                app.push(
-                    crate::tui::app::EntryRole::Info,
-                    "Context compact triggered (would summarize and prune)".to_string(),
-                );
             }
             _ => {}
         }
@@ -501,14 +440,12 @@ impl Overlay for ContextOverlay {
             ])
             .split(area);
 
-        // Tabs
         let tab_titles: Vec<&str> = self
             .tabs
             .iter()
             .map(|t| match t {
                 ContextTab::Beliefs => "Beliefs",
-                ContextTab::Coordination => "Coordination",
-                ContextTab::History => "History",
+                ContextTab::Activity => "Activity",
             })
             .collect();
         let tabs = Tabs::new(tab_titles)
@@ -522,26 +459,36 @@ impl Overlay for ContextOverlay {
             );
         frame.render_widget(tabs, chunks[0]);
 
-        // Content
         if self.detail_view {
             let detail = Paragraph::new(self.detail_content.clone())
                 .style(Style::default().fg(Color::White))
                 .block(Block::default().borders(Borders::ALL).title(" Detail "))
-                .wrap(Wrap { trim: true });
+                .wrap(Wrap { trim: false });
             frame.render_widget(detail, chunks[1]);
+        } else if self.rows() == 0 {
+            let note = Paragraph::new(self.state_text())
+                .style(Style::default().fg(Color::Gray))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(match self.tab() {
+                            ContextTab::Beliefs => " Vault Beliefs ",
+                            ContextTab::Activity => " Recent Versions ",
+                        }),
+                )
+                .wrap(Wrap { trim: true });
+            frame.render_widget(note, chunks[1]);
         } else {
             match self.tab() {
                 ContextTab::Beliefs => self.render_beliefs(frame, chunks[1]),
-                ContextTab::Coordination => self.render_coordination(frame, chunks[1]),
-                ContextTab::History => self.render_history(frame, chunks[1]),
+                ContextTab::Activity => self.render_activity(frame, chunks[1]),
             }
         }
 
-        // Help footer
         let help_text = if self.detail_view {
-            "esc: back · c: copy · p: pin"
+            "esc: back"
         } else {
-            "↑↓: navigate · enter: detail · tab: next tab · c: copy · p: pin · r: refresh · Ctrl+X: compact · esc: close"
+            "↑↓: move · enter: detail · tab: next tab · r: reread the vault · esc: close"
         };
         let help = Paragraph::new(help_text)
             .style(Style::default().fg(Color::DarkGray))
@@ -551,15 +498,205 @@ impl Overlay for ContextOverlay {
 
     fn help_text(&self) -> Vec<(&'static str, &'static str)> {
         vec![
-            ("/context", "Open context overlay"),
-            ("Tab / Shift+Tab", "Switch tabs"),
-            ("↑/↓", "Navigate entries"),
-            ("Enter", "View detail"),
-            ("Esc", "Close / Back from detail"),
-            ("Ctrl+C", "Copy entry"),
-            ("P", "Pin entry"),
-            ("R", "Refresh"),
-            ("Ctrl+X", "Compact context"),
+            ("/context", "What the vault believes, read from it"),
+            ("Tab / Shift+Tab", "Switch Beliefs / Activity"),
+            ("↑/↓", "Move"),
+            ("Enter", "Detail"),
+            ("R", "Reread the vault"),
+            ("Esc", "Close / back from detail"),
         ]
+    }
+}
+
+/// Entities, plus the observations that make each one true.
+fn beliefs_from(data: &serde_json::Value) -> Vec<Belief> {
+    let mut facts: Vec<(String, String)> = Vec::new();
+    for fact in data["facts"].as_array().into_iter().flatten() {
+        let entity = fact["entity"].as_str().unwrap_or_default().to_string();
+        let content = fact["content"].as_str().unwrap_or_default().to_string();
+        if !entity.is_empty() && !content.trim().is_empty() {
+            facts.push((entity, content));
+        }
+    }
+
+    data["entities"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entity| {
+            let name = entity["name"].as_str()?.to_string();
+            Some(Belief {
+                facts: facts
+                    .iter()
+                    .filter(|(owner, _)| *owner == name)
+                    .map(|(_, content)| content.clone())
+                    .collect(),
+                kind: entity["kind"].as_str().unwrap_or("unknown").to_string(),
+                confidence: entity["confidence"].as_f64().unwrap_or(0.0),
+                summary: entity["summary"].as_str().unwrap_or_default().to_string(),
+                updated: entity["valid_from_iso"]
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or_default(),
+                name,
+            })
+        })
+        .collect()
+}
+
+/// Recent entity versions, newest first as the timeline reports them.
+fn activity_from(data: &serde_json::Value) -> Vec<Activity> {
+    data["facts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|fact| Activity {
+            at: fact["valid_from"]
+                .as_i64()
+                .and_then(stamp)
+                .unwrap_or_default(),
+            name: fact["name"].as_str().unwrap_or_default().to_string(),
+            kind: fact["kind"].as_str().unwrap_or("unknown").to_string(),
+            state: if fact["valid_to"].is_null() {
+                "active"
+            } else {
+                "closed"
+            },
+            summary: fact["summary"].as_str().unwrap_or_default().to_string(),
+        })
+        .collect()
+}
+
+/// Epoch milliseconds as a local-looking stamp, or `None` when the value is not
+/// a date this build can format.
+fn stamp(ms: i64) -> Option<String> {
+    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms)
+        .map(|when| when.format("%Y-%m-%d %H:%M UTC").to_string())
+}
+
+/// A failure as a screen can show it: what went wrong, and the fix if there is
+/// one. `ErrorOutcome` already carries both, so nothing is invented here.
+fn describe(error: &ErrorOutcome) -> String {
+    let mut text = error.message.clone();
+    if let Some(cause) = &error.cause {
+        text.push_str(&format!("\n\n{cause}"));
+    }
+    if let Some(fix) = &error.fix {
+        text.push_str(&format!("\n\n{fix}"));
+    }
+    text
+}
+
+/// Keep one drawn row inside the pane's width.
+fn ellipsize(text: &str, max: usize) -> String {
+    let line = text.lines().next().unwrap_or("").trim();
+    if line.chars().count() <= max {
+        return line.to_string();
+    }
+    let mut out: String = line.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn belief(name: &str) -> Belief {
+        Belief {
+            name: name.to_string(),
+            kind: "decision".to_string(),
+            confidence: 0.9,
+            summary: format!("{name} is the decided thing"),
+            updated: "2026-01-02 03:04 UTC".to_string(),
+            facts: vec![format!("{name} was recorded")],
+        }
+    }
+
+    #[test]
+    fn the_tabs_are_the_two_the_vault_can_answer() {
+        let overlay = ContextOverlay::new();
+        assert_eq!(
+            overlay.tabs,
+            vec![ContextTab::Beliefs, ContextTab::Activity],
+            "no tab may exist that no local read can fill"
+        );
+    }
+
+    #[test]
+    fn an_empty_list_is_words_not_an_empty_table() {
+        let overlay = ContextOverlay::new();
+        assert!(overlay.state_text().contains("nothing is believed"));
+    }
+
+    #[test]
+    fn a_read_failure_shows_its_reason_and_its_fix() {
+        let mut overlay = ContextOverlay::new();
+        overlay.note = Some(describe(
+            &ErrorOutcome::new(crate::output::ExitCode::Unexpected, "failed to open vault")
+                .with_cause("no such file")
+                .with_fix("run `memnoth vault init` to create the vault"),
+        ));
+        let text = overlay.state_text();
+        assert!(text.contains("failed to open vault"), "{text}");
+        assert!(text.contains("no such file"), "{text}");
+        assert!(text.contains("vault init"), "{text}");
+    }
+
+    #[test]
+    fn navigating_stops_at_the_last_belief_and_the_first() {
+        let mut overlay = ContextOverlay::new();
+        overlay.beliefs = vec![belief("a"), belief("b")];
+        overlay.clamp();
+
+        overlay.select(1);
+        assert_eq!(overlay.selected, 1);
+        overlay.select(9);
+        assert_eq!(overlay.selected, 1, "there is no third row");
+        overlay.select(0);
+        assert_eq!(overlay.selected, 0);
+    }
+
+    #[test]
+    fn a_selection_survives_a_reload_that_shrinks_the_list() {
+        let mut overlay = ContextOverlay::new();
+        overlay.beliefs = vec![belief("a"), belief("b"), belief("c")];
+        overlay.selected = 2;
+        overlay.beliefs.truncate(1);
+        overlay.clamp();
+        assert_eq!(overlay.selected, 0);
+    }
+
+    #[test]
+    fn the_entities_read_is_the_shape_the_vault_returns() {
+        let data = serde_json::json!({
+            "entities": [
+                { "name": "architecture", "kind": "decision", "summary": "event sourcing",
+                  "confidence": 0.75, "valid_from_iso": "2026-01-15 14:32 UTC" }
+            ],
+            "facts": [
+                { "entity": "architecture", "content": "replay from the log" },
+                { "entity": "something-else", "content": "not this entity" }
+            ]
+        });
+        let beliefs = beliefs_from(&data);
+        assert_eq!(beliefs.len(), 1);
+        assert_eq!(beliefs[0].name, "architecture");
+        assert_eq!(beliefs[0].kind, "decision");
+        assert_eq!(beliefs[0].confidence, 0.75);
+        assert_eq!(beliefs[0].facts, vec!["replay from the log".to_string()]);
+    }
+
+    #[test]
+    fn activity_marks_a_closed_version_as_closed() {
+        let data = serde_json::json!({
+            "facts": [
+                { "name": "a", "kind": "fact", "valid_from": 0, "valid_to": null },
+                { "name": "b", "kind": "fact", "valid_from": 0, "valid_to": 10 }
+            ]
+        });
+        let rows = activity_from(&data);
+        assert_eq!(rows[0].state, "active");
+        assert_eq!(rows[1].state, "closed");
     }
 }
