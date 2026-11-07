@@ -9,9 +9,7 @@ use crate::cli::{
 };
 use crate::context::AppContext;
 use crate::output::Outcome;
-use memnoth_cloud_client::{
-    BatchIngestRequest, BatchIngestResponse, BillingResponse, CloudClient, CreditsResponse,
-};
+use memnoth_cloud_client::{CloudClient, CreditsResponse};
 
 /// Run the cloud command.
 pub fn run(ctx: &AppContext, args: &CloudArgs) -> Result<Outcome> {
@@ -24,6 +22,33 @@ pub fn run(ctx: &AppContext, args: &CloudArgs) -> Result<Outcome> {
 }
 
 /// Get authenticated cloud client.
+/// The client every command that *requires* an account uses.
+///
+/// Same token sources as [`get_cloud_client`] — an exported key wins over the
+/// stored one — but a machine with no credential is refused here rather than
+/// answering 401 on the first request. A write command that cannot say "sign
+/// in first" is a command that looks broken.
+pub fn signed_in_client(ctx: &AppContext) -> Result<CloudClient> {
+    let mut client = CloudClient::new().context("Failed to create cloud client")?;
+
+    let token = std::env::var("MEMNOTH_API_KEY")
+        .ok()
+        .or_else(|| std::env::var("MEMNOTH_MCP_TOKEN").ok())
+        .or_else(|| ctx.auth_token())
+        .filter(|token| !token.trim().is_empty())
+        .ok_or_else(|| {
+            // These verbs answer as `/projects` and friends inside the session, so
+            // the sign-in they name has to be the one that exists where the person is.
+            anyhow::anyhow!(
+                "not signed in. Run `/login` in the session, `mn auth login` in a shell, \
+                 or set MEMNOTH_API_KEY"
+            )
+        })?;
+
+    client.set_auth_token(token);
+    Ok(client)
+}
+
 fn get_cloud_client(ctx: &AppContext) -> Result<CloudClient> {
     let mut client = CloudClient::new().context("Failed to create cloud client")?;
 
@@ -39,53 +64,15 @@ fn get_cloud_client(ctx: &AppContext) -> Result<CloudClient> {
     Ok(client)
 }
 
-/// `mn cloud sync` - POST /api/v1/ingest/batch
+/// `mn cloud sync` — the same sync `mn sync` runs.
+///
+/// This used to build an empty batch and post it, so every run answered
+/// "Synced 0 items to cloud" against a server that was never asked to do
+/// anything. The collection, the privacy gate, the retry queue and the
+/// heartbeat all live in [`crate::sync`]; delegating is what makes the number a
+/// real number instead of a hard-coded zero.
 pub fn sync(ctx: &AppContext, args: &SyncArgs) -> Result<Outcome> {
-    let client = get_cloud_client(ctx)?;
-
-    // Build batch ingest request from local data
-    // For now, create a dry-run or empty request structure
-    let request = BatchIngestRequest {
-        items: vec![], // TODO: collect actual session data to sync
-        dry_run: if args.dry_run { Some(true) } else { None },
-    };
-
-    let response: BatchIngestResponse = if args.dry_run {
-        // For dry run, just validate without sending
-        BatchIngestResponse {
-            accepted: true,
-            batch_id: Some("dry-run".to_string()),
-            accepted_count: 0,
-            rejected_count: 0,
-            results: Some(vec![]),
-        }
-    } else {
-        client
-            .ingest_batch(request)
-            .context("Failed to sync with cloud")?
-    };
-
-    let data = json!({
-        "accepted": response.accepted,
-        "batch_id": response.batch_id,
-        "accepted_count": response.accepted_count,
-        "rejected_count": response.rejected_count,
-        "dry_run": args.dry_run,
-    });
-
-    let text = if args.dry_run {
-        "Dry run: no data sent to cloud".to_string()
-    } else if response.accepted {
-        format!(
-            "Synced {} items to cloud (batch: {})",
-            response.accepted_count,
-            response.batch_id.as_deref().unwrap_or("unknown")
-        )
-    } else {
-        format!("Sync failed: {} items rejected", response.rejected_count)
-    };
-
-    Ok(Outcome::new("cloud.sync", text, data))
+    crate::sync::run_sync(ctx, args)
 }
 
 /// `mn cloud profile` - manage cloud profile in config.toml
@@ -108,7 +95,7 @@ fn profile_show(ctx: &AppContext, _args: &ProfileShowArgs) -> Result<Outcome> {
     let data = json!({
         "mcp_url": mcp_url,
         "profile": profile,
-        "vault": config.vault.as_ref().map(|v| v.as_str()),
+        "vault": config.vault.as_deref(),
         "provider": config.provider.as_ref().map(|p| json!({
             "base_url": p.base_url,
             "model": p.model,
@@ -165,44 +152,59 @@ fn profile_set(ctx: &AppContext, args: &ProfileSetArgs) -> Result<Outcome> {
     Ok(Outcome::new("cloud.profile.set", text, data))
 }
 
-/// `mn cloud billing` - GET /api/v1/billing
+/// `mn cloud billing` — the credit summary and the org it belongs to.
+///
+/// There is no `/billing` route: this view is `GET /credits` plus `GET /org`,
+/// the two reads the control plane actually serves.
 fn billing(ctx: &AppContext, _args: &BillingArgs) -> Result<Outcome> {
     let client = get_cloud_client(ctx)?;
 
-    let response: BillingResponse = client.billing().context("Failed to fetch billing info")?;
+    let credits = client.credits().context("Failed to fetch credits info")?;
+    // The org is context, not the subject: a failure to read it must not hide
+    // the balance, which is what the command was asked for.
+    let org = client.org().ok();
 
     let data = json!({
+        "org": org.as_ref().map(|org| json!({
+            "slug": org.slug,
+            "name": org.name,
+            "plan": org.plan,
+        })),
         "credits": {
-            "balance_micros": response.credits.balance_micros,
-            "currency": response.credits.currency,
-            "auto_recharge": response.credits.auto_recharge,
-            "recharge_threshold_micros": response.credits.recharge_threshold_micros,
-            "recharge_amount_micros": response.credits.recharge_amount_micros,
-            "next_billing_date": response.credits.next_billing_date,
-        },
-        "pricing": {
-            "currency": response.pricing.currency,
-            "models": response.pricing.models.iter().map(|m| json!({
-                "model_id": m.model_id,
-                "input_price_per_million_micros": m.input_price_per_million_micros,
-                "output_price_per_million_micros": m.output_price_per_million_micros,
-                "currency": m.currency,
-            })).collect::<Vec<_>>(),
+            "balance_micros": credits.balance_micros,
+            "burned_micros": credits.burned_micros,
+            "window_days": credits.window_days,
+            "expiring_micros": credits.expiring_micros,
+            "next_expiry_at": credits.next_expiry_at,
+            "demo": credits.demo,
         },
     });
 
-    let balance_usd = response.credits.balance_micros as f64 / 1_000_000.0;
-    let text = format!(
-        "Billing:\n  Credits: ${:.4} {}\n  Auto-recharge: {}\n  Models with pricing: {}",
-        balance_usd,
-        response.credits.currency,
-        if response.credits.auto_recharge {
-            "enabled"
-        } else {
-            "disabled"
-        },
-        response.pricing.models.len()
+    let mut text = format!(
+        "Billing:\n  Credits: ${:.4} USD",
+        credits.balance_micros as f64 / 1_000_000.0
     );
+    if let Some(org) = &org {
+        text.push_str(&format!(
+            "\n  Organization: {} (plan {})",
+            org.name, org.plan
+        ));
+    }
+    if credits.window_days > 0 {
+        text.push_str(&format!(
+            "\n  Spent (last {} days): ${:.4}",
+            credits.window_days,
+            credits.burned_micros as f64 / 1_000_000.0
+        ));
+    }
+    if credits.expiring_micros > 0 {
+        text.push_str(&format!(
+            "\n  Expiring within {} days: ${:.4} across {} grant(s)",
+            credits.expiry_warning_days,
+            credits.expiring_micros as f64 / 1_000_000.0,
+            credits.expiring_grants
+        ));
+    }
 
     Ok(Outcome::new("cloud.billing", text, data))
 }
@@ -215,40 +217,44 @@ fn credits(ctx: &AppContext, _args: &CreditsArgs) -> Result<Outcome> {
 
     let data = json!({
         "balance_micros": response.balance_micros,
-        "currency": response.currency,
-        "auto_recharge": response.auto_recharge,
-        "recharge_threshold_micros": response.recharge_threshold_micros,
-        "recharge_amount_micros": response.recharge_amount_micros,
-        "next_billing_date": response.next_billing_date,
+        "burned_micros": response.burned_micros,
+        "window_days": response.window_days,
+        "expiring_micros": response.expiring_micros,
+        "expiring_grants": response.expiring_grants,
+        "next_expiry_at": response.next_expiry_at,
+        "expiry_warning_days": response.expiry_warning_days,
+        "grants_total": response.grants_total,
+        "ledger_total": response.ledger_total,
+        "unpriced_sessions": response.unpriced_sessions,
+        "demo": response.demo,
     });
 
-    let balance_usd = response.balance_micros as f64 / 1_000_000.0;
     let mut text = format!(
-        "Credits: ${:.4} {}\n  Auto-recharge: {}",
-        balance_usd,
-        response.currency,
-        if response.auto_recharge {
-            "enabled"
-        } else {
-            "disabled"
-        }
+        "Credits: ${:.4} USD",
+        response.balance_micros as f64 / 1_000_000.0
     );
-
-    if let Some(threshold) = response.recharge_threshold_micros {
+    if response.window_days > 0 {
         text.push_str(&format!(
-            "\n  Recharge threshold: ${:.4}",
-            threshold as f64 / 1_000_000.0
+            "\n  Spent (last {} days): ${:.4}",
+            response.window_days,
+            response.burned_micros as f64 / 1_000_000.0
         ));
     }
-    if let Some(amount) = response.recharge_amount_micros {
+    if response.expiring_micros > 0 {
         text.push_str(&format!(
-            "\n  Recharge amount: ${:.4}",
-            amount as f64 / 1_000_000.0
+            "\n  Expiring within {} days: ${:.4} across {} grant(s)",
+            response.expiry_warning_days,
+            response.expiring_micros as f64 / 1_000_000.0,
+            response.expiring_grants
         ));
     }
-    if let Some(date) = &response.next_billing_date {
-        text.push_str(&format!("\n  Next billing: {}", date));
+    if let Some(date) = &response.next_expiry_at {
+        text.push_str(&format!("\n  Next expiry: {date}"));
     }
+    text.push_str(&format!(
+        "\n  Grants: {}   Ledger rows: {}",
+        response.grants_total, response.ledger_total
+    ));
 
     Ok(Outcome::new("cloud.credits", text, data))
 }
