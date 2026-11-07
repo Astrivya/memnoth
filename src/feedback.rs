@@ -1,15 +1,12 @@
 //! Feedback command: send feedback to memnoth cloud.
 
 use anyhow::{Context, Result};
-use serde_json::{Value, json};
+use memnoth_cloud_client::CloudClient;
+use serde_json::Value;
 
 use crate::cli::{FeedbackArgs, FeedbackCommand, FeedbackSendArgs};
 use crate::context::AppContext;
 use crate::output::Outcome;
-
-/// Where `mn feedback send` posts. The typed cloud client exposes no feedback
-/// endpoint, so this verb posts to the documented URL directly.
-const FEEDBACK_URL: &str = "https://memnoth.astrivya.ai/api/v1/feedback";
 
 /// Run the feedback command.
 pub fn run(ctx: &AppContext, args: &FeedbackArgs) -> Result<Outcome> {
@@ -26,12 +23,7 @@ fn auth_token() -> Option<String> {
         .ok()
         .or_else(|| std::env::var("MEMNOTH_MCP_TOKEN").ok())
         .filter(|token| !token.trim().is_empty())
-        .or_else(|| {
-            memnoth_auth::get_credential_sync("memnoth")
-                .ok()
-                .flatten()
-                .filter(|token| !token.trim().is_empty())
-        })
+        .or_else(|| memnoth_auth::account_key_sync())
 }
 
 /// `mn feedback send <message>` - POST /api/v1/feedback
@@ -47,44 +39,21 @@ pub fn send_feedback(_ctx: &AppContext, args: &FeedbackSendArgs) -> Result<Outco
 
 /// POST /api/v1/feedback and return the decoded reply.
 ///
-/// Feedback is a single small POST, so it goes straight to the endpoint the
-/// console serves rather than through the typed client.
+/// Through the shared client rather than a hand-built request: this is a
+/// mutating route behind the CSRF guard, so a bare `reqwest` POST was refused
+/// `403 cross-origin request rejected` on every plane — the one path that
+/// build a request itself instead of inheriting the client's headers. Going
+/// through the client also means `MEMNOTH_CLOUD_URL` is honoured here like
+/// everywhere else, rather than always reaching production.
 fn post_feedback(message: &str, category: &str, include_context: bool) -> Result<Value> {
-    let body = json!({
-        "message": message,
-        "category": category,
-        "include_context": include_context,
-    });
-
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(20))
-        .build()
-        .context("cannot create an HTTP client")?;
-
-    let mut request = client.post(FEEDBACK_URL).json(&body);
+    let mut client =
+        CloudClient::from_env().context("cannot work out which control plane to reach")?;
     if let Some(token) = auth_token() {
-        request = request.bearer_auth(token);
+        client.set_auth_token(token);
     }
-
-    let response = request
-        .send()
-        .context("cannot reach the feedback endpoint")?;
-    let status = response.status();
-    let text = response.text().unwrap_or_default();
-
-    if status.is_success() {
-        // A non-JSON reply still means the server accepted the feedback.
-        Ok(serde_json::from_str(&text).unwrap_or_else(|_| json!({ "text": text })))
-    } else {
-        Err(anyhow::anyhow!(match status.as_u16() {
-            401 => "Authentication failed. Please run `mn auth login`".to_string(),
-            402 => "Credits exhausted".to_string(),
-            404 => "Feedback endpoint not found".to_string(),
-            429 => "Rate limited. Please try again later".to_string(),
-            code @ 500..=599 => format!("Server error ({code})"),
-            code => format!("Error ({code}): {text}"),
-        }))
-    }
+    client
+        .feedback(message, category, include_context)
+        .context("the control plane refused the feedback")
 }
 
 /// Feedback overlay state for TUI
