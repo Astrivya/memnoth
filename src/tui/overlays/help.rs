@@ -356,6 +356,11 @@ impl HelpOverlay {
             "Build/update code graph",
         ));
         commands.add_binding(KeyBinding::new(
+            "/update",
+            "Update memnoth",
+            "Check for and install a new release",
+        ));
+        commands.add_binding(KeyBinding::new(
             "/kg status",
             "KG Status",
             "Show graph build info",

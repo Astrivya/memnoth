@@ -26,7 +26,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 
 use crate::context::AppContext;
-use crate::output::ellipsize;
 use crate::tui::app::{App, EntryRole};
 use crate::tui::overlays::{Overlay, OverlayAction, OverlayKind};
 
@@ -118,13 +117,13 @@ impl SearchOverlay {
                         let name = hit["name"].as_str().unwrap_or_default().to_string();
                         let kind = hit["kind"].as_str().unwrap_or_default().to_string();
                         let summary = hit["summary"].as_str().unwrap_or_default();
+                        // Kept whole. The row is wrapped to the width it
+                        // actually gets at render time, so a narrow window no
+                        // longer shows `…` where the matching sentence was.
                         let detail = if summary.trim().is_empty() {
-                            ellipsize(&kind, 40)
+                            kind
                         } else {
-                            format!(
-                                "{kind} · {}",
-                                ellipsize(summary.lines().next().unwrap_or(""), 60)
-                            )
+                            format!("{kind} · {}", summary.lines().next().unwrap_or(""))
                         };
                         rows.push(SearchResult {
                             source: SearchSource::Vault,
@@ -440,35 +439,35 @@ impl Overlay for SearchOverlay {
                         Style::default()
                     };
 
-                    let mut title = vec![
-                        Span::styled(
-                            format!("{source_label}  "),
-                            Style::default().fg(Color::Cyan),
-                        ),
-                        Span::styled(r.title.clone(), style),
-                    ];
+                    // Every row wraps at the width the list was given. A name
+                    // or a snippet longer than the window used to be clipped by
+                    // the widget with no ellipsis at all, which read as a row
+                    // that had lost half its words.
+                    let room = (chunks[1].width as usize).saturating_sub(6).max(8);
+                    let mut heading = format!("{source_label}  {}", r.title);
                     if let Some(score) = r.score {
-                        title.push(Span::styled(
-                            format!("  ({:.0}%)", score * 100.0),
-                            style.fg(Color::DarkGray),
-                        ));
+                        heading.push_str(&format!("  ({:.0}%)", score * 100.0));
                     }
-
-                    let mut lines = vec![
-                        Line::from(title),
-                        Line::from(vec![
-                            Span::styled("    ", Style::default()),
-                            Span::styled(r.snippet.clone(), style.fg(Color::Gray)),
-                        ]),
-                    ];
-                    if let Some(path) = &r.path {
+                    let mut lines: Vec<Line> = crate::tui::app::wrap_text(&heading, room)
+                        .into_iter()
+                        .map(|chunk| Line::from(Span::styled(format!("  {chunk}"), style)))
+                        .collect();
+                    for chunk in crate::tui::app::wrap_text(&r.snippet, room) {
                         lines.push(Line::from(vec![
                             Span::styled("    ", Style::default()),
-                            Span::styled(
-                                path.clone(),
-                                style.fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
-                            ),
+                            Span::styled(chunk, style.fg(Color::Gray)),
                         ]));
+                    }
+                    if let Some(path) = &r.path {
+                        for chunk in crate::tui::app::wrap_text(path, room) {
+                            lines.push(Line::from(vec![
+                                Span::styled("    ", Style::default()),
+                                Span::styled(
+                                    chunk,
+                                    style.fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                                ),
+                            ]));
+                        }
                     }
                     ListItem::new(lines).style(style)
                 })

@@ -20,13 +20,13 @@ use crate::cli::{
     KeysArgs, KeysCommand, KeysListArgs, KeysRevokeAllArgs, KeysRevokeArgs, KgArgs, KgCommand,
     McpArgs, McpCommand, OrgAddMemberArgs, OrgArgs, OrgCommand, OrgInvitesArgs, OrgMembersArgs,
     OrgRemoveMemberArgs, OrgRenameArgs, OrgSetRoleArgs, OrgShowArgs, OrgWithdrawArgs, ParallelArgs,
-    ProjectsArgs, ProjectsCommand, ProjectsCreateArgs, ProjectsDeleteArgs, ProjectsListArgs,
-    ProjectsRenameArgs, ProjectsUseArgs, ServeArgs, SkillAddArgs, SkillArgs, SkillCommand,
-    SkillEditArgs,
-    SkillListArgs, SkillRemoveArgs, SkillRunArgs, StatsArgs, SyncArgs, TeamsArgs, TeamsCommand,
-    TeamsCreateArgs, TeamsJoinArgs, TeamsListArgs, TeamsMembersArgs, UsageArgs, VaultArgs,
-    VaultCommand, Verb, WatchArgs, WhoamiArgs, WorktreeArgs, WorktreeCleanArgs, WorktreeCommand,
-    WorktreeCreateArgs, WorktreeDiffArgs, WorktreeListArgs,
+    ProjectsArgs, ProjectsCommand, ProjectsCreateArgs, ProjectsDeleteArgs, ProjectsFileArgs,
+    ProjectsListArgs, ProjectsRenameArgs, ProjectsUnassignedArgs, ProjectsUseArgs, ServeArgs,
+    SkillAddArgs, SkillArgs, SkillCommand, SkillEditArgs, SkillListArgs, SkillRemoveArgs,
+    SkillRunArgs, StatsArgs, SyncArgs, TeamsArgs, TeamsCommand, TeamsCreateArgs, TeamsJoinArgs,
+    TeamsListArgs, TeamsMembersArgs, UsageArgs, VaultArgs, VaultCommand, Verb, WatchArgs,
+    WhoamiArgs, WorktreeArgs, WorktreeCleanArgs, WorktreeCommand, WorktreeCreateArgs,
+    WorktreeDiffArgs, WorktreeListArgs,
 };
 use crate::tui::jobs::{JobStatus, Jobs};
 use crate::tui::panes::{DiffPane, TasksPane, TranscriptPane};
@@ -404,6 +404,10 @@ pub struct App {
     pub resumed: bool,
     /// A session to open as soon as the loop can swap the file it records.
     pub pending_session: Option<SessionSwitch>,
+    /// A line typed on the brief, waiting for the fresh conversation the loop
+    /// opens for it. The brief can stand over a resumed file, and a question
+    /// typed at it must not be filed into that file.
+    pub pending_prompt: Option<String>,
     /// What the startup screen shows, or `None` for a plain empty transcript.
     pub home: Option<Home>,
     /// Which row of `next` the selection is on.
@@ -437,6 +441,10 @@ pub struct App {
     pub approval: Option<String>,
     /// The rendered context pane (legacy string).
     pub context: String,
+    /// The model the next turn would use, shown beside the prompt. Read from
+    /// the config on refresh, not on every frame: a file read per keystroke is
+    /// the wrong price for a label.
+    pub model: String,
     /// The graph's state when it needs a person, with the verb that fixes it.
     ///
     /// `None` when the graph is indexed and current — the header shows nothing
@@ -488,6 +496,10 @@ pub struct App {
     pub slash: crate::tui::slash::SlashMenu,
     /// The signed-in cloud account, when this machine has one.
     pub account: Option<String>,
+    /// The project this machine files sessions under, as `mn projects use`
+    /// stored it, resolved to a name once at launch. `None` means the console's
+    /// unassigned queue, which is a state worth showing rather than hiding.
+    pub project: Option<String>,
     /// Sign-in events from the device-flow thread, and the sender kept beside
     /// the receiver so one attempt does not outlive the channel it reports on.
     pub login_tx: mpsc::Sender<crate::tui::login::LoginEvent>,
@@ -576,6 +588,7 @@ impl App {
             name: name.to_string(),
             resumed,
             pending_session: None,
+            pending_prompt: None,
             home: None,
             home_cursor: 0,
             home_visible: false,
@@ -591,6 +604,7 @@ impl App {
             busy: false,
             approval: None,
             context: String::new(),
+            model: String::new(),
             graph_attention: None,
             root: String::new(),
             vault: String::new(),
@@ -616,6 +630,7 @@ impl App {
             // Read from the credential store by `tui::run`, not here: a unit
             // test must never open the keyring.
             account: None,
+            project: None,
             login_tx,
             login_rx,
             login_busy: false,
@@ -1010,6 +1025,25 @@ impl App {
         self.scroll = self.scroll.saturating_sub(self.view_height.max(1));
     }
 
+    /// Move the transcript by one wheel notch.
+    ///
+    /// A touchpad sends a stream of these, so the step is small enough that one
+    /// flick is not a page. Scrolling up stops following — a view that jumps
+    /// back to the newest line the moment an answer lands cannot be read — and
+    /// scrolling to the end resumes it, exactly as `page_down` does.
+    pub fn wheel(&mut self, lines: usize, up: bool) {
+        let step = lines.max(1);
+        if up {
+            self.follow = false;
+            self.scroll = self.scroll.saturating_sub(step);
+            return;
+        }
+        self.scroll = self.scroll.saturating_add(step);
+        if self.scroll >= self.max_scroll() {
+            self.to_bottom();
+        }
+    }
+
     /// Scroll down one page; reaching the end resumes following.
     pub fn page_down(&mut self) {
         self.scroll = self.scroll.saturating_add(self.view_height.max(1));
@@ -1042,14 +1076,27 @@ impl App {
     /// Wrapping here rather than in the widget is what makes scrolling exact:
     /// the offset is in visual lines, so `PgUp` moves by a screen and the last
     /// page is not an estimate.
-    pub fn visual_lines(&self, width: usize) -> Vec<(EntryRole, String)> {
+    pub fn visual_lines(&self, width: usize) -> Vec<(EntryRole, ratatui::text::Line<'static>)> {
         // Every row is drawn after a [`GUTTER`]-wide glyph, so the text may only
         // use what is left of the pane. Wrapping to the full width let the
         // terminal re-wrap the last word onto a line of its own.
         let width = width.saturating_sub(GUTTER).max(1);
         let mut out = Vec::new();
         for entry in &self.entries {
-            for line in wrap_text(&entry.text, width) {
+            // An answer is markdown and is rendered as such: headings without
+            // their hashes, bullets with a hanging indent, code without its
+            // backticks. A prompt or a tool row is text the person typed or the
+            // tool printed, so it is wrapped and never reinterpreted.
+            let rendered: Vec<ratatui::text::Line<'static>> = match entry.role {
+                EntryRole::Answer | EntryRole::Info => {
+                    crate::tui::markdown::lines(&entry.text, width)
+                }
+                _ => wrap_text(&entry.text, width)
+                    .into_iter()
+                    .map(ratatui::text::Line::from)
+                    .collect(),
+            };
+            for line in rendered {
                 out.push((entry.role, line));
             }
         }
@@ -1345,6 +1392,19 @@ pub fn parse_line(raw: &str) -> Parsed {
         },
         "vault" => parse_vault(&args),
         "mcp" => parse_mcp(&args),
+        // `/update` runs the same verb `mn update` parses: one implementation,
+        // two doors. Progress arrives as the verb's answer rather than as
+        // stdout, because this screen owns the terminal while it runs.
+        "update" => {
+            let (flags, words) = split_flags(&args);
+            Parsed::Run(Verb::Update(crate::cli::UpdateArgs {
+                check: flags.contains_key("check") || words.iter().any(|word| word == "check"),
+                channel: flags.get("channel").cloned(),
+                version: flags.get("version").cloned(),
+                no_verify: flags.contains_key("no-verify")
+                    || words.iter().any(|word| word == "no-verify"),
+            }))
+        }
         "stats" => parse_usage_flags(&args, true),
         "usage" => parse_usage_flags(&args, false),
         "credits" => Parsed::Run(Verb::Cloud(CloudArgs {
@@ -2508,7 +2568,7 @@ fn parse_mcp(args: &[String]) -> Parsed {
 
 /// The project verbs, as `/projects --help` would write them.
 const PROJECTS_USAGE: &str = "usage: /projects <list | create <name> [--visibility org|restricted] | rename <id> <name> | \
-     delete <id> --yes | use <id> | use --clear>";
+     delete <id> --yes | use <id> | use --clear | unassigned | file <session> [--project ID]>";
 
 /// `/projects` — the org's projects, from inside the session.
 fn parse_projects(args: &[String]) -> Parsed {
@@ -2584,6 +2644,25 @@ fn parse_projects(args: &[String]) -> Parsed {
                     json: false,
                 }),
             }))
+        }
+        // The queue the console calls "awaiting a project", and the verb that
+        // empties it. Both live here because a person filing a session is in the
+        // session, not on the console.
+        "unassigned" => Parsed::Run(Verb::Projects(ProjectsArgs {
+            action: ProjectsCommand::Unassigned(ProjectsUnassignedArgs { json: false }),
+        })),
+        "file" => {
+            let (flags, positional) = split_flags(rest);
+            match positional.first() {
+                Some(session) => Parsed::Run(Verb::Projects(ProjectsArgs {
+                    action: ProjectsCommand::File(ProjectsFileArgs {
+                        session: session.clone(),
+                        project: flags.get("project").cloned(),
+                        json: false,
+                    }),
+                })),
+                None => Parsed::Unknown(PROJECTS_USAGE.to_string()),
+            }
         }
         other => Parsed::Unknown(format!(
             "unknown projects command {other:?}\n{PROJECTS_USAGE}"
@@ -3453,6 +3532,60 @@ mod tests {
         assert!(app.follow, "new output snaps to the bottom");
     }
 
+    /// Following must leave the newest line inside the viewport: the slice the
+    /// screen draws starts at `scroll` and must end on the last visual line.
+    #[test]
+    fn the_newest_visual_line_is_inside_the_viewport() {
+        let mut app = App::new("s", false);
+        for index in 0..40 {
+            app.push(EntryRole::Answer, format!("filler line {index:02}"));
+        }
+        app.push(
+            EntryRole::Answer,
+            "**Temporal vault**\n\nA belief is a claim with a date it became true, never a \
+             fact that floats free of one.\n\n- Impact analysis — what breaks if you change a \
+             symbol, which is exactly the question this sentence is long enough to have to \
+             answer across several wrapped lines before it finally ends here (`kg_impact`)\n\
+             - Read files directly with line ranges\n\n`kg_impact_status` is one name, never italics.",
+        );
+        app.set_viewport(83, 36);
+        app.to_bottom();
+
+        let visual = app.visual_lines(app.view_width);
+        assert_eq!(
+            app.scroll + app.view_height,
+            visual.len(),
+            "the followed slice must end on the last line"
+        );
+    }
+
+    /// The wheel is a small step, not a page, and it leaves following off so the
+    /// next answer cannot yank the view back.
+    #[test]
+    fn the_wheel_moves_a_few_lines_and_stops_following() {
+        let mut app = App::new("s", false);
+        for index in 0..30 {
+            app.push(EntryRole::Answer, format!("line {index}"));
+        }
+        app.set_viewport(20, 5);
+        app.to_bottom();
+        let max = app.max_scroll();
+        assert!(max > 3);
+
+        app.wheel(3, true);
+        assert!(!app.follow, "the wheel stops following");
+        assert_eq!(app.scroll, max - 3);
+
+        app.wheel(3, false);
+        assert_eq!(app.scroll, max);
+        assert!(app.follow, "scrolling to the end resumes following");
+
+        // Past the top is the top, not a negative offset.
+        app.wheel(3, true);
+        app.wheel(1000, true);
+        assert_eq!(app.scroll, 0);
+    }
+
     #[test]
     fn wrapping_preserves_paragraphs_and_never_overflows() {
         let lines = wrap_text("alpha beta gamma\n\nsecond paragraph", 10);
@@ -3631,5 +3764,31 @@ mod tests {
         );
         assert!(answer.contains("kg index"));
         assert!(answer.contains("vault remember"));
+    }
+}
+
+#[cfg(test)]
+mod update_parse_tests {
+    use super::*;
+
+    #[test]
+    fn slash_update_parses_check_channel_version_and_no_verify() {
+        let Parsed::Run(Verb::Update(args)) = parse_line("/update check") else {
+            panic!("`/update check` must parse to an update verb");
+        };
+        assert!(args.check);
+
+        let Parsed::Run(Verb::Update(args)) = parse_line("/update --version 0.2.0 --no-verify")
+        else {
+            panic!("`/update --version …` must parse to an update verb");
+        };
+        assert_eq!(args.version.as_deref(), Some("0.2.0"));
+        assert!(args.no_verify);
+
+        let Parsed::Run(Verb::Update(args)) = parse_line("/update --channel beta") else {
+            panic!("`/update --channel beta` must parse to an update verb");
+        };
+        assert_eq!(args.channel.as_deref(), Some("beta"));
+        assert!(!args.check);
     }
 }
