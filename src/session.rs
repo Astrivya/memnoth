@@ -64,6 +64,16 @@ impl SessionStore {
         Ok(self.dir.join(format!("{}.jsonl", validate_name(name)?)))
     }
 
+    /// Where the command history lives.
+    ///
+    /// It sits beside the sessions because it is read at the moment a session
+    /// starts: the dropdown's ranking is the first thing on screen, and a
+    /// second directory to look in would be one more thing to get wrong.
+    /// [`crate::tui::slash::load_usage`] treats a missing file as no history.
+    pub fn usage_path(&self) -> PathBuf {
+        self.dir.join("commands.json")
+    }
+
     /// Load `name`, or create it when it does not exist yet.
     ///
     /// The boolean says whether it was resumed, so the session header and the
@@ -198,6 +208,15 @@ pub fn transcript(session: &Session) -> Value {
     })
 }
 
+/// Milliseconds since the Unix epoch. Time is recorded, never inferred: a
+/// receipt that cannot be dated is worse than one that is slightly wrong.
+pub fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,13 +264,4 @@ mod tests {
         assert_eq!(rows[0].messages, 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
-}
-
-/// Milliseconds since the Unix epoch. Time is recorded, never inferred: a
-/// receipt that cannot be dated is worse than one that is slightly wrong.
-pub fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
 }

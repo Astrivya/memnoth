@@ -1,11 +1,13 @@
 use anyhow::{Context, Result, bail};
-use memnoth_session::{Message, Role, Session};
+use memnoth_session::{Role, Session};
 use serde_json::json;
+use std::io::Read;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use crate::context::AppContext;
-use crate::output::{ExitCode, Outcome};
-use crate::session::{SESSION_MODEL, SessionStore, now_ms, transcript, validate_name};
+use crate::output::Outcome;
+use crate::session::{SESSION_MODEL, SessionStore, validate_name};
 
 /// `memnoth session start [--resume NAME] [--model ID]` — start a new session.
 pub fn start(
@@ -32,10 +34,10 @@ pub fn start(
     };
 
     // If model was explicitly provided and differs from what's on disk, update it
-    if let Some(m) = model {
-        if m != session.model {
-            // Session was loaded, but model flag overrides
-        }
+    if let Some(m) = model
+        && m != session.model
+    {
+        // Session was loaded, but model flag overrides
     }
 
     let path = store.save(&session)?;
@@ -281,8 +283,9 @@ pub fn effort(ctx: &AppContext, name: Option<&str>, level: &str, _json: bool) ->
         );
     }
 
-    // Store effort level in session metadata (we'll add it as a special message)
-    // For now, we'll record it as a system message
+    // The session has no metadata field for effort, so it is recorded as a
+    // system message — the only channel `memnoth-session` gives a header-less
+    // value. A reader that wants the current level takes the last `effort:` line.
     session.push(Role::System, format!("effort:{}", level_lower));
 
     let save_path = store.save(&session)?;
@@ -301,18 +304,35 @@ pub fn effort(ctx: &AppContext, name: Option<&str>, level: &str, _json: bool) ->
     Ok(Outcome::new("session.effort", text, data))
 }
 
-/// `mn replay <session>` — deterministically replay a session from its transcript.
+/// `mn replay <session>` — print the recorded turns of a session.
+///
+/// This is a transcript replay, not a model replay: no provider is contacted and
+/// no answer is generated. `--model` is therefore refused rather than echoed,
+/// because a line reading `Replay model: <id>` next to answers the model never
+/// produced is the one thing this verb must not print.
+// Each parameter is a CLI flag the verb exposes; grouping them into a struct
+// would only move the list to the caller.
+#[allow(clippy::too_many_arguments)]
 pub fn replay(
     ctx: &AppContext,
     name: &str,
     from_turn: usize,
     max_turns: Option<usize>,
     model: Option<&str>,
-    format: &str,
+    _format: &str,
     output: Option<&str>,
     diff: bool,
     _json: bool,
 ) -> Result<Outcome> {
+    // Checked before any work is done, so a caller asking to re-run a model gets
+    // an answer instead of a transcript that quietly ignores the flag.
+    if let Some(requested) = model {
+        bail!(
+            "replay is transcript-only in this build and cannot re-run {requested}; \
+             drop --model to print the recorded turns"
+        );
+    }
+
     let store = SessionStore::new(&ctx.sessions_dir);
     let validated =
         validate_name(name).with_context(|| format!("invalid session name {name:?}"))?;
@@ -338,17 +358,12 @@ pub fn replay(
     let end_turn = max_turns.map_or(turns.len(), |m| (from_turn + m).min(turns.len()));
     let replay_turns = &turns[from_turn..end_turn];
 
-    // For now, we'll output the replay transcript
-    // In a full implementation, this would re-run the model with the same context
     let mut output_lines = Vec::new();
     output_lines.push(format!(
-        "Replaying session '{}' from turn {} to {}",
+        "Transcript replay of session '{}', turns {}..{} (no model was contacted)",
         name, from_turn, end_turn
     ));
-    output_lines.push(format!("Original model: {}", session.model));
-    if let Some(m) = model {
-        output_lines.push(format!("Replay model: {}", m));
-    }
+    output_lines.push(format!("Recorded model: {}", session.model));
     output_lines.push("---".to_string());
 
     for (i, &turn_idx) in replay_turns.iter().enumerate() {
@@ -381,20 +396,17 @@ pub fn replay(
 
     let data = json!({
         "session": name,
+        "format": "transcript",
+        "model_contacted": false,
         "from_turn": from_turn,
         "to_turn": end_turn,
         "turns_replayed": replay_turns.len(),
         "original_model": session.model,
-        "replay_model": model,
         "diff_requested": diff,
     });
 
-    let text = if output.is_some() {
-        format!(
-            "Replay saved to {} ({} turns)",
-            output.unwrap(),
-            replay_turns.len()
-        )
+    let text = if let Some(output) = output {
+        format!("Replay saved to {} ({} turns)", output, replay_turns.len())
     } else {
         replay_text
     };
@@ -447,27 +459,36 @@ pub fn attach(
             "output_tokens": session.output_tokens,
         },
         "metadata": {
-            "include_vault": include_vault,
-            "include_kg": include_kg,
             "created_ms": crate::session::now_ms(),
         }
     });
 
-    // TODO: Include vault snapshot if requested
+    // The snapshots are the same reads `memnoth vault status` and `memnoth kg
+    // status` answer with, so a bundle cannot describe a vault or a graph the
+    // verbs would not. A read that fails is recorded as its error: the bundle is
+    // still a valid handoff, and the field says which half is missing.
+    let mut vault_embedded = false;
+    let mut kg_embedded = false;
+
     if include_vault {
-        bundle["vault"] = json!({
-            "status": "not_implemented",
-            "message": "Vault snapshot not yet implemented"
-        });
+        bundle["vault"] = match crate::vault::status(ctx) {
+            Ok(outcome) => outcome.data,
+            Err(error) => json!({ "error": error.message }),
+        };
+        vault_embedded = true;
     }
 
-    // TODO: Include code graph snapshot if requested
     if include_kg {
-        bundle["kg"] = json!({
-            "status": "not_implemented",
-            "message": "Code graph snapshot not yet implemented"
-        });
+        bundle["kg"] = match crate::kg::status(ctx) {
+            Ok(status) => serde_json::to_value(&status)
+                .unwrap_or_else(|error| json!({ "error": error.to_string() })),
+            Err(error) => json!({ "error": error.to_string() }),
+        };
+        kg_embedded = true;
     }
+
+    bundle["metadata"]["include_vault"] = json!(vault_embedded);
+    bundle["metadata"]["include_kg"] = json!(kg_embedded);
 
     let bundle_json =
         serde_json::to_string_pretty(&bundle).context("failed to serialize bundle")?;
@@ -479,8 +500,8 @@ pub fn attach(
     let data = json!({
         "session": name,
         "bundle_path": bundle_path.display().to_string(),
-        "include_vault": include_vault,
-        "include_kg": include_kg,
+        "include_vault": vault_embedded,
+        "include_kg": kg_embedded,
         "size_bytes": size_bytes,
     });
 
@@ -499,7 +520,7 @@ pub fn handoff(
     ctx: &AppContext,
     bundle: &str,
     name: Option<&str>,
-    workspace: Option<&str>,
+    _workspace: Option<&str>,
     _json: bool,
 ) -> Result<Outcome> {
     let bundle_path = PathBuf::from(bundle);
@@ -607,6 +628,9 @@ pub fn handoff(
 }
 
 /// `memnoth session exec` — run a command under the policy engine (sandbox).
+// Each parameter is a CLI flag the verb exposes; grouping them into a struct
+// would only move the list to the caller.
+#[allow(clippy::too_many_arguments)]
 pub fn exec(
     ctx: &AppContext,
     cmd: Vec<String>,
@@ -648,8 +672,11 @@ pub fn exec(
         None
     };
 
-    // Build sandbox policy
-    let sandbox_policy = json!({
+    // There is no sandbox in this build: the command runs as the current user,
+    // with the caller's network and filesystem access. `--policy`, `--network`
+    // and `--write-outside-workspace` are recorded in the answer and enforced
+    // nowhere, which is why the answer says so. `--timeout` *is* enforced below.
+    let request = json!({
         "profile": policy,
         "network": network,
         "write_outside_workspace": write_outside,
@@ -657,21 +684,69 @@ pub fn exec(
         "workspace": ctx.root.display().to_string(),
     });
 
-    // In a full implementation, this would invoke memnoth-sandbox
-    // For now, we'll use std::process::Command with basic restrictions
-    let mut command = std::process::Command::new(&cmd[0]);
-    command.args(&cmd[1..]);
-
-    command.current_dir(&ctx.root);
-
-    // Set timeout
-    let output = command
-        .output()
+    let mut child = std::process::Command::new(&cmd[0])
+        .args(&cmd[1..])
+        .current_dir(&ctx.root)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .with_context(|| format!("failed to execute command: {}", cmd.join(" ")))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let exit_code = output.status.code().unwrap_or(-1);
+    // Both pipes are drained on their own threads: a child that fills a pipe
+    // without being read would otherwise block until the timeout, and a polling
+    // loop on `try_wait` is the only way std offers to enforce one.
+    fn drain<R: Read + Send + 'static>(
+        pipe: Option<R>,
+    ) -> Option<std::thread::JoinHandle<Vec<u8>>> {
+        pipe.map(|mut pipe| {
+            std::thread::spawn(move || {
+                let mut buffer = Vec::new();
+                let _ = pipe.read_to_end(&mut buffer);
+                buffer
+            })
+        })
+    }
+    let stdout_reader = drain(child.stdout.take());
+    let stderr_reader = drain(child.stderr.take());
+
+    // `0` means no deadline, which is the only reading of "no timeout" a caller
+    // can express through a u64.
+    let deadline = (timeout > 0).then(|| Instant::now() + Duration::from_secs(timeout));
+    let mut timed_out = false;
+    let mut status = None;
+    loop {
+        match child.try_wait() {
+            Ok(Some(waited)) => {
+                status = Some(waited);
+                break;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error)
+                    .with_context(|| format!("failed to wait for command: {}", cmd.join(" ")));
+            }
+        }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            let _ = child.kill();
+            let _ = child.wait();
+            timed_out = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let stdout = stdout_reader
+        .map(|reader| reader.join().unwrap_or_default())
+        .map(|bytes| String::from_utf8_lossy(&bytes).to_string())
+        .unwrap_or_default();
+    let stderr = stderr_reader
+        .map(|reader| reader.join().unwrap_or_default())
+        .map(|bytes| String::from_utf8_lossy(&bytes).to_string())
+        .unwrap_or_default();
+    let exit_code = status.and_then(|status| status.code()).unwrap_or(-1);
 
     // Record in session if provided
     if let Some(mut sess) = session_context {
@@ -690,19 +765,37 @@ pub fn exec(
     let data = json!({
         "command": cmd,
         "policy": policy,
+        "policy_enforced": false,
+        "sandbox": "none",
         "network_allowed": network,
         "write_outside_allowed": write_outside,
         "timeout_seconds": timeout,
+        "timed_out": timed_out,
+        "request": request,
         "exit_code": exit_code,
         "stdout": stdout,
         "stderr": stderr,
         "session": session,
     });
 
-    let text = if exit_code == 0 {
-        format!("Command completed successfully (exit code {})", exit_code)
+    let note = if timeout > 0 {
+        "note: no sandbox in this build — the command ran unconfined; policy, network and write-outside are recorded, not enforced (--timeout is enforced)"
     } else {
-        format!("Command failed with exit code {}", exit_code)
+        "note: no sandbox in this build — the command ran unconfined; policy, network and write-outside are recorded, not enforced (no --timeout was set)"
+    };
+
+    let text = if timed_out {
+        format!(
+            "Command timed out after {}s and was killed\n{}",
+            timeout, note
+        )
+    } else if exit_code == 0 {
+        format!(
+            "Command completed successfully (exit code {})\n{}",
+            exit_code, note
+        )
+    } else {
+        format!("Command failed with exit code {}\n{}", exit_code, note)
     };
 
     Ok(Outcome::new("session.exec", text, data))
