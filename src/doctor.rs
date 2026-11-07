@@ -14,11 +14,11 @@ use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use std::io::{self, Write};
 
-use memnoth_command::CommandRegistry;
+use memnoth_command::{CommandRegistry, build_p0_registry};
 use memnoth_context::Scope;
 
 use crate::auth::login;
-use crate::cli::{AuthLoginArgs, AuthStatusArgs, DoctorArgs};
+use crate::cli::{AuthLoginArgs, DoctorArgs};
 use crate::context::AppContext;
 use crate::kg;
 use crate::output::{Outcome, human_bytes};
@@ -182,7 +182,7 @@ fn fix(ctx: &AppContext, yes: bool) -> Result<Outcome> {
         for item in &fixed {
             text.push_str(&format!("  ✓ {item}\n"));
         }
-        text.push_str("\n");
+        text.push('\n');
     }
 
     if !skipped.is_empty() {
@@ -190,7 +190,7 @@ fn fix(ctx: &AppContext, yes: bool) -> Result<Outcome> {
         for item in &skipped {
             text.push_str(&format!("  ○ {item}\n"));
         }
-        text.push_str("\n");
+        text.push('\n');
     }
 
     if fixed.is_empty() && skipped.is_empty() {
@@ -282,12 +282,11 @@ fn completions_installed() -> Result<bool> {
     };
 
     for file in &completion_files {
-        if file.exists() {
-            if let Ok(content) = std::fs::read_to_string(file) {
-                if content.contains("memnoth") {
-                    return Ok(true);
-                }
-            }
+        if file.exists()
+            && let Ok(content) = std::fs::read_to_string(file)
+            && content.contains("memnoth")
+        {
+            return Ok(true);
         }
     }
     Ok(false)
@@ -298,7 +297,7 @@ fn install_completions() -> Result<()> {
     let home = dirs::home_dir().context("cannot find home directory")?;
     let shell = std::env::var("SHELL").unwrap_or_default();
 
-    let registry = CommandRegistry::new();
+    let registry: CommandRegistry = build_p0_registry().build();
     let shell_type = if shell.contains("fish") {
         clap_complete::Shell::Fish
     } else if shell.contains("zsh") {
@@ -499,9 +498,12 @@ fn mcp_section(ctx: &AppContext) -> Section {
     text.push_str(&format!(
         "  token      {}\n",
         if ctx.mcp_token().is_some() {
-            "MEMNOTH_MCP_TOKEN is set"
+            "MEMNOTH_MCP_TOKEN is set".to_string()
         } else {
-            "missing — mint one at /api-keys, then export MEMNOTH_MCP_TOKEN"
+            format!(
+                "missing — mint one at {}, then export MEMNOTH_MCP_TOKEN",
+                crate::context::console_url("api-keys")
+            )
         }
     ));
     Section { text, data }

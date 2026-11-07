@@ -4,10 +4,10 @@ use anyhow::{Result, anyhow};
 use memnoth_update::{Channel, UpdateConfig, check_for_update, detect_managed_install};
 use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
-use crate::cli::{InstallArgs, UninstallArgs, UpdateArgs, Verb};
+use crate::cli::{InstallArgs, UninstallArgs, UpdateArgs};
 use crate::output::{ErrorOutcome, ExitCode, Outcome};
 
 /// Map an engine or I/O failure into the CLI's error envelope.
@@ -21,7 +21,7 @@ fn failure(error: impl std::fmt::Display) -> ErrorOutcome {
 
 /// Execute update verb.
 pub fn execute_update(
-    ctx: &crate::context::AppContext,
+    _ctx: &crate::context::AppContext,
     args: &UpdateArgs,
 ) -> Result<Outcome, ErrorOutcome> {
     let channel = match args.channel.as_deref() {
@@ -63,7 +63,7 @@ pub fn execute_update(
 
 /// Execute install verb.
 pub fn execute_install(
-    ctx: &crate::context::AppContext,
+    _ctx: &crate::context::AppContext,
     args: &InstallArgs,
 ) -> Result<Outcome, ErrorOutcome> {
     // On Windows, we can't easily install from here; show the install script URL
@@ -104,10 +104,10 @@ pub fn execute_install(
 
 /// Execute uninstall verb.
 pub fn execute_uninstall(
-    ctx: &crate::context::AppContext,
+    _ctx: &crate::context::AppContext,
     args: &UninstallArgs,
 ) -> Result<Outcome, ErrorOutcome> {
-    let current_exe = env::current_exe().map_err(|e| failure(e))?;
+    let current_exe = env::current_exe().map_err(failure)?;
 
     // Check for managed install
     if let Some(manager) = detect_managed_install() {
@@ -128,11 +128,11 @@ pub fn execute_uninstall(
 
     let mut removed = Vec::new();
     if memnoth_bin.exists() {
-        fs::remove_file(&memnoth_bin).map_err(|e| failure(e))?;
+        fs::remove_file(&memnoth_bin).map_err(failure)?;
         removed.push("memnoth");
     }
     if mn_bin.exists() {
-        fs::remove_file(&mn_bin).map_err(|e| failure(e))?;
+        fs::remove_file(&mn_bin).map_err(failure)?;
         removed.push("mn");
     }
 
@@ -142,22 +142,22 @@ pub fn execute_uninstall(
             .or_else(|| dirs::home_dir().map(|h| h.join(".local/share")))
             .map(|d| d.join("memnoth"));
 
-        if let Some(state_dir) = state_dir {
-            if state_dir.exists() {
-                fs::remove_dir_all(&state_dir).map_err(|e| failure(e))?;
-                removed.push("state directory");
-            }
+        if let Some(state_dir) = state_dir
+            && state_dir.exists()
+        {
+            fs::remove_dir_all(&state_dir).map_err(failure)?;
+            removed.push("state directory");
         }
 
         let config_dir = dirs::config_dir()
             .or_else(|| dirs::home_dir().map(|h| h.join(".config")))
             .map(|d| d.join("memnoth"));
 
-        if let Some(config_dir) = config_dir {
-            if config_dir.exists() {
-                fs::remove_dir_all(&config_dir).map_err(|e| failure(e))?;
-                removed.push("config directory");
-            }
+        if let Some(config_dir) = config_dir
+            && config_dir.exists()
+        {
+            fs::remove_dir_all(&config_dir).map_err(failure)?;
+            removed.push("config directory");
         }
     }
 
@@ -231,16 +231,16 @@ fn apply_update_with_config(
     no_verify: bool,
 ) -> Result<Outcome, ErrorOutcome> {
     // Check for managed install
-    if let Some(manager) = detect_managed_install() {
-        if !no_verify {
-            return Err(ErrorOutcome::usage(format!(
-                "memnoth is managed by {}. Use {} to update, or pass --no-verify to override.",
-                manager, manager
-            )));
-        }
+    if let Some(manager) = detect_managed_install()
+        && !no_verify
+    {
+        return Err(ErrorOutcome::usage(format!(
+            "memnoth is managed by {}. Use {} to update, or pass --no-verify to override.",
+            manager, manager
+        )));
     }
 
-    let current_exe = env::current_exe().map_err(|e| failure(e))?;
+    let current_exe = env::current_exe().map_err(failure)?;
 
     // Find matching target for current platform
     let target_triple = format!("{}-{}", env::consts::ARCH, env::consts::OS);
@@ -264,13 +264,12 @@ fn apply_update_with_config(
 
     // Download with progress
     println!("Downloading {}...", download_url);
-    download_file_with_progress(&download_url, &temp_exe).map_err(|e| failure(e))?;
+    download_file_with_progress(&download_url, &temp_exe).map_err(failure)?;
 
     // Verify checksum unless --no-verify
     if !no_verify {
         println!("Verifying checksum...");
-        memnoth_update::verify_checksum(&temp_exe, &manifest.checksums.sha256)
-            .map_err(|e| failure(e))?;
+        memnoth_update::verify_checksum(&temp_exe, &manifest.checksums.sha256).map_err(failure)?;
         println!("Checksum OK");
     } else {
         println!("WARNING: Skipping verification (--no-verify)");
@@ -285,7 +284,7 @@ fn apply_update_with_config(
     let new_version_output = Command::new(&current_exe)
         .arg("--version")
         .output()
-        .map_err(|e| failure(e))?;
+        .map_err(failure)?;
 
     let version_str = String::from_utf8_lossy(&new_version_output.stdout)
         .trim()
@@ -315,8 +314,7 @@ fn download_file_with_progress(url: &str, dest: &Path) -> Result<()> {
         file.write_all(&buffer[..bytes_read])?;
         downloaded += bytes_read as u64;
 
-        if total_size > 0 {
-            let percent = (downloaded * 100) / total_size;
+        if let Some(percent) = (downloaded * 100).checked_div(total_size) {
             print!(
                 "\rProgress: {}% ({}/{} bytes)",
                 percent, downloaded, total_size

@@ -96,6 +96,11 @@ pub struct FeedbackOverlay {
     category: FeedbackCategory,
     include_context: bool,
     status: FeedbackStatus,
+    /// Whether one `Esc` has already asked to throw the draft away.
+    ///
+    /// A draft is the only thing this screen holds, so the key that leaves it
+    /// is the one key that has to ask twice.
+    discard_armed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -130,18 +135,13 @@ impl FeedbackCategory {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 enum FeedbackStatus {
+    #[default]
     Editing,
     Submitting,
     Success(String),
     Error(String),
-}
-
-impl Default for FeedbackStatus {
-    fn default() -> Self {
-        FeedbackStatus::Editing
-    }
 }
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -149,7 +149,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use crate::tui::app::App;
 use crate::tui::overlays::{Overlay, OverlayAction, OverlayKind};
@@ -186,6 +186,16 @@ impl FeedbackOverlay {
     }
 }
 
+impl FeedbackOverlay {
+    /// Nothing has been written yet, so there is nothing to lose: `Esc` may close
+    /// without asking.
+    fn draft_is_untouched(&self) -> bool {
+        self.message.is_empty()
+            && self.category == FeedbackCategory::default()
+            && self.include_context
+    }
+}
+
 impl Overlay for FeedbackOverlay {
     fn kind(&self) -> OverlayKind {
         OverlayKind::Feedback
@@ -202,6 +212,7 @@ impl Overlay for FeedbackOverlay {
         self.category = FeedbackCategory::default();
         self.include_context = true;
         self.status = FeedbackStatus::Editing;
+        self.discard_armed = false;
     }
 
     fn hide(&mut self) {
@@ -215,16 +226,22 @@ impl Overlay for FeedbackOverlay {
 
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
+        // Arming a discard survives exactly one keypress: the second `Esc` is the
+        // confirmation, anything else withdraws the question.
+        if key.code != KeyCode::Esc {
+            self.discard_armed = false;
+        }
+
         match (&self.status, key.code) {
             (FeedbackStatus::Editing, KeyCode::Esc) => {
-                if !self.message.is_empty()
-                    || self.category != FeedbackCategory::default()
-                    || !self.include_context
-                {
-                    // If user has entered content, ask for confirmation? For now just close.
+                if self.draft_is_untouched() {
                     return OverlayAction::Close;
                 }
-                return OverlayAction::Close;
+                if self.discard_armed {
+                    return OverlayAction::Close;
+                }
+                self.discard_armed = true;
+                return OverlayAction::None;
             }
             (FeedbackStatus::Editing, KeyCode::Enter) if ctrl => {
                 // Ctrl+Enter submits
@@ -360,12 +377,16 @@ impl Overlay for FeedbackOverlay {
 
         // Status
         let status_text = match &self.status {
+            FeedbackStatus::Editing if self.discard_armed => {
+                " Esc again discards this draft ".to_string()
+            }
             FeedbackStatus::Editing => " Editing... ".to_string(),
             FeedbackStatus::Submitting => " Submitting... ".to_string(),
             FeedbackStatus::Success(msg) => format!(" ✓ {msg} (Esc to close) "),
             FeedbackStatus::Error(msg) => format!(" ✗ {msg} (Esc to retry) "),
         };
         let status_style = match &self.status {
+            FeedbackStatus::Editing if self.discard_armed => Style::default().fg(Color::Yellow),
             FeedbackStatus::Error(_) => Style::default().fg(Color::Red),
             FeedbackStatus::Success(_) => Style::default().fg(Color::Green),
             FeedbackStatus::Submitting => Style::default().fg(Color::Yellow),
@@ -389,5 +410,74 @@ impl Overlay for FeedbackOverlay {
             FeedbackStatus::Error(_) => vec![("Esc", "Retry")],
             FeedbackStatus::Submitting => vec![],
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn app() -> App {
+        App::new("s", false)
+    }
+
+    fn opened() -> FeedbackOverlay {
+        let mut overlay = FeedbackOverlay::new();
+        overlay.show();
+        overlay
+    }
+
+    #[test]
+    fn one_escape_keeps_a_typed_draft_and_the_second_discards_it() {
+        let mut app = app();
+        let mut overlay = opened();
+        overlay.message = "the graph forgets my macros".to_string();
+        overlay.cursor = overlay.message.len();
+
+        let first = overlay.handle_key(KeyEvent::from(KeyCode::Esc), &mut app);
+        assert_eq!(
+            first,
+            OverlayAction::None,
+            "one esc must not destroy a draft"
+        );
+        assert!(overlay.discard_armed);
+        assert_eq!(overlay.message, "the graph forgets my macros");
+
+        let second = overlay.handle_key(KeyEvent::from(KeyCode::Esc), &mut app);
+        assert_eq!(
+            second,
+            OverlayAction::Close,
+            "the second esc is the confirmation"
+        );
+    }
+
+    #[test]
+    fn an_untouched_draft_closes_on_the_first_escape() {
+        let mut app = app();
+        let mut overlay = opened();
+
+        assert_eq!(
+            overlay.handle_key(KeyEvent::from(KeyCode::Esc), &mut app),
+            OverlayAction::Close
+        );
+    }
+
+    #[test]
+    fn typing_after_an_escape_withdraws_the_confirmation() {
+        let mut app = app();
+        let mut overlay = opened();
+        overlay.message = "hello".to_string();
+        overlay.cursor = overlay.message.len();
+
+        overlay.handle_key(KeyEvent::from(KeyCode::Esc), &mut app);
+        assert!(overlay.discard_armed);
+
+        overlay.handle_key(KeyEvent::from(KeyCode::Char('!')), &mut app);
+        assert!(!overlay.discard_armed, "typing is not a confirmation");
+        assert_eq!(
+            overlay.handle_key(KeyEvent::from(KeyCode::Esc), &mut app),
+            OverlayAction::None,
+            "the arming starts over instead of firing on the next esc"
+        );
     }
 }
