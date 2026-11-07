@@ -7,8 +7,6 @@ use std::fs;
 use crate::AppContext;
 use crate::context::Config;
 use crate::output::Outcome;
-use crate::sync::get_cloud_client;
-use memnoth_cloud_client::CloudClient;
 /// Execute `mn telemetry`.
 pub fn run(ctx: &AppContext, args: &crate::cli::TelemetryArgs) -> Result<Outcome> {
     match &args.action {
@@ -106,10 +104,10 @@ fn set_telemetry(ctx: &AppContext, enabled: bool) -> Result<Outcome> {
     let content = toml::to_string_pretty(&config)?;
     fs::write(config_path, content)?;
 
-    // Also send to cloud if authenticated
-    if let Ok(client) = get_cloud_client(ctx) {
-        let _ = client.set_telemetry_preferences(enabled);
-    }
+    // Nothing is pushed to the control plane: it has no telemetry-preference
+    // endpoint, and the local `config.toml` is what `mn sync` reads before it
+    // sends anything. A call here used to 404 on every deployment and was
+    // swallowed, which made the toggle look synced when it never was.
 
     let text = if enabled {
         "Telemetry enabled."
