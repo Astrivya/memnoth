@@ -1,6 +1,6 @@
 [package]
 name = "memnoth-mcp"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 # Spelled out rather than inherited: this crate is excluded from the workspace
 # (five of its path dependencies are not published here), and an excluded
 # package cannot resolve `workspace = true`. Inheriting would hide the real

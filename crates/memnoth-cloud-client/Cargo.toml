@@ -1,6 +1,6 @@
 [package]
 name = "memnoth-cloud-client"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 license.workspace = true
 edition = "2024"
 description = "Typed HTTP client for the memnoth cloud API: device auth, me, usage, credits, models, projects, orgs, MCP token, ingest, keys"

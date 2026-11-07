@@ -1,6 +1,6 @@
 [package]
 name = "memnoth-search"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 license.workspace = true
 edition = "2024"
 description = "memnoth code search engine: lexical grep, ranked file discovery, structural outline, relation tracing. First-party implementation on ripgrep's `ignore`/`globset` crates."

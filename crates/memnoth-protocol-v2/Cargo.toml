@@ -1,6 +1,6 @@
 [package]
 name = "memnoth-protocol-v2"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 license.workspace = true
 edition = "2024"
 description = "Compact binary framing protocol replacing NDJSON-over-Unix-socket IPC"

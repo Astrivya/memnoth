@@ -1,6 +1,6 @@
 {
   "name": "@astrivya/mcp",
-  "version": "0.1.0-beta.1",
+  "version": "0.1.0-beta.2",
   "description": "MCP server for memnoth: bi-temporal memory vault, code graph, and multi-agent coordination. This package is a launcher for the memnoth binary.",
   "bin": {
     "memnoth-mcp": "bin/memnoth-mcp.js"

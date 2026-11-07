@@ -1,0 +1,241 @@
+name: release
+
+# One tag publishes what an installer needs:
+#
+#   dist/install.sh                                    the script `/install` fetches
+#   dist/<tag>/memnoth-<target>.tar.gz(.sha256)        the versioned build
+#   dist/latest/…                                      a real copy, for MEMNOTH_VERSION=latest
+#   dist/SHA256SUMS                                    every digest, one file
+#   dist/<tag>/manifest.json                           what `mn update` reads
+#
+# `scripts/dist.sh` owns that layout; this workflow only builds the five
+# targets and hands the resulting files to it. Nothing here reimplements the
+# installer, because a second copy of "which target is this" is how a release
+# ships a binary nobody can check.
+#
+# The workflow lives in this repository because this is the repository a tag is
+# pushed to. A copy in a directory that is not under version control cannot be
+# triggered by anything.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag to publish (for example v0.1.0-beta.2). Empty or 'latest' uses the version in Cargo.toml."
+        required: false
+        default: ""
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # A tag push does not run the branch CI, so the release gates on the same
+  # checks itself. A release that has not passed them is not a release.
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace --locked
+
+  build:
+    name: build (${{ matrix.target }})
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: false
+          # An aarch64 Linux runner is not generally available, and the glibc
+          # version a cross image provides is the one worth targeting, so this
+          # leg is built with `cross` and the others with plain cargo.
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-13
+            cross: false
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            cross: false
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            cross: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: ${{ !matrix.cross }}
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: cargo build
+        if: ${{ !matrix.cross }}
+        shell: bash
+        run: cargo build --release --locked --target "${{ matrix.target }}" -p memnoth
+
+      - name: cross build
+        if: ${{ matrix.cross }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo install cross --locked
+          cross build --release --locked --target "${{ matrix.target }}" -p memnoth
+
+      # A binary that builds and does not run is the failure this step exists
+      # for: it is caught here, on the runner, rather than by whoever installs
+      # the archive. `memnoth --version` touches no vault and no graph, and it
+      # also proves the version the binary reports is the tag being published.
+      - name: smoke test and package
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="${{ matrix.target }}"
+          binary="target/$target/release/memnoth"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            binary="$binary.exe"
+          fi
+          if [ ! -f "$binary" ]; then
+            echo "no binary at $binary" >&2
+            exit 1
+          fi
+          "$binary" --version
+
+          stage="package/$target"
+          rm -rf "$stage"
+          mkdir -p "$stage"
+          cp "$binary" "$stage/"
+          cp README.md "$stage/"
+
+          artifact="memnoth-$target.tar.gz"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            artifact="memnoth-$target.zip"
+            # A relative destination: 7z is a native executable and Git Bash
+            # mangles a POSIX absolute path into something it cannot open.
+            (cd "$stage" && 7z a -tzip "../../$artifact" memnoth.exe README.md > /dev/null)
+          else
+            tar -czf "$artifact" -C "$stage" memnoth README.md
+          fi
+
+          # The installer refuses a release without this file, so it is written
+          # here, next to the artifact, and verified again by `dist.sh`.
+          if command -v sha256sum > /dev/null 2>&1; then
+            digest=$(sha256sum "$artifact" | awk '{print $1}')
+          else
+            digest=$(shasum -a 256 "$artifact" | awk '{print $1}')
+          fi
+          printf '%s  %s\n' "$digest" "$artifact" > "$artifact.sha256"
+          printf '%s\n' "$digest  $artifact"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: memnoth-${{ matrix.target }}.*
+          if-no-files-found: error
+
+  dist:
+    name: dist bundle
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      # Creating the release and attaching the bundle's assets to it.
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # Every target's artifact lands in its own directory, which is the shape
+      # `dist.sh` searches: `download-artifact` is not asked to merge them
+      # because the per-target name is what tells two artifacts apart.
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: assemble dist
+        id: layout
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest_version=$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -n 1)
+          if [ -z "$manifest_version" ]; then
+            echo "cannot read the version from Cargo.toml" >&2
+            exit 1
+          fi
+
+          raw="${{ github.event.inputs.version }}"
+          if [ -z "$raw" ] || [ "$raw" = "latest" ]; then
+            if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+              tag="$GITHUB_REF_NAME"
+            else
+              # A manual run from a branch has no tag to read, and the branch
+              # name is not a version. The manifest is.
+              tag="v$manifest_version"
+            fi
+          else
+            case "$raw" in
+              v*) tag="$raw" ;;
+              *) tag="v$raw" ;;
+            esac
+          fi
+
+          # The archive's `--version` prints what `[package] version` says, so a
+          # tag that disagrees publishes a binary nobody can identify. Caught
+          # here rather than after the upload.
+          if [ "$tag" != "v$manifest_version" ]; then
+            echo "tag $tag does not match Cargo.toml version v$manifest_version" >&2
+            exit 1
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          sh scripts/dist.sh --from artifacts --version "$tag" --out dist
+          tar -czf "memnoth-dist-$tag.tar.gz" dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: memnoth-dist-${{ steps.layout.outputs.tag }}
+          path: dist/
+          if-no-files-found: error
+
+      # This is the publication step. The assets are what the installer's
+      # GitHub base resolves — `<base>/<tag>/memnoth-<target>.tar.gz` — and
+      # `install.sh` at the top of the release is the script that one-liner runs:
+      #
+      #   curl -fsSL https://github.com/astrivya/memnoth/releases/latest/download/install.sh | sh
+      #
+      # A staging host is MEMNOTH_INSTALL_BASE=https://<host>/dist, which is the
+      # tree inside memnoth-dist-<tag>.tar.gz.
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.layout.outputs.tag }}
+          name: ${{ steps.layout.outputs.tag }}
+          generate_release_notes: true
+          draft: false
+          fail_on_unmatched_files: true
+          files: |
+            dist/${{ steps.layout.outputs.tag }}/*
+            dist/install.sh
+            dist/SHA256SUMS
+            memnoth-dist-${{ steps.layout.outputs.tag }}.tar.gz
