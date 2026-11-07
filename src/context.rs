@@ -29,6 +29,104 @@ use crate::cli::Cli;
 /// The default endpoint clients are registered against.
 pub const DEFAULT_MCP_URL: &str = "https://memnoth.astrivya.ai/mcp";
 
+/// Path prefix the console bundle is served under on the cloud origin.
+///
+/// The console is an SPA mounted at `/app` (`nest_service("/app", …)` in
+/// `memnoth-cloud`, matching its Vite `base` and router `basepath`). The API
+/// (`/api/v1/*`) and the MCP endpoint (`/mcp`) stay at the origin root, so this
+/// prefix belongs to console *pages* only.
+pub const CONSOLE_BASE_PATH: &str = "/app";
+
+/// Console origin: `MEMNOTH_CONSOLE_URL` when set, else production.
+///
+/// An **origin**, never a page path — [`console_url`] adds the mount, so a
+/// self-hosted override gets the same `/app` prefix rather than a doubled one.
+pub fn console_origin() -> String {
+    std::env::var("MEMNOTH_CONSOLE_URL")
+        .map(|url| url.trim_end_matches('/').to_string())
+        .unwrap_or_else(|_| "https://memnoth.astrivya.ai".to_string())
+}
+
+/// Absolute URL of one console page, e.g. `console_url("api-keys")`.
+///
+/// One definition of the mount, so a page link cannot drift back to the origin
+/// root where the console answers nothing.
+pub fn console_url(page: &str) -> String {
+    format!(
+        "{}{CONSOLE_BASE_PATH}/{}",
+        console_origin(),
+        page.trim_start_matches('/')
+    )
+}
+
+/// Origin the published documentation lives on.
+///
+/// Docs are served by the marketing site, not the control plane, so they keep
+/// their own origin: `MEMNOTH_CONSOLE_URL` sends a self-hoster's console links
+/// to their own deployment and must not drag documentation along with them.
+pub const DOCS_ORIGIN: &str = "https://memnoth.astrivya.ai";
+
+/// Absolute URL of one documentation page, e.g. `docs_url("vault/init")`.
+///
+/// One definition of the docs path, so a help link in an error message cannot
+/// drift to a page the site does not serve.
+pub fn docs_url(page: &str) -> String {
+    format!("{DOCS_ORIGIN}/docs/{}", page.trim_start_matches('/'))
+}
+
+/// Console pages the CLI links to — the SPA's own top-level routes.
+const CONSOLE_ROUTES: &[&str] = &[
+    "api-keys",
+    "connectors",
+    "dashboard",
+    "org",
+    "projects",
+    "sessions",
+    "settings",
+    "sharing",
+    "teams",
+    "usage",
+    "workspaces",
+];
+
+/// Put a console page the cloud handed us back under the mount.
+///
+/// The device-authorization response carries its own `verification_uri`, built
+/// by whichever server answered. A deployment on an older build — or one whose
+/// public origin is configured as a bare host — returns `/api-keys`, the origin
+/// root, where the console bundle is not served: the browser lands on a 404 and
+/// the sign-in cannot be approved. Rather than trust the server's idea of the
+/// mount, any URL whose first path segment is a console route gets
+/// [`CONSOLE_BASE_PATH`] inserted. Everything else (the API, `/auth/*`, `/mcp`,
+/// an already-mounted `/app/…`) is returned untouched.
+pub fn mounted_console_page(url: &str) -> String {
+    // The authority ends at the first `/`, `?` or `#` after the scheme. A URL
+    // with none of them is a bare origin and holds no page to mount.
+    let authority_start = url.find("://").map(|i| i + 3).unwrap_or(0);
+    let rest = &url[authority_start..];
+    let Some(offset) = rest.find(['/', '?', '#']) else {
+        return url.to_string();
+    };
+    let path = &rest[offset..];
+    if !path.starts_with('/') {
+        return url.to_string();
+    }
+    let end = path.find(['?', '#']).unwrap_or(path.len());
+    let first = path[1..end].split('/').next().unwrap_or("");
+    if !CONSOLE_ROUTES
+        .iter()
+        .any(|route| route.eq_ignore_ascii_case(first))
+    {
+        return url.to_string();
+    }
+    let insert_at = authority_start + offset;
+    format!(
+        "{}{CONSOLE_BASE_PATH}{}",
+        &url[..insert_at],
+        &url[insert_at..]
+    )
+}
+
 /// The default tool profile when neither the flag nor the config names one.
 pub const DEFAULT_PROFILE: &str = "full";
 
@@ -57,6 +155,22 @@ pub struct Config {
     /// `[ui]`: presentation preferences that outlive a single session.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ui: Option<UiConfig>,
+    /// `[tools]`: what the chat agent may not do. The one gate that is a
+    /// person's decision rather than a code path's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<ToolsConfig>,
+}
+
+/// `[tools]` — the agent's denials, written by `/permissions`.
+///
+/// Only denials are stored. Everything else is already a decision the code
+/// makes (a write asks first, a read does not), and a config file that repeats
+/// a default goes stale the moment the default changes.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ToolsConfig {
+    /// Tool names the agent may not call at all.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub denied: Vec<String>,
 }
 
 /// Presentation preferences written by `mn set-theme` and
@@ -69,6 +183,9 @@ pub struct UiConfig {
     /// `off` or `plain`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub screen_reader: Option<String>,
+    /// Model ids pinned in `/models`, so the Favorites tab survives a restart.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub favorite_models: Vec<String>,
 }
 
 /// Sync configuration
@@ -307,6 +424,17 @@ impl AppContext {
     pub fn config_path(&self) -> &PathBuf {
         &self.config_path
     }
+
+    /// Tool names the agent may not call, as of the config this invocation
+    /// loaded. The gate in `provider` re-reads the file, so a denial saved
+    /// mid-session applies to the next call rather than the next process.
+    pub fn denied_tools(&self) -> Vec<String> {
+        self.config
+            .tools
+            .as_ref()
+            .map(|tools| tools.denied.clone())
+            .unwrap_or_default()
+    }
 }
 
 /// `memnoth-mcp`, with the platform's executable suffix.
@@ -441,6 +569,35 @@ mod tests {
         }
         assert!(AppContext::resolve(&cli(Some(tmp.clone()), None, "../secrets")).is_err());
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn a_console_page_from_the_cloud_gains_the_mount() {
+        assert_eq!(
+            mounted_console_page("https://memnoth.astrivya.ai/api-keys?device=DRGA-YRKN"),
+            "https://memnoth.astrivya.ai/app/api-keys?device=DRGA-YRKN"
+        );
+        assert_eq!(
+            mounted_console_page("https://memnoth.astrivya.ai/projects/abc"),
+            "https://memnoth.astrivya.ai/app/projects/abc"
+        );
+        assert_eq!(
+            mounted_console_page("https://memnoth.astrivya.ai/app/api-keys?device=DRGA-YRKN"),
+            "https://memnoth.astrivya.ai/app/api-keys?device=DRGA-YRKN"
+        );
+    }
+
+    #[test]
+    fn a_non_console_url_is_left_alone() {
+        for url in [
+            "https://memnoth.astrivya.ai/api/v1/usage",
+            "https://memnoth.astrivya.ai/mcp",
+            "https://memnoth.astrivya.ai/auth/callback?code=abc",
+            "https://memnoth.astrivya.ai",
+            "https://memnoth.astrivya.ai/pricing",
+        ] {
+            assert_eq!(mounted_console_page(url), url);
+        }
     }
 
     #[test]

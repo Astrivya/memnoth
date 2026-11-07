@@ -57,20 +57,20 @@ fn load_local_receipts(ctx: &AppContext) -> Result<Vec<LocalReceipt>> {
     for entry in std::fs::read_dir(sessions_dir)? {
         let entry = entry?;
         let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
-            if let Ok(session) = load_session(&path) {
-                for r in session.receipts {
-                    receipts.push(LocalReceipt {
-                        at_ms: r.at_ms,
-                        total_tokens: r.total_tokens,
-                        input_tokens: r.input_tokens,
-                        output_tokens: r.output_tokens,
-                        cache_read_tokens: r.cache_read_tokens,
-                        cache_write_tokens: r.cache_write_tokens,
-                        cost_micros: r.cost_micros,
-                        model: session.model.clone(),
-                    });
-                }
+        if path.extension().and_then(|s| s.to_str()) == Some("jsonl")
+            && let Ok(session) = load_session(&path)
+        {
+            for r in session.receipts {
+                receipts.push(LocalReceipt {
+                    at_ms: r.at_ms,
+                    total_tokens: r.total_tokens,
+                    input_tokens: r.input_tokens,
+                    output_tokens: r.output_tokens,
+                    cache_read_tokens: r.cache_read_tokens,
+                    cache_write_tokens: r.cache_write_tokens,
+                    cost_micros: r.cost_micros,
+                    model: session.model.clone(),
+                });
             }
         }
     }
