@@ -179,6 +179,51 @@ fn mask_symlink_aliases(paths: &[PathBuf]) -> Vec<PathBuf> {
     out
 }
 
+/// Whether this plan denies `path`, on the three rules `decide` applies.
+///
+/// Split out because it is asked twice per decision — once for the path as
+/// written and once for its resolved form — and a deny that ran a subset of the
+/// rules on the second spelling would be the same bug in a new place.
+fn deny_matches(plan: &BackendPlan, path: &Path) -> bool {
+    // 1. Exact deny: the path itself or any ancestor is denied.
+    if plan
+        .deny_exact
+        .iter()
+        .any(|d| path == d || path.starts_with(d))
+    {
+        return true;
+    }
+
+    // 2. Expanded glob matches (concrete paths from resolve time).
+    if plan.deny_expanded.iter().any(|m| {
+        let mp = Path::new(m);
+        path == mp || path.starts_with(mp)
+    }) {
+        return true;
+    }
+
+    // 3. Live glob patterns (covers files created after resolve).
+    !plan.deny_globs.is_empty() && glob_patterns_deny(&plan.deny_globs, path)
+}
+
+/// The same path with symlinks in its existing prefix resolved, when that is a
+/// different path.
+///
+/// `canonicalize` fails for a file that does not exist yet, and refusing a write
+/// is exactly when that happens, so the parent is resolved and the file name
+/// appended. Without the fallback, a denied directory would be denied only for
+/// paths that already existed.
+fn resolve_alias(path: &Path) -> Option<PathBuf> {
+    if let Ok(canonical) = dunce::canonicalize(path) {
+        return (canonical.as_path() != path).then_some(canonical);
+    }
+    let parent = path.parent()?;
+    let name = path.file_name()?;
+    let canonical_parent = dunce::canonicalize(parent).ok()?;
+    let joined = canonical_parent.join(name);
+    (joined.as_path() != path).then_some(joined)
+}
+
 /// Access requested for one path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Access {
@@ -204,25 +249,17 @@ pub fn decide(plan: &BackendPlan, path: &Path, access: Access) -> PathDecision {
         return PathDecision::Allow;
     }
 
-    // 1. Exact deny: the path itself or any ancestor is denied.
-    if plan
-        .deny_exact
-        .iter()
-        .any(|d| path == d || path.starts_with(d))
+    if deny_matches(plan, path) {
+        return PathDecision::Deny;
+    }
+
+    // The same checks against the path with symlinks resolved. A denied
+    // directory reached through a symlink is still that directory —
+    // `link/secret.pem` opens `real/secret.pem` — and matching only the logical
+    // spelling let a rule be stepped around by writing the other name.
+    if let Some(resolved) = resolve_alias(path)
+        && deny_matches(plan, &resolved)
     {
-        return PathDecision::Deny;
-    }
-
-    // 2. Expanded glob matches (concrete paths from resolve time).
-    if plan.deny_expanded.iter().any(|m| {
-        let mp = Path::new(m);
-        path == mp || path.starts_with(mp)
-    }) {
-        return PathDecision::Deny;
-    }
-
-    // 3. Live glob patterns (covers files created after resolve).
-    if !plan.deny_globs.is_empty() && glob_patterns_deny(&plan.deny_globs, path) {
         return PathDecision::Deny;
     }
 
