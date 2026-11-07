@@ -94,10 +94,10 @@ fn get_connected_providers(config: &Config) -> HashSet<String> {
     let mut providers = HashSet::new();
 
     // Check config for provider settings
-    if let Some(provider_config) = &config.provider {
-        if provider_config.kind.is_some() {
-            providers.insert(provider_config.kind.as_ref().unwrap().to_lowercase());
-        }
+    if let Some(provider_config) = &config.provider
+        && provider_config.kind.is_some()
+    {
+        providers.insert(provider_config.kind.as_ref().unwrap().to_lowercase());
     }
 
     // Check for API keys in environment/credential store
@@ -116,17 +116,17 @@ fn get_connected_providers(config: &Config) -> HashSet<String> {
     }
 
     // Check credential store for stored keys
-    if let Ok(Some(key)) = get_credential_sync("memnoth") {
-        if !key.is_empty() {
-            if let Some(provider_config) = &config.provider {
-                if let Some(kind) = &provider_config.kind {
-                    providers.insert(kind.to_lowercase());
-                } else {
-                    providers.insert("memnoth".to_string());
-                }
+    if let Ok(Some(key)) = get_credential_sync("memnoth")
+        && !key.is_empty()
+    {
+        if let Some(provider_config) = &config.provider {
+            if let Some(kind) = &provider_config.kind {
+                providers.insert(kind.to_lowercase());
             } else {
                 providers.insert("memnoth".to_string());
             }
+        } else {
+            providers.insert("memnoth".to_string());
         }
     }
 
@@ -258,23 +258,19 @@ fn render_compare(
     }
 
     // Text comparison
-    let (p1, c1, pr1, cap1) = parse_model_info(&m1.id, &m1.description);
-    let (p2, c2, pr2, cap2) = parse_model_info(&m2.id, &m2.description);
+    let (p1, c1, _pr1, cap1) = parse_model_info(&m1.id, &m1.description);
+    let (p2, c2, _pr2, cap2) = parse_model_info(&m2.id, &m2.description);
     let prd1 = extract_pricing_detail(&m1.description);
     let prd2 = extract_pricing_detail(&m2.description);
 
     let mut rows = Vec::new();
-    rows.push(format!(
-        "══════════════════════════════════════════════════════════════"
-    ));
+    rows.push("══════════════════════════════════════════════════════════════".to_string());
     rows.push(format!(
         "           MODEL COMPARISON: {} vs {}",
         m1.id, m2.id
     ));
-    rows.push(format!(
-        "══════════════════════════════════════════════════════════════"
-    ));
-    rows.push(format!(""));
+    rows.push("══════════════════════════════════════════════════════════════".to_string());
+    rows.push(String::new());
     rows.push(format!("{:<25} {:<35} {:<35}", "ATTRIBUTE", m1.id, m2.id));
     rows.push(format!(
         "{:<25} {:<35} {:<35}",
@@ -302,8 +298,8 @@ fn render_compare(
         truncate(&cap1, 33),
         truncate(&cap2, 33)
     ));
-    rows.push(format!(""));
-    rows.push(format!("Description:"));
+    rows.push(String::new());
+    rows.push("Description:".to_string());
     rows.push(format!("  {}: {}", m1.id, truncate(&m1.description, 100)));
     rows.push(format!("  {}: {}", m2.id, truncate(&m2.description, 100)));
 
@@ -362,17 +358,36 @@ fn model_use(ctx: &AppContext, args: &crate::cli::ModelUseArgs) -> Result<Outcom
             max_tokens: None,
             input_per_mtok: None,
             output_per_mtok: None,
+            ..Default::default()
         });
     }
+    let provider_name = model_provider(model);
+
+    // A model id is only meaningful on the provider that serves it, so the
+    // preset is switched with it — otherwise `mn model use claude-…` leaves the
+    // config pointed at an OpenAI endpoint that will answer 404.
+    let preset = crate::connect::known_providers()
+        .into_iter()
+        .find(|info| info.name.eq_ignore_ascii_case(&provider_name));
+
     if let Some(provider) = config.provider.as_mut() {
         provider.model = Some(args.model_id.clone());
+        if let Some(info) = preset {
+            let changed = provider.kind.as_deref() != Some(info.kind.name());
+            provider.kind = Some(info.kind.name().to_string());
+            provider.name = Some(info.name.to_string());
+            provider.base_url = Some(info.default_base_url.to_string());
+            if changed {
+                provider.input_per_mtok = None;
+                provider.output_per_mtok = None;
+            }
+        }
     }
 
     // Write back
     let content = toml::to_string_pretty(&config).context("Failed to serialize config")?;
     fs::write(config_path, content).context("Failed to write config.toml")?;
 
-    let provider_name = model_provider(model);
     let (_, context_window, _, _) = parse_model_info(&model.id, &model.description);
 
     let text = format!(
