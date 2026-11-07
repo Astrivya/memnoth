@@ -647,7 +647,9 @@ fn mem_search_rerank_demotes_redundancy_and_names_the_method() {
         "mem_search",
         json!({"query": "pipeline", "limit": 5}),
     );
-    assert_eq!(plain["ranking"], json!("rrf"), "{plain}");
+    // The default arm, named: `mem_search` used to report `"rrf"` for every
+    // search that was not relaxed, which named an arm it had not run.
+    assert_eq!(plain["ranking"], json!("bm25_graph"), "{plain}");
     let plain_len = plain["results"].as_array().unwrap().len();
     assert!(
         plain_len >= 2,

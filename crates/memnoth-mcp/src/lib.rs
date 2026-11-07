@@ -2453,10 +2453,15 @@ fn mcp_registry() -> Registry {
                     });
                 }
             }
+            // The arm that produced this order, never a constant. `"rrf"` was
+            // written for every non-relaxed search whatever the fusion was, so
+            // a `dense_hybrid` result set was attributed to an arm it had not
+            // used, and yesterday's answer became indistinguishable from
+            // today's once the default moved.
             let base_ranking = if relaxed {
                 format!("{} (relaxed: per-token fusion)", fusion.label())
             } else {
-                "rrf".to_string()
+                fusion.label().to_string()
             };
             let base_ranking = if preference_boosted > 0 {
                 format!(
