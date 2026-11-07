@@ -5,6 +5,50 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added - MCP
+
+- `kg_callees`, `kg_def` and `kg_refs` — direct callees of a symbol, the one
+  definition it binds to, and every reference to it. A code question that used
+  to start with a scan now starts with an answer, so the `code` profile is 26
+  tools and `full` is 51 (both counts derived from `TOOL_PROFILES`, not typed
+  by hand).
+
+### Added
+
+- `/whoami` in the session screen: the same verb as `memnoth auth whoami`, so
+  the account, organisation, role and key deadline cannot be described two
+  ways. `memnoth auth whoami` now reports when the key expires and how long that
+  is from now; `memnoth auth status` prints the same line even when the server
+  reported no deadline.
+
+### Changed
+
+- `memnoth auth login` prints the link and waits for a key instead of opening a
+  browser: Enter opens it, `c` copies it, `q` cancels. The code, the link, the
+  wait and the account are each reported as they happen instead of arriving as
+  one block at the end.
+- Signing in says *who* before it says *which organisation*: the credential is
+  stored and the account named as soon as the web page approves, and the
+  organisation follows as a second line.
+- `/login` inside the session screen keeps its code and link on the screen,
+  directly above the prompt, for as long as the wait lasts: the transcript's
+  copy could be cleared or scrolled past, leaving a wait with nothing to act on.
+  `ctrl-o` opens the link, esc cancels where the prompt is empty, and `/login`
+  again cancels from any state — so a code nobody approves stops being
+  indistinguishable from a hang.
+
+### Fixed
+
+- Sign-in no longer stretches its poll interval on every pending answer, which
+  let an approval sit unnoticed for up to thirty seconds. The interval the
+  server names is the cadence; only a rate-limited poll lengthens it.
+- `memnoth serve` and `memnoth watch` print the port they bound rather than the
+  one that was requested, so `--port 0` names a port a client can dial.
+- `memnoth watch` closes a response with a clean FIN before the socket drops on
+  Windows, where the previous close could surface as `ConnectionReset`.
+
 ## [0.1.0-beta.1] - 2026-11-02
 
 ### Added - Core Product
