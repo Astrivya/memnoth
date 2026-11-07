@@ -21,7 +21,8 @@ pub fn run(ctx: &AppContext, args: &crate::cli::OpenArgs) -> Result<Outcome, Err
     }
 
     if args.no_browser {
-        println!("{}", url);
+        // Not printed here: the outcome's message *is* the URL, and every verb's
+        // renderer prints that once. Printing it here put it on screen twice.
         return Ok(Outcome::new(
             "open",
             url,
@@ -44,16 +45,17 @@ pub fn run(ctx: &AppContext, args: &crate::cli::OpenArgs) -> Result<Outcome, Err
 /// which console route a verb means.
 fn build_console_url(args: &crate::cli::OpenArgs, ctx: &AppContext) -> Result<String> {
     let page = args.page.to_lowercase();
+    // Decided before the match because the catch-all arm moves `page`.
+    let is_sessions = page.starts_with("session");
     let route = match page.as_str() {
         "dashboard" | "dash" => "dashboard".to_string(),
         "projects" | "project" => match &args.project_id {
             Some(id) => format!("projects/{id}"),
             None => "projects".to_string(),
         },
-        "sessions" | "session" => match &args.session_id {
-            Some(id) => format!("sessions/{id}"),
-            None => "sessions".to_string(),
-        },
+        // The console has no per-session route: a session is a row in a list,
+        // and its drawer is opened by `?session=`. A path segment here 404s.
+        "sessions" | "session" => "sessions".to_string(),
         "settings" | "config" => "settings".to_string(),
         "usage" | "costs" | "billing" => "usage".to_string(),
         "org" | "organization" => "org".to_string(),
@@ -73,10 +75,15 @@ fn build_console_url(args: &crate::cli::OpenArgs, ctx: &AppContext) -> Result<St
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("workspace");
-    url.push_str(&format!(
-        "?workspace={}",
-        encode_query_component(workspace_name)
-    ));
+    let mut query = format!("?workspace={}", encode_query_component(workspace_name));
+
+    // The session a reader asked for, as the drawer the console actually has.
+    if is_sessions {
+        if let Some(id) = args.session_id.as_deref() {
+            query.push_str(&format!("&session={}", encode_query_component(id)));
+        }
+    }
+    url.push_str(&query);
 
     Ok(url)
 }
