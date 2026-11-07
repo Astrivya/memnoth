@@ -288,7 +288,7 @@ fn local_commands() -> Vec<PaletteItem> {
         // a row that pre-fills `--yes` is a row that invites a mistake.
         PaletteItem {
             command: "/projects".into(),
-            description: "The org's projects - create, rename, delete, use".into(),
+            description: "Projects - create, rename, delete, use, unassigned, file".into(),
         },
         PaletteItem {
             command: "/keys".into(),

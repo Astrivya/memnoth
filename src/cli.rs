@@ -1144,6 +1144,12 @@ pub enum ProjectsCommand {
     /// File every session from this machine under a project.
     #[command(name = "use")]
     Use(ProjectsUseArgs),
+    /// List the sessions no project has claimed yet.
+    #[command(name = "unassigned")]
+    Unassigned(ProjectsUnassignedArgs),
+    /// File one already-recorded session under the current project.
+    #[command(name = "file")]
+    File(ProjectsFileArgs),
 }
 
 /// Arguments for `mn projects list`.
@@ -1213,6 +1219,30 @@ pub struct ProjectsUseArgs {
     /// Stop filing sessions under a project; they report as unassigned again.
     #[arg(long)]
     pub clear: bool,
+
+    /// Output as JSON.
+    #[arg(long, global = true)]
+    pub json: bool,
+}
+
+/// Arguments for `mn projects unassigned`.
+#[derive(Debug, Args)]
+pub struct ProjectsUnassignedArgs {
+    /// Output as JSON.
+    #[arg(long, global = true)]
+    pub json: bool,
+}
+
+/// Arguments for `mn projects file`.
+#[derive(Debug, Args)]
+pub struct ProjectsFileArgs {
+    /// Session id, as `mn projects unassigned` prints it.
+    #[arg(value_name = "SESSION")]
+    pub session: String,
+
+    /// File into this project instead of the one `mn projects use` stored.
+    #[arg(long, value_name = "ID")]
+    pub project: Option<String>,
 
     /// Output as JSON.
     #[arg(long, global = true)]

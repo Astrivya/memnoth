@@ -43,7 +43,129 @@ pub fn run(ctx: &AppContext, args: &crate::cli::ProjectsArgs) -> Result<Outcome>
         }
         crate::cli::ProjectsCommand::Delete(delete) => delete_project(ctx, &delete.id, delete.yes),
         crate::cli::ProjectsCommand::Use(args) => use_project(ctx, args),
+        crate::cli::ProjectsCommand::Unassigned(_) => unassigned(ctx),
+        crate::cli::ProjectsCommand::File(args) => file_session(ctx, args),
     }
+}
+
+/// `mn projects unassigned` — the sessions no project has claimed.
+///
+/// The console calls this queue "awaiting a project"; it exists because a
+/// machine that never learned its project reports honestly with none instead of
+/// guessing. Filing one is `mn projects file <id>` here or the button on the
+/// console's page — both write the same row.
+fn unassigned(ctx: &AppContext) -> Result<Outcome> {
+    let client = signed_in_client(ctx)?;
+    let rows: Vec<_> = client
+        .sessions()?
+        .sessions
+        .into_iter()
+        .filter(|session| {
+            session
+                .project_id
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("")
+                .is_empty()
+        })
+        .collect();
+
+    let data = json!({
+        "count": rows.len(),
+        "sessions": rows
+            .iter()
+            .map(|session| json!({
+                "id": session.id,
+                "status": session.status,
+                "model": session.model,
+                "tokens": session.tokens,
+                "cost_usd": session.cost_usd,
+                "started_at": session.started_at,
+            }))
+            .collect::<Vec<_>>(),
+    });
+
+    if rows.is_empty() {
+        return Ok(Outcome::new(
+            "projects.unassigned",
+            "No unassigned sessions: every recorded session is filed under a project.\n"
+                .to_string(),
+            data,
+        ));
+    }
+
+    let mut text = format!("Unassigned sessions ({})\n\n", rows.len());
+    for row in rows.iter().take(50) {
+        text.push_str(&format!(
+            "  {}\n    {} · {} tok · {} · started {}\n",
+            row.id,
+            if row.model.is_empty() {
+                "unknown model"
+            } else {
+                row.model.as_str()
+            },
+            row.tokens,
+            if row.status.is_empty() {
+                "unknown"
+            } else {
+                row.status.as_str()
+            },
+            row.started_at.get(..16).unwrap_or(&row.started_at),
+        ));
+    }
+    if rows.len() > 50 {
+        text.push_str(&format!("  … and {} more\n", rows.len() - 50));
+    }
+    let tail = match ctx.config().project.as_deref() {
+        Some(id) => format!(
+            "\nFile one: `mn projects file <id>` — into {id}.\nConsole: {}\n",
+            crate::context::console_url("sessions")
+        ),
+        None => format!(
+            "\nFile one: `mn projects use <id>` picks the project, then `mn projects file <session>`.\nConsole: {}\n",
+            crate::context::console_url("sessions")
+        ),
+    };
+    text.push_str(&tail);
+
+    Ok(Outcome::new("projects.unassigned", text, data))
+}
+
+/// `mn projects file <session>` — file one recorded session under a project.
+///
+/// The project defaults to the one this machine reports to, so the common case
+/// after `mn projects use` is one argument. `--project` covers the other case:
+/// an administrator filing someone else's session from a machine that reports
+/// somewhere else.
+fn file_session(ctx: &AppContext, args: &crate::cli::ProjectsFileArgs) -> Result<Outcome> {
+    let session = args.session.trim();
+    if session.is_empty() {
+        anyhow::bail!("name the session to file: `mn projects file <session-id>`");
+    }
+    let project = args
+        .project
+        .clone()
+        .or_else(|| ctx.config().project.clone())
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no project to file into: pick one with `mn projects use <id>`, or pass \
+                 `--project <id>`"
+            )
+        })?;
+
+    let client = signed_in_client(ctx)?;
+    client.assign_session(session, Some(&project))?;
+
+    Ok(Outcome::new(
+        "projects.file",
+        format!(
+            "Filed {session} under {project}.\nConsole: {}\n",
+            crate::context::console_url("sessions")
+        ),
+        json!({ "session": session, "project_id": project }),
+    ))
 }
 
 /// `mn projects list` — every project this credential can see.
@@ -186,9 +308,9 @@ fn use_project(ctx: &AppContext, args: &crate::cli::ProjectsUseArgs) -> Result<O
     if args.clear {
         let previous = set_project(ctx, None)?;
         let text = match previous {
-            Some(previous) => format!(
-                "Sessions from this machine are unassigned again (was {previous}).\n"
-            ),
+            Some(previous) => {
+                format!("Sessions from this machine are unassigned again (was {previous}).\n")
+            }
             None => "No project was set; sessions are still unassigned.\n".to_string(),
         };
         return Ok(Outcome::new(
@@ -242,6 +364,24 @@ fn use_project(ctx: &AppContext, args: &crate::cli::ProjectsUseArgs) -> Result<O
         text,
         json!({ "project_id": project.id, "project": project_json(project) }),
     ))
+}
+
+/// What the TUI names on its rail when a session is filed under a project.
+///
+/// The name when the org will say it, the id otherwise — a signed-out machine
+/// still has a stored choice and should still be able to see it. `None` is the
+/// unassigned queue, which the rail says in words rather than leaving blank.
+pub fn filed_under(ctx: &AppContext) -> Option<String> {
+    let id = crate::report::project_id(ctx)?;
+    let name = crate::cloud::signed_in_client(ctx)
+        .ok()
+        .and_then(|client| client.projects().ok())
+        .and_then(|list| list.projects.into_iter().find(|project| project.id == id))
+        .map(|project| project.name);
+    Some(match name {
+        Some(name) => format!("{name} ({id})"),
+        None => id,
+    })
 }
 
 /// Which project this machine is filing under, from the config and the env.
