@@ -10,7 +10,7 @@ use memnoth_session::{Session, TurnReceipt};
 
 /// Execute `mn stats`.
 pub fn run(ctx: &AppContext, args: &crate::cli::StatsArgs) -> Result<Outcome> {
-    let client = CloudClient::new()?;
+    let client = CloudClient::from_env()?;
 
     // Build usage params
     let params = UsageParams {

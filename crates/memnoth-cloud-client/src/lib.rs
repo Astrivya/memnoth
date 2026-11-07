@@ -172,6 +172,16 @@ pub struct ModelList {
 
 const DEFAULT_BASE_URL: &str = "https://memnoth.astrivya.ai/api/v1";
 
+/// The variable that points this client at a different control plane.
+///
+/// It must be named somewhere a caller can find it, and the client must honour
+/// it everywhere: `team.rs` and `teams.rs` have always read this variable, so a
+/// staging plane accepted `mn team` requests while every other cloud command in
+/// the same shell went to production. It is also the only way to point the CLI
+/// at a plane on this machine, which is what makes an end-to-end check of these
+/// endpoints possible at all.
+const BASE_URL_ENV: &str = "MEMNOTH_CLOUD_URL";
+
 /// Typed HTTP client for the memnoth cloud API.
 #[derive(Debug, Clone)]
 pub struct CloudClient {
@@ -182,8 +192,31 @@ pub struct CloudClient {
 
 impl CloudClient {
     /// Create a new cloud client with the default base URL.
+    ///
+    /// Deliberately ignores `MEMNOTH_CLOUD_URL`: a constructor whose host
+    /// depends on the environment makes every test that asserts a URL read the
+    /// developer's shell. [`CloudClient::from_env`] is the command-facing one.
     pub fn new() -> CloudResult<Self> {
         Self::with_base_url(DEFAULT_BASE_URL)
+    }
+
+    /// Create the client a command should use: `MEMNOTH_CLOUD_URL` when it is
+    /// set, the hosted plane otherwise.
+    ///
+    /// This is what points the CLI at a staging — or a local — plane. It has to
+    /// be honoured by every command, because `team.rs` and `teams.rs` have
+    /// always read the variable: honouring it in two modules and ignoring it
+    /// everywhere else meant `mn team` reached the plane an operator named while
+    /// `mn sync` and `mn usage` in the same shell reached production.
+    pub fn from_env() -> CloudResult<Self> {
+        match std::env::var(BASE_URL_ENV)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            Some(base) => Self::with_base_url(&base),
+            None => Self::new(),
+        }
     }
 
     /// Create a new cloud client with a custom base URL.
