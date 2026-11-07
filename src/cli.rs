@@ -1669,7 +1669,9 @@ pub struct UpdateArgs {
     #[arg(long, value_name = "VERSION")]
     pub version: Option<String>,
 
-    /// Skip signature and checksum verification (dangerous).
+    /// Install without verifying the release signature (dangerous). The
+    /// artifact checksum is still checked, because a corrupted download is a
+    /// different failure from an unsigned one.
     #[arg(long)]
     pub no_verify: bool,
 }

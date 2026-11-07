@@ -139,6 +139,7 @@ trap 'rm -rf "$WORK"' 0 1 2 3 15
 LIST="$WORK/artifacts"
 SUMS="$WORK/SHA256SUMS"
 REPORT="$WORK/report"
+DIGESTS="$WORK/digests"
 
 # Nested directories are the shape `actions/download-artifact` produces (one
 # directory per target); a flat directory is what a person building one target
@@ -160,6 +161,7 @@ chmod 755 "$OUT/install.sh"
 
 : > "$SUMS"
 : > "$REPORT"
+: > "$DIGESTS"
 COUNT=0
 
 while IFS= read -r artifact; do
@@ -191,6 +193,7 @@ Nothing was published."
     # with the default IFS, and a literal `\t` in an IFS assignment is the two
     # characters backslash and `t` in POSIX sh, not a tab.
     printf '%s %s\n' "$name" "$bytes" >> "$REPORT"
+    printf '%s %s\n' "$name" "$actual" >> "$DIGESTS"
     COUNT=$((COUNT + 1))
 done < "$LIST"
 
@@ -198,12 +201,80 @@ done < "$LIST"
 
 cp "$SUMS" "$OUT/SHA256SUMS"
 
+# ---------------------------------------------------------------- manifest
+# `mn update` reads a manifest rather than a directory listing: it needs the
+# version, the artifact name for this platform, and that artifact's digest.
+# Writing it here, from the digests just verified, is what stops the client's
+# description of a release from drifting from the installer's.
+CHANNEL=${MEMNOTH_CHANNEL:-stable}
+PUBLISHED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+VERSION_NUM=${VERSION#v}
+
+json_string() {
+    if [ -z "$1" ]; then
+        printf 'null'
+        return 0
+    fi
+    escaped=$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | awk 'NR > 1 {printf "\\\\n"} {printf "%s", $0}')
+    printf '"%s"' "$escaped"
+}
+
+# Fail closed, like the client: a release whose signature nobody can check is a
+# release `mn update` refuses, so publishing one silently would be publishing
+# something no installed binary can use.
+SIGNATURE_JSON=null
+if [ -n "${MEMNOTH_MINISIGN_SECRET_KEY:-}" ]; then
+    command -v minisign > /dev/null 2>&1 || fail "MEMNOTH_MINISIGN_SECRET_KEY is set but minisign is not installed"
+    minisign -S -s "$MEMNOTH_MINISIGN_SECRET_KEY" -m "$OUT/SHA256SUMS" \
+        -x "$WORK/SHA256SUMS.minisig" -c "memnoth $VERSION" > /dev/null 2>&1 \
+        || fail "cannot sign SHA256SUMS with MEMNOTH_MINISIGN_SECRET_KEY"
+    SIGNATURE_JSON=$(json_string "$(cat "$WORK/SHA256SUMS.minisig")")
+fi
+
+MANIFEST="$WORK/manifest.json"
+{
+    printf '{\n'
+    printf '  "version": "%s",\n' "$VERSION_NUM"
+    printf '  "channel": "%s",\n' "$CHANNEL"
+    printf '  "targets": [\n'
+    FIRST=1
+    while read -r name digest; do
+        [ -n "$name" ] || continue
+        triple=${name#memnoth-}
+        triple=${triple%.zip}
+        triple=${triple%.tar.gz}
+        if [ "$FIRST" -eq 1 ]; then
+            FIRST=0
+        else
+            printf ',\n'
+        fi
+        printf '    {"triple": "%s", "filename": "%s", "sha256": "%s"}' \
+            "$triple" "$name" "$digest"
+    done < "$DIGESTS"
+    printf '\n  ],\n'
+    printf '  "checksums": {"sha256": ""},\n'
+    printf '  "signatures": {"minisign": %s, "cosign": null},\n' "$SIGNATURE_JSON"
+    printf '  "published_at": "%s",\n' "$PUBLISHED_AT"
+    printf '  "notes": %s\n' "$(json_string "${MEMNOTH_RELEASE_NOTES:-}")"
+    printf '}\n'
+} > "$MANIFEST"
+
+cp "$MANIFEST" "$OUT/$VERSION/manifest.json"
+cp "$MANIFEST" "$OUT/latest/manifest.json"
+
 # ---------------------------------------------------------------- summary
 printf 'memnoth dist %s — %s artifact(s)\n\n' "$VERSION" "$COUNT"
 printf '  %s/install.sh\n' "$OUT"
 printf '  %s/%s/\n' "$OUT" "$VERSION"
 printf '  %s/latest/        (copy, for MEMNOTH_VERSION=latest)\n' "$OUT"
-printf '  %s/SHA256SUMS\n\n' "$OUT"
+printf '  %s/SHA256SUMS\n' "$OUT"
+if [ "$SIGNATURE_JSON" = "null" ]; then
+    printf '\n  WARNING: SHA256SUMS is unsigned. `mn update` refuses an unsigned\n'
+    printf '  release, so this bundle installs from the script but cannot be\n'
+    printf '  updated. Set MEMNOTH_MINISIGN_SECRET_KEY to sign it.\n\n'
+else
+    printf '  %s/SHA256SUMS.minisig (published inside manifest.json)\n\n' "$OUT"
+fi
 
 while read -r name bytes; do
     printf '  %-48s %10s bytes\n' "$name" "$bytes"

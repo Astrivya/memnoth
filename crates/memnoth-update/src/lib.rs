@@ -89,10 +89,17 @@ impl Channel {
 pub struct Target {
     pub triple: String,
     pub filename: String,
+    /// The digest of this artifact.
+    ///
+    /// One manifest describes every platform's build, so a single digest at
+    /// the release level could only ever be right for one of them. Older
+    /// manifests that carry it are still accepted as a fallback.
+    #[serde(default)]
+    pub sha256: String,
 }
 
 /// Checksums for a release artifact.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Checksums {
     pub sha256: String,
 }
@@ -111,6 +118,7 @@ pub struct Manifest {
     pub version: String,
     pub channel: Channel,
     pub targets: Vec<Target>,
+    #[serde(default)]
     pub checksums: Checksums,
     pub signatures: Signatures,
     #[serde_as(as = "DisplayFromStr")]
@@ -163,7 +171,11 @@ pub fn compiled_in_pubkey() -> Option<String> {
 impl Default for UpdateConfig {
     fn default() -> Self {
         Self {
-            dist_base_url: "https://releases.memnoth.astrivya.ai".to_string(),
+            dist_base_url: std::env::var("MEMNOTH_UPDATE_BASE")
+                .ok()
+                .map(|value| value.trim().trim_end_matches('/').to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "https://memnoth.astrivya.ai/dist".to_string()),
             minisign_pubkey: compiled_in_pubkey(),
             cosign_pubkey: None,
             channel: Channel::Stable,
@@ -183,27 +195,57 @@ pub struct UpdateCheckResult {
     pub update_available: bool,
 }
 
-/// Resolve the distribution URL for a given channel.
-pub fn resolve_dist_url(config: &UpdateConfig, channel: Channel) -> String {
+/// The release artifact name this build would install.
+///
+/// `env::consts::OS` is not a target triple (`windows`, not
+/// `pc-windows-msvc`), and the strings are computed at compile time so the
+/// only honest mapping is an explicit table. The installer, the manifest and
+/// the updater have to agree on it: when they disagree the update fails after
+/// the download, with a message about a target the release does have.
+pub fn target_triple() -> String {
+    let arch = std::env::consts::ARCH;
+    let os = std::env::consts::OS;
+    match (arch, os) {
+        ("x86_64", "windows") => "x86_64-pc-windows-msvc".to_string(),
+        ("x86_64", "linux") => "x86_64-unknown-linux-gnu".to_string(),
+        ("aarch64", "linux") => "aarch64-unknown-linux-gnu".to_string(),
+        ("x86_64", "macos") => "x86_64-apple-darwin".to_string(),
+        ("aarch64", "macos") => "aarch64-apple-darwin".to_string(),
+        _ => format!("{arch}-{os}"),
+    }
+}
+
+/// Resolve the manifest URL for the latest release.
+///
+/// The channel is a property of the manifest, not a path segment: one bundle
+/// is published per base URL, so a beta lives at its own `MEMNOTH_UPDATE_BASE`
+/// instead of a subdirectory nobody serves.
+pub fn resolve_dist_url(config: &UpdateConfig, _channel: Channel) -> String {
     format!(
-        "{}/dist/{}/latest",
-        config.dist_base_url,
-        channel.dist_subdir()
+        "{}/latest/manifest.json",
+        config.dist_base_url.trim_end_matches('/')
     )
+}
+
+/// Fetch one release directory's manifest (`v0.2.0`, `latest`).
+pub fn fetch_manifest_at(base: &str, dir: &str) -> Result<Manifest> {
+    let url = format!("{}/{dir}/manifest.json", base.trim_end_matches('/'));
+    fetch_manifest_url(&url)
+}
+
+fn fetch_manifest_url(url: &str) -> Result<Manifest> {
+    let client = reqwest::blocking::Client::new();
+    let response = client
+        .get(url)
+        .header("Accept", "application/json")
+        .send()?
+        .error_for_status()?;
+    Ok(response.json()?)
 }
 
 /// Fetch the manifest from the distribution server.
 pub fn fetch_manifest(config: &UpdateConfig, channel: Channel) -> Result<Manifest> {
-    let url = resolve_dist_url(config, channel);
-    let client = reqwest::blocking::Client::new();
-    let response = client
-        .get(&url)
-        .header("Accept", "application/json")
-        .send()?
-        .error_for_status()?;
-
-    let manifest: Manifest = response.json()?;
-    Ok(manifest)
+    fetch_manifest_url(&resolve_dist_url(config, channel))
 }
 
 /// Verify SHA-256 checksum of a file.
@@ -549,9 +591,9 @@ pub fn should_notify(config: &UpdateConfig, cache: &UpdateCache) -> bool {
 
 /// Perform a full update check (active).
 pub fn check_for_update(config: &UpdateConfig) -> Result<UpdateCheckResult> {
-    let current_version = Version::parse(&config.current_version)?;
+    let current_version = Version::parse(config.current_version.trim_start_matches('v'))?;
     let manifest = fetch_manifest(config, config.channel)?;
-    let latest_version = Version::parse(&manifest.version)?;
+    let latest_version = Version::parse(manifest.version.trim_start_matches('v'))?;
 
     let update_available = latest_version > current_version;
 
@@ -604,6 +646,8 @@ pub fn apply_update(
     config: &UpdateConfig,
     manifest: &Manifest,
     explicit_version: bool,
+    artifact_dir: &str,
+    no_verify: bool,
 ) -> Result<()> {
     // Detect managed install
     if let Some(manager) = detect_managed_install() {
@@ -612,59 +656,93 @@ pub fn apply_update(
 
     let current_exe = std::env::current_exe()?;
 
-    // Find matching target for current platform
-    let target_triple = std::env::consts::ARCH.to_string() + "-" + std::env::consts::OS;
+    // Published artifact names are full target triples; the short
+    // `<arch>-<os>` spelling is accepted for hand-written manifests but is not
+    // what this build asks for.
+    let wanted = target_triple();
+    let short = format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS);
     let target = manifest
         .targets
         .iter()
-        .find(|t| t.triple == target_triple)
-        .ok_or_else(|| anyhow!("No release artifact for target: {}", target_triple))?;
+        .find(|t| t.triple == wanted || t.triple == short)
+        .ok_or_else(|| anyhow!("no release artifact for target: {wanted}"))?;
 
     // A manifest that would walk this machine backwards is refused before a
     // byte of the artifact is sent.
     check_version_policy(&config.current_version, &manifest.version, explicit_version)?;
 
+    let base = config.dist_base_url.trim_end_matches('/');
+    let download_url = format!("{base}/{artifact_dir}/{}", target.filename);
+
     let temp_dir = std::env::temp_dir();
-    let temp_exe = temp_dir.join(format!("memnoth-update-{}.tmp", process::id()));
-    let download_url = format!(
-        "{}/dist/{}/{}",
-        config.dist_base_url,
-        config.channel.dist_subdir(),
-        target.filename
-    );
 
-    // The signature covers the checksum file, not the artifact directly, so the
-    // checksum file is fetched and checked first: a signature over a list of
-    // hashes is only worth something if the hash used below came from it.
-    let sums_url = format!(
-        "{}/dist/{}/SHA256SUMS",
-        config.dist_base_url,
-        config.channel.dist_subdir()
-    );
-    let sums_path = temp_dir.join(format!("memnoth-update-{}.SHA256SUMS", process::id()));
-    download_file(&sums_url, &sums_path)?;
-    let signatures = verify_signatures(&sums_path, manifest, config);
-    let _ = fs::remove_file(&sums_path);
-    signatures?;
+    // The published artifact is an archive, not a bare executable: the same
+    // file the installer unpacks. Downloading it as the executable and running
+    // it failed on every release, after the download.
+    let archive_ext = if target.filename.ends_with(".zip") {
+        "zip"
+    } else {
+        "tar.gz"
+    };
+    let archive = temp_dir.join(format!("memnoth-update-{}.{archive_ext}", process::id()));
 
-    download_file(&download_url, &temp_exe)?;
+    if !no_verify {
+        // The signature covers the checksum file, not the artifact directly, so
+        // the checksum file is fetched and checked first: a signature over a
+        // list of hashes is only worth something if the hash used below came
+        // from it.
+        let sums_url = format!("{base}/SHA256SUMS");
+        let sums_path = temp_dir.join(format!("memnoth-update-{}.SHA256SUMS", process::id()));
+        download_file(&sums_url, &sums_path)?;
+        let signatures = verify_signatures(&sums_path, manifest, config);
+        let _ = fs::remove_file(&sums_path);
+        signatures?;
+    }
 
-    // Verify checksum
-    if let Err(error) = verify_checksum(&temp_exe, &manifest.checksums.sha256) {
-        let _ = fs::remove_file(&temp_exe);
+    download_file(&download_url, &archive)?;
+
+    // The digest for *this* platform, not the first one in the manifest.
+    let expected = if !target.sha256.is_empty() {
+        target.sha256.clone()
+    } else {
+        manifest.checksums.sha256.clone()
+    };
+    if expected.is_empty() {
+        let _ = fs::remove_file(&archive);
+        bail!(UpdateError::InvalidManifest(format!(
+            "the manifest has no sha256 for {}; refusing an unverified artifact",
+            target.filename
+        )));
+    }
+
+    if let Err(error) = verify_checksum(&archive, &expected) {
+        let _ = fs::remove_file(&archive);
         return Err(error);
     }
+
+    let unpack_dir = temp_dir.join(format!("memnoth-update-{}-unpack", process::id()));
+    let _ = fs::remove_dir_all(&unpack_dir);
+    let binary = match extract_binary(&archive, &unpack_dir) {
+        Ok(binary) => binary,
+        Err(error) => {
+            let _ = fs::remove_file(&archive);
+            return Err(error);
+        }
+    };
 
     // Prove the artifact runs and is the version it claims, before it replaces
     // anything. On Windows there is no way back after the swap: the running
     // executable cannot be renamed.
-    if let Err(error) = verify_new_binary(&temp_exe, &manifest.version) {
-        let _ = fs::remove_file(&temp_exe);
+    if let Err(error) = verify_new_binary(&binary, &manifest.version) {
+        let _ = fs::remove_file(&archive);
+        let _ = fs::remove_dir_all(&unpack_dir);
         return Err(error);
     }
 
     // Atomic swap
-    atomic_swap(&current_exe, &temp_exe)?;
+    atomic_swap(&current_exe, &binary)?;
+    let _ = fs::remove_file(&archive);
+    let _ = fs::remove_dir_all(&unpack_dir);
 
     // Make executable on Unix
     #[cfg(unix)]
@@ -676,6 +754,62 @@ pub fn apply_update(
     }
 
     Ok(())
+}
+
+/// Unpack a release archive and return the binary inside it.
+///
+/// The installer and the updater have to agree about what a release artifact
+/// is. They do: one archive per target, containing `memnoth` (or
+/// `memnoth.exe`). Unpacking here is the only way that agreement survives the
+/// download.
+fn extract_binary(archive: &Path, dir: &Path) -> Result<PathBuf> {
+    fn is_binary(path: &Path) -> bool {
+        matches!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("memnoth" | "memnoth.exe")
+        )
+    }
+
+    fs::create_dir_all(dir)?;
+    let name = archive
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+
+    if name.ends_with(".zip") {
+        let file = fs::File::open(archive)?;
+        let mut zip =
+            zip::ZipArchive::new(file).with_context(|| format!("opening {}", archive.display()))?;
+        for index in 0..zip.len() {
+            let mut entry = zip.by_index(index)?;
+            let path = PathBuf::from(entry.name());
+            if !is_binary(&path) {
+                continue;
+            }
+            let out = dir.join(path.file_name().unwrap_or_default());
+            let mut target = fs::File::create(&out)?;
+            std::io::copy(&mut entry, &mut target)?;
+            return Ok(out);
+        }
+    } else {
+        let file = fs::File::open(archive)?;
+        let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(file));
+        for entry in tar.entries()? {
+            let mut entry = entry?;
+            let path = entry.path()?.to_path_buf();
+            if !is_binary(&path) {
+                continue;
+            }
+            let out = dir.join(path.file_name().unwrap_or_default());
+            entry.unpack(&out)?;
+            return Ok(out);
+        }
+    }
+
+    bail!(UpdateError::InvalidManifest(format!(
+        "{} does not contain a memnoth binary",
+        archive.display()
+    )))
 }
 
 /// Format update notification message.
@@ -747,18 +881,51 @@ mod tests {
 
     #[test]
     fn test_resolve_dist_url() {
-        let config = UpdateConfig::default();
+        // The layout `dist.sh` publishes: one manifest per release directory,
+        // and `latest` is a real copy of the newest one.
+        let config = UpdateConfig {
+            dist_base_url: "https://example.test/dist".to_string(),
+            ..Default::default()
+        };
         assert_eq!(
             resolve_dist_url(&config, Channel::Stable),
-            "https://releases.memnoth.astrivya.ai/dist/stable/latest"
+            "https://example.test/dist/latest/manifest.json"
         );
         assert_eq!(
             resolve_dist_url(&config, Channel::Beta),
-            "https://releases.memnoth.astrivya.ai/dist/beta/latest"
+            "https://example.test/dist/latest/manifest.json"
         );
+    }
+
+    #[test]
+    fn the_target_triple_is_the_one_the_release_publishes() {
+        // `x86_64-windows` is not a target triple and matched no artifact, so
+        // every update failed with "no release artifact" on Windows.
+        let triple = target_triple();
+        assert!(
+            !triple.contains("windows") || triple.ends_with("-msvc"),
+            "{triple}"
+        );
+        assert!(triple.contains('-'), "{triple}");
+        assert!(
+            triple == "x86_64-pc-windows-msvc"
+                || triple == "x86_64-unknown-linux-gnu"
+                || triple == "aarch64-unknown-linux-gnu"
+                || triple == "x86_64-apple-darwin"
+                || triple == "aarch64-apple-darwin",
+            "{triple}"
+        );
+    }
+
+    #[test]
+    fn the_update_base_can_be_pointed_at_a_staging_host() {
+        let config = UpdateConfig {
+            dist_base_url: "http://127.0.0.1:8099/".to_string(),
+            ..Default::default()
+        };
         assert_eq!(
-            resolve_dist_url(&config, Channel::Nightly),
-            "https://releases.memnoth.astrivya.ai/dist/nightly/latest"
+            resolve_dist_url(&config, Channel::Stable),
+            "http://127.0.0.1:8099/latest/manifest.json"
         );
     }
 
@@ -770,6 +937,7 @@ mod tests {
             targets: vec![Target {
                 triple: "x86_64-linux".to_string(),
                 filename: "memnoth-x86_64-linux.tar.gz".to_string(),
+                sha256: String::new(),
             }],
             checksums: Checksums {
                 sha256: "abc123".to_string(),
@@ -817,6 +985,7 @@ mod tests {
             targets: vec![Target {
                 triple: "x86_64-windows".to_string(),
                 filename: "memnoth.exe".to_string(),
+                sha256: String::new(),
             }],
             checksums: Checksums {
                 sha256: "abc123".to_string(),
@@ -870,6 +1039,7 @@ mod tests {
             targets: vec![Target {
                 triple: "x86_64-windows".to_string(),
                 filename: "memnoth.exe".to_string(),
+                sha256: String::new(),
             }],
             checksums: Checksums {
                 sha256: "abc123".to_string(),
@@ -938,6 +1108,46 @@ mod tests {
 
         // Naming the version is what makes it deliberate.
         assert!(check_version_policy("1.2.0", "1.0.0", true).is_ok());
+    }
+
+    #[test]
+    fn a_release_archive_is_unpacked_to_the_binary_it_carries() {
+        use std::io::Write;
+
+        let dir = tempdir().unwrap();
+        let archive = dir.path().join("release.zip");
+        {
+            let file = fs::File::create(&archive).unwrap();
+            let mut writer = zip::ZipWriter::new(file);
+            writer
+                .start_file("memnoth.exe", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(b"not really a binary\n").unwrap();
+            writer.finish().unwrap();
+        }
+
+        let binary = extract_binary(&archive, &dir.path().join("unpack")).unwrap();
+        assert_eq!(binary.file_name().unwrap(), "memnoth.exe");
+        assert_eq!(fs::read(&binary).unwrap(), b"not really a binary\n");
+    }
+
+    #[test]
+    fn an_archive_without_a_binary_is_refused() {
+        use std::io::Write;
+
+        let dir = tempdir().unwrap();
+        let archive = dir.path().join("empty.zip");
+        {
+            let file = fs::File::create(&archive).unwrap();
+            let mut writer = zip::ZipWriter::new(file);
+            writer
+                .start_file("README.md", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(b"# nothing here\n").unwrap();
+            writer.finish().unwrap();
+        }
+
+        assert!(extract_binary(&archive, &dir.path().join("unpack")).is_err());
     }
 
     #[test]

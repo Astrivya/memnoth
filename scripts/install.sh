@@ -18,6 +18,18 @@
 # this product, and the failure would be silent.
 set -eu
 
+# Two shapes are published and this script reads both, because different
+# things publish them:
+#
+#   * a GitHub release — `<base>/<tag>/<artifact>`, where the newest release is
+#     spelled `releases/latest/download` because GitHub has no `latest` tag to
+#     name;
+#   * the `dist/` tree `scripts/dist.sh` assembles — `<base>/<version>/…`, where
+#     `latest` is a real directory kept in step with the newest tag.
+#
+# The default is the GitHub release, because that is the host a tag actually
+# publishes to. A mirror of the dist tree is
+# `MEMNOTH_INSTALL_BASE=https://<host>/dist`.
 BASE="${MEMNOTH_INSTALL_BASE:-https://github.com/astrivya/memnoth/releases/download}"
 VERSION="${MEMNOTH_VERSION:-latest}"
 if [ -n "${MEMNOTH_INSTALL_DIR:-}" ]; then
@@ -37,7 +49,8 @@ memnoth installer
 Installs two names for one binary: memnoth, and mn beside it.
 
 Environment:
-  MEMNOTH_INSTALL_BASE  directory holding <version>/<artifact> (default: https://github.com/astrivya/memnoth/releases/download)
+  MEMNOTH_INSTALL_BASE  directory holding <version>/<artifact> (default: the
+                        GitHub release for this repository)
   MEMNOTH_VERSION       release to install (default: latest)
   MEMNOTH_INSTALL_DIR   destination directory (default: ~/.local/bin)
 USAGE
@@ -101,7 +114,21 @@ case "$KERNEL" in
 esac
 
 ARTIFACT="memnoth-$TARGET.$EXT"
-ARCHIVE_URL="$BASE/$VERSION/$ARTIFACT"
+
+# The version segment is the one part of the path that is not simply "$VERSION":
+# on GitHub, `latest` is the `releases/latest/download` redirect, not a tag.
+case "$BASE" in
+    */releases/download)
+        if [ "$VERSION" = "latest" ]; then
+            ARTIFACT_BASE="${BASE%/download}/latest/download"
+        else
+            ARTIFACT_BASE="$BASE/$VERSION"
+        fi
+        ;;
+    *) ARTIFACT_BASE="$BASE/$VERSION" ;;
+esac
+
+ARCHIVE_URL="$ARTIFACT_BASE/$ARTIFACT"
 CHECKSUM_URL="$ARCHIVE_URL.sha256"
 WORK="${TMPDIR:-/tmp}/memnoth-install.$$"
 rm -rf "$WORK"
@@ -206,32 +233,44 @@ if [ "$EXT" = "zip" ]; then
 else
     $UNPACK_CMD "$WORK/$ARTIFACT" -C "$WORK/unpack" || fail "cannot unpack $ARTIFACT"
 fi
-if [ ! -f "$BINARY" ]; then
-    BINARY=$(find "$WORK/unpack" -type f -name "$BINARY_NAME" | head -n 1)
-fi
+# `BINARY` was read before it was ever set: under `set -u` the installer died
+# here on every clean machine, which is the worst possible place for the one
+# bug in an installer.
+BINARY=$(find "$WORK/unpack" -type f -name "$BINARY_NAME" | head -n 1 || true)
 if [ -z "${BINARY:-}" ] || [ ! -f "$BINARY" ]; then
     fail "the archive does not contain a memnoth binary"
 fi
 
+# Windows resolves an executable by its `.exe` extension: installing a file
+# named `memnoth` gives a binary Git Bash can run and the rest of the system
+# cannot find. The suffix travels with the platform, not with the caller.
+if [ "$EXT" = "zip" ]; then
+    SUFFIX=".exe"
+else
+    SUFFIX=""
+fi
+MNN="$INSTALL_DIR/memnoth$SUFFIX"
+MNSHORT="$INSTALL_DIR/mn$SUFFIX"
+
 mkdir -p "$INSTALL_DIR" || fail "cannot create $INSTALL_DIR"
-cp "$BINARY" "$INSTALL_DIR/memnoth"
-chmod 755 "$INSTALL_DIR/memnoth"
+cp "$BINARY" "$MNN"
+chmod 755 "$MNN"
 
 # `mn` is the same binary under the name people type. A relative symlink rather
 # than a copy: one file to update, and moving the install directory keeps the
 # pair working. A filesystem without symlinks falls back to a copy, because a
 # missing short command is worse than a duplicated binary.
-rm -f "$INSTALL_DIR/mn" 2> /dev/null || true
-if ln -s memnoth "$INSTALL_DIR/mn" 2> /dev/null; then
+rm -f "$MNSHORT" 2> /dev/null || true
+if [ -z "$SUFFIX" ] && ln -s memnoth "$INSTALL_DIR/mn" 2> /dev/null; then
     :
 else
-    cp "$INSTALL_DIR/memnoth" "$INSTALL_DIR/mn" || fail "cannot create $INSTALL_DIR/mn"
-    chmod 755 "$INSTALL_DIR/mn"
+    cp "$MNN" "$MNSHORT" || fail "cannot create $MNSHORT"
+    chmod 755 "$MNSHORT"
 fi
 
-printf 'memnoth: installed %s (and %s)\n' "$INSTALL_DIR/memnoth" "$INSTALL_DIR/mn"
-"$INSTALL_DIR/memnoth" --version || fail "the installed binary does not run"
-"$INSTALL_DIR/mn" --version > /dev/null || fail "the installed mn alias does not run"
+printf 'memnoth: installed %s (and %s)\n' "$MNN" "$MNSHORT"
+"$MNN" --version || fail "the installed binary does not run"
+"$MNSHORT" --version > /dev/null || fail "the installed mn alias does not run"
 
 case ":${PATH:-}:" in
     *":$INSTALL_DIR:"*) ;;

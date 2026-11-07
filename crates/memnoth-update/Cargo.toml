@@ -24,6 +24,11 @@ semver = "1"
 thiserror = "1"
 dirs = "5"
 toml = "0.8"
+# Release artifacts are archives, exactly what the installer unpacks: the
+# updater has to unpack the same file rather than run it as an executable.
+zip = "2"
+tar = "0.4"
+flate2 = "1"
 
 [dev-dependencies]
 tempfile = "3"
