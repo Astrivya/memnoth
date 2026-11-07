@@ -16,13 +16,11 @@ use anyhow::{Context, Result};
 use serde_json::json;
 use std::io::{self, Write};
 
-use crate::auth::{auth_status, login};
+use crate::auth::login;
 use crate::context::{AppContext, Config};
 use crate::kg;
-use crate::mcp;
-use crate::output::{Outcome, human_bytes};
-use crate::provider::{Kind, ProviderConfig, Settings};
-use crate::vault;
+use crate::output::Outcome;
+use crate::provider::{ProviderConfig, Settings};
 
 /// Step identifier for the setup wizard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -235,7 +233,9 @@ fn run_auth_step(ctx: &AppContext, state: &mut SetupState) -> Result<()> {
         .is_some()
         || std::env::var("MEMNOTH_API_KEY").is_ok()
         || std::env::var("ANTHROPIC_API_KEY").is_ok()
-        || std::env::var("OPENAI_API_KEY").is_ok();
+        || std::env::var("OPENAI_API_KEY").is_ok()
+        || std::env::var("KILO_API_KEY").is_ok()
+        || std::env::var("KILOCODE_API_KEY").is_ok();
 
     if has_token {
         state.print_progress(Step::Auth, "authenticated");
@@ -303,7 +303,7 @@ fn run_mcp_step(ctx: &AppContext, state: &mut SetupState) -> Result<()> {
     Ok(())
 }
 
-fn run_provider_step(ctx: &AppContext, state: &mut SetupState) -> Result<()> {
+fn run_provider_step(_ctx: &AppContext, state: &mut SetupState) -> Result<()> {
     state.print_progress(Step::Provider, "checking model provider...");
 
     // Try to load provider settings
@@ -322,12 +322,12 @@ fn run_provider_step(ctx: &AppContext, state: &mut SetupState) -> Result<()> {
         state.print_progress(Step::Provider, "configuring provider...");
 
         if !state.quiet {
-            eprintln!("    Available providers: anthropic, openai, memnoth");
+            eprintln!("    Available providers: anthropic, openai, memnoth, kilo");
             eprintln!("    Run `memnoth config set provider.kind <kind>` to set the provider.");
             eprintln!("    Run `memnoth config set provider.model <model>` to set the model.");
             eprintln!("    Run `memnoth config set provider.base_url <url>` for custom endpoints.");
             eprintln!(
-                "    Set your API key via environment: MEMNOTH_API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY"
+                "    Set your API key via environment: MEMNOTH_API_KEY, ANTHROPIC_API_KEY, OPENAI_API_KEY, or KILO_API_KEY"
             );
         }
 
@@ -337,6 +337,10 @@ fn run_provider_step(ctx: &AppContext, state: &mut SetupState) -> Result<()> {
                 "anthropic"
             } else if std::env::var("OPENAI_API_KEY").is_ok() {
                 "openai"
+            } else if std::env::var("KILO_API_KEY").is_ok()
+                || std::env::var("KILOCODE_API_KEY").is_ok()
+            {
+                "kilo"
             } else if std::env::var("MEMNOTH_API_KEY").is_ok()
                 || memnoth_auth::get_credential_sync("memnoth")
                     .ok()
@@ -355,6 +359,7 @@ fn run_provider_step(ctx: &AppContext, state: &mut SetupState) -> Result<()> {
                 max_tokens: None,
                 input_per_mtok: None,
                 output_per_mtok: None,
+                ..Default::default()
             });
             state.config_dirty = true;
             state.print_progress(
