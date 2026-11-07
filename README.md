@@ -1,166 +1,106 @@
 <p align="center">
-  <img src="../memnoth.jpeg" width="104" alt="Memnoth" />
+  <img src="assets/mn-mark.png" width="88" alt="Memnoth" />
 </p>
 
 <h1 align="center">memnoth</h1>
 
 <p align="center">
-  <strong>A terminal agent with a memory that has a past.</strong><br />
-  One binary for the session, the bi-temporal vault, and the code graph — local SQLite, no daemon.<br />
-  The same brain over MCP for Cursor, Claude Code, Codex, and Zed.
+  A terminal coding agent that remembers <em>when</em> things were true.
 </p>
 
 <p align="center">
   <a href="https://github.com/astrivya/memnoth/actions/workflows/cli-ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/astrivya/memnoth/cli-ci.yml?style=flat-square&label=ci"></a>
   <a href="https://github.com/astrivya/memnoth/releases"><img alt="Release" src="https://img.shields.io/github/v/release/astrivya/memnoth?include_prereleases&style=flat-square&label=release"></a>
   <img alt="Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square">
-  <img alt="Rust edition 2024" src="https://img.shields.io/badge/rust-edition%202024-orange?style=flat-square">
-  <img alt="Linux, macOS, Windows" src="https://img.shields.io/badge/platform-linux%20%7C%20macOS%20%7C%20Windows-lightgrey?style=flat-square">
-  <img alt="MCP ready" src="https://img.shields.io/badge/MCP-ready-7C3AED?style=flat-square">
 </p>
 
-<p align="center">
-  <a href="#quickstart">Quickstart</a> ·
-  <a href="#what-it-does">What it does</a> ·
-  <a href="#how-it-fits-together">Architecture</a> ·
-  <a href="#use-it-from-your-editor">MCP</a> ·
-  <a href="#commands">Commands</a> ·
-  <a href="#build-and-contribute">Contributing</a>
-</p>
+Memnoth keeps decisions, corrections, and the reasons behind them in a vault that remembers when each one was true, and indexes your code so you can see what a change would touch. It runs in your terminal, stores everything in local SQLite files, and needs no account or server.
 
-Memnoth is a local-first coding agent that remembers **when** things were true. It keeps decisions, corrections, and the reasons behind them in a temporal vault; keeps a graph of what your code declares and what mentions it; and exposes both to a model, a shell, or your editor.
+## Start here
 
-No account. No service to start. The vault, the graph, and the session are files you own.
+| I want to… | Start here |
+| --- | --- |
+| Use Memnoth in my terminal | [Quickstart](#quickstart) |
+| Use it from Cursor, VS Code, or Claude Code | [MCP](#mcp) |
+| See which commands exist | [Commands](#commands) |
+| Know what this build does not include | [This build](#this-build) |
 
 ## Install
 
-| You have | Install |
-| --- | --- |
-| **Linux / macOS** | `curl -fsSL https://memnoth.astrivya.ai/install | bash` |
-| **Windows (Git Bash / WSL / MSYS2)** | `curl -fsSL https://memnoth.astrivya.ai/install | bash` |
-| **Windows (PowerShell / CMD)** | Download `memnoth-x86_64-pc-windows-msvc.zip` from [Releases](https://github.com/astrivya/memnoth/releases) |
-| **Rust toolchain** | `git clone https://github.com/astrivya/memnoth && cd memnoth/CLI && cargo install --path .` |
-| **Editor only (MCP)** | `npx -y @astrivya/mcp` — bundles the server, no separate install |
+```bash
+# Linux, macOS, Git Bash, WSL
+curl -fsSL https://memnoth.astrivya.ai/install | bash
 
-The installer verifies the release checksum and installs two names for one binary: `memnoth` and `mn`.
+# From source
+git clone https://github.com/astrivya/memnoth && cd memnoth/CLI && cargo install --path .
+
+# Windows: download memnoth-x86_64-pc-windows-msvc.zip
+# https://github.com/astrivya/memnoth/releases
+```
+
+The installer checks the release checksum and installs one binary under two names, `memnoth` and `mn`.
+
+Add the MCP server to your editor without installing anything:
+
+<p>
+  <a href="https://cursor.com/en/install-mcp?name=memnoth&config=eyJ0eXBlIjoic3RkaW8iLCJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsIkBhc3RyaXZ5YS9tY3AiXSwiZW52Ijp7Ik1FTU5PVEhfTUNQX1BST0ZJTEUiOiJmdWxsIn19"><img alt="Install in Cursor" src="https://cursor.com/deeplink/mcp-install-dark.svg" height="28"></a>
+  <a href="https://insiders.vscode.dev/redirect/mcp/install?name=memnoth&config=%7B%22type%22%3A%22stdio%22%2C%22command%22%3A%22npx%22%2C%22args%22%3A%5B%22-y%22%2C%22%40astrivya%2Fmcp%22%5D%2C%22env%22%3A%7B%22MEMNOTH_MCP_PROFILE%22%3A%22full%22%7D%7D"><img alt="Install in VS Code" src="https://img.shields.io/badge/VS_Code-0098FF?style=flat-square&logo=visualstudiocode&logoColor=white"></a>
+  <a href="https://vs-open.link/mcp-install?%7B%22name%22%3A%22memnoth%22%2C%22type%22%3A%22stdio%22%2C%22command%22%3A%22npx%22%2C%22args%22%3A%5B%22-y%22%2C%22%40astrivya%2Fmcp%22%5D%2C%22env%22%3A%7B%22MEMNOTH_MCP_PROFILE%22%3A%22full%22%7D%7D"><img alt="Install in Visual Studio" src="https://img.shields.io/badge/Visual_Studio-C16FDE?style=flat-square&logo=visualstudio&logoColor=white"></a>
+</p>
 
 ## Quickstart
 
 ```bash
-# 1 · see what this machine already has
-memnoth doctor
-
-# 2 · create the vault (idempotent, once per machine)
-memnoth vault init
-
-# 3 · index this workspace (incremental after the first run)
-memnoth kg index
-
-# 4 · open the session
-memnoth
+memnoth doctor        # what this machine already has
+memnoth vault init    # create the vault, once per machine
+memnoth kg index      # index this workspace
+memnoth               # start the session
 ```
 
-That is the whole setup. No auth flow, no server to keep alive.
-
-Then ask questions with commands that can also be scripted:
+Then ask in plain language, or run a question directly:
 
 | Question | Command |
 | --- | --- |
 | What did we believe on 2026-09-01? | `memnoth vault asof --at 2026-09-01` |
 | Why did this decision change? | `memnoth vault history auth` |
 | What breaks if I change `PaymentRetrier`? | `memnoth kg impact PaymentRetrier` |
-| Where is `open_vault` declared? | `memnoth kg search open_vault` |
-| What do we know about retries? | `memnoth vault recall retries` |
 
-**No API key? It still works.** The session answers from the vault and the graph, and tells you which store answered. Export `MEMNOTH_API_KEY` (or `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`) and a model drives the same tools, printing every lookup it makes.
+No API key is required: answers come from the vault and the graph, and the session says which store answered. Add `MEMNOTH_API_KEY` (or `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `KILO_API_KEY`) and a model can drive the same tools.
 
-## What it does
+## How it works
 
-### Memory that keeps its history
+| Component | What it stores |
+| --- | --- |
+| Entity | something worth having a belief about: a service, a decision, a constraint |
+| Observation | one typed statement: `fact`, `decision`, `lesson`, `gotcha`, or `correction` |
+| Relation | a typed link between two entities, with a confidence |
+| Window | `valid_from` and `valid_to` on every row; a correction closes one window and opens the next |
 
-Facts are observations attached to entities. Entities and relations carry `valid_from` / `valid_to`; observations carry the date they became true. Correcting a belief closes the old window and opens a new one — nothing is overwritten.
+A correction never erases what came before, so you can ask what was believed on any date and see both sides of a change.
 
-- `asof` reconstructs what was believed at any instant.
-- `history` shows every version of one belief, with the reason each window closed.
-- `contradictions` keeps both sides of an explicit revocation instead of averaging them into an answer true of neither.
-- Repeating the same fact on the same day is idempotent — no duplicate that reads as corroboration.
-
-Search is hybrid FTS + graph, so `recall` finds the decision, not just the word. `remember` accepts `fact`, `decision`, `lesson`, `gotcha`, or `correction` (confidence defaults to `0.9`); an unknown kind is refused rather than stored.
-
-### A code graph, not just grep
-
-`kg index` walks the workspace and stores files, declarations, and references in SQLite. `kg impact` answers the question that matters before a refactor: where is this defined, who mentions it, which tests touch it, and what else moves one hop away.
-
-The index is incremental by file size and mtime, and it is a derived artifact — deleting `.memnoth/graph.db` is always safe.
-
-### A session that shows its work
-
-A plain question runs a model turn when a provider is configured. The model's tools are the same verbs you type, so `/kg status` and `memnoth kg status` cannot drift. Every lookup is printed in the transcript; `/search` asks the two local stores directly even when a model is available.
-
-### Local by default
-
-| What | Where | Scope |
-| --- | --- | --- |
-| Vault | `~/.memnoth/vault.db` | the person and the machine |
-| Code graph | `<workspace>/.memnoth/graph.db` | the repository |
-| Sessions | `~/.memnoth/sessions/*.jsonl` | append-only, one message per line |
-| Config | `~/.memnoth/config.toml` | endpoints and models, never a key |
-
-The vault is per-machine because memory is about the person; the graph is per-workspace because it is about the code. Copy the vault file and you have moved your memory. The model key lives only in the environment.
-
-### An agent with brakes
-
-Two tools change state: `vault_remember` and `edit_file`. Neither can run until you say yes in a confirmation box; a refusal is final for that turn.
-
-File edits stay inside the workspace (relative paths only, never `.git/` or `.memnoth/`), must replace exactly one snippet byte for byte, and refuse files that are non-UTF-8 or larger than 256 KB.
-
-## How it fits together
-
-```mermaid
-flowchart LR
-    you([you]) --> cli["memnoth · one binary"]
-    cli --> tui["session TUI"]
-    cli --> vault[("vault.db<br/>bi-temporal memory")]
-    cli --> kgdb[("graph.db<br/>code graph")]
-    tui <--> model["Anthropic / OpenAI-compatible"]
-    model -. tool calls .-> cli
-    cli -. starts when present .-> mcp["memnoth-mcp<br/>separate binary"]
-    mcp --> vault
-    mcp --> kgdb
-    editor["Cursor · Claude Code<br/>Codex · Zed"] <-->|MCP| mcp
+```bash
+memnoth vault remember auth --kind decision "Sessions expire after 15 minutes"
+memnoth vault correct auth --reason "PCI scope changed" --summary "Sessions expire after 30 minutes"
+memnoth vault history auth     # both versions, and why the first closed
 ```
 
-Two rules hold the binary together:
+`forget`, `gc`, and `prune` are dry runs until `--apply`, retractions need `--reason`, and `restore` verifies a backup before replacing anything.
 
-- **One dispatcher.** `commands::execute` answers every verb. The TUI builds the same `Verb` for its slash commands, so there is no second implementation that can disagree.
-- **One answer, two renderings.** Every verb returns text for a person and JSON for a program — the same JSON shape the MCP tool returns.
+`kg index` stores files, declarations, and references in SQLite; `kg impact` answers what a change touches, one hop out. The index is incremental and safe to delete.
 
-## Use it from your editor
+With a provider configured, the session runs a model turn over the same verbs you can type, printing every lookup. Two tools change state, `vault_remember` and `edit_file`; both ask first, and edits stay inside the workspace and must match one exact snippet.
+
+## MCP
 
 ```bash
 memnoth mcp add --clients cursor,codex   # omit --clients to detect installed clients
 memnoth mcp doctor                       # what is registered, with which profile, and where
 ```
 
-`mcp add` writes each client's own config and preserves entries it did not create. `mcp doctor` also runs the server's own selftest, so “the config looks right” and “the server answers” are never confused.
-
-Profiles decide which tools a host is told about:
-
-| Profile | Tools | For |
-| --- | ---: | --- |
-| `micro` | 4 | the smallest useful set |
-| `memory` | 21 | the vault, including the temporal quartet |
-| `code` | 23 | code graph plus filesystem/git toolbox |
-| `coord` | 11 | multi-agent claims, tasks, messaging |
-| `full` | 48 | everything |
-| `agent` | 6 | agent session management, HTTP transport only |
-
-A tool you expected but cannot see is a profile setting, not a missing capability. The active profile and its tool count are reported in `initialize` and `mcp doctor`.
+`mcp add` writes each client's own config and preserves entries it did not create; `mcp doctor` also runs the server's selftest. Profiles (`micro`, `memory`, `code`, `coord`, `full`) decide which tools a host is offered, and `mcp doctor` reports the one in force.
 
 <details>
-<summary><strong>Manual MCP config</strong></summary>
-
-<br />
+<summary>Any other MCP client</summary>
 
 ```json
 {
@@ -174,49 +114,6 @@ A tool you expected but cannot see is a profile setting, not a missing capabilit
 }
 ```
 
-For the HTTP transport, pass the endpoint and a bearer token. `MEMNOTH_MCP_TOKEN` is the only token source; it is never written to Memnoth's config.
-
-</details>
-
-## Commands
-
-| Surface | Verbs |
-| --- | --- |
-| **Session** | `memnoth`, `memnoth --resume <name>` |
-| **Vault** | `init` · `status` · `remember` · `recall` · `asof` · `history` · `contradictions` |
-| **Graph** | `index` · `status` · `impact` · `search` |
-| **MCP** | `serve` · `doctor` · `add` · `call` · `selftest` |
-| **Diagnostics** | `doctor` |
-
-Global flags: `--root <dir>`, `--vault <path>`, `--namespace <name>`, `--json`, `--quiet`, `--resume <name>`. They work before or after the verb.
-
-<details>
-<summary><strong>Every command, with what it answers</strong></summary>
-
-<br />
-
-| Command | What it answers |
-| --- | --- |
-| `memnoth` | the session against the current directory's vault and graph |
-| `memnoth --resume payments` | the same session, continued by name |
-| `memnoth vault init` | create the vault (idempotent, once per machine) |
-| `memnoth vault status` | the vault's path, size, namespace, and counts |
-| `memnoth vault asof --at <when>` | what was believed at an instant (RFC 3339, a date, or epoch milliseconds) |
-| `memnoth vault history <name>` | every version of one belief, with the reasons it closed |
-| `memnoth vault contradictions` | beliefs explicitly revoked, both sides kept |
-| `memnoth vault remember <name> -- <fact>` | record a fact, decision, lesson, gotcha, or correction |
-| `memnoth vault recall <query>` | search the vault (FTS + graph + temporal windows) |
-| `memnoth kg index` | build or update the code graph from the workspace |
-| `memnoth kg status` | what was built, when, and how stale it is |
-| `memnoth kg impact <symbol>` | definitions, references, tests, and blast radius |
-| `memnoth kg search <query>` | symbols by name |
-| `memnoth mcp serve` | serve the vault and graph over MCP (stdio; `--http` for loopback HTTP) |
-| `memnoth mcp doctor` | what is registered, with which profile, and where |
-| `memnoth mcp add --clients cursor,codex` | write a client's MCP config |
-| `memnoth mcp call <tool> --args '{...}'` | one tool, through the same dispatcher a host reaches |
-| `memnoth mcp selftest` | the server's own initialize/tools/list probe |
-| `memnoth doctor` | which paths, stores, model, server, instructions, and sandbox policy this machine actually has |
-
 </details>
 
 ## Configuration
@@ -224,146 +121,69 @@ Global flags: `--root <dir>`, `--vault <path>`, `--namespace <name>`, `--json`, 
 ```toml
 # ~/.memnoth/config.toml
 [provider]
-kind = "anthropic"                 # or "openai": any OpenAI-compatible endpoint
+kind = "anthropic"          # wire shape: "anthropic", "openai", "memnoth", "kilo"
+name = "anthropic"          # which preset the key belongs to; two gateways share a kind
 model = "claude-sonnet-4-5"
-# base_url = "http://127.0.0.1:8080/v1"   # a gateway or a local server
-# max_tokens = 1600
-# input_per_mtok = 3.0             # optional: exact session cost estimate
-# output_per_mtok = 15.0
+# base_url = "http://127.0.0.1:8080/v1"
+# reasoning_effort = "high"  # only for models that accept it; ←/→ in /models sets it
 ```
 
-| Variable | What it overrides |
+`/models` (alias `/model`) lists every model this build knows with its context window, list price and reasoning variants; `Enter` writes this table and saves it, so the next turn uses the new model without a restart. `R` merges in the ids the configured provider actually serves.
+
+| Variable | Overrides |
 | --- | --- |
 | `MEMNOTH_API_KEY` | the key (falls back to the provider's own variable) |
 | `MEMNOTH_PROVIDER` | `provider.kind` |
 | `MEMNOTH_MODEL` | `provider.model` |
-| `MEMNOTH_PROVIDER_BASE_URL` | `provider.base_url` |
 | `MEMNOTH_MCP_TOKEN` | bearer token for the HTTP MCP transport; never stored |
 
-`memnoth doctor` and `/model` print the provider, model, endpoint, and whether a key is present — so “the model declined” and “no key is wired” never look the same.
+Vault, graph, session, and config paths are printed by `memnoth doctor`; `--vault`, `--namespace`, `MEMNOTH_HOME`, and `MEMNOTH_VAULT` override them. `memnoth doctor` and `/model` also report the provider, endpoint, and whether a key is present, so "the model declined" and "no key is wired" never look the same.
 
-### State and overrides
+## Commands
 
-| What | Default | Override |
-| --- | --- | --- |
-| Vault | `~/.memnoth/vault.db` | `--vault`, `MEMNOTH_VAULT` |
-| Vault namespace | `default` → `vault-<name>.db` | `--namespace` |
-| Code graph | `<root>/.memnoth/graph.db` | `MEMNOTH_GRAPH` |
-| Sessions | `~/.memnoth/sessions/<name>.jsonl` | — |
-| Config | `~/.memnoth/config.toml` | — |
-| State directory | `~/.memnoth` | `MEMNOTH_HOME` |
-| MCP server binary | beside `memnoth`, then `PATH` | `MEMNOTH_MCP_BIN` |
-
-## JSON for scripts
-
-Every command that answers a question can answer a program instead:
-
-```bash
-memnoth kg status --json
-```
-
-```json
-{
-  "ok": true,
-  "command": "kg.status",
-  "version": "0.1.0-beta.1",
-  "data": {}
-}
-```
-
-Failures use the same envelope with `ok: false` and `error`, so a caller never parses prose to find a failure. Exit code is `0` on success and `1` on failure.
-
-## What ships in this tree
-
-This repository publishes the local product, and it names what is absent rather than returning an empty list that reads as “nothing found”.
-
-| Surface | Status in this tree |
+| Group | Common verbs |
 | --- | --- |
-| Session, vault, doctor | Builds and ships. |
-| Code graph | v1 structural index: line/regex extraction, lexical search, textual references. |
-| MCP server | Separate `memnoth-mcp` binary. Its crate is excluded because five dependencies are not published here. |
-| Embeddings | Not built here; `kg search` stays lexical. |
+| **Session** | `memnoth`, `--resume <name>` |
+| **Vault** | `remember` `recall` `search` `asof` `history` `correct` `forget` `export` `import` `backup` `restore` |
+| **Graph** | `index` `status` `impact` `search` |
+| **MCP** | `serve` `add` `doctor` `call` `selftest` |
+| **Cloud** | `auth` `billing` `projects` `keys` `org` `teams` `usage` `sync` |
+| **Diagnostics** | `doctor` |
 
-The production `memnoth-codegraph` (tree-sitter parsing, resolved call edges, communities, semantic search) is not in this repository. In its place, `kg` answers the two questions that need no resolution — *where is this declared* and *who mentions it* — and says so in its output.
+Global flags work before or after the verb: `--root`, `--vault`, `--namespace`, `--json`, `--quiet`, `--resume`.
 
-The MCP server crate is excluded on purpose, not forgotten: `memnoth-codegraph`, `memnoth-ingest`, `memnoth-embedding`, `memnoth-harness-api`, and `memnoth-transport` are unpublished siblings. `memnoth mcp` drives a separate server binary when one is on the machine; `npx -y @astrivya/mcp` is the fastest way to get one. A change that makes the CLI depend on `crates/memnoth-mcp` would make this repository unbuildable again.
+`memnoth <group> --help` lists every verb and flag (27 for the vault) and is always more current than this page. Every question verb also answers a program, with one envelope: `{ok, command, version, data}`, using `ok: false` and `error` on failure and exit code 0 or 1.
 
-Run `memnoth doctor` first when something is not wired. It prints paths rather than names, so a client registered against a binary that has since moved shows up as a path that does not exist instead of an answer that looks fluent.
+## This build
 
-## Build and contribute
+Session, vault, and doctor ship complete. The code graph is a v1 structural index (line and regex extraction, lexical search, textual references), not the tree-sitter production graph; embeddings are not built here, so `kg search` stays lexical. When something is not wired, `memnoth doctor` prints the path that is missing rather than an answer that sounds fluent.
 
-### From source
+## Contributing
+
+Pull requests are welcome, including first ones. Bugs and small fixes can go straight to a pull request with a test that fails before the change and passes after it. New commands, and anything touching credentials, the update path, the sandbox, or file writes, start as an issue, because the command surface is a contract.
+
+Good places to start:
+
+- Vault semantics in `src/vault.rs` and `crates/memnoth-engine`.
+- The v1 code graph in `src/kg/`.
+- MCP registration and calls in `src/mcp/` and `crates/memnoth-mcp-client`.
+- Output and docs: command help, `doctor` paths, and the gaps listed under [This build](#this-build).
 
 ```bash
 git clone https://github.com/astrivya/memnoth
 cd memnoth/CLI
-cargo build --release        # target/release/memnoth
-cargo test --workspace       # binary + eleven library crates
+cargo build --release
+cargo test --workspace        # binary + 23 crates
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
-Requires a current stable Rust toolchain (edition 2024).
+Requires stable Rust (edition 2024). Sign every commit with `git commit -s`; the DCO is in `DCO.md`, and a pull request without it cannot merge. Add a verb once in `commands::execute` and return an `Outcome`; the TUI and the JSON output follow from it — including the hover window, which renders the same `Outcome::data` the pipe gets.
 
-### Project map
-
-```text
-CLI/
-├── src/
-│   ├── cli.rs         the command surface
-│   ├── commands.rs    one dispatcher, one Outcome
-│   ├── vault.rs       temporal vault verbs
-│   ├── kg/            code graph: extract, store, render
-│   ├── mcp/           server bridge and client registration
-│   ├── tui/           session screen and line parser
-│   ├── provider.rs    model transport and tool loop
-│   ├── edit.rs        sandboxed, approval-gated file edits
-│   └── doctor.rs      what is wired on this machine
-├── crates/            eleven published library crates
-│   ├── memnoth-engine        temporal graph + hybrid search
-│   ├── memnoth-session       JSONL turn log
-│   ├── memnoth-search        lexical code search
-│   ├── memnoth-coord         multi-agent claims and tasks
-│   ├── memnoth-context       instructions, budgets, compaction
-│   ├── memnoth-capability    one tool registry for every surface
-│   ├── memnoth-sandbox       deny-globs and policy plans
-│   ├── memnoth-mcp-auth      static bearer / HS256 / RS256
-│   ├── memnoth-mcp-client    MCP client (stdio + HTTP)
-│   ├── memnoth-protocol-v2   length-prefixed framing
-│   └── memnoth-embedding-wasm ONNX inference for WASM
-└── scripts/           install.sh and dist.sh
-```
-
-### Before you open a PR
-
-```bash
-cargo fmt -p memnoth -- --check
-cargo clippy -p memnoth --all-targets -- -D warnings
-cargo test --workspace --locked
-```
-
-CI runs those on Linux, macOS, and Windows.
-
-### Releases
-
-`cli-release.yml` runs on a `v*` tag, builds the five release targets, verifies each binary's `--version`, and hands the archives to `scripts/dist.sh`. That script is the one place that knows the bundle's shape: `dist/install.sh`, versioned archives with checksums, a real `latest/` copy, and `SHA256SUMS`. The website's `/install` endpoint downloads `install.sh` rather than carrying a second copy.
-
-### Three rules that keep the tree coherent
-
-1. **Add a verb once.** Put it in `commands::execute`; the TUI gets it for free.
-2. **Return an `Outcome`.** Text and JSON together, never a second hand-written shape.
-3. **Never fabricate an answer.** If a component is absent from this build, name it. If a result is truncated, say so.
-
-### Good places to start
-
-- The v1 graph in `src/kg/` — extraction, reference scanning, ranking, rendering.
-- The vault verbs in `src/vault.rs` and the engine semantics in `crates/memnoth-engine`.
-- MCP registration and calls in `src/mcp/` and `crates/memnoth-mcp-client`.
-- Docs and examples: command help, `doctor` output, and the gaps listed above.
-
-For a large change, open an issue first so the design can be agreed before the code. Small, tested PRs are always welcome.
+`CONTRIBUTING.md` has the full rules and the pull request checklist, `CODE_OF_CONDUCT.md` the standards, and `OPEN_CORE.md` explains what belongs in this repository and what is hosted. Security reports go through `SECURITY.md`, not the issue tracker.
 
 ## License
 
-Apache-2.0, as declared in `Cargo.toml`. The control plane in `memnoth-cloud/` is separate and proprietary; the local product does not require it.
+Apache-2.0, as declared in `Cargo.toml`.
 
 <p align="center">
   <sub>Built in Rust. Stored in SQLite. Yours to keep.</sub>
