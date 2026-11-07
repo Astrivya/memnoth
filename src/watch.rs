@@ -663,6 +663,10 @@ mod tests {
         stream
             .write_all(b"GET /events HTTP/1.1\r\nHost: test\r\n\r\n")
             .expect("write request");
+        // The stream is a live one: it sends keep-alive pings until the event
+        // arrives. A read timeout turns a missing event into a failure instead
+        // of a test that hangs the suite.
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(20)));
         let mut reader = BufReader::new(stream.try_clone().expect("clone"));
         loop {
             let mut header = String::new();
@@ -683,7 +687,12 @@ mod tests {
         // the assertion is that the event arrives, not that it is the very next
         // line. Pings are skipped; anything else that is not the event fails.
         let mut found = String::new();
-        for _ in 0..3 {
+        // Skip pings until the event shows up. A fixed number of lines was the
+        // old bound, and a loaded machine can emit that many pings before the
+        // pushed event is read — the assertion is that the event arrives, so
+        // the bound is time, not line count.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
             let mut line = String::new();
             reader.read_line(&mut line).expect("a line from the stream");
             if line.contains("src/lib.rs") {

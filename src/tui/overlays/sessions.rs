@@ -111,7 +111,9 @@ impl SessionsOverlay {
 
     /// The row under the cursor.
     fn current(&self) -> Option<&SessionEntry> {
-        self.shown.get(self.selected).and_then(|index| self.rows.get(*index))
+        self.shown
+            .get(self.selected)
+            .and_then(|index| self.rows.get(*index))
     }
 
     /// Read the sessions on disk.
@@ -758,7 +760,10 @@ mod tests {
         overlay.filter = "oqn".to_string();
         overlay.rebuild();
         assert_eq!(overlay.shown.len(), 1);
-        assert_eq!(overlay.current().map(|row| row.name.as_str()), Some("older"));
+        assert_eq!(
+            overlay.current().map(|row| row.name.as_str()),
+            Some("older")
+        );
         assert_eq!(overlay.selected, 0, "the cursor cannot point past the end");
 
         overlay.filter = "zzz".to_string();
@@ -783,7 +788,13 @@ mod tests {
         overlay.handle_key(key(KeyCode::Char('d')), &mut app);
         overlay.handle_key(key(KeyCode::Char('d')), &mut app);
         assert!(open_path.exists(), "the recorded conversation stays");
-        assert!(overlay.note.as_deref().unwrap_or_default().contains("being recorded"));
+        assert!(
+            overlay
+                .note
+                .as_deref()
+                .unwrap_or_default()
+                .contains("being recorded")
+        );
 
         // The other row takes two presses: the first only arms.
         overlay.selected = 1;
