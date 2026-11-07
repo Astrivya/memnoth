@@ -5,12 +5,15 @@ use std::path::PathBuf;
 
 use crate::AppContext;
 use crate::output::Outcome;
-use memnoth_cloud_client::{CloudClient, LocalReceipt, UsageParams};
+use memnoth_cloud_client::{LocalReceipt, UsageParams};
 use memnoth_session::{Session, TurnReceipt};
 
 /// Execute `mn usage`.
 pub fn run(ctx: &AppContext, args: &crate::cli::UsageArgs) -> Result<Outcome> {
-    let client = CloudClient::from_env()?;
+    // The one client every command that needs an account uses: it reads the
+    // token this machine stored at `/login`, not only the environment, so
+    // `mn usage` works from the same sign-in the session already has.
+    let client = crate::cloud::signed_in_client(ctx)?;
 
     // Build usage params
     let params = UsageParams {

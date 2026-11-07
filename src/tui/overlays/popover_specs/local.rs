@@ -321,57 +321,43 @@ fn config_entries(data: &Value) -> Option<PopoverSpec> {
 
 /// `usage` and `stats` answer with the same shape, so they get the same window.
 ///
-/// The by-model rows are the useful list; a payload without them falls back to
-/// the leaderboard, which is the only other place a person appears by name.
+/// The payload carries three lists, and the window used to draw whichever one
+/// was non-empty first: a by-model table hid the leaderboard, which is the only
+/// other place a person appears by name. They are sections here — models, then
+/// people, then the days when both are quiet — because they answer different
+/// questions about the same spend.
 fn spend(data: &Value, command: &str) -> Option<PopoverSpec> {
-    let per_model = list(data, "models");
-    let mut rows: Vec<PopoverRow> = Vec::new();
+    let models = list(data, "models");
+    let people = list(data, "leaderboard");
+    let days = list(data, "series");
 
-    if !per_model.is_empty() {
-        for model in per_model {
-            let mut detail = Vec::new();
-            if let Some(cost) = model.get("cost_usd").and_then(Value::as_f64) {
-                detail.push(format!("${cost:.2}"));
-            }
-            if let Some(tokens) = model.get("tokens").and_then(Value::as_i64) {
-                detail.push(format!("{tokens} tokens"));
-            }
-            let provider = string(model, "provider");
-            if !provider.is_empty() {
-                detail.push(provider);
-            }
-            rows.push(PopoverRow::new(string(model, "model"), detail.join(" · ")));
-        }
-    } else {
-        for person in list(data, "leaderboard") {
-            let mut detail = Vec::new();
-            if let Some(cost) = person.get("spend_usd").and_then(Value::as_f64) {
-                detail.push(format!("${cost:.2}"));
-            }
-            if let Some(tasks) = person.get("tasks").and_then(Value::as_i64) {
-                detail.push(format!("{tasks} tasks"));
-            }
-            rows.push(PopoverRow::new(
-                present(person, "email").unwrap_or_else(|| string(person, "name")),
-                detail.join(" · "),
-            ));
-        }
+    let mut rows: Vec<PopoverRow> = Vec::new();
+    if !models.is_empty() {
+        rows.push(PopoverRow::section(format!("by model ({})", models.len())));
+        rows.extend(models.iter().filter_map(model_row));
+    }
+    if !people.is_empty() {
+        rows.push(PopoverRow::section(format!("by person ({})", people.len())));
+        rows.extend(people.iter().filter_map(person_row));
+    }
+    // Both quiet is still a window worth opening: the daily series is what the
+    // console's chart is drawn from, and it is the one list left to walk.
+    if models.is_empty() && people.is_empty() && !days.is_empty() {
+        rows.push(PopoverRow::section(format!("by day ({})", days.len())));
+        rows.extend(days.iter().filter_map(day_row));
     }
 
-    if rows.is_empty() {
+    if rows.iter().all(|row| row.header) {
         return None;
     }
 
-    let heading = if per_model.is_empty() {
-        "Spend per person"
-    } else {
-        "Spend per model"
-    };
-    let mut spec = PopoverSpec::new(
-        format!("{heading} ({})", rows.len()),
-        format!("from {command}"),
-    )
-    .rows(rows);
+    let mut spec = PopoverSpec::new("Usage", format!("from {command}"))
+        .rows(rows)
+        .button(PopoverButton::open(
+            'u',
+            "console",
+            crate::context::console_url("usage"),
+        ));
 
     if let Some(totals) = data.get("totals") {
         let mut parts = Vec::new();
@@ -393,6 +379,65 @@ fn spend(data: &Value, command: &str) -> Option<PopoverSpec> {
     }
 
     Some(with_follows(spec, data))
+}
+
+/// One model: what it cost and how much of the window it served.
+fn model_row(model: &Value) -> Option<PopoverRow> {
+    let name = string(model, "model");
+    if name.is_empty() {
+        return None;
+    }
+    let mut detail = Vec::new();
+    if let Some(cost) = model.get("cost_usd").and_then(Value::as_f64) {
+        detail.push(format!("${cost:.2}"));
+    }
+    if let Some(tokens) = model.get("tokens").and_then(Value::as_i64) {
+        detail.push(format!("{tokens} tokens"));
+    }
+    let provider = string(model, "provider");
+    if !provider.is_empty() {
+        detail.push(provider);
+    }
+    Some(PopoverRow::new(name, detail.join(" · ")))
+}
+
+/// One person: the org's own leaderboard row, address first because that is
+/// what an administrator acts on.
+fn person_row(person: &Value) -> Option<PopoverRow> {
+    let who = present(person, "email").or_else(|| present(person, "name"))?;
+    let mut detail = Vec::new();
+    if let Some(cost) = person.get("spend_usd").and_then(Value::as_f64) {
+        detail.push(format!("${cost:.2}"));
+    }
+    if let Some(tokens) = person.get("tokens").and_then(Value::as_i64) {
+        detail.push(format!("{tokens} tokens"));
+    }
+    if let Some(tasks) = person.get("tasks").and_then(Value::as_i64) {
+        detail.push(format!("{tasks} tasks"));
+    }
+    Some(PopoverRow::new(who, detail.join(" · ")))
+}
+
+/// One day of the series: the same numbers the console charts.
+fn day_row(day: &Value) -> Option<PopoverRow> {
+    let stamp = present(day, "day")?;
+    let mut detail = Vec::new();
+    let tokens_in = day.get("tokens_in").and_then(Value::as_i64);
+    let tokens_out = day.get("tokens_out").and_then(Value::as_i64);
+    if tokens_in.is_some() || tokens_out.is_some() {
+        detail.push(format!(
+            "{} in · {} out",
+            tokens_in.unwrap_or(0),
+            tokens_out.unwrap_or(0)
+        ));
+    }
+    if let Some(cost) = day.get("cost_usd").and_then(Value::as_f64) {
+        detail.push(format!("${cost:.2}"));
+    }
+    if let Some(tasks) = day.get("tasks").and_then(Value::as_i64) {
+        detail.push(format!("{tasks} tasks"));
+    }
+    Some(PopoverRow::new(stamp, detail.join(" · ")))
 }
 
 fn tasks(data: &Value) -> Option<PopoverSpec> {
@@ -546,8 +591,9 @@ mod tests {
         assert!(keys.contains(&'t') && keys.contains(&'d'), "{keys:?}");
     }
 
+    /// One answer carries both lists; a window that drew either hid half of it.
     #[test]
-    fn spend_prefers_the_model_breakdown_over_the_leaderboard() {
+    fn spend_walks_the_models_and_the_people_in_one_window() {
         let data = json!({
             "range": "30d",
             "demo": false,
@@ -558,10 +604,55 @@ mod tests {
         });
 
         let spec = spec("usage.show", &data).expect("a window");
-        assert_eq!(spec.title, "Spend per model (1)");
-        assert_eq!(spec.rows[0].title, "opus");
-        assert!(spec.rows[0].detail.contains("$12.50"), "{:?}", spec.rows[0]);
+        assert_eq!(spec.title, "Usage");
+        let sections: Vec<&str> = spec
+            .rows
+            .iter()
+            .filter(|row| row.header)
+            .map(|row| row.title.as_str())
+            .collect();
+        assert_eq!(
+            sections,
+            vec!["by model (1)", "by person (1)"],
+            "{sections:?}"
+        );
+
+        let model = spec
+            .rows
+            .iter()
+            .find(|row| row.title == "opus")
+            .expect("the model row");
+        assert!(model.detail.contains("$12.50"), "{}", model.detail);
+        let person = spec
+            .rows
+            .iter()
+            .find(|row| row.title == "a@b.c")
+            .expect("the person row");
+        assert!(person.detail.contains("1 tasks"), "{}", person.detail);
         assert!(spec.note.as_deref().unwrap_or_default().contains("$12.50"));
+        assert!(spec.buttons.iter().any(|button| button.key == 'u'));
+    }
+
+    /// A window with no models and no people still has the days to walk.
+    #[test]
+    fn a_quiet_spend_window_falls_back_to_the_daily_series() {
+        let data = json!({
+            "range": "7d",
+            "demo": false,
+            "totals": { "cost_usd": 0.5, "tasks": 3 },
+            "series": [{ "day": "2026-11-03", "tokens_in": 1200, "tokens_out": 400, "cost_usd": 0.5, "tasks": 3 }],
+            "leaderboard": [],
+            "models": []
+        });
+
+        let spec = spec("stats.show", &data).expect("a window");
+        assert_eq!(spec.rows[0].title, "by day (1)");
+        assert_eq!(spec.rows[1].title, "2026-11-03");
+        assert!(
+            spec.rows[1].detail.contains("1200 in · 400 out"),
+            "{}",
+            spec.rows[1].detail
+        );
     }
 
     #[test]
