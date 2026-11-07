@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/astrivya/memnoth/actions/workflows/cli-ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/astrivya/memnoth/cli-ci.yml?style=flat-square&label=ci"></a>
+  <a href="https://github.com/astrivya/memnoth/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/astrivya/memnoth/ci.yml?style=flat-square&label=ci"></a>
   <a href="https://github.com/astrivya/memnoth/releases"><img alt="Release" src="https://img.shields.io/github/v/release/astrivya/memnoth?include_prereleases&style=flat-square&label=release"></a>
   <img alt="Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square">
 </p>
