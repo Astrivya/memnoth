@@ -139,8 +139,12 @@ fn local_commands() -> Vec<PaletteItem> {
             description: "Browse every command, grouped by area".into(),
         },
         PaletteItem {
+            command: "/new".into(),
+            description: "Start a fresh conversation".into(),
+        },
+        PaletteItem {
             command: "/sessions".into(),
-            description: "List/manage saved sessions".into(),
+            description: "Browse saved conversations, with a preview".into(),
         },
         PaletteItem {
             command: "/tasks".into(),

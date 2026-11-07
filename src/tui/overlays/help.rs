@@ -291,9 +291,14 @@ impl HelpOverlay {
             "The session brief, over the transcript",
         ));
         commands.add_binding(KeyBinding::new(
+            "/new",
+            "New chat",
+            "Start a fresh conversation",
+        ));
+        commands.add_binding(KeyBinding::new(
             "/sessions",
             "Sessions",
-            "List sessions on disk",
+            "Browse saved conversations, with a preview",
         ));
         commands.add_binding(KeyBinding::new(
             "/model",

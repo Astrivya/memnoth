@@ -178,7 +178,8 @@ impl ScreenReaderOutput {
 /quit                      leave (also :q, ctrl-c)
 /clear                     clear the transcript
 /home                      the brief: what is here, what is missing
-/sessions                  sessions on disk, and how to resume them
+/new [name]                start a fresh conversation in this window
+/sessions                  every conversation, with a preview (alias: /resume)
 /models                    browse, search and switch models (alias: /model)
 /search                    open search overlay
 /search <query>            ask the vault and the graph (no model)

@@ -68,7 +68,13 @@ fn footer_hint(app: &App) -> String {
         };
         format!("sign in: waiting for approval · {waited}{open}{key}")
     } else if app.home_showing() && app.input.is_empty() {
-        "↑↓ choose · enter run · tab edit · / all commands · ? keys".to_string()
+        // On a session with history the brief is standing in front of it, so
+        // the key that puts it back is named here rather than discovered.
+        if app.entries.is_empty() {
+            "↑↓ choose · enter run · tab edit · / all commands · ? keys".to_string()
+        } else {
+            "↑↓ choose · enter run · esc conversation · / commands · ? keys".to_string()
+        }
     } else if app.busy {
         "esc cancel turn · ctrl-c twice quit · / commands · ctrl-k palette".to_string()
     } else if let Some(running) = &app.running_verb {
@@ -694,6 +700,21 @@ fn draw_home(frame: &mut Frame, area: Rect, home: &Home, cursor: usize) {
         Style::default().fg(Color::Gray),
     )));
 
+    // The conversation behind the brief is named, not merely hidden. Every
+    // launch starts here, so on a session with history the one thing the screen
+    // must not leave ambiguous is whether `esc` closes it or opens what was
+    // already said. Counting the turns answers that with a number.
+    if home.hidden_turns > 0 {
+        let turns = match home.hidden_turns {
+            1 => "1 earlier turn".to_string(),
+            many => format!("{many} earlier turns"),
+        };
+        lines.push(Line::from(Span::styled(
+            ellipsize(&format!("{turns} · esc shows them"), width),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
     // The blocks are built separately and then fitted, because on a short
     // window something has to give and it must not be the action: a brief that
     // lists five problems and no way to fix one is a complaint. Facts are the
@@ -769,23 +790,26 @@ fn draw_home(frame: &mut Frame, area: Rect, home: &Home, cursor: usize) {
     if height >= 17 && !home.recent.is_empty() {
         recent.push(Line::from(""));
         recent.push(Line::from(Span::styled(
-            "recent",
+            "recent activity",
             Style::default().fg(Color::White),
         )));
         for row in home.recent.iter().take(3) {
             recent.push(Line::from(Span::styled(
-                ellipsize(row, width),
+                ellipsize(&format!("  {row}"), width),
                 Style::default().fg(Color::DarkGray),
             )));
         }
     }
 
-    // Fit, in the order the brief is worth reading. On a short window `next`
-    // drops to one row and the timeline goes first, because a fact with no way
-    // to act on it is a report, not a brief.
+    // Fit, in the order the brief is worth reading. `next` drops to one command
+    // first; the activity strip then keeps its heading and a row. Only after
+    // that do the facts give way, because a fact with no way to act on it is a
+    // report, and a strip with no room is a header again.
     if lines.len() + facts.len() + next_block.len() + recent.len() > height {
-        recent.clear();
         next_block.truncate(3); // blank, `next`, one command
+    }
+    while recent.len() > 2 && lines.len() + facts.len() + next_block.len() + recent.len() > height {
+        recent.pop();
     }
     let facts_room = height.saturating_sub(lines.len() + next_block.len() + recent.len());
     if facts.len() > facts_room && facts.first().is_some_and(|line| line.spans.is_empty()) {
@@ -1064,6 +1088,7 @@ mod tests {
             facts: Vec::new(),
             steps: Vec::new(),
             invitation: None,
+            hidden_turns: 0,
             recent: Vec::new(),
         });
         app.login_busy = true;
@@ -1178,6 +1203,7 @@ mod tests {
                 },
             ],
             invitation: Some("a turn with the vault and the graph as tools".into()),
+            hidden_turns: 0,
             recent: vec!["2h ago   payments   retry cap raised".into()],
         }
     }
@@ -1249,6 +1275,28 @@ mod tests {
 
         app.close_home();
         let transcript = screen(&mut app, 110, 32);
+        assert!(transcript.contains("what changed?"), "{transcript}");
+    }
+
+    #[test]
+    fn the_brief_says_how_much_conversation_is_behind_it() {
+        // The shape a launch makes: entries loaded, brief in front, count of
+        // what is behind it on screen.
+        let mut app = App::new("payments", true);
+        let mut home = example_home();
+        home.hidden_turns = 3;
+        app.home = Some(home);
+        app.push(EntryRole::User, "what changed?");
+        app.open_home();
+
+        let text = screen(&mut app, 100, 30);
+        assert!(text.contains("3 earlier turns · esc shows them"), "{text}");
+        assert!(!text.contains("what changed?"), "{text}");
+        // The footer names the key the line above it just promised.
+        assert!(text.contains("esc conversation"), "{text}");
+
+        app.close_home();
+        let transcript = screen(&mut app, 100, 30);
         assert!(transcript.contains("what changed?"), "{transcript}");
     }
 

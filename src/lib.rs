@@ -100,6 +100,10 @@ pub fn run() -> ExitCode {
         _ => "session".to_string(),
     };
 
+    // Every interactive launch opens on the brief, `--resume NAME` included:
+    // naming a session chooses which conversation sits behind the brief, it does
+    // not skip the screen. No invocation may land a person in the middle of last
+    // Tuesday's transcript as their first frame; `esc` is the way in.
     if interactive && matches!(cli.verb, None | Some(Verb::Session(_))) {
         return match tui::run(&ctx, &session_name) {
             Ok(()) => ExitCode::SUCCESS,

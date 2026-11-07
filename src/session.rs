@@ -42,8 +42,21 @@ pub struct SessionSummary {
     pub model: String,
     /// Created at (ms).
     pub created_ms: i64,
+    /// Last activity (the file's mtime, ms).
+    ///
+    /// Created-at is when a conversation was born; this is when it was last
+    /// used, which is the question a picker is actually asked. `0` when the
+    /// file cannot be stat-ed.
+    pub modified_ms: i64,
     /// Messages on disk.
     pub messages: usize,
+    /// The first thing the person asked, flattened and shortened.
+    ///
+    /// A name is a filename, so it cannot be "fix the login redirect" without
+    /// becoming one. The first prompt is the title a person recognises, and it
+    /// is derived rather than stored: every session already on disk has one,
+    /// including the ones written before this field existed.
+    pub title: String,
     /// Where the file is.
     pub path: String,
 }
@@ -101,6 +114,64 @@ impl SessionStore {
             .with_context(|| format!("cannot write the session under {}", self.dir.display()))
     }
 
+    /// The newest `limit` conversations, newest first.
+    ///
+    /// `list` parses every file because the picker draws them all. The home
+    /// screen's activity strip shows three, so this sorts by the file's mtime
+    /// first — a stat per session instead of a parse per session — and reads
+    /// only the files it is about to name.
+    pub fn recent(&self, limit: usize) -> Vec<SessionSummary> {
+        let Ok(entries) = std::fs::read_dir(&self.dir) else {
+            return Vec::new();
+        };
+        let mut files: Vec<(String, PathBuf, i64)> = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let Some(name) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            let modified_ms = entry
+                .metadata()
+                .ok()
+                .and_then(|meta| meta.modified().ok())
+                .and_then(|when| when.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|since| since.as_millis().min(i64::MAX as u128) as i64)
+                .unwrap_or(0);
+            files.push((name.to_string(), path, modified_ms));
+        }
+        files.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)));
+        files.truncate(limit);
+        files
+            .into_iter()
+            .map(|(name, path, modified_ms)| {
+                let (model, created_ms, messages, title) = match Session::load(&path) {
+                    Ok(session) => {
+                        let title = title_of(&session);
+                        (
+                            session.model,
+                            session.created_ms,
+                            session.messages.len(),
+                            title,
+                        )
+                    }
+                    Err(_) => (String::new(), 0, 0, String::new()),
+                };
+                SessionSummary {
+                    name,
+                    model,
+                    created_ms,
+                    modified_ms,
+                    messages,
+                    title,
+                    path: path.display().to_string(),
+                }
+            })
+            .collect()
+    }
+
     /// Every session on disk, newest first.
     ///
     /// A file that cannot be parsed is listed with `messages: 0` rather than
@@ -119,20 +190,130 @@ impl SessionStore {
             let Some(name) = path.file_stem().and_then(|stem| stem.to_str()) else {
                 continue;
             };
-            let (model, created_ms, messages) = match Session::load(&path) {
-                Ok(session) => (session.model, session.created_ms, session.messages.len()),
-                Err(_) => (String::new(), 0, 0),
+            let (model, created_ms, messages, title) = match Session::load(&path) {
+                Ok(session) => {
+                    let title = title_of(&session);
+                    (
+                        session.model,
+                        session.created_ms,
+                        session.messages.len(),
+                        title,
+                    )
+                }
+                Err(_) => (String::new(), 0, 0, String::new()),
             };
+            let modified_ms = entry
+                .metadata()
+                .ok()
+                .and_then(|meta| meta.modified().ok())
+                .and_then(|when| when.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|since| since.as_millis().min(i64::MAX as u128) as i64)
+                .unwrap_or(created_ms);
             out.push(SessionSummary {
                 name: name.to_string(),
                 model,
                 created_ms,
+                modified_ms,
                 messages,
+                title,
                 path: path.display().to_string(),
             });
         }
-        out.sort_by(|a, b| b.created_ms.cmp(&a.created_ms).then(a.name.cmp(&b.name)));
+        // Most recently used first: a picker is the way back to what you were
+        // doing, not an archive sorted by birthday.
+        out.sort_by(|a, b| {
+            b.modified_ms
+                .cmp(&a.modified_ms)
+                .then(b.created_ms.cmp(&a.created_ms))
+                .then(a.name.cmp(&b.name))
+        });
         out
+    }
+
+    /// A session that does not exist yet, under a free name.
+    ///
+    /// `/new` cannot reuse the default name: `session` is a real file that may
+    /// already hold a conversation, and opening it would continue that one —
+    /// the opposite of what was asked. The first free `chat-N` is readable,
+    /// typeable as `--resume chat-2`, and needs no clock to stay unique.
+    pub fn next_name(&self) -> String {
+        for index in 1..=9999 {
+            let candidate = format!("chat-{index}");
+            let taken = self
+                .path(&candidate)
+                .map(|path| path.exists())
+                .unwrap_or(true);
+            if !taken {
+                return candidate;
+            }
+        }
+        "chat".to_string()
+    }
+
+    /// A fresh session under `name`, refusing to reuse one that exists.
+    pub fn create(&self, name: &str) -> Result<Session> {
+        let name = validate_name(name)?;
+        let path = self.path(&name)?;
+        if path.exists() {
+            bail!("session \"{name}\" already exists — open it, or pick another name");
+        }
+        let mut session = Session::new(SESSION_MODEL);
+        session.id = name;
+        Ok(session)
+    }
+
+    /// Load a session that must already exist.
+    pub fn load(&self, name: &str) -> Result<Session> {
+        let name = validate_name(name)?;
+        let path = self.path(&name)?;
+        if !path.exists() {
+            bail!("no session named \"{name}\"");
+        }
+        let mut session = Session::load(&path)
+            .with_context(|| format!("cannot read {}", path.display()))?;
+        // The file name is the identity a person types, so it wins over the
+        // header id — the same rule `load_or_create` applies. Without it, a
+        // session renamed on disk would be saved back under its old name.
+        session.id = name;
+        Ok(session)
+    }
+
+    /// Move a session to a new name, refusing to overwrite another one.
+    ///
+    /// The name is the identity here, so renaming is the only way to give a
+    /// conversation a handle a person can remember — which is exactly what the
+    /// picker's rename key exists for.
+    pub fn rename(&self, from: &str, to: &str) -> Result<String> {
+        let from = validate_name(from)?;
+        let to = validate_name(to)?;
+        if from == to {
+            return Ok(to);
+        }
+        let source = self.path(&from)?;
+        let target = self.path(&to)?;
+        if !source.exists() {
+            bail!("no session named \"{from}\"");
+        }
+        if target.exists() {
+            bail!("session \"{to}\" already exists");
+        }
+        std::fs::rename(&source, &target)
+            .with_context(|| format!("cannot rename {from} to {to}"))?;
+        Ok(to)
+    }
+
+    /// Delete a session file.
+    ///
+    /// The name is validated first, so a stray `..` can never become a path
+    /// outside the sessions directory.
+    pub fn delete(&self, name: &str) -> Result<()> {
+        let name = validate_name(name)?;
+        let path = self.path(&name)?;
+        if !path.exists() {
+            bail!("no session named \"{name}\"");
+        }
+        std::fs::remove_file(&path)
+            .with_context(|| format!("cannot delete {}", path.display()))
     }
 
     /// Append one exchange and write the file.
@@ -147,6 +328,31 @@ impl SessionStore {
         }
         self.save(session)
     }
+}
+
+/// The first question asked, flattened to one line and shortened.
+///
+/// Empty for a session with no user turn yet, which the picker reads as "name
+/// it, or ask something": a title invented from nothing would be a lie in the
+/// one column people scan.
+pub(crate) fn title_of(session: &Session) -> String {
+    let Some(first) = session
+        .messages
+        .iter()
+        .find(|message| matches!(message.role, Role::User))
+    else {
+        return String::new();
+    };
+    let flat = first.content.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut out = String::with_capacity(flat.len().min(80));
+    for (index, ch) in flat.chars().enumerate() {
+        if index >= 72 {
+            out.push('…');
+            break;
+        }
+        out.push(ch);
+    }
+    out
 }
 
 /// A session name as a safe filename.

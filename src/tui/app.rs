@@ -180,6 +180,8 @@ pub enum TasksCommand {
 pub enum Parsed {
     /// Nothing to do (blank line).
     Empty,
+    /// `/new [name]`: a fresh conversation, in this process.
+    NewChat(Option<String>),
     /// Leave the session.
     Quit,
     /// Open the help overlay (the command list and the keybindings).
@@ -188,7 +190,8 @@ pub enum Parsed {
     Clear,
     /// `/home`: the brief against the existing transcript.
     Home,
-    /// `/sessions`: what is on disk, and how to come back to it.
+    /// `/sessions` (alias `/resume`): the picker — every conversation on disk,
+    /// with a title and a preview, and the one you pick opens here.
     Sessions,
     /// `/models` (and its `/model` alias): browse, search, and switch models.
     ModelsOverlay,
@@ -326,6 +329,12 @@ pub struct Home {
     /// The last line of `next`: the invitation to type in the prompt, shown only
     /// when a model is configured. It is a row, not an affordance.
     pub invitation: Option<String>,
+    /// How many turns the session file behind this brief already holds.
+    ///
+    /// The brief is drawn over history on every launch, so the count is what
+    /// makes `esc` a specific promise — "show those" — instead of a key that
+    /// might close the screen.
+    pub hidden_turns: usize,
     /// The vault's own timeline, newest first, already aged (`2h ago`).
     pub recent: Vec<String>,
 }
@@ -360,6 +369,23 @@ pub struct Attention {
     pub fix: String,
 }
 
+/// A session the person asked to open, waiting for the loop that owns the file.
+///
+/// The screen may ask — `/new`, or a row in the sessions picker — but it cannot
+/// perform: the `Session` and its single writer live in the run loop, and two
+/// writers on one conversation is how a transcript forks. So the request parks
+/// here and the loop takes it before drawing the next frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionSwitch {
+    /// A conversation that does not exist yet, under the name given.
+    New(String),
+    /// An existing conversation, by the name `--resume` would take.
+    Open(String),
+    /// Rename a conversation. The file name is the identity, so this can only be
+    /// done by whoever holds the session it names.
+    Rename { from: String, to: String },
+}
+
 /// The session screen's state.
 #[derive(Debug)]
 pub struct App {
@@ -367,11 +393,15 @@ pub struct App {
     pub name: String,
     /// Whether the file already existed when the session opened.
     pub resumed: bool,
+    /// A session to open as soon as the loop can swap the file it records.
+    pub pending_session: Option<SessionSwitch>,
     /// What the startup screen shows, or `None` for a plain empty transcript.
     pub home: Option<Home>,
     /// Which row of `next` the selection is on.
     pub home_cursor: usize,
-    /// Set by `/home`: show the brief again over an existing transcript.
+    /// The brief is in front. Set at launch (so a session file is history to
+    /// continue, not a screen to be dropped into), by `/home`, and cleared by
+    /// the first thing that adds to the transcript.
     pub home_visible: bool,
     /// Transcript, oldest first.
     pub entries: Vec<Entry>,
@@ -532,6 +562,7 @@ impl App {
         Self {
             name: name.to_string(),
             resumed,
+            pending_session: None,
             home: None,
             home_cursor: 0,
             home_visible: false,
@@ -590,8 +621,13 @@ impl App {
         }
     }
 
-    /// Seed the transcript from a session file, so `--resume` shows the
-    /// conversation that was actually had.
+    /// Seed the transcript from a session file, so a session that is continued
+    /// continues the conversation that was actually had.
+    ///
+    /// The rows land behind the brief rather than on screen: whoever calls this
+    /// at startup leaves `home_visible` set, and `esc` is what puts them in
+    /// front of the person. Nothing is re-read later, so the transcript and the
+    /// file cannot disagree about what was said.
     pub fn seed(&mut self, session: &Session) {
         for message in &session.messages {
             let role = match message.role {
@@ -1245,7 +1281,13 @@ pub fn parse_line(raw: &str) -> Parsed {
         "quit" | "exit" | "q" => Parsed::Quit,
         "clear" => Parsed::Clear,
         "home" => Parsed::Home,
-        "sessions" => Parsed::Sessions,
+        // `/new chat-3` names the conversation; `/new` takes the next free name.
+        // One word for the thing every agent CLI has: start over without
+        // leaving, and without losing what you just said.
+        "new" => Parsed::NewChat(args.first().cloned()),
+        // `/resume` is the name the other tools use for this list. An alias
+        // costs one line and keeps muscle memory working.
+        "sessions" | "resume" => Parsed::Sessions,
         // `/model` was a second, mock copy of the same browser. One name is an
         // alias now, so both spellings open the surface that actually works.
         "model" | "models" => Parsed::ModelsOverlay,
@@ -2839,7 +2881,8 @@ memnoth session — commands
   /quit                      leave (also :q, ctrl-c)
   /clear                     clear the transcript
   /home                      the brief: what is here, what is missing, what to do
-  /sessions                  sessions on disk, and how to resume them
+  /new [name]                start a fresh conversation in this window
+  /sessions                  every conversation, with a preview (alias: /resume)
   /models                    browse, search and switch models (alias: /model)
   /tasks                     show or hide the background-task rail
   /tasks run <command>       run a command in the background
