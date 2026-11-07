@@ -166,6 +166,12 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
             app.screen_reader = crate::tui::app::ScreenReaderMode::parse(mode).unwrap_or_default();
         }
     }
+    // `NO_COLOR` and `TERM=dumb` are requests about *this* terminal, so they
+    // outrank a stored preference: a theme written on a desktop machine must not
+    // follow a person into a pipe or a screen reader.
+    if let Some(theme) = crate::tui::theme::theme_from_env() {
+        app.theme = theme;
+    }
     app.set_paths(display_path(&ctx.root), display_path(&ctx.vault_path));
     app.seed(&session);
     // The brief is what a launch shows, over whatever the file held. Splitting
@@ -371,6 +377,9 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
         terminal
             .draw(|frame| {
                 ui::draw(frame, &mut app);
+                if app.theme == crate::tui::app::Theme::NoColor {
+                    crate::tui::theme::strip_colors(frame.buffer_mut());
+                }
             })
             .context("cannot draw the session")?;
         if event::poll(Duration::from_millis(150)).context("cannot poll the keyboard")? {
@@ -402,7 +411,14 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
                         // that runs — it is not looked up a second time.
                         match key.code {
                             KeyCode::Char('y' | 'Y') | KeyCode::Enter => {
-                                execute_shell_command(&mut app, &pending.command);
+                                // The box keeps its promise: `background` decides
+                                // whether this lands in the transcript or on the
+                                // rail, and the command is the parked one.
+                                if pending.background {
+                                    start_job(&mut app, ctx, &pending.command);
+                                } else {
+                                    execute_shell_command(&mut app, ctx, &pending.command);
+                                }
                                 app.push(
                                     EntryRole::Info,
                                     format!("approved · {}", pending.command),
@@ -1064,16 +1080,40 @@ fn submit(
 fn run_tasks(app: &mut App, ctx: &AppContext, command: TasksCommand) {
     match command {
         TasksCommand::Show => app.toggle_tasks(),
-        TasksCommand::Run(command) => match app.jobs.start(&command, &ctx.root) {
-            Ok(id) => {
-                app.sync_jobs();
-                app.focus_pane(2);
-                app.push(
-                    EntryRole::Info,
-                    format!("started {id}: {command}\n  /tasks logs {id} · /tasks cancel {id}"),
-                );
+        // A background job is the same command as `!cmd` with a different
+        // destination, so it goes through the same rule set. The rail showed the
+        // argv before; it did not ask anyone about it, and "in the background"
+        // is not a permission.
+        TasksCommand::Run(command) => match decide_shell(ctx, &command) {
+            Ok(RuleDecision::Allow { .. }) => start_job(app, ctx, &command),
+            Ok(RuleDecision::Deny { reason, rule }) => app.push(
+                EntryRole::Error,
+                format!(
+                    "denied: {} (rule: {})\n  the job was not started",
+                    reason, rule
+                ),
+            ),
+            Ok(RuleDecision::Ask {
+                reason,
+                rule,
+                destructive,
+                kind,
+            }) => {
+                app.pending_shell = Some(PendingShell {
+                    command,
+                    decision: RuleDecision::Ask {
+                        reason,
+                        rule,
+                        destructive,
+                        kind,
+                    },
+                    background: true,
+                });
             }
-            Err(error) => app.push(EntryRole::Error, format!("{error:#}")),
+            Err(error) => app.push(
+                EntryRole::Error,
+                format!("sandbox: {error:#}\n  the job was not started"),
+            ),
         },
         TasksCommand::Status => {
             app.sync_jobs();
@@ -1090,6 +1130,27 @@ fn run_tasks(app: &mut App, ctx: &AppContext, command: TasksCommand) {
             }
         }
         TasksCommand::Cancel(id) => cancel_job(app, &id),
+    }
+}
+
+/// Start a command as a background job, under the same policy and boundary as
+/// `!cmd`.
+fn start_job(app: &mut App, ctx: &AppContext, command: &str) {
+    let launch = launch_shell(ctx, command);
+    say_if_unconfined(app, &launch.confinement);
+    let started = app
+        .jobs
+        .start_with(&launch.program, &launch.args, command, &ctx.root);
+    match started {
+        Ok(id) => {
+            app.sync_jobs();
+            app.focus_pane(2);
+            app.push(
+                EntryRole::Info,
+                format!("started {id}: {command}\n  /tasks logs {id} · /tasks cancel {id}"),
+            );
+        }
+        Err(error) => app.push(EntryRole::Error, format!("{error:#}")),
     }
 }
 
@@ -1956,7 +2017,7 @@ fn recent_activity(ctx: &AppContext, name: &str, session: &Session) -> Vec<Strin
             },
         ));
     }
-    rows.sort_by(|a, b| b.0.cmp(&a.0));
+    rows.sort_by_key(|row| std::cmp::Reverse(row.0));
     rows.into_iter()
         .take(3)
         // The age is a column, so it is padded: three rows of ragged ages read
@@ -2243,15 +2304,92 @@ fn switch_session(
     Ok(())
 }
 
+/// The plan a shell command runs under, or why there is none.
+///
+/// One function for `!cmd` and `/tasks run`, so the two cannot disagree about
+/// which profile is in force. A profile that cannot be resolved is a refusal:
+/// an unenforced shell is worse than none.
+fn shell_plan(ctx: &AppContext) -> anyhow::Result<memnoth_sandbox::backend::BackendPlan> {
+    // An unparseable `sandbox.toml` is a refusal, not an empty policy: the
+    // deny lists it carries are protection, and a typo must not drop them.
+    let config = load_sandbox_config(&ctx.root)?;
+    memnoth_sandbox::backend::BackendPlan::build(
+        memnoth_sandbox::backend::OsBackend::host(),
+        &ProfileName::Workspace,
+        &ctx.root,
+        &config,
+    )
+}
+
+/// What the rule set says about one command line.
+///
+/// `~/.memnoth/rules.txt` is parsed here, and a rule file that does not parse is
+/// an error rather than an empty rule set: a typo must not quietly downgrade
+/// the policy to the built-in defaults.
+fn decide_shell(ctx: &AppContext, cmd: &str) -> anyhow::Result<RuleDecision> {
+    let rules_path = ctx.home.join("rules.txt");
+    let user_rules = match std::fs::read_to_string(&rules_path) {
+        Ok(text) => memnoth_sandbox::rules::parse_rules(&text)
+            .map_err(|error| anyhow::anyhow!("{}: {error:#}", rules_path.display()))?,
+        Err(_) => Vec::new(),
+    };
+    let rule_set = RuleSet::with_user_rules(user_rules);
+    Ok(decide(&rule_set, "Bash", cmd))
+}
+
+/// One command, ready to spawn, with the boundary that will (or will not) hold it.
+struct Launch {
+    program: String,
+    args: Vec<String>,
+    confinement: memnoth_sandbox::Confinement,
+}
+
+/// Decide the argv for a command line and confine it where this machine can.
+///
+/// The plan is applied here rather than in the child, because there is no child
+/// yet: `bwrap` *is* the child, and its argv is the boundary.
+fn launch_shell(ctx: &AppContext, cmd: &str) -> Launch {
+    let (program, args) = jobs::shell_argv(cmd);
+    let mut argv = vec![program.clone()];
+    argv.extend(args.iter().cloned());
+    let confinement = match shell_plan(ctx) {
+        Ok(plan) => memnoth_sandbox::confine(&plan, &ctx.root, &argv),
+        Err(error) => memnoth_sandbox::Confinement::Unavailable {
+            reason: format!("{error:#}"),
+        },
+    };
+    match confinement.confined_argv() {
+        Some((wrapped, wrapped_args)) => Launch {
+            program: wrapped,
+            args: wrapped_args,
+            confinement,
+        },
+        None => Launch {
+            program,
+            args,
+            confinement,
+        },
+    }
+}
+
+/// Print the boundary once per session, before the first command that has none.
+///
+/// Once, and not under every command: a warning repeated on each line is one the
+/// reader learns to skip, and the answer is the same every time.
+fn say_if_unconfined(app: &mut App, confinement: &memnoth_sandbox::Confinement) {
+    if confinement.is_enforced() || app.sandbox_notice_shown {
+        return;
+    }
+    app.sandbox_notice_shown = true;
+    app.push(EntryRole::Info, confinement.describe());
+}
+
 /// Execute a shell command with sandbox policy checking.
 fn run_shell(app: &mut App, ctx: &AppContext, cmd: &str) {
     app.push(EntryRole::User, format!("!{}", cmd));
 
-    // Load sandbox config and check policy. A profile that cannot be resolved
-    // is a refusal, not a default: an unenforced shell is worse than none.
-    let config = load_sandbox_config(&ctx.root);
-    let _profile = match ProfileName::Workspace.resolve_profile(&ctx.root, &config) {
-        Ok(profile) => profile,
+    let decision = match decide_shell(ctx, cmd) {
+        Ok(decision) => decision,
         Err(error) => {
             app.push(
                 EntryRole::Error,
@@ -2260,31 +2398,9 @@ fn run_shell(app: &mut App, ctx: &AppContext, cmd: &str) {
             return;
         }
     };
-    let rules_path = ctx.home.join("rules.txt");
-    let user_rules = match std::fs::read_to_string(&rules_path) {
-        Ok(text) => match memnoth_sandbox::rules::parse_rules(&text) {
-            Ok(rules) => rules,
-            Err(error) => {
-                app.push(
-                    EntryRole::Error,
-                    format!(
-                        "sandbox: {}: {error:#}
-  the command was not run",
-                        rules_path.display()
-                    ),
-                );
-                return;
-            }
-        },
-        Err(_) => Vec::new(),
-    };
-    let rule_set = RuleSet::with_user_rules(user_rules);
-    let decision = decide(&rule_set, "Bash", cmd);
 
     match decision {
-        RuleDecision::Allow { .. } => {
-            execute_shell_command(app, cmd);
-        }
+        RuleDecision::Allow { .. } => execute_shell_command(app, ctx, cmd),
         RuleDecision::Deny { reason, rule } => {
             app.push(
                 EntryRole::Error,
@@ -2308,21 +2424,19 @@ fn run_shell(app: &mut App, ctx: &AppContext, cmd: &str) {
                     destructive,
                     kind,
                 },
+                background: false,
             });
         }
     }
 }
 
 /// Actually execute the shell command and capture output.
-fn execute_shell_command(app: &mut App, cmd: &str) {
+fn execute_shell_command(app: &mut App, ctx: &AppContext, cmd: &str) {
     use std::process::Command;
 
-    let output = if cfg!(target_os = "windows") {
-        Command::new("cmd").args(["/C", cmd]).output()
-    } else {
-        Command::new("sh").args(["-c", cmd]).output()
-    };
-
+    let launch = launch_shell(ctx, cmd);
+    say_if_unconfined(app, &launch.confinement);
+    let output = Command::new(&launch.program).args(&launch.args).output();
     match output {
         Ok(result) => {
             let stdout = String::from_utf8_lossy(&result.stdout);
@@ -2648,6 +2762,48 @@ mod tests {
     }
 
     #[test]
+    fn a_background_job_asks_the_same_question_as_a_foreground_one() {
+        // The rail used to start whatever it was given. A job is a process with
+        // the person's permissions, so it asks first — and the box has to know
+        // the answer puts it on the rail, not in the transcript.
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = context(dir.path());
+        let mut app = App::new("s", false);
+        run_tasks(
+            &mut app,
+            &ctx,
+            TasksCommand::Run("rm -rf build".to_string()),
+        );
+        let pending = app.pending_shell.expect("a destructive job asks first");
+        assert!(pending.background, "yes starts a job, not a foreground run");
+        assert!(
+            pending.prompt().contains("background job"),
+            "{}",
+            pending.prompt()
+        );
+        assert!(
+            app.jobs.get("job-1").is_none(),
+            "nothing started unapproved"
+        );
+    }
+
+    #[test]
+    fn a_denied_command_never_becomes_a_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = context(dir.path());
+        let mut app = App::new("s", false);
+        run_tasks(
+            &mut app,
+            &ctx,
+            TasksCommand::Run("sudo rm -rf /tmp/x".to_string()),
+        );
+        let last = app.entries.last().expect("a line saying why");
+        assert!(format!("{last:?}").contains("denied"), "{last:?}");
+        assert!(app.pending_shell.is_none(), "a deny is not a question");
+        assert!(app.jobs.get("job-1").is_none());
+    }
+
+    #[test]
     fn the_activity_strip_names_this_session_and_the_conversations_beside_it() {
         // A home screen with no activity on it is a header: the strip is the
         // only row that says the tool has been used.
@@ -2656,7 +2812,11 @@ mod tests {
         let store = SessionStore::new(&ctx.sessions_dir);
         let mut other = store.create("payments").unwrap();
         store
-            .record(&mut other, "index the payments service", "indexed 412 files")
+            .record(
+                &mut other,
+                "index the payments service",
+                "indexed 412 files",
+            )
             .unwrap();
 
         let mut session = Session::new("claude-sonnet-4-5");

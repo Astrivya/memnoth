@@ -23,6 +23,24 @@ use std::thread::JoinHandle;
 /// chatty job cannot grow the session without limit.
 const KEPT_LINES: usize = 500;
 
+/// The platform shell that runs one command line.
+///
+/// The same pair `!cmd` uses, so an unconfined job and an unconfined passthrough
+/// fail in the same way on the same machine.
+pub fn shell_argv(command: &str) -> (String, Vec<String>) {
+    if cfg!(target_os = "windows") {
+        (
+            "cmd".to_string(),
+            vec!["/C".to_string(), command.to_string()],
+        )
+    } else {
+        (
+            "sh".to_string(),
+            vec!["-c".to_string(), command.to_string()],
+        )
+    }
+}
+
 /// Where a job is in its life.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobStatus {
@@ -85,7 +103,17 @@ impl Jobs {
     }
 
     /// Start a command in the workspace root and return its job id.
-    pub fn start(&mut self, command: &str, cwd: &Path) -> Result<String> {
+    ///
+    /// The argv is decided by the caller, not here: `!cmd` and `/tasks` run the
+    /// same policy and the same confinement, and a job that built its own shell
+    /// line would be the one process on screen that skipped both.
+    pub fn start_with(
+        &mut self,
+        program: &str,
+        args: &[String],
+        command: &str,
+        cwd: &Path,
+    ) -> Result<String> {
         let command = command.trim();
         if command.is_empty() {
             anyhow::bail!("nothing to run");
@@ -93,15 +121,8 @@ impl Jobs {
         self.next_id += 1;
         let id = format!("job-{}", self.next_id);
 
-        let mut builder = if cfg!(target_os = "windows") {
-            let mut cmd = Command::new("cmd");
-            cmd.args(["/C", command]);
-            cmd
-        } else {
-            let mut cmd = Command::new("sh");
-            cmd.args(["-c", command]);
-            cmd
-        };
+        let mut builder = Command::new(program);
+        builder.args(args);
         let mut child = builder
             .current_dir(cwd)
             .stdin(Stdio::null())
@@ -131,6 +152,15 @@ impl Jobs {
             cancelled: false,
         });
         Ok(id)
+    }
+
+    /// Start a command through the platform shell.
+    ///
+    /// Kept for the tests and for any caller with no plan in hand; the session
+    /// uses [`Jobs::start_with`] so the command is the one the policy decided.
+    pub fn start(&mut self, command: &str, cwd: &Path) -> Result<String> {
+        let (program, args) = shell_argv(command);
+        self.start_with(&program, &args, command, cwd)
     }
 
     /// Reap finished children and release their reader threads.
