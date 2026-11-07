@@ -1,11 +1,18 @@
 //! `mn invoices`, `mn plan`, `mn limits` — billing, plan info, and quotas.
+//!
+//! Every number here is one the control plane actually sends: the credit
+//! summary (`GET /api/v1/credits`) and the tenant's own org (`GET /api/v1/org`).
+//! There is no invoice and no price-list route — the views used to be built from
+//! `/billing` and `/pricing`, which this service has never served — so the
+//! invoice view says where invoices live rather than rendering a shape nobody
+//! sends, and neither view prints a rate limit the server did not report.
 
 use anyhow::Result;
 use serde_json::json;
 
 use crate::AppContext;
 use crate::output::Outcome;
-use memnoth_cloud_client::{BillingResponse, CloudClient, CreditsResponse};
+use memnoth_cloud_client::{CloudClient, CreditsResponse, OrgInfo};
 
 /// Execute billing-related commands.
 pub fn run(ctx: &AppContext, args: &crate::cli::BillingCommands) -> Result<Outcome> {
@@ -22,252 +29,222 @@ fn units(micros: i64) -> f64 {
     micros as f64 / 1_000_000.0
 }
 
-/// Micros per million tokens to "per million" money.
-fn per_million(micros: i64) -> String {
-    format!("${:.2}", units(micros))
-}
+/// The only currency the control plane denominates in; it reports micros with
+/// no currency field, so the unit is this constant rather than a parsed value.
+const CURRENCY: &str = "USD";
 
-/// `mn invoices` — show billing history / invoices link.
+/// `mn invoices` — credit balance and where the invoices themselves live.
 fn invoices(ctx: &AppContext) -> Result<Outcome> {
     let client = get_cloud_client(ctx)?;
 
-    // Billing carries the credit balance and the price list; invoices
-    // themselves live on the web console.
-    let billing = client.billing().ok();
+    // Billing is the credit summary: there is no invoice endpoint to call, and
+    // a failure here is an authentication/deployment fact, not an empty bill.
+    let credits = client.credits().ok();
 
-    let text = if let Some(b) = &billing {
-        render_invoices(b)
-    } else {
-        render_invoices_unavailable()
+    let text = match &credits {
+        Some(credits) => render_invoices(credits),
+        None => render_unavailable("billing"),
     };
 
     let data = json!({
-        "billing_url": "https://memnoth.astrivya.ai/billing",
-        "invoices": billing.map(|b| json!({
-            "credits": b.credits,
-            "pricing": b.pricing,
+        "billing_url": crate::context::console_url("usage"),
+        "credits": credits.as_ref().map(|credits| json!({
+            "balance_micros": credits.balance_micros,
+            "burned_micros": credits.burned_micros,
+            "window_days": credits.window_days,
+            "expiring_micros": credits.expiring_micros,
+            "next_expiry_at": credits.next_expiry_at,
+            "demo": credits.demo,
         })),
     });
 
     Ok(Outcome::new("billing.invoices", text, data))
 }
 
-fn render_invoices(billing: &BillingResponse) -> String {
+fn render_invoices(credits: &CreditsResponse) -> String {
     let mut out = String::new();
     out.push_str("Billing & Invoices\n");
     out.push_str("==================\n\n");
 
-    let credits = &billing.credits;
     out.push_str(&format!(
-        "Current Balance: {} {:.2}\n",
-        credits.currency,
+        "Balance: {CURRENCY} {:.2}\n",
         units(credits.balance_micros)
     ));
+
+    if credits.window_days > 0 {
+        out.push_str(&format!(
+            "Spent (last {} days): {CURRENCY} {:.2}\n",
+            credits.window_days,
+            units(credits.burned_micros)
+        ));
+    }
+
+    out.push_str(&expiring_line(credits));
+
     out.push_str(&format!(
-        "Auto-recharge: {}\n",
-        if credits.auto_recharge {
-            "enabled"
-        } else {
-            "disabled"
-        }
+        "\nInvoices live in the console: {}\n",
+        crate::context::console_url("usage")
     ));
-    if let Some(threshold) = credits.recharge_threshold_micros {
-        out.push_str(&format!(
-            "  Threshold: {} {:.2}\n",
-            credits.currency,
-            units(threshold)
-        ));
-    }
-    if let Some(amount) = credits.recharge_amount_micros {
-        out.push_str(&format!(
-            "  Top-up: {} {:.2}\n",
-            credits.currency,
-            units(amount)
-        ));
-    }
-    if let Some(date) = &credits.next_billing_date {
-        out.push_str(&format!("Next billing date: {date}\n"));
-    }
-
-    if !billing.pricing.models.is_empty() {
-        out.push_str("\nPriced models:\n");
-        for pricing in billing.pricing.models.iter().take(10) {
-            out.push_str(&format!(
-                "  • {} — {} in / {} out per 1M tokens\n",
-                pricing.model_id,
-                per_million(pricing.input_price_per_million_micros),
-                per_million(pricing.output_price_per_million_micros)
-            ));
-        }
-        if billing.pricing.models.len() > 10 {
-            out.push_str(&format!(
-                "  ... and {} more\n",
-                billing.pricing.models.len() - 10
-            ));
-        }
-    }
-
-    out.push_str("\nFull billing history: https://memnoth.astrivya.ai/billing\n");
     out
 }
 
-fn render_invoices_unavailable() -> String {
-    "Unable to fetch billing info. Check authentication with `mn auth status`.\nFull billing history: https://memnoth.astrivya.ai/billing\n".to_string()
+/// The expiry warning, or nothing at all.
+///
+/// Expiry is the one fact about credits a balance cannot show, so it is worth a
+/// line — but an account with nothing expiring must not read a warning-shaped
+/// zero: a printed "0.00 expiring" is noise that trains people to skip the line.
+fn expiring_line(credits: &CreditsResponse) -> String {
+    if credits.expiring_micros <= 0 {
+        return String::new();
+    }
+    let when = credits
+        .next_expiry_at
+        .as_deref()
+        .map(|date| format!(", soonest {date}"))
+        .unwrap_or_default();
+    format!(
+        "Expiring within {} days: {CURRENCY} {:.2} across {} grant(s){when}\n",
+        credits.expiry_warning_days,
+        units(credits.expiring_micros),
+        credits.expiring_grants
+    )
 }
 
-/// `mn plan` — show current plan, quotas, and rate limits.
+fn render_unavailable(what: &str) -> String {
+    format!(
+        "Unable to fetch {what}. Check authentication with `mn auth status`.\nFull billing history: {}\n",
+        crate::context::console_url("usage")
+    )
+}
+
+/// `mn plan` — the plan the server says this org is on, and its seat usage.
 fn plan(ctx: &AppContext) -> Result<Outcome> {
     let client = get_cloud_client(ctx)?;
 
-    // Get credits for plan info
+    let org = client.org().ok();
     let credits = client.credits().ok();
-    let billing = client.billing().ok();
 
-    let text = if let (Some(c), Some(b)) = (&credits, &billing) {
-        render_plan(c, b)
-    } else {
-        render_plan_unavailable()
+    let text = match (&org, &credits) {
+        (Some(org), credits) => render_plan(org, credits.as_ref()),
+        (None, _) => render_unavailable("plan info"),
     };
 
     let data = json!({
-        "plan": credits.as_ref().map(|c| json!({
-            "balance_micros": c.balance_micros,
-            "currency": c.currency,
-            "auto_recharge": c.auto_recharge,
+        "org": org.as_ref().map(|org| json!({
+            "slug": org.slug,
+            "name": org.name,
+            "plan": org.plan,
+            "role": org.role,
+            "seats": org.seats,
+            "seats_used": org.seats_used,
+            "member_count": org.member_count,
         })),
-        "quotas": billing.as_ref().map(|b| json!({
-            "models": b.pricing.models.len(),
+        "credits": credits.as_ref().map(|credits| json!({
+            "balance_micros": credits.balance_micros,
+            "burned_micros": credits.burned_micros,
+            "window_days": credits.window_days,
         })),
     });
 
     Ok(Outcome::new("billing.plan", text, data))
 }
 
-fn render_plan(credits: &CreditsResponse, billing: &BillingResponse) -> String {
+fn render_plan(org: &OrgInfo, credits: Option<&CreditsResponse>) -> String {
     let mut out = String::new();
     out.push_str("Current Plan\n");
     out.push_str("============\n\n");
 
-    // Determine plan tier from the balance
-    let balance = units(credits.balance_micros);
-    let plan_name = if balance >= 100.0 {
-        "Pro"
-    } else if balance > 0.0 {
-        "Starter"
-    } else {
-        "Free"
-    };
-
-    out.push_str(&format!("Plan: {plan_name}\n"));
-    out.push_str(&format!("Balance: {} {:.2}\n", credits.currency, balance));
+    // The plan is a fact the org reports. It used to be *derived* from the
+    // credit balance, which labelled an unused paid plan "Free" and a topped-up
+    // small one "Pro" — two wrong answers invented from the one number at hand.
+    out.push_str(&format!("Organization: {} (org:{})\n", org.name, org.slug));
+    out.push_str(&format!("Plan: {}\n", org.plan));
+    out.push_str(&format!("Your role: {}\n", org.role));
+    out.push_str(&format!("Seats: {}\n", seats_line(org)));
     out.push_str(&format!(
-        "Auto-recharge: {}\n",
-        if credits.auto_recharge {
-            "enabled"
-        } else {
-            "disabled"
-        }
+        "Members: {}   Teams: {}   Projects: {}\n",
+        org.member_count, org.team_count, org.project_count
     ));
 
-    out.push_str("\nQuotas:\n");
-    out.push_str("  • Models available: unlimited\n");
-    out.push_str("  • Context window: per model\n");
-    out.push_str("  • Concurrent sessions: 5\n");
-
-    out.push_str("\nRate Limits:\n");
-    out.push_str("  • Requests/minute: 60\n");
-    out.push_str("  • Tokens/minute: 100,000\n");
-
-    out.push_str("\nModel Pricing (sample):\n");
-    for (i, pricing) in billing.pricing.models.iter().take(5).enumerate() {
+    if let Some(credits) = credits {
         out.push_str(&format!(
-            "  {}. {} — {} in, {} out (per 1M)\n",
-            i + 1,
-            pricing.model_id,
-            per_million(pricing.input_price_per_million_micros),
-            per_million(pricing.output_price_per_million_micros)
-        ));
-    }
-    if billing.pricing.models.len() > 5 {
-        out.push_str(&format!(
-            "  ... and {} more\n",
-            billing.pricing.models.len() - 5
+            "Credit balance: {CURRENCY} {:.2}\n",
+            units(credits.balance_micros)
         ));
     }
 
     out
 }
 
-fn render_plan_unavailable() -> String {
-    "Unable to fetch plan info. Check authentication with `mn auth status`.\n".to_string()
+/// `3 of 10` when seats are sold, `3 used` when the deployment has no seat plan.
+fn seats_line(org: &OrgInfo) -> String {
+    if org.seats > 0 {
+        format!("{} of {}", org.seats_used, org.seats)
+    } else {
+        format!("{} used (no seat count reported)", org.seats_used)
+    }
 }
 
-/// `mn limits` — show detailed rate limits and quotas.
+/// `mn limits` — the quotas the control plane reports, and nothing more.
 fn limits(ctx: &AppContext) -> Result<Outcome> {
     let client = get_cloud_client(ctx)?;
 
+    let org = client.org().ok();
     let credits = client.credits().ok();
-    let billing = client.billing().ok();
 
-    let text = if let (Some(c), Some(b)) = (&credits, &billing) {
-        render_limits(c, b)
-    } else {
-        render_limits_unavailable()
+    let text = match &org {
+        Some(org) => render_limits(org, credits.as_ref()),
+        None => render_unavailable("limits"),
     };
 
     let data = json!({
-        "rate_limits": {
-            "requests_per_minute": 60,
-            "tokens_per_minute": 100_000,
-            "concurrent_sessions": 5,
-        },
-        "quotas": {
-            "models": billing.as_ref().map(|b| b.pricing.models.len()).unwrap_or(0),
-        },
+        "quotas": org.as_ref().map(|org| json!({
+            "seats": org.seats,
+            "seats_used": org.seats_used,
+            "member_count": org.member_count,
+            "team_count": org.team_count,
+            "project_count": org.project_count,
+            "unassigned_sessions": org.unassigned_sessions,
+        })),
+        "credits": credits.as_ref().map(|credits| json!({
+            "balance_micros": credits.balance_micros,
+            "expiring_micros": credits.expiring_micros,
+            "expiry_warning_days": credits.expiry_warning_days,
+        })),
     });
 
     Ok(Outcome::new("billing.limits", text, data))
 }
 
-fn render_limits(credits: &CreditsResponse, billing: &BillingResponse) -> String {
+fn render_limits(org: &OrgInfo, credits: Option<&CreditsResponse>) -> String {
     let mut out = String::new();
-    out.push_str("Rate Limits & Quotas\n");
-    out.push_str("====================\n\n");
+    out.push_str("Quotas\n");
+    out.push_str("======\n\n");
 
-    out.push_str("API Rate Limits:\n");
-    out.push_str("  • Requests/minute: 60\n");
-    out.push_str("  • Tokens/minute: 100,000\n");
-    out.push_str("  • Concurrent requests: 10\n\n");
-
-    out.push_str("Session Limits:\n");
-    out.push_str("  • Concurrent sessions: 5\n");
-    out.push_str("  • Max session duration: 24 hours\n");
-    out.push_str("  • Context window: model-dependent\n\n");
-
-    out.push_str("Storage Quotas:\n");
-    out.push_str("  • Vault entries: 100,000\n");
-    out.push_str("  • Knowledge graph nodes: 500,000\n");
-    out.push_str("  • Session history: 1,000 turns\n\n");
-
-    out.push_str("Model Access:\n");
+    out.push_str(&format!("Seats: {}\n", seats_line(org)));
+    out.push_str(&format!("Members: {}\n", org.member_count));
+    out.push_str(&format!("Teams: {}\n", org.team_count));
+    out.push_str(&format!("Projects: {}\n", org.project_count));
     out.push_str(&format!(
-        "  • Available models: {}\n",
-        billing.pricing.models.len()
+        "Unassigned sessions: {}\n",
+        org.unassigned_sessions
     ));
-    out.push_str("  • Custom models: not available\n\n");
 
-    out.push_str(&format!(
-        "Current Balance: {} {:.2}\n",
-        credits.currency,
-        units(credits.balance_micros)
-    ));
+    if let Some(credits) = credits {
+        out.push_str(&format!(
+            "Credit balance: {CURRENCY} {:.2}\n",
+            units(credits.balance_micros)
+        ));
+        out.push_str(&expiring_line(credits));
+    }
+
+    // The old view printed "Requests/minute: 60", "Tokens/minute: 100,000" and
+    // similar: numbers this deployment has no source for. Saying nothing is the
+    // only honest option until the control plane reports a limit.
+    out.push_str("\nThis deployment reports no request or token rate limits.\n");
     out.push_str("Monitor usage: `mn usage`\n");
 
     out
-}
-
-fn render_limits_unavailable() -> String {
-    "Unable to fetch limits. Check authentication with `mn auth status`.\n".to_string()
 }
 
 fn get_cloud_client(ctx: &AppContext) -> Result<CloudClient> {
@@ -278,4 +255,106 @@ fn get_cloud_client(ctx: &AppContext) -> Result<CloudClient> {
     }
 
     Ok(client)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use memnoth_cloud_client::{CreditGrant, CreditLedgerEntry};
+
+    fn credits(balance_micros: i64, burned_micros: i64) -> CreditsResponse {
+        CreditsResponse {
+            balance_micros,
+            burned_micros,
+            window_days: 30,
+            grants: vec![CreditGrant {
+                id: "g1".into(),
+                amount_micros: 5_000_000,
+                remaining_micros: 5_000_000,
+                source: "grant".into(),
+                note: "trial".into(),
+                granted_by: "operator".into(),
+                expires_at: Some("2026-11-13T00:00:00Z".into()),
+                created_at: "2026-10-14T00:00:00Z".into(),
+            }],
+            ledger: vec![CreditLedgerEntry {
+                id: "l1".into(),
+                kind: "debit".into(),
+                amount_micros: -1_200_000,
+                balance_after_micros: Some(3_800_000),
+                reason: "managed turn".into(),
+                ref_id: "turn:abc".into(),
+                actor: "system".into(),
+                created_at: "2026-11-01T00:00:00Z".into(),
+            }],
+            unpriced_sessions: 0,
+            expiring_micros: 0,
+            expiring_grants: 0,
+            next_expiry_at: None,
+            expiry_warning_days: 7,
+            grants_total: 1,
+            ledger_total: 1,
+            demo: false,
+        }
+    }
+
+    fn org() -> OrgInfo {
+        OrgInfo {
+            slug: "acme".into(),
+            name: "Acme".into(),
+            plan: "team".into(),
+            role: "admin".into(),
+            member_count: 4,
+            seats_used: 3,
+            seats: 10,
+            team_count: 2,
+            project_count: 5,
+            unassigned_sessions: 1,
+            created_at: "2026-01-01T00:00:00Z".into(),
+        }
+    }
+
+    #[test]
+    fn the_invoice_view_renders_the_reported_balance_and_window() {
+        let text = render_invoices(&credits(7_250_000, 1_200_000));
+        assert!(text.contains("Balance: USD 7.25"), "{text}");
+        assert!(text.contains("Spent (last 30 days): USD 1.20"), "{text}");
+        assert!(text.contains("/app/usage"), "{text}");
+    }
+
+    #[test]
+    fn nothing_expiring_prints_no_expiry_line() {
+        let quiet = render_invoices(&credits(7_250_000, 0));
+        assert!(!quiet.contains("Expiring within"), "{quiet}");
+
+        let mut soon = credits(7_250_000, 0);
+        soon.expiring_micros = 5_000_000;
+        soon.expiring_grants = 1;
+        soon.next_expiry_at = Some("2026-11-13T00:00:00Z".into());
+        let loud = render_invoices(&soon);
+        assert!(loud.contains("Expiring within 7 days: USD 5.00"), "{loud}");
+        assert!(loud.contains("2026-11-13"), "{loud}");
+    }
+
+    #[test]
+    fn the_plan_is_the_reported_plan_not_a_balance_guess() {
+        // A $0.50 balance used to be labelled "Starter" and $100 "Pro"; neither
+        // is what the org says it is on.
+        let text = render_plan(&org(), Some(&credits(500_000, 0)));
+        assert!(text.contains("Plan: team"), "{text}");
+        assert!(text.contains("Seats: 3 of 10"), "{text}");
+        assert!(
+            !text.contains("Starter") && !text.contains("Pro\n"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn limits_print_only_numbers_the_server_sent() {
+        let text = render_limits(&org(), Some(&credits(1_000_000, 0)));
+        assert!(text.contains("Projects: 5"), "{text}");
+        assert!(text.contains("Unassigned sessions: 1"), "{text}");
+        assert!(!text.contains("Requests/minute"), "{text}");
+        assert!(!text.contains("100,000"), "{text}");
+    }
 }

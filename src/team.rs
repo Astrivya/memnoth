@@ -173,13 +173,12 @@ pub fn tasks(ctx: &AppContext, args: &crate::cli::TeamTasksArgs) -> Result<Outco
     let filtered: Vec<TaskRow> = all_tasks
         .into_iter()
         .filter(|t| {
-            let matches_status = match t.status {
+            match t.status {
                 TaskStatus::Pending => args.pending || !(args.in_progress || args.done),
                 TaskStatus::InProgress => args.in_progress || !(args.pending || args.done),
                 TaskStatus::Done => args.done || !(args.pending || args.in_progress),
                 TaskStatus::Blocked => true, // always show blocked
-            };
-            matches_status
+            }
         })
         .collect();
 
@@ -274,7 +273,7 @@ pub fn inbox(ctx: &AppContext, args: &crate::cli::TeamInboxArgs) -> Result<Outco
 /// Show team presence (active sessions).
 pub fn presence(ctx: &AppContext, args: &crate::cli::TeamPresenceArgs) -> Result<Outcome> {
     let coord = open_coord(ctx)?;
-    let session_id = get_session_id(&coord, ctx)?;
+    let _session_id = get_session_id(&coord, ctx)?;
 
     // Clean up expired claims and stale sessions
     coord
@@ -291,27 +290,35 @@ pub fn presence(ctx: &AppContext, args: &crate::cli::TeamPresenceArgs) -> Result
     // Sync with cloud if requested
     let mut cloud_synced = false;
     let mut cloud_sessions: Vec<Value> = Vec::new();
-    if args.sync {
-        if let Ok(client) = get_cloud_client(ctx) {
-            // The cloud API reports the authenticated account and its
-            // organizations; it has no member roster yet, so the account itself
-            // is the one presence entry that is known to be online.
-            if let Ok(me) = client.me() {
-                cloud_synced = true;
-                let role = me
-                    .organizations
-                    .as_ref()
-                    .and_then(|organizations| organizations.first())
-                    .map(|organization| organization.role.clone())
-                    .unwrap_or_else(|| "member".to_string());
-                let name = me.name.clone().unwrap_or_else(|| me.email.clone());
-                cloud_sessions = vec![json!({
-                    "user_id": me.id,
-                    "name": name,
-                    "role": role,
-                    "online": true,
-                })];
-            }
+    if args.sync
+        && let Ok(client) = get_cloud_client(ctx)
+    {
+        // The cloud API reports the authenticated credential and nothing more:
+        // `/api/v1/me` is the token's view of itself — subject, org scope and
+        // roles — because a key is not a user profile. So the subject stands in
+        // for the name and there is no email here to fall back on.
+        if let Ok(me) = client.me() {
+            cloud_synced = true;
+            let role = if me.role.is_empty() {
+                me.roles
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "member".to_string())
+            } else {
+                me.role.clone()
+            };
+            let subject = me.sub.clone().unwrap_or_else(|| "unknown".to_string());
+            let name = me
+                .sub
+                .clone()
+                .or_else(|| me.org.clone())
+                .unwrap_or_else(|| "unknown".to_string());
+            cloud_sessions = vec![json!({
+                "user_id": subject,
+                "name": name,
+                "role": role,
+                "online": true,
+            })];
         }
     }
 
