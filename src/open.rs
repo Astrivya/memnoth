@@ -105,27 +105,22 @@ fn encode_query_component(value: &str) -> String {
 
 /// Open a URL in the default browser.
 fn open_browser(url: &str) -> Result<()> {
+    // One statement per platform and a single `Ok(())` at the end. A `return`
+    // inside whichever block is last on this host is needless there, and only
+    // a clippy run on that host says so.
     #[cfg(target_os = "macos")]
-    {
-        Command::new("open").arg(url).spawn()?;
-        return Ok(());
-    }
+    Command::new("open").arg(url).spawn()?;
 
     #[cfg(target_os = "windows")]
-    {
-        // Use cmd /c start to open in default browser
-        Command::new("cmd").args(["/c", "start", "", url]).spawn()?;
-        Ok(())
-    }
+    Command::new("cmd").args(["/c", "start", "", url]).spawn()?;
 
     #[cfg(target_os = "linux")]
-    {
-        Command::new("xdg-open").arg(url).spawn()?;
-        return Ok(());
-    }
+    Command::new("xdg-open").arg(url).spawn()?;
 
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         anyhow::bail!("Unsupported platform for opening browser");
     }
+
+    Ok(())
 }

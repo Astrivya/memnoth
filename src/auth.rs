@@ -823,27 +823,22 @@ pub fn create_credential_store() -> Result<MultiCredentialStore> {
 /// Shared with the session screen's sign-in worker, which needs the same
 /// platform switch and nothing else.
 pub(crate) fn open_browser(url: &str) -> Result<()> {
+    // One statement per platform and a single `Ok(())` at the end: a `return`
+    // inside the block that happens to be last on this host is a needless
+    // return there, and clippy says so on that host only.
     #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open").arg(url).spawn()?;
-        return Ok(());
-    }
+    std::process::Command::new("open").arg(url).spawn()?;
     #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", url])
-            .spawn()?;
-        Ok(())
-    }
+    std::process::Command::new("cmd")
+        .args(["/C", "start", "", url])
+        .spawn()?;
     #[cfg(target_os = "linux")]
-    {
-        std::process::Command::new("xdg-open").arg(url).spawn()?;
-        return Ok(());
-    }
+    std::process::Command::new("xdg-open").arg(url).spawn()?;
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         anyhow::bail!("unsupported platform for opening browser");
     }
+    Ok(())
 }
 
 /// Print one line while the terminal may be in raw mode.
