@@ -2179,9 +2179,18 @@ pub fn dead_code(ctx: &AppContext) -> Result<DeadCodeReport> {
         // local constant in the repository. Before it was stored, a frontend
         // repo produced 787 "unreferenced exports" that were function-locals.
         if symbol.exported
+            // A method is reached through its type, not by its bare name: it is
+            // not a module export, and counting `new` as dead in every crate
+            // that defines one turned this report into noise (737 rows on this
+            // repository).
+            && symbol.container.is_none()
             && matches!(
                 symbol.kind.as_str(),
-                "function"
+                // The extractor stores Rust/C-family functions as `fn`; this
+                // filter used to accept only `function`, so no Rust function
+                // could ever be reported dead and the report always said
+                // "no unreferenced exports found" for a Rust repository.
+                "fn" | "function"
                     | "class"
                     | "interface"
                     | "struct"
@@ -2220,20 +2229,51 @@ pub fn dead_code(ctx: &AppContext) -> Result<DeadCodeReport> {
 pub fn cycles(ctx: &AppContext) -> Result<CyclesReport> {
     let graph = open_for_read(ctx)?;
 
-    // Build import graph from references
-    let all_symbols = graph.definitions_for(&[])?;
-    let mut imports: HashMap<String, Vec<String>> = HashMap::new();
-
+    // A name declared in more than one file is not an edge. References are
+    // textual, so `new` in one crate would otherwise "import" every other
+    // crate's `new`, and the report opened with 2,156 one-symbol cycles.
+    let all_symbols = graph.all_symbols()?;
+    let mut declaring: HashMap<&str, HashSet<&str>> = HashMap::new();
+    let mut by_path: HashMap<&str, Vec<&SymbolRow>> = HashMap::new();
     for symbol in &all_symbols {
-        let refs = graph.refs_for(std::slice::from_ref(&symbol.name), 1000)?;
-        let mut imported = Vec::new();
-        for ref_row in refs {
-            if ref_row.path != symbol.path {
-                imported.push(ref_row.name);
-            }
+        declaring
+            .entry(symbol.name.as_str())
+            .or_default()
+            .insert(symbol.path.as_str());
+        by_path
+            .entry(symbol.path.as_str())
+            .or_default()
+            .push(symbol);
+    }
+    let unique = |name: &str| declaring.get(name).is_some_and(|files| files.len() == 1);
+
+    // The edge is caller -> callee. Asking "who mentions this name" gives the
+    // reverse direction, which turned every dependency into a backwards arrow.
+    let container_of = |path: &str, line: usize| -> Option<&str> {
+        by_path
+            .get(path)?
+            .iter()
+            .filter(|symbol| symbol.line <= line && line <= symbol.end_line.max(symbol.line))
+            .min_by_key(|symbol| symbol.end_line.saturating_sub(symbol.line))
+            .map(|symbol| symbol.name.as_str())
+    };
+
+    let mut imports: HashMap<String, Vec<String>> = HashMap::new();
+    for symbol in &all_symbols {
+        if !unique(&symbol.name) {
+            continue;
         }
-        if !imported.is_empty() {
-            imports.insert(symbol.name.clone(), imported);
+        for row in graph.refs_for(std::slice::from_ref(&symbol.name), 1000)? {
+            let Some(caller) = container_of(&row.path, row.line) else {
+                continue;
+            };
+            if caller == row.name || !unique(caller) || !unique(&row.name) {
+                continue;
+            }
+            imports
+                .entry(caller.to_string())
+                .or_default()
+                .push(row.name);
         }
     }
 
@@ -2263,6 +2303,11 @@ pub fn cycles(ctx: &AppContext) -> Result<CyclesReport> {
                     // Found a cycle
                     if let Some(idx) = path.iter().position(|n| n == neighbor) {
                         let cycle = path[idx..].to_vec();
+                        // A one-symbol "cycle" is a name mentioning itself, not
+                        // an import loop a person can break.
+                        if cycle.len() < 2 {
+                            continue;
+                        }
                         cycles.push(ImportCycle {
                             length: cycle.len(),
                             files: cycle.clone(),
@@ -2393,6 +2438,7 @@ pub fn unused_exports(ctx: &AppContext) -> Result<UnusedExportsReport> {
     let mut unused = Vec::new();
     for symbol in &all_symbols {
         if symbol.exported
+            && symbol.container.is_none()
             && !referenced.contains(&symbol.name)
             && symbol.name.len() >= MIN_REF_NAME_LEN
             && !symbol.name.starts_with('_')
@@ -3439,6 +3485,97 @@ mod tests {
     /// `pub mod store` is reached through the crate tree: the file that declares
     /// it is exactly where its name is used (`store::open_vault()` in the same
     /// module), so that mention must not leave it looking like dead API surface.
+    #[test]
+    fn an_import_cycle_is_reported_only_between_unambiguous_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = context(dir.path().to_path_buf());
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("src/a.rs"),
+            "pub fn alpha() -> u32 {
+    crate::beta()
+}
+",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("src/b.rs"),
+            "pub fn beta() -> u32 {
+    crate::alpha()
+}
+",
+        )
+        .unwrap();
+        index(&ctx, false, true, &mut |_| {}).unwrap();
+
+        let report = cycles(&ctx).unwrap();
+        assert!(
+            report.cycles.iter().any(|cycle| cycle.length == 2),
+            "alpha and beta call each other: {:?}",
+            report.cycles
+        );
+        assert!(
+            report.cycles.iter().all(|cycle| cycle.length >= 2),
+            "a name mentioning itself is not a cycle: {:?}",
+            report.cycles
+        );
+    }
+
+    #[test]
+    fn a_method_is_not_a_dead_module_export() {
+        // `Cache::new` is reached through the type. Reporting it as an
+        // unreferenced export made the list 737 rows long on this repository,
+        // which is a report nobody reads.
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = context(dir.path().to_path_buf());
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("src/cache.rs"),
+            "pub struct Cache;\nimpl Cache {\n    pub fn new() -> Self {\n        Cache\n    }\n}\n",
+        )
+        .unwrap();
+        index(&ctx, false, true, &mut |_| {}).unwrap();
+
+        let report = dead_code(&ctx).unwrap();
+        assert!(
+            !report.exports.iter().any(|export| export.name == "new"),
+            "a method is not a module export: {:?}",
+            report.exports
+        );
+    }
+
+    #[test]
+    fn a_public_function_nothing_mentions_is_reported_as_dead() {
+        // The kind filter accepted `function` while the extractor stores `fn`,
+        // so this report was empty for every Rust repository.
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = context(dir.path().to_path_buf());
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("src/lib.rs"),
+            "pub fn add(a: i32, b: i32) -> i32 { a + b }\npub fn never_called() -> u32 { 7 }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("src/use.rs"),
+            "pub fn caller() -> i32 { crate::add(1, 2) }\n",
+        )
+        .unwrap();
+        index(&ctx, false, true, &mut |_| {}).unwrap();
+
+        let report = dead_code(&ctx).unwrap();
+        let names: Vec<&str> = report
+            .exports
+            .iter()
+            .map(|export| export.name.as_str())
+            .collect();
+        assert!(names.contains(&"never_called"), "{names:?}");
+        assert!(
+            !names.contains(&"add"),
+            "a referenced export is not dead: {names:?}"
+        );
+    }
+
     #[test]
     fn a_module_used_only_inside_its_own_file_is_not_dead_code() {
         let dir = tempfile::tempdir().unwrap();
