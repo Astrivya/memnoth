@@ -400,79 +400,173 @@ pub struct McpTokenResponse {
     pub expires_at: String,
 }
 
-/// Ingest request (POST /ingest).
+/// One event in a `POST /api/v1/ingest/batch` body.
+///
+/// The control plane reads `event_id`, `kind`, `surface`, `session_id` and
+/// `at_ms` itself and stores the whole object as the event's payload, so anything
+/// a surface adds beyond those five is flattened in rather than typed: a new
+/// payload field must not need a client release to arrive.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IngestRequest {
-    /// Session ID.
-    pub session_id: String,
-    /// Workspace path.
-    pub workspace: String,
-    /// Model used.
-    pub model: String,
-    /// Tokens used (input + output).
-    pub tokens: u64,
-    /// Files touched.
-    pub files: u64,
-    /// Cost in micros.
-    pub cost_micros: i64,
-    /// Event type: "created" | "updated" | "closed".
-    pub event_type: String,
-    /// Timestamp (RFC3339).
-    pub timestamp: String,
-    /// Optional project ID.
+pub struct IngestEvent {
+    /// Deduplication key. `(org, event_id)` is the primary key, so a retry that
+    /// reuses it is a no-op rather than a second row.
+    pub event_id: String,
+    /// What happened, e.g. `session_opened`.
+    pub kind: String,
+    /// Which surface emitted it: `cli`, `tui`, `mcp`, `web` or `api`.
+    #[serde(default = "default_surface")]
+    pub surface: String,
+    /// The session it belongs to, when it belongs to one.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub project_id: Option<String>,
+    pub session_id: Option<String>,
+    /// When it happened, in milliseconds since the epoch.
+    #[serde(default)]
+    pub at_ms: i64,
+    /// Everything else, kept verbatim in the stored payload.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
-/// Ingest response (POST /ingest).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IngestResponse {
-    /// Whether the ingest was accepted.
-    pub accepted: bool,
-    /// Ingest ID for tracking.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ingest_id: Option<String>,
+fn default_surface() -> String {
+    "cli".to_string()
 }
+
 /// Batch ingest request (POST /api/v1/ingest/batch).
+///
+/// At most 100 events per request: the plane refuses a larger body rather than
+/// reading it as a backlog dump, so a caller with more than that splits the batch.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchIngestRequest {
-    /// Array of ingest requests.
-    pub items: Vec<IngestRequest>,
-    /// Dry run flag - don't actually persist.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub dry_run: Option<bool>,
+    pub events: Vec<IngestEvent>,
+}
+
+impl BatchIngestRequest {
+    /// The most events one request may carry.
+    pub const MAX_BATCH: usize = 100;
 }
 
 /// Batch ingest response (POST /api/v1/ingest/batch).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BatchIngestResponse {
-    /// Whether the batch was accepted.
-    pub accepted: bool,
-    /// Batch ID for tracking.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub batch_id: Option<String>,
-    /// Number of items accepted.
-    pub accepted_count: usize,
-    /// Number of items rejected.
-    pub rejected_count: usize,
-    /// Per-item results.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub results: Option<Vec<BatchIngestItemResult>>,
+    /// Rows this request stored.
+    #[serde(default)]
+    pub accepted: u64,
+    /// Events the plane already had. A replay is a success.
+    #[serde(default)]
+    pub duplicates: u64,
 }
 
-/// Per-item result in batch ingest response.
+/// `POST /api/v1/instances/heartbeat` — one running surface saying it is alive.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BatchIngestItemResult {
-    /// Index of the item in the request.
-    pub index: usize,
-    /// Whether this item was accepted.
-    pub accepted: bool,
-    /// Ingest ID if accepted.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ingest_id: Option<String>,
-    /// Error message if rejected.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
+pub struct HeartbeatRequest {
+    /// Stable per-machine identity; the plane upserts on `(org, instance_id)`.
+    pub instance_id: String,
+    /// `cli`, `tui`, `mcp`, `web` or `api`.
+    pub surface: String,
+    /// The build that is beating.
+    pub version: String,
+    /// How many sessions this instance has open right now.
+    #[serde(default)]
+    pub sessions_live: i32,
+}
+
+/// `POST /api/v1/instances/heartbeat` — recorded.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HeartbeatAck {
+    #[serde(default)]
+    pub ok: bool,
+}
+
+/// `GET /api/v1/status` — the one call that answers what is green.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PlaneStatus {
+    #[serde(default)]
+    pub plane: String,
+    #[serde(default)]
+    pub instances: InstanceCounts,
+    #[serde(default)]
+    pub ingest: IngestCounts,
+}
+
+/// Instance liveness for one tenant.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct InstanceCounts {
+    /// Instances that beat within the last 90 seconds.
+    #[serde(default)]
+    pub live: i64,
+    /// Instances that have beaten before and stopped.
+    #[serde(default)]
+    pub stale: i64,
+    /// Every instance this tenant has ever reported.
+    #[serde(default)]
+    pub known: i64,
+    #[serde(default)]
+    pub last_seen_ms_ago: Option<i64>,
+}
+
+/// Ingest totals for one tenant.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IngestCounts {
+    #[serde(default)]
+    pub events: i64,
+    #[serde(default)]
+    pub last_event_ms_ago: Option<i64>,
+}
+
+/// The answer every write route gives when it has nothing else to say.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OkResponse {
+    #[serde(default)]
+    pub ok: bool,
+}
+
+/// One session row, as `POST /api/v1/sessions` takes it and the console reads it.
+///
+/// This is *the* dashboard contract: the Sessions page is this row, the usage
+/// charts are rolled up from it once it is closed, and a session a user cannot
+/// see there is a session this machine never reported. `events` carries the
+/// bounded transcript summary (see the control plane's `TranscriptSummary`),
+/// never full transcript text — that stays in `sessions/<id>.jsonl` here.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SessionReport {
+    /// The local session id. Re-posting the same id updates the same row.
+    pub id: String,
+    /// The conversation's name — the session file's name in the TUI.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub repo: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub branch: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
+    /// `running` or `finished`. The rollup only happens for a finished row.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub status: String,
+    #[serde(default)]
+    pub tokens: i64,
+    #[serde(default)]
+    pub files: i64,
+    #[serde(default)]
+    pub cost_micros: i64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub workspace: String,
+    /// The cloud project this session is filed under. Absent, the row is the
+    /// unassigned queue the console offers to file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    /// Where to drive the session while it is live.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_url: Option<String>,
+    /// The bounded transcript summary; `None` means "not reported".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub events: Option<serde_json::Value>,
+    /// RFC 3339. Absent, the plane stamps the row with its own clock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    /// RFC 3339, set when the session ended. This is what triggers the rollup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<String>,
 }
 
 /// `GET /api/v1/api-keys`.

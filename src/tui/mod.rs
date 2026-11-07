@@ -185,6 +185,11 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
     // Read before the first frame: the account line is part of what the screen
     // opened with, not something that appears a redraw later.
     app.account = crate::auth::signed_in_account();
+    // The dashboard's row for this conversation exists from the moment the screen
+    // opens, not only after the first turn: a session a person is about to work
+    // in is a session their console should show. Fire-and-forget, so a plane that
+    // cannot be reached costs a log line and never a launch.
+    crate::report::started(ctx, name, &session);
 
     enable_raw_mode().context("cannot put the terminal in raw mode")?;
     let mut stdout = io::stdout();
@@ -247,6 +252,10 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
                             app.resolve_tools(from);
                         }
                         settle(&mut app, &store, &mut session, &current, tools, *result);
+                        // Tokens, files and cost just moved, and the plane's row
+                        // is cumulative: one report per finished turn is what
+                        // makes the console's numbers match this machine's.
+                        crate::report::updated(ctx, &app.name, &session);
                         break;
                     }
                     Err(TryRecvError::Empty) => break,
@@ -562,6 +571,11 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
             app.pending_submit = true;
         }
     }
+
+    // The row's `ended_at` is what rolls the session into the usage charts, so
+    // the close is reported before the screen is torn down. `settle` has already
+    // written the session file; this only tells the plane about it.
+    crate::report::finished(ctx, &app.name, &session);
 
     drop(terminal);
     drop(guard);
@@ -2272,6 +2286,9 @@ fn switch_session(
             // A fresh conversation has nothing to show yet, so it shows the
             // brief — the same screen a launch gives, naming the new session.
             app.home_visible = true;
+            // A conversation the person asked for is a conversation on their
+            // dashboard, whether or not a turn has run in it yet.
+            crate::report::started(ctx, &app.name, session);
         }
         SessionSwitch::Open(name) => {
             *session = store.load(&name)?;
@@ -2281,6 +2298,9 @@ fn switch_session(
             app.seed(session);
             // The conversation is what was picked, so it is what is shown.
             app.home_visible = false;
+            // Resuming a conversation re-posts its own id, so the plane updates
+            // the row it already has rather than opening a second one.
+            crate::report::started(ctx, &app.name, session);
         }
         SessionSwitch::Rename { from, to } => {
             let renamed = store.rename(&from, &to)?;

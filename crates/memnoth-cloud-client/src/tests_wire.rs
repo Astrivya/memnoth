@@ -613,3 +613,83 @@ fn a_created_team_is_wrapped_and_starts_owned_by_its_creator() {
     );
     assert!(envelope.team.is_member);
 }
+
+/// `POST /api/v1/sessions` is the dashboard's only source of sessions.
+///
+/// This is the shape the console's Sessions page and its usage rollup read, so
+/// the numbers have to leave as numbers: a `tokens` that serialised as a string
+/// would be a row the page renders as zero, and a missing `ended_at` would be a
+/// session the usage charts never count. Written as a serialisation test rather
+/// than a parse test because this direction is the one that was broken — the
+/// client sent a shape the plane had no field for.
+#[test]
+fn the_session_row_is_the_shape_the_console_reads() {
+    use crate::types::SessionReport;
+
+    let report = SessionReport {
+        id: "20261107-120000-4242".to_string(),
+        name: "session".to_string(),
+        model: "memnoth/auto".to_string(),
+        status: "finished".to_string(),
+        tokens: 1240,
+        files: 3,
+        cost_micros: 2500,
+        workspace: "/home/dev/project".to_string(),
+        started_at: Some("2026-11-07T12:00:00.000Z".to_string()),
+        ended_at: Some("2026-11-07T12:30:00.000Z".to_string()),
+        ..SessionReport::default()
+    };
+
+    let body = serde_json::to_value(&report).expect("a session report must serialise");
+
+    assert_eq!(body["id"], "20261107-120000-4242");
+    assert_eq!(body["status"], "finished");
+    assert!(body["tokens"].is_i64(), "tokens is a number, not a string");
+    assert!(body["files"].is_i64());
+    assert!(body["cost_micros"].is_i64());
+    assert!(
+        body["ended_at"].as_str().unwrap().ends_with('Z'),
+        "ended_at is RFC 3339, which is the only shape the plane parses"
+    );
+    // Empty strings and absent options stay out of the body: the plane reads a
+    // missing field as \"not reported\", a present empty one as a claim.
+    assert!(body.get("repo").is_none());
+    assert!(body.get("control_url").is_none());
+    assert!(body.get("project_id").is_none());
+}
+
+/// The ingest envelope is `events`, and a replay is reported as `duplicates`.
+///
+/// The client used to send `{"items": [...]}`, a body the plane's `/ingest/batch`
+/// route has never had, so every `mn sync` was refused before it stored
+/// anything — while the command still printed a cheerful count.
+#[test]
+fn the_ingest_batch_envelope_is_events_not_items() {
+    use crate::types::{BatchIngestRequest, BatchIngestResponse, IngestEvent};
+
+    let batch = BatchIngestRequest {
+        events: vec![IngestEvent {
+            event_id: "evt-1".to_string(),
+            kind: "session_opened".to_string(),
+            surface: "tui".to_string(),
+            session_id: Some("sess-1".to_string()),
+            at_ms: 1_760_000_000_000,
+            extra: serde_json::Map::new(),
+        }],
+    };
+
+    let body = serde_json::to_value(&batch).expect("a batch must serialise");
+    assert!(
+        body.get("items").is_none(),
+        "the plane has no `items` field"
+    );
+    assert_eq!(body["events"][0]["event_id"], "evt-1");
+    assert_eq!(body["events"][0]["kind"], "session_opened");
+    assert_eq!(body["events"][0]["surface"], "tui");
+    assert_eq!(body["events"][0]["at_ms"], 1_760_000_000_000_i64);
+
+    let answer: BatchIngestResponse = serde_json::from_str(r#"{"accepted": 2, "duplicates": 1}"#)
+        .expect("the plane's ingest result must parse");
+    assert_eq!(answer.accepted, 2);
+    assert_eq!(answer.duplicates, 1);
+}
