@@ -2,11 +2,10 @@
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
-use std::path::Path;
 use std::process::Command;
 
 use crate::context::Config;
-use crate::output::{Outcome, human_count};
+use crate::output::Outcome;
 
 /// Known configuration keys with their descriptions and value types.
 #[derive(Debug, Clone)]
@@ -14,7 +13,6 @@ struct ConfigKey {
     key: &'static str,
     description: &'static str,
     value_type: &'static str,
-    env_var: Option<&'static str>,
 }
 
 const CONFIG_KEYS: &[ConfigKey] = &[
@@ -22,55 +20,46 @@ const CONFIG_KEYS: &[ConfigKey] = &[
         key: "mcp_url",
         description: "MCP server endpoint URL",
         value_type: "string (URL)",
-        env_var: None,
     },
     ConfigKey {
         key: "profile",
         description: "Default tool profile (micro, memory, coord, code, full, agent)",
         value_type: "string",
-        env_var: None,
     },
     ConfigKey {
         key: "vault",
         description: "Default vault file path",
         value_type: "string (path)",
-        env_var: Some("MEMNOTH_VAULT"),
     },
     ConfigKey {
         key: "provider.kind",
         description: "Provider kind (anthropic, openai)",
         value_type: "string",
-        env_var: None,
     },
     ConfigKey {
         key: "provider.model",
         description: "Model ID to use",
         value_type: "string",
-        env_var: None,
     },
     ConfigKey {
         key: "provider.base_url",
         description: "Provider base URL (for gateways/local servers)",
         value_type: "string (URL)",
-        env_var: None,
     },
     ConfigKey {
         key: "provider.max_tokens",
         description: "Maximum tokens per response",
         value_type: "integer",
-        env_var: None,
     },
     ConfigKey {
         key: "provider.input_per_mtok",
         description: "Input cost per million tokens (USD)",
         value_type: "float",
-        env_var: None,
     },
     ConfigKey {
         key: "provider.output_per_mtok",
         description: "Output cost per million tokens (USD)",
         value_type: "float",
-        env_var: None,
     },
 ];
 
@@ -131,50 +120,50 @@ fn get_effective_value(config: &Config, key: &str) -> (Value, &'static str) {
             }
         }
         "provider.kind" => {
-            if let Some(ref p) = config.provider {
-                if let Some(ref v) = p.kind {
-                    return (json!(v.clone()), "config");
-                }
+            if let Some(ref p) = config.provider
+                && let Some(ref v) = p.kind
+            {
+                return (json!(v.clone()), "config");
             }
             (json!(Value::Null), "default")
         }
         "provider.model" => {
-            if let Some(ref p) = config.provider {
-                if let Some(ref v) = p.model {
-                    return (json!(v.clone()), "config");
-                }
+            if let Some(ref p) = config.provider
+                && let Some(ref v) = p.model
+            {
+                return (json!(v.clone()), "config");
             }
             (json!(Value::Null), "default")
         }
         "provider.base_url" => {
-            if let Some(ref p) = config.provider {
-                if let Some(ref v) = p.base_url {
-                    return (json!(v.clone()), "config");
-                }
+            if let Some(ref p) = config.provider
+                && let Some(ref v) = p.base_url
+            {
+                return (json!(v.clone()), "config");
             }
             (json!(Value::Null), "default")
         }
         "provider.max_tokens" => {
-            if let Some(ref p) = config.provider {
-                if let Some(v) = p.max_tokens {
-                    return (json!(v), "config");
-                }
+            if let Some(ref p) = config.provider
+                && let Some(v) = p.max_tokens
+            {
+                return (json!(v), "config");
             }
             (json!(Value::Null), "default")
         }
         "provider.input_per_mtok" => {
-            if let Some(ref p) = config.provider {
-                if let Some(v) = p.input_per_mtok {
-                    return (json!(v), "config");
-                }
+            if let Some(ref p) = config.provider
+                && let Some(v) = p.input_per_mtok
+            {
+                return (json!(v), "config");
             }
             (json!(Value::Null), "default")
         }
         "provider.output_per_mtok" => {
-            if let Some(ref p) = config.provider {
-                if let Some(v) = p.output_per_mtok {
-                    return (json!(v), "config");
-                }
+            if let Some(ref p) = config.provider
+                && let Some(v) = p.output_per_mtok
+            {
+                return (json!(v), "config");
             }
             (json!(Value::Null), "default")
         }
@@ -433,7 +422,7 @@ pub fn edit(
     }
 
     // Reload and validate config
-    let config = Config::load(&ctx.config_path).context("failed to reload config after edit")?;
+    let _config = Config::load(&ctx.config_path).context("failed to reload config after edit")?;
 
     let data = json!({
         "config_path": ctx.config_path.to_string_lossy().to_string(),
@@ -497,6 +486,7 @@ mod tests {
                 max_tokens: Some(2000),
                 input_per_mtok: Some(3.0),
                 output_per_mtok: Some(15.0),
+                ..Default::default()
             }),
             ..Default::default()
         };
