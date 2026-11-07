@@ -5,7 +5,6 @@ use memnoth_update::{Channel, UpdateConfig, check_for_update, detect_managed_ins
 use std::env;
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 use crate::cli::{InstallArgs, UninstallArgs, UpdateArgs};
 use crate::output::{ErrorOutcome, ExitCode, Outcome};
@@ -33,6 +32,13 @@ pub fn execute_update(
     let config = UpdateConfig {
         channel,
         current_version: current_version.to_string(),
+        // A key in the environment lets a tester verify a local build without
+        // rebuilding the binary; otherwise the compiled-in key is the one that
+        // counts, because a key read from the release host proves nothing.
+        minisign_pubkey: std::env::var("MEMNOTH_MINISIGN_PUBKEY")
+            .ok()
+            .filter(|key| !key.trim().is_empty())
+            .or_else(memnoth_update::compiled_in_pubkey),
         ..Default::default()
     };
 
@@ -48,7 +54,7 @@ pub fn execute_update(
     match check_for_update(&config) {
         Ok(result) => {
             if result.update_available {
-                apply_update_with_config(&config, &result.manifest, args.no_verify)
+                apply_update_with_config(&config, &result.manifest, args.no_verify, false)
             } else {
                 Ok(Outcome::text(format!(
                     "memnoth {} is up to date (channel: {})",
@@ -219,16 +225,22 @@ fn install_specific_version(
         )));
     }
 
-    let mut update_config = config.clone();
-    update_config.current_version = version.to_string();
-
-    apply_update_with_config(&update_config, &manifest, no_verify)
+    // Naming the version is what makes a downgrade deliberate. The config keeps
+    // the version actually running: rewriting `current_version` to the target
+    // made every downgrade look like an upgrade and skipped the policy check
+    // below.
+    println!(
+        "Installing {} (running {})",
+        version, config.current_version
+    );
+    apply_update_with_config(config, &manifest, no_verify, true)
 }
 
 fn apply_update_with_config(
     config: &UpdateConfig,
     manifest: &memnoth_update::Manifest,
     no_verify: bool,
+    explicit_version: bool,
 ) -> Result<Outcome, ErrorOutcome> {
     // Check for managed install
     if let Some(manager) = detect_managed_install()
@@ -239,6 +251,16 @@ fn apply_update_with_config(
             manager, manager
         )));
     }
+
+    // A manifest that points at an older version is refused unless the version
+    // was named on the command line. Closing a security hole by downgrading is
+    // a decision, not something an update does on its own.
+    memnoth_update::check_version_policy(
+        &config.current_version,
+        &manifest.version,
+        explicit_version,
+    )
+    .map_err(failure)?;
 
     let current_exe = env::current_exe().map_err(failure)?;
 
@@ -262,17 +284,54 @@ fn apply_update_with_config(
         target.filename
     );
 
+    // Signatures first: the checksum below comes from the manifest, and a
+    // manifest is not a signature. This is also the order in which a refusal
+    // costs nothing — an unsigned release is rejected before the binary is
+    // fetched, not after.
+    if !no_verify {
+        println!("Verifying signature...");
+        let sums_url = format!(
+            "{}/dist/{}/SHA256SUMS",
+            config.dist_base_url,
+            config.channel.dist_subdir()
+        );
+        let sums_path = temp_dir.join(format!("memnoth-update-{}.SHA256SUMS", std::process::id()));
+        let verified = download_file_with_progress(&sums_url, &sums_path)
+            .and_then(|()| memnoth_update::verify_signatures(&sums_path, manifest, config));
+        let _ = fs::remove_file(&sums_path);
+        match verified {
+            Ok(()) => println!("Signature OK"),
+            Err(error) => {
+                return Err(failure(anyhow!(
+                    "{error}\n\nNothing was changed. If this machine is meant to install an \
+                     unsigned build, say so with --no-verify."
+                )));
+            }
+        }
+    } else {
+        println!("WARNING: Skipping signature and checksum verification (--no-verify)");
+    }
+
     // Download with progress
     println!("Downloading {}...", download_url);
     download_file_with_progress(&download_url, &temp_exe).map_err(failure)?;
 
-    // Verify checksum unless --no-verify
     if !no_verify {
         println!("Verifying checksum...");
-        memnoth_update::verify_checksum(&temp_exe, &manifest.checksums.sha256).map_err(failure)?;
+        if let Err(error) = memnoth_update::verify_checksum(&temp_exe, &manifest.checksums.sha256) {
+            let _ = fs::remove_file(&temp_exe);
+            return Err(failure(error));
+        }
         println!("Checksum OK");
-    } else {
-        println!("WARNING: Skipping verification (--no-verify)");
+    }
+
+    // Prove the artifact runs and is the version promised, before it replaces
+    // the working binary. After the swap on Windows there is no way back: a
+    // running executable cannot be renamed.
+    println!("Checking the downloaded binary...");
+    if let Err(error) = memnoth_update::verify_new_binary(&temp_exe, &manifest.version) {
+        let _ = fs::remove_file(&temp_exe);
+        return Err(failure(anyhow!("{error}\n\nNothing was changed.")));
     }
 
     // Atomic swap
@@ -280,19 +339,9 @@ fn apply_update_with_config(
     memnoth_update::atomic_swap(&current_exe, &temp_exe)
         .map_err(|e| failure(anyhow!("Update failed: {}", e)))?;
 
-    // Verify the new binary runs
-    let new_version_output = Command::new(&current_exe)
-        .arg("--version")
-        .output()
-        .map_err(failure)?;
-
-    let version_str = String::from_utf8_lossy(&new_version_output.stdout)
-        .trim()
-        .to_string();
-
     Ok(Outcome::text(format!(
         "Successfully updated to {}\nRun `memnoth --version` to verify.",
-        version_str
+        manifest.version
     )))
 }
 
