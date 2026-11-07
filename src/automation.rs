@@ -1,16 +1,15 @@
 //! Automation commands: hooks, actions, CI integration.
 
 use anyhow::{Context, Result};
-use serde_json::{json, Value};
+use serde_json::json;
 use std::fs;
-use std::path::{Path, PathBuf};
 
 use crate::cli::{
-    HookArgs, HookCommand, ActionArgs, ActionCommand, CiArgs, CiCommand,
-    HookInstallArgs, ActionInitArgs, CiDetectArgs, CiIndexArgs,
+    ActionArgs, ActionCommand, ActionInitArgs, CiArgs, CiCommand, CiDetectArgs, CiIndexArgs,
+    HookArgs, HookCommand, HookInstallArgs,
 };
 use crate::context::AppContext;
-use crate::output::{ErrorOutcome, Outcome};
+use crate::output::Outcome;
 
 /// Run the automation command.
 pub fn run(ctx: &AppContext, args: &crate::cli::AutomationArgs) -> Result<Outcome> {
@@ -46,11 +45,11 @@ fn ci(ctx: &AppContext, args: &CiArgs) -> Result<Outcome> {
 
 /// Generate pre-commit hook content for kg index.
 fn pre_commit_hook_content() -> String {
-    r#"# memnoth pre-commit hook
+    r#"#!/bin/sh
+# memnoth pre-commit hook
 # This hook runs `mn kg index` before each commit to keep the code graph up to date.
 # To skip: git commit --no-verify
 
-#!/bin/sh
 # Pre-commit hook for memnoth code graph indexing
 
 # Check if memnoth is available
@@ -166,23 +165,24 @@ fn hook_install(ctx: &AppContext, args: &HookInstallArgs) -> Result<Outcome> {
 
     // Check if we're in a git repo
     if !git_dir.exists() {
-        return Err(anyhow::anyhow!("Not a git repository (no .git directory found)"));
+        return Err(anyhow::anyhow!(
+            "Not a git repository (no .git directory found)"
+        ));
     }
 
     // Create hooks directory if needed
-    fs::create_dir_all(&hooks_dir)
-        .context("Failed to create .git/hooks directory")?;
+    fs::create_dir_all(&hooks_dir).context("Failed to create .git/hooks directory")?;
 
     let hook_content = pre_commit_hook_content();
 
     // Check if hook already exists
-    let mut should_write = true;
     if pre_commit_path.exists() {
         let existing = fs::read_to_string(&pre_commit_path)
             .context("Failed to read existing pre-commit hook")?;
 
         if existing.contains("memnoth kg index") && !args.force {
-            let text = "Pre-commit hook already contains memnoth kg index. Use --force to overwrite.";
+            let text =
+                "Pre-commit hook already contains memnoth kg index. Use --force to overwrite.";
             let data = json!({
                 "installed": false,
                 "reason": "already_exists",
@@ -200,8 +200,7 @@ fn hook_install(ctx: &AppContext, args: &HookInstallArgs) -> Result<Outcome> {
     }
 
     // Write the hook
-    fs::write(&pre_commit_path, hook_content)
-        .context("Failed to write pre-commit hook")?;
+    fs::write(&pre_commit_path, hook_content).context("Failed to write pre-commit hook")?;
 
     // Make executable
     #[cfg(unix)]
@@ -240,24 +239,16 @@ fn action_init(ctx: &AppContext, args: &ActionInitArgs) -> Result<Outcome> {
     let workflow_path = workflows_dir.join("memnoth.yml");
 
     // Determine project name
-    let project_name = args
-        .name
-        .clone()
-        .unwrap_or_else(|| {
-            root.file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("memnoth-project")
-                .to_string()
-        });
+    let project_name = args.name.clone().unwrap_or_else(|| {
+        root.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("memnoth-project")
+            .to_string()
+    });
 
-    fs::create_dir_all(&workflows_dir)
-        .context("Failed to create .github/workflows directory")?;
+    fs::create_dir_all(&workflows_dir).context("Failed to create .github/workflows directory")?;
 
-    let workflow_content = github_actions_workflow(
-        &project_name,
-        args.kg_index,
-        args.sync,
-    );
+    let workflow_content = github_actions_workflow(&project_name, args.kg_index, args.sync);
 
     // Check if workflow already exists
     if workflow_path.exists() && !args.force {
@@ -293,7 +284,7 @@ fn action_init(ctx: &AppContext, args: &ActionInitArgs) -> Result<Outcome> {
 }
 
 /// `mn ci detect` — detect CI environment.
-fn ci_detect(ctx: &AppContext, _args: &CiDetectArgs) -> Result<Outcome> {
+fn ci_detect(_ctx: &AppContext, _args: &CiDetectArgs) -> Result<Outcome> {
     let mut detected = Vec::new();
     let mut ci_name = "unknown";
 
@@ -344,7 +335,11 @@ fn ci_detect(ctx: &AppContext, _args: &CiDetectArgs) -> Result<Outcome> {
     let is_ci = !detected.is_empty();
 
     let text = if is_ci {
-        format!("CI environment detected: {} ({})", ci_name, detected.join(", "))
+        format!(
+            "CI environment detected: {} ({})",
+            ci_name,
+            detected.join(", ")
+        )
     } else {
         "No CI environment detected".to_string()
     };
@@ -361,7 +356,7 @@ fn ci_detect(ctx: &AppContext, _args: &CiDetectArgs) -> Result<Outcome> {
 /// `mn ci index` — index in CI.
 fn ci_index(ctx: &AppContext, args: &CiIndexArgs) -> Result<Outcome> {
     // First detect CI environment
-    let detect_args = CiDetectArgs {};
+    let detect_args = CiDetectArgs { json: ctx.json };
     let detect_result = ci_detect(ctx, &detect_args)?;
 
     let is_ci = detect_result.data["is_ci"].as_bool().unwrap_or(false);
@@ -384,7 +379,8 @@ fn ci_index(ctx: &AppContext, args: &CiIndexArgs) -> Result<Outcome> {
         },
     };
 
-    let kg_result = crate::kg::run(ctx, &kg_args).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+    let kg_result = crate::commands::execute(ctx, &crate::cli::Verb::Kg(kg_args))
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     // If sync is requested and we have cloud credentials, run cloud sync
     let mut sync_result = None;
