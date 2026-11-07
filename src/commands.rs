@@ -4,17 +4,16 @@ use memnoth_skills::{SkillCommand as SkillsSkillCommand, execute_skill_command};
 
 use crate::auth::{auth_status, login, logout, whoami};
 use crate::cli::{
-    ActionArgs, ActionCommand, AuthCommand, AutomationArgs, AutomationCommand, CiArgs, CiCommand,
-    ConnectArgs, ConnectCommand, FeedbackArgs, FeedbackCommand, HookArgs, HookCommand, KgCommand,
-    McpCommand, McpProfileCommand, OpenArgs, PrivacyArgs, PrivacyCommand, SkillArgs, SkillCommand,
-    StatsArgs, TeamsCommand, VaultCommand, Verb,
+    AuthCommand, ConnectCommand, KgCommand, McpCommand, McpProfileCommand, SkillCommand,
+    TeamsCommand, VaultCommand, Verb,
 };
 use crate::completion::{Shell, install, show_completions};
 use crate::context::AppContext;
-use crate::output::{ErrorOutcome, Outcome};
+use crate::output::{ErrorOutcome, ExitCode, Outcome};
 use crate::{
-    billing, cloud, config_cmd, connect, doctor, feedback, kg, mcp, models, open, session_cmd,
-    setup, stats, sync, team, teams, telemetry, update_cmd, usage, vault,
+    automation, billing, cloud, config_cmd, connect, docs, doctor, feedback, keys, kg, mcp, models,
+    open, org, projects, serve, session_cmd, setup, stats, team, teams, telemetry, update_cmd,
+    usage, vault, watch, worktree,
 };
 
 pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
@@ -122,9 +121,84 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
                 *confidence,
                 reason,
             ),
-            _other => Err(ErrorOutcome::usage(
-                "this `vault` subcommand is not available in this build; run `memnoth vault --help`",
-            )),
+            VaultCommand::Link {
+                source,
+                target,
+                kind,
+                confidence,
+                reason,
+            } => vault::link(ctx, source, target, kind, *confidence, reason),
+            VaultCommand::Unlink {
+                source,
+                target,
+                kind,
+                reason,
+            } => vault::unlink(ctx, source, target, kind, reason),
+            VaultCommand::Search {
+                query,
+                limit,
+                semantic,
+                at,
+            } => vault::search(ctx, query, *limit, *semantic, at.as_deref()),
+            VaultCommand::Export {
+                output,
+                format,
+                include_history,
+                kind,
+            } => vault::export(
+                ctx,
+                output.as_deref(),
+                format,
+                *include_history,
+                kind.as_deref(),
+            ),
+            VaultCommand::Import {
+                input,
+                format,
+                dry_run,
+                on_conflict,
+            } => vault::import(ctx, input.as_deref(), format, *dry_run, on_conflict),
+            VaultCommand::Gc { keep, apply } => vault::gc(ctx, *keep, *apply),
+            VaultCommand::Prune { keep_days, apply } => vault::prune(ctx, *keep_days, *apply),
+            VaultCommand::Reindex { embeddings, full } => vault::reindex(ctx, *embeddings, *full),
+            VaultCommand::Stats { json, growth } => vault::stats(ctx, *json, *growth),
+            VaultCommand::Backup {
+                output,
+                include_wal,
+                compress,
+            } => vault::backup(ctx, output, *include_wal, *compress),
+            VaultCommand::Restore {
+                input,
+                verify,
+                force,
+            } => vault::restore(ctx, input, *verify, *force),
+            VaultCommand::Audit { limit, kind, json } => {
+                vault::audit(ctx, *limit, kind.as_deref(), *json)
+            }
+            VaultCommand::Merge { from, into, reason } => vault::merge(ctx, from, into, reason),
+            VaultCommand::Duplicates { at, json } => vault::duplicates(ctx, at.as_deref(), *json),
+            VaultCommand::Top { limit, kind, at } => {
+                vault::top(ctx, *limit, kind.as_deref(), at.as_deref())
+            }
+            VaultCommand::Timeline {
+                limit,
+                at,
+                kind,
+                include_observations,
+            } => vault::timeline(
+                ctx,
+                *limit,
+                at.as_deref(),
+                kind.as_deref(),
+                *include_observations,
+            ),
+            VaultCommand::Explain { name, at } => vault::explain(ctx, name, at.as_deref()),
+            VaultCommand::Graph {
+                name,
+                depth,
+                at,
+                json,
+            } => vault::graph(ctx, name, *depth, at.as_deref(), *json),
         },
         Verb::Kg(args) => match &args.action {
             KgCommand::Index { full, no_embed } => {
@@ -227,13 +301,150 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
                     data,
                 ))
             }
-            _other => Err(ErrorOutcome::usage(
-                "this `kg` subcommand is not available in this build; run `memnoth kg --help`",
-            )),
+            KgCommand::Callpath { from, to } => {
+                let report =
+                    kg::callpath(ctx, from, to).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                let data = serde_json::to_value(&report)
+                    .context("serialize kg callpath report")
+                    .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                Ok(Outcome::new(
+                    "kg.callpath",
+                    kg::render_callpath(&report),
+                    data,
+                ))
+            }
+            KgCommand::Outline { file } => {
+                let report = kg::outline(ctx, file).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                let data = serde_json::to_value(&report)
+                    .context("serialize kg outline report")
+                    .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                Ok(Outcome::new(
+                    "kg.outline",
+                    kg::render_outline(&report),
+                    data,
+                ))
+            }
+            KgCommand::Tree { dir } => {
+                let report = kg::tree(ctx, dir).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                let data = serde_json::to_value(&report)
+                    .context("serialize kg tree report")
+                    .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                Ok(Outcome::new("kg.tree", kg::render_tree(&report), data))
+            }
+            KgCommand::Review { staged, base } => {
+                let report = kg::review(ctx, *staged, base.as_deref())
+                    .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                let data = serde_json::to_value(&report)
+                    .context("serialize kg review report")
+                    .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                Ok(Outcome::new("kg.review", kg::render_review(&report), data))
+            }
+            KgCommand::TestsFor { symbol } => {
+                let report =
+                    kg::tests_for(ctx, symbol).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                let data = serde_json::to_value(&report)
+                    .context("serialize kg tests-for report")
+                    .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                Ok(Outcome::new(
+                    "kg.tests_for",
+                    kg::render_tests_for(&report),
+                    data,
+                ))
+            }
+            KgCommand::Owners { path } => {
+                let report = kg::owners(ctx, path).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                let data = serde_json::to_value(&report)
+                    .context("serialize kg owners report")
+                    .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                Ok(Outcome::new("kg.owners", kg::render_owners(&report), data))
+            }
+            KgCommand::DeadCode => {
+                let report = kg::dead_code(ctx).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                let data = serde_json::to_value(&report)
+                    .context("serialize kg dead-code report")
+                    .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                Ok(Outcome::new(
+                    "kg.dead_code",
+                    kg::render_dead_code(&report),
+                    data,
+                ))
+            }
+            KgCommand::Cycles => {
+                let report = kg::cycles(ctx).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                let data = serde_json::to_value(&report)
+                    .context("serialize kg cycles report")
+                    .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                Ok(Outcome::new("kg.cycles", kg::render_cycles(&report), data))
+            }
+            KgCommand::Hotspots => {
+                let report = kg::hotspots(ctx).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                let data = serde_json::to_value(&report)
+                    .context("serialize kg hotspots report")
+                    .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                Ok(Outcome::new(
+                    "kg.hotspots",
+                    kg::render_hotspots(&report),
+                    data,
+                ))
+            }
+            KgCommand::UnusedExports => {
+                let report = kg::unused_exports(ctx).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                let data = serde_json::to_value(&report)
+                    .context("serialize kg unused-exports report")
+                    .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                Ok(Outcome::new(
+                    "kg.unused_exports",
+                    kg::render_unused_exports(&report),
+                    data,
+                ))
+            }
+            KgCommand::Deps { file } => {
+                let report = kg::deps(ctx, file).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                let data = serde_json::to_value(&report)
+                    .context("serialize kg deps report")
+                    .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                Ok(Outcome::new("kg.deps", kg::render_deps(&report), data))
+            }
+            KgCommand::Query { expr } => {
+                let report = kg::query(ctx, expr).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                let data = serde_json::to_value(&report)
+                    .context("serialize kg query report")
+                    .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                Ok(Outcome::new("kg.query", kg::render_query(&report), data))
+            }
+            // Both of these are the same long-running processes `memnoth watch`
+            // and `memnoth serve` run; delegating is what makes `kg serve`
+            // actually bind the port it prints instead of reporting one it never
+            // opened. The `kg` verb takes no flags of its own, so the defaults
+            // are the ones a reader of `memnoth kg serve --help` expects.
+            KgCommand::Watch => watch::run(
+                ctx,
+                &crate::cli::WatchArgs {
+                    port: None,
+                    debounce: 500,
+                    vault_changes: false,
+                    once: false,
+                    json: ctx.json,
+                },
+            ),
+            KgCommand::Serve { port } => {
+                let runtime = tokio::runtime::Runtime::new()
+                    .map_err(|e| ErrorOutcome::from_anyhow(&anyhow::Error::from(e)))?;
+                runtime.block_on(serve::run(
+                    ctx,
+                    &crate::cli::ServeArgs {
+                        port: *port,
+                        host: "127.0.0.1".to_string(),
+                        cors: false,
+                        graph_path: None,
+                        json: ctx.json,
+                    },
+                ))
+            }
         },
         Verb::Mcp(args) => match &args.action {
             McpCommand::Serve { http, db, profile } => {
-                let profile_opt = profile.as_ref().and_then(|p| Profile::from_name(p));
+                let profile_opt = mcp_profile(profile)?;
                 mcp::serve(ctx, *http, db.clone(), profile_opt)
                     .map_err(|e| ErrorOutcome::from_anyhow(&e))
                     .map(|()| Outcome::inline("mcp.serve", "MCP server stopped."))
@@ -253,7 +464,7 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
                 token,
                 dry_run,
             } => {
-                let profile_opt = profile.as_ref().and_then(|p| Profile::from_name(p));
+                let profile_opt = mcp_profile(profile)?;
                 let report = mcp::add(
                     ctx,
                     clients,
@@ -273,10 +484,7 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
                 args: args_json,
                 profile,
             } => {
-                let profile_opt = profile
-                    .as_ref()
-                    .and_then(|p| Profile::from_name(p))
-                    .unwrap_or(Profile::Full);
+                let profile_opt = mcp_profile(profile)?.unwrap_or(Profile::Full);
                 let value = mcp::call(ctx, tool, args_json, profile_opt)
                     .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
                 Ok(Outcome::new(
@@ -320,13 +528,19 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
                 Ok(Outcome::new("mcp.list", mcp::render_list(&report), data))
             }
             McpCommand::Test { tool, profile } => {
-                let profile_opt = profile.as_ref().and_then(|p| Profile::from_name(p));
+                let profile_opt = mcp_profile(profile)?;
                 let report = mcp::test(ctx, tool.as_deref(), profile_opt)
                     .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
                 let data = serde_json::to_value(&report)
                     .context("serialize mcp test report")
                     .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
-                Ok(Outcome::new("mcp.test", mcp::render_test(&report), data))
+                let mut outcome = Outcome::new("mcp.test", mcp::render_test(&report), data);
+                // A test that prints `failed` and still exits 0 cannot gate a
+                // script or a CI step.
+                if !report.tools_list_ok || !report.call_ok {
+                    outcome.exit_code = ExitCode::Unexpected as u8;
+                }
+                Ok(outcome)
             }
             McpCommand::Token { json: _ } => {
                 let report = mcp::token(ctx).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
@@ -415,6 +629,15 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
         Verb::Teams(args) => match &args.action {
             TeamsCommand::Join(args) => {
                 teams::join(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e))
+            }
+            TeamsCommand::List(args) => {
+                teams::list(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e))
+            }
+            TeamsCommand::Create(args) => {
+                teams::create(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e))
+            }
+            TeamsCommand::Members(args) => {
+                teams::members(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e))
             }
             TeamsCommand::Claim(args) => {
                 team::claim(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e))
@@ -545,7 +768,20 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
             crate::sync::run_privacy(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e))
         }
         Verb::Billing(args) => billing::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
+        Verb::Projects(args) => projects::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
+        Verb::Keys(args) => keys::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
+        Verb::Org(args) => org::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
         Verb::Skill(args) => {
+            // Which verb answered is part of the answer: `skill list --json`
+            // and `skill run --json` both return a document, and a script has
+            // to be able to tell them apart without re-reading the command.
+            let action = match &args.action {
+                SkillCommand::Add(_) => "add",
+                SkillCommand::List(_) => "list",
+                SkillCommand::Remove(_) => "remove",
+                SkillCommand::Run(_) => "run",
+                SkillCommand::Edit(_) => "edit",
+            };
             let skill_cmd = match &args.action {
                 SkillCommand::Add(a) => {
                     SkillsSkillCommand::Add(memnoth_skills::commands::AddArgs {
@@ -582,7 +818,16 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
             };
             let result =
                 execute_skill_command(skill_cmd).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
-            Ok(Outcome::new("skill", result, serde_json::json!({})))
+            // `--json` already makes the skill crate print a document, so lift
+            // that document instead of handing the pipe an empty object. A
+            // plain-text answer is carried as the message it printed.
+            let mut data = match serde_json::from_str::<serde_json::Value>(&result) {
+                Ok(value @ serde_json::Value::Object(_)) => value,
+                Ok(value @ serde_json::Value::Array(_)) => serde_json::json!({ "result": value }),
+                _ => serde_json::json!({ "message": result.clone() }),
+            };
+            data["action"] = serde_json::json!(action);
+            Ok(Outcome::new("skill", result, data))
         }
         Verb::Open(args) => open::run(ctx, args),
         Verb::Connect(args) => match &args.action {
@@ -600,6 +845,19 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
             }
         },
         Verb::Feedback(args) => feedback::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
+        Verb::Automation(args) => {
+            automation::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e))
+        }
+        Verb::Worktree(args) => worktree::run(ctx, args),
+        Verb::Batch(args) => worktree::run_batch_cmd(ctx, args),
+        Verb::Parallel(args) => worktree::run_parallel(ctx, args),
+        Verb::Docs(args) => docs::run(ctx, args),
+        Verb::Watch(args) => watch::run(ctx, args),
+        Verb::Serve(args) => {
+            let runtime = tokio::runtime::Runtime::new()
+                .map_err(|e| ErrorOutcome::from_anyhow(&anyhow::Error::from(e)))?;
+            runtime.block_on(serve::run(ctx, args))
+        }
     }
 }
 
@@ -610,6 +868,25 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
 /// copy that could drift.
 pub const SKILL_USAGE: &str =
     "usage: /skill add <path> | list | remove <name> | run <name> [args] | edit <name>";
+
+/// A `--profile` value, or the reason it is not one.
+///
+/// A typo must fail *here*, before a server is spawned or a client's config is
+/// written: silently treating `codde` as "no profile" registered the default
+/// surface and told the caller nothing.
+fn mcp_profile(profile: &Option<String>) -> Result<Option<Profile>, ErrorOutcome> {
+    match profile {
+        None => Ok(None),
+        Some(name) => match Profile::from_name(name) {
+            Some(profile) => Ok(Some(profile)),
+            None => Err(ErrorOutcome::new(
+                crate::output::ExitCode::Usage,
+                format!("unknown tool profile: {name}"),
+            )
+            .with_fix("use micro, memory, coord, code, full or agent")),
+        },
+    }
+}
 
 /// Parse a profile name, naming the valid set on a typo.
 pub fn parse_profile(name: &str) -> anyhow::Result<Profile> {

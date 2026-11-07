@@ -24,6 +24,7 @@
 //! "nothing found".
 
 pub mod auth;
+pub mod automation;
 pub mod cli;
 
 pub use context::Config;
@@ -34,15 +35,20 @@ pub mod completion;
 pub mod config_cmd;
 pub mod connect;
 pub mod context;
+pub mod docs;
 pub mod doctor;
 pub mod edit;
 pub mod feedback;
+pub mod keys;
 pub mod kg;
 pub mod mcp;
 pub mod models;
 pub mod open;
+pub mod org;
 pub mod output;
+pub mod projects;
 pub mod provider;
+pub mod serve;
 pub mod session;
 pub mod session_cmd;
 pub mod setup;
@@ -55,6 +61,8 @@ pub mod tui;
 pub mod update_cmd;
 pub mod usage;
 pub mod vault;
+pub mod watch;
+pub mod worktree;
 use clap::Parser;
 use cli::{Cli, Verb};
 use context::{AppContext, DEFAULT_MCP_URL, DEFAULT_PROFILE};
@@ -102,11 +110,7 @@ pub fn run() -> ExitCode {
     if let Some(verb) = cli.verb {
         match commands::execute(&ctx, &verb) {
             Ok(outcome) => {
-                if json {
-                    println!("{}", serde_json::to_string(&outcome).unwrap());
-                } else {
-                    print!("{}", outcome.text);
-                }
+                output::emit(json, &outcome);
                 ExitCode::from(outcome.exit_code)
             }
             Err(err) => fail(json, &err),
@@ -130,11 +134,7 @@ fn run_session(ctx: &AppContext, cli: &Cli, json: bool) -> ExitCode {
     });
     match commands::execute(ctx, &verb) {
         Ok(outcome) => {
-            if json {
-                println!("{}", serde_json::to_string(&outcome).unwrap());
-            } else {
-                print!("{}", outcome.text);
-            }
+            output::emit(json, &outcome);
             ExitCode::from(outcome.exit_code)
         }
         Err(err) => fail(json, &err),
@@ -142,10 +142,6 @@ fn run_session(ctx: &AppContext, cli: &Cli, json: bool) -> ExitCode {
 }
 
 fn fail(json: bool, error: &ErrorOutcome) -> ExitCode {
-    if json {
-        eprintln!("{}", serde_json::to_string(error).unwrap());
-    } else {
-        eprintln!("{error}");
-    }
+    output::emit_error(json, error);
     ExitCode::from(error.code)
 }
