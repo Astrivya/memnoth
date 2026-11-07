@@ -658,6 +658,35 @@ fn the_session_row_is_the_shape_the_console_reads() {
     assert!(body.get("project_id").is_none());
 }
 
+/// `events` is always in the body, even when there is no transcript to send.
+///
+/// `metadata-only` — the default privacy mode — withholds the transcript, and a
+/// session that ended before its first turn has none either. Skipping the field
+/// for those cases made the plane answer `422 missing field \`events\``, so
+/// **every** session a privacy-conscious machine finished was refused while the
+/// console kept showing the sessions from before the field existed. One explicit
+/// `null` says \"not reported\" in the same 12 bytes and is accepted.
+#[test]
+fn a_session_with_no_transcript_still_sends_events() {
+    use crate::types::SessionReport;
+
+    let report = SessionReport {
+        id: "20261107-120000-4242".to_string(),
+        model: "memnoth/auto".to_string(),
+        status: "finished".to_string(),
+        ended_at: Some("2026-11-07T12:30:00.000Z".to_string()),
+        ..SessionReport::default()
+    };
+
+    let body = serde_json::to_value(&report).expect("a session report must serialise");
+
+    assert!(
+        body.get("events").is_some(),
+        "the plane requires the key; omitting it is a 422 for every session"
+    );
+    assert!(body["events"].is_null(), "absent means \"not reported\"");
+}
+
 /// The ingest envelope is `events`, and a replay is reported as `duplicates`.
 ///
 /// The client used to send `{"items": [...]}`, a body the plane's `/ingest/batch`
