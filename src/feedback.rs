@@ -23,7 +23,7 @@ fn auth_token() -> Option<String> {
         .ok()
         .or_else(|| std::env::var("MEMNOTH_MCP_TOKEN").ok())
         .filter(|token| !token.trim().is_empty())
-        .or_else(|| memnoth_auth::account_key_sync())
+        .or_else(memnoth_auth::account_key_sync)
 }
 
 /// `mn feedback send <message>` - POST /api/v1/feedback
