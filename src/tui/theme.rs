@@ -1,8 +1,54 @@
 //! Theme system for accessibility: high contrast, no color, etc.
 
+use ratatui::buffer::Buffer;
 use ratatui::style::{Color, Modifier, Style};
 
 use crate::tui::app::Theme;
+
+/// The theme the environment asks for, if it asks for one.
+///
+/// `NO_COLOR` (set to anything non-empty) is the cross-tool convention, and
+/// `TERM=dumb` says the terminal cannot do it. Both were advertised in the help
+/// screen while nothing read them, which is the worst of both worlds: a person
+/// who needs plain text got escape codes and a key that did nothing.
+///
+pub fn theme_for(no_color: Option<&str>, term: Option<&str>) -> Option<Theme> {
+    if no_color.is_some_and(|value| !value.is_empty()) {
+        return Some(Theme::NoColor);
+    }
+    if term.is_some_and(|value| value.eq_ignore_ascii_case("dumb")) {
+        return Some(Theme::NoColor);
+    }
+    None
+}
+
+/// [`theme_for`] against this process's environment.
+pub fn theme_from_env() -> Option<Theme> {
+    theme_for(
+        std::env::var_os("NO_COLOR")
+            .map(|value| value.to_string_lossy().into_owned())
+            .as_deref(),
+        std::env::var("TERM").ok().as_deref(),
+    )
+}
+
+/// Remove every colour from a finished frame.
+///
+/// Stripping here rather than at each call site is what makes `no-color` true
+/// everywhere: 63 places in `ui.rs` pick a colour, and a theme that is applied
+/// by remembering all of them is a theme that will be wrong somewhere.
+/// Modifiers (bold, reversal) are kept — they are the part a plain terminal and
+/// a screen reader can still use to tell one row from another.
+pub fn strip_colors(buffer: &mut Buffer) {
+    let area = *buffer.area();
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            let cell = &mut buffer[(x, y)];
+            cell.set_fg(Color::Reset);
+            cell.set_bg(Color::Reset);
+        }
+    }
+}
 
 /// Color scheme for a theme
 #[derive(Debug, Clone)]
@@ -251,5 +297,46 @@ Tasks overlay:
   Ctrl+C             Clear completed tasks
   A                  Toggle auto-refresh"#
             .to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::layout::Rect;
+
+    #[test]
+    fn no_color_yields_the_plain_theme() {
+        assert_eq!(theme_for(Some("1"), None), Some(Theme::NoColor));
+        assert_eq!(theme_for(Some("anything"), None), Some(Theme::NoColor));
+        assert_eq!(theme_for(None, Some("dumb")), Some(Theme::NoColor));
+        assert_eq!(theme_for(None, Some("DUMB")), Some(Theme::NoColor));
+    }
+
+    #[test]
+    fn an_empty_or_absent_setting_changes_nothing() {
+        // The NO_COLOR spec: presence with a non-empty value means "no colour".
+        assert_eq!(theme_for(Some(""), None), None);
+        assert_eq!(theme_for(None, Some("xterm-256color")), None);
+        assert_eq!(theme_for(None, None), None);
+    }
+
+    #[test]
+    fn stripping_a_frame_leaves_glyphs_and_modifiers() {
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 2, 1));
+        buffer[(0, 0)]
+            .set_symbol("x")
+            .set_fg(Color::Red)
+            .set_bg(Color::Blue);
+        buffer[(0, 0)].modifier = Modifier::BOLD;
+        buffer[(1, 0)].set_symbol("y").set_fg(Color::Green);
+
+        strip_colors(&mut buffer);
+
+        assert_eq!(buffer[(0, 0)].symbol(), "x");
+        assert_eq!(buffer[(0, 0)].fg, Color::Reset);
+        assert_eq!(buffer[(0, 0)].bg, Color::Reset);
+        assert_eq!(buffer[(0, 0)].modifier, Modifier::BOLD);
+        assert_eq!(buffer[(1, 0)].fg, Color::Reset);
     }
 }
