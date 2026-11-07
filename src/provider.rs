@@ -77,6 +77,9 @@ pub enum Kind {
     OpenAi,
     /// Memnoth managed inference: `/api/v1/chat/completions` with account token auth.
     Memnoth,
+    /// Kilo's AI Gateway. OpenAI-compatible, with vendor-prefixed model ids
+    /// (`anthropic/claude-sonnet-4.5`) behind one key.
+    Kilo,
 }
 
 impl Kind {
@@ -86,6 +89,7 @@ impl Kind {
             Kind::Anthropic => "anthropic",
             Kind::OpenAi => "openai",
             Kind::Memnoth => "memnoth",
+            Kind::Kilo => "kilo",
         }
     }
 
@@ -100,6 +104,7 @@ impl Kind {
             Kind::Anthropic => "https://api.anthropic.com",
             Kind::OpenAi => "https://api.openai.com/v1",
             Kind::Memnoth => "https://memnoth.astrivya.ai/api/v1",
+            Kind::Kilo => "https://ai-gateway.kilo.ai/api/v1",
         }
     }
 
@@ -110,6 +115,9 @@ impl Kind {
             Kind::Anthropic => "claude-sonnet-4-5",
             Kind::OpenAi => "gpt-4.1",
             Kind::Memnoth => "memnoth-default",
+            // The gateway names a model as `<vendor>/<model>`; this is the one
+            // its own quickstart uses.
+            Kind::Kilo => "anthropic/claude-sonnet-4.5",
         }
     }
 
@@ -120,6 +128,7 @@ impl Kind {
             Kind::Anthropic => "ANTHROPIC_API_KEY",
             Kind::OpenAi => "OPENAI_API_KEY",
             Kind::Memnoth => "MEMNOTH_API_KEY",
+            Kind::Kilo => "KILO_API_KEY",
         }
     }
 
@@ -128,8 +137,9 @@ impl Kind {
             "anthropic" | "claude" => Ok(Kind::Anthropic),
             "openai" | "open-ai" | "openai-compatible" | "compatible" => Ok(Kind::OpenAi),
             "memnoth" | "managed" => Ok(Kind::Memnoth),
+            "kilo" | "kilo-code" | "kilocode" | "kilo-gateway" | "gateway" => Ok(Kind::Kilo),
             other => bail!(
-                "unknown provider kind {other:?} — use `anthropic`, `openai`, or `memnoth` \
+                "unknown provider kind {other:?} — use `anthropic`, `openai`, `memnoth`, or `kilo` \
                  (set it in `provider.kind` or MEMNOTH_PROVIDER)"
             ),
         }
@@ -142,6 +152,24 @@ impl std::fmt::Display for Kind {
     }
 }
 
+/// Whether a model's API accepts `reasoning_effort`.
+///
+/// The wire shape says nothing about the model: a gateway (Kilo, OpenRouter)
+/// routes many vendors behind one OpenAI-compatible endpoint, so a Claude or
+/// Llama id sent `reasoning_effort` answers 400 — the parameter is not a no-op
+/// there, it is an error. Only the OpenAI reasoning families document it, and
+/// the models screen offers the arrows on exactly these ids.
+pub(crate) fn takes_reasoning_effort(model: &str) -> bool {
+    let id = model.to_ascii_lowercase();
+    id.starts_with("o1")
+        || id.starts_with("o3")
+        || id.starts_with("o4")
+        || id.contains("gpt-5")
+        || id.contains("/o3")
+        || id.contains("/o4")
+        || id.contains("/gpt-5")
+}
+
 /// The `[provider]` table in `~/.memnoth/config.toml`.
 ///
 /// Every field is optional so a config can name only the model and inherit the
@@ -152,6 +180,13 @@ pub struct ProviderConfig {
     /// `anthropic` or `openai`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
+    /// The preset this came from (`anthropic`, `openrouter`, `kilo`, …).
+    ///
+    /// `kind` is the wire shape, and every OpenAI-compatible gateway collapses
+    /// to `openai`. This is the identity the API key is stored under, so it is
+    /// what lets two compatible gateways coexist on one machine.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// Model id sent to the provider.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -169,13 +204,25 @@ pub struct ProviderConfig {
     /// USD per million output tokens.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_per_mtok: Option<f64>,
+    /// Sampling temperature, sent on the wire when set.
+    ///
+    /// Absent is not `0.0`: it means "the provider's own default", which is
+    /// the right answer for anyone who never opened the setting.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    /// Nucleus sampling (`top_p`), sent on the wire when set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f32>,
+    /// Reasoning effort for the models that take one (`low`/`medium`/`high`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
 
 /// What a million tokens cost, in USD.
 ///
 /// Used only to answer "what has this session spent", and always labelled an
 /// estimate: a price is a fact about a provider's page on a day, so the config
-/// can override it and `doctor`/`/model` name the rates they used.
+/// can override it and `doctor`/`/models` name the rates they used.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Pricing {
     /// USD per million input tokens.
@@ -201,8 +248,14 @@ impl Pricing {
 /// is wrong within a release. Anything absent is reported as an unknown cost
 /// rather than guessed, and `provider.input_per_mtok`/`output_per_mtok` make it
 /// exact for whatever this deployment actually pays.
-fn builtin_price(model: &str) -> Option<Pricing> {
-    let model = model.to_ascii_lowercase();
+pub(crate) fn builtin_price(model: &str) -> Option<Pricing> {
+    // A gateway names the model `vendor/model`; the vendor prefix is routing,
+    // not part of the price. `anthropic/claude-sonnet-4.5` is a Sonnet.
+    let model = model
+        .rsplit('/')
+        .next()
+        .unwrap_or(model)
+        .to_ascii_lowercase();
     const TABLE: [(&str, f64, f64); 7] = [
         ("claude-opus", 15.0, 75.0),
         ("claude-sonnet", 3.0, 15.0),
@@ -245,6 +298,16 @@ pub struct Settings {
     pub api_key: Option<String>,
     /// Rates for the cost estimate, when the model is priced.
     pub pricing: Option<Pricing>,
+    /// The preset the key is stored under, when the config names one.
+    pub provider_name: Option<String>,
+    /// Sampling temperature for this turn, when the config sets one.
+    pub temperature: Option<f32>,
+    /// Nucleus sampling for this turn, when the config sets one.
+    pub top_p: Option<f32>,
+    /// Reasoning effort for this turn, when the config sets one.
+    pub reasoning_effort: Option<String>,
+    /// Where the key came from, for the screens that explain a connection.
+    pub key_source: Option<String>,
 }
 
 impl Settings {
@@ -256,7 +319,8 @@ impl Settings {
     pub fn load(config: &Config) -> Result<Self> {
         let section = config.provider.clone().unwrap_or_default();
 
-        let kind = match env_string("MEMNOTH_PROVIDER").or(section.kind) {
+        let env_kind = env_string("MEMNOTH_PROVIDER");
+        let kind = match env_kind.clone().or(section.kind) {
             Some(raw) => Kind::parse(&raw)?,
             // A key in the environment is the strongest signal of intent there
             // is: someone who exported ANTHROPIC_API_KEY wants to use it.
@@ -265,6 +329,8 @@ impl Settings {
                     Kind::Anthropic
                 } else if std::env::var_os("OPENAI_API_KEY").is_some() {
                     Kind::OpenAi
+                } else if std::env::var_os("KILO_API_KEY").is_some() {
+                    Kind::Kilo
                 } else {
                     Kind::Anthropic
                 }
@@ -282,17 +348,16 @@ impl Settings {
             .filter(|value| *value > 0)
             .unwrap_or(DEFAULT_MAX_TOKENS);
 
-        // For Memnoth provider, get the token from the auth credential store
-        // instead of environment variables. Falls back to MEMNOTH_API_KEY env var
-        // if not in credential store.
-        let api_key = if matches!(kind, Kind::Memnoth) {
-            get_credential_sync("memnoth")
-                .ok()
-                .flatten()
-                .or_else(|| env_string("MEMNOTH_API_KEY"))
+        // The key is resolved once, here, so every screen that reports a
+        // connection reports the same one a turn would use. An environment
+        // override means "not the configured preset", so its stored key is not
+        // the one this turn should use.
+        let provider_name = if env_kind.is_some() {
+            None
         } else {
-            env_string("MEMNOTH_API_KEY").or_else(|| env_string(kind.key_env()))
+            section.name.clone()
         };
+        let (api_key, key_source) = resolve_api_key(kind, provider_name.as_deref());
 
         // An explicit pair of rates is a statement about what this deployment
         // pays, so it wins over the built-in list price. One rate alone is not
@@ -312,6 +377,16 @@ impl Settings {
             max_tokens,
             api_key,
             pricing,
+            provider_name,
+            temperature: section.temperature,
+            top_p: section.top_p,
+            reasoning_effort: section
+                .reasoning_effort
+                .as_deref()
+                .map(str::trim)
+                .filter(|effort| matches!(*effort, "minimal" | "low" | "medium" | "high" | "off"))
+                .map(str::to_string),
+            key_source,
         })
     }
 
@@ -332,6 +407,7 @@ impl Settings {
             Kind::Memnoth => {
                 "run `mn login` to authenticate, or export MEMNOTH_API_KEY".to_string()
             }
+            Kind::Kilo => "KILO_API_KEY (or KILOCODE_API_KEY)".to_string(),
             _ => format!("MEMNOTH_API_KEY (or {})", self.kind.key_env()),
         }
     }
@@ -358,6 +434,59 @@ impl Settings {
     }
 }
 
+/// The key a turn would use, and where it came from.
+///
+/// A key stored for the *preset* wins: someone who typed it into `/connect` (or
+/// ran `mn connect add`) has just said which provider they mean, and the
+/// collapsed `kind` — every OpenAI-compatible gateway is `openai` — cannot tell
+/// them apart. After that the account token and the environment, then the key
+/// stored under the kind's own name.
+fn resolve_api_key(kind: Kind, provider_name: Option<&str>) -> (Option<String>, Option<String>) {
+    let stored = |name: &str| {
+        get_credential_sync(&format!("provider_api_key_{name}"))
+            .ok()
+            .flatten()
+            .filter(|key| !key.trim().is_empty())
+    };
+
+    if let Some(name) = provider_name
+        && let Some(key) = stored(name)
+    {
+        return (Some(key), Some(format!("stored for {name}")));
+    }
+
+    if matches!(kind, Kind::Memnoth)
+        && let Some(key) = get_credential_sync("memnoth")
+            .ok()
+            .flatten()
+            .filter(|key| !key.trim().is_empty())
+    {
+        return (Some(key), Some("account sign-in".to_string()));
+    }
+
+    if let Some(key) = env_string("MEMNOTH_API_KEY") {
+        return (Some(key), Some("MEMNOTH_API_KEY".to_string()));
+    }
+
+    if matches!(kind, Kind::Kilo) {
+        // The gateway documents KILO_API_KEY; Kilo Code's own tooling has long
+        // exported KILOCODE_API_KEY, so both are read.
+        for variable in ["KILO_API_KEY", "KILOCODE_API_KEY"] {
+            if let Some(key) = env_string(variable) {
+                return (Some(key), Some(variable.to_string()));
+            }
+        }
+    } else if let Some(key) = env_string(kind.key_env()) {
+        return (Some(key), Some(kind.key_env().to_string()));
+    }
+
+    if let Some(key) = stored(kind.name()) {
+        return (Some(key), Some(format!("stored for {}", kind.name())));
+    }
+
+    (None, None)
+}
+
 /// Fetch available models from the Memnoth API.
 /// Returns a list of model IDs, or an error if the request fails.
 pub fn fetch_memnoth_models(base_url: &str, api_key: Option<&str>) -> Result<Vec<String>> {
@@ -369,10 +498,10 @@ pub fn fetch_memnoth_models(base_url: &str, api_key: Option<&str>) -> Result<Vec
 
     let url = format!("{}/models", base_url.trim_end_matches('/'));
     let mut request = client.get(&url);
-    if let Some(key) = api_key {
-        if !key.trim().is_empty() {
-            request = request.header("authorization", format!("Bearer {}", key));
-        }
+    if let Some(key) = api_key
+        && !key.trim().is_empty()
+    {
+        request = request.header("authorization", format!("Bearer {}", key));
     }
     let response = request
         .send()
@@ -385,7 +514,8 @@ pub fn fetch_memnoth_models(base_url: &str, api_key: Option<&str>) -> Result<Vec
     if !status.is_success() {
         if status.as_u16() == 402 {
             bail!(
-                "out of credits — run `mn credits` to check balance, top up at https://memnoth.astrivya.ai/billing"
+                "out of credits — run `mn credits` to check balance, top up at {}",
+                crate::context::console_url("usage")
             );
         }
         bail!(
@@ -418,7 +548,71 @@ pub fn fetch_memnoth_models(base_url: &str, api_key: Option<&str>) -> Result<Vec
     Ok(models)
 }
 
-/// One exchange from the session, reduced to what the provider needs.
+/// Fetch the model ids a configured provider offers.
+///
+/// `fetch_memnoth_models` speaks the managed endpoint's dialect; this speaks
+/// each wire shape's own, so `/models` can show what the provider actually
+/// serves instead of a catalogue baked into the binary. A provider that does
+/// not implement `GET /models` is a normal failure here, not a broken config:
+/// the caller keeps its offline catalogue.
+pub fn fetch_provider_models(
+    kind: Kind,
+    base_url: &str,
+    api_key: Option<&str>,
+) -> Result<Vec<String>> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(8))
+        .user_agent(concat!("memnoth/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .context("cannot build the HTTP client")?;
+
+    // Anthropic serves `/v1/models`, the OpenAI shape serves `/models` on the
+    // base URL that already ends in `/v1` for most gateways.
+    let url = match kind {
+        Kind::Anthropic => format!("{}/v1/models", base_url.trim_end_matches('/')),
+        _ => format!("{}/models", base_url.trim_end_matches('/')),
+    };
+
+    let mut request = client.get(&url);
+    if let Some(key) = api_key.filter(|key| !key.trim().is_empty()) {
+        request = match kind {
+            Kind::Anthropic => request
+                .header("x-api-key", key)
+                .header("anthropic-version", "2023-06-01"),
+            _ => request.header("authorization", format!("Bearer {}", key)),
+        };
+    }
+
+    let response = request
+        .send()
+        .with_context(|| format!("cannot reach {}", url))?;
+    let status = response.status();
+    let text = response
+        .text()
+        .with_context(|| format!("cannot read the reply from {}", url))?;
+
+    if !status.is_success() {
+        bail!(
+            "{} answered {}: {}",
+            url,
+            status,
+            scrub_secrets(
+                &provider_error(&text).unwrap_or_else(|| clip(&text, 300)),
+                api_key
+            )
+        );
+    }
+
+    let value: Value =
+        serde_json::from_str(&text).with_context(|| format!("{} did not answer with JSON", url))?;
+    let models = value["data"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("unexpected models response: no 'data' array"))?
+        .iter()
+        .filter_map(|model| model["id"].as_str().map(str::to_string))
+        .collect();
+    Ok(models)
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Exchange {
     /// Who said it.
@@ -566,8 +760,36 @@ impl<'a> Toolbox<'a> {
     }
 }
 
+impl<'a> Toolbox<'a> {
+    /// The person's own denial, if they wrote one for this tool.
+    ///
+    /// Read from the config *file*, not from the snapshot the invocation
+    /// loaded: `/permissions` saves mid-session, and a denial that only takes
+    /// effect after a restart is a screen that does not work. A file that
+    /// cannot be read answers "no denial" — startup already refused a malformed
+    /// config, so this is a race at worst, and refusing every tool because a
+    /// read failed would be a worse lie than the one it prevents.
+    fn denied(&self, name: &str) -> Option<String> {
+        let config = crate::context::Config::load(&self.ctx.config_path).ok()?;
+        let denied = config.tools.map(|tools| tools.denied).unwrap_or_default();
+        denied.contains(&name.to_string()).then(|| {
+            format!(
+                "{name} is denied on this machine — /permissions can lift it, and the chat agent \
+                 cannot change it itself"
+            )
+        })
+    }
+}
+
 impl Tools for Toolbox<'_> {
     fn call(&mut self, name: &str, input: &Value) -> Result<String> {
+        // The denial comes first, before any branch can read or write: a gate
+        // that only covers the verbs would leave `read_file` open, and a gate
+        // that runs after an edit has already happened is decoration.
+        if let Some(reason) = self.denied(name) {
+            bail!(reason);
+        }
+
         // File tools are not verbs: `memnoth` has no `edit` command, because an
         // edit typed by a person is their editor. They are here, under the same
         // confirmation gate as a vault write.
@@ -690,6 +912,44 @@ pub fn verb_for(name: &str, input: &Value) -> Result<Verb> {
                 depth: number("depth", 2) as u32,
             },
         })),
+        // `explore` and `callers` are the two calls an agent needs to work in a
+        // file it has not opened: explore returns the declaration with its
+        // snippet and who mentions it, and callers resolves the JSX/import edges
+        // that a name search cannot. The session offered only search/impact/
+        // status, so the agent had to re-derive both from a flat reference list.
+        "kg_explore" => Ok(Verb::Kg(KgArgs {
+            action: KgCommand::Explore {
+                symbol: text("symbol")?,
+            },
+        })),
+        "kg_callers" => Ok(Verb::Kg(KgArgs {
+            action: KgCommand::Callers {
+                symbol: text("symbol")?,
+                limit: number("limit", 20),
+            },
+        })),
+        // A caller list answers "who breaks if I change this signature"; it
+        // does not answer "what does this function touch", which is the other
+        // half of the same edit. `kg_def` is the declaration the two lists are
+        // about, and `kg_refs` is every mention when the callers list is too
+        // narrow (a type used in a field, a constant named in a test).
+        "kg_callees" => Ok(Verb::Kg(KgArgs {
+            action: KgCommand::Callees {
+                symbol: text("symbol")?,
+                limit: number("limit", 50),
+            },
+        })),
+        "kg_def" => Ok(Verb::Kg(KgArgs {
+            action: KgCommand::Def {
+                symbol: text("symbol")?,
+            },
+        })),
+        "kg_refs" => Ok(Verb::Kg(KgArgs {
+            action: KgCommand::Refs {
+                symbol: text("symbol")?,
+                limit: number("limit", 100),
+            },
+        })),
         "kg_status" => Ok(Verb::Kg(KgArgs {
             action: KgCommand::Status,
         })),
@@ -719,6 +979,23 @@ fn words(query: &str) -> Vec<String> {
 /// Every tool name, for `doctor`-style messages and for tests.
 pub fn tool_names() -> Vec<&'static str> {
     spec().iter().map(|(name, _, _)| *name).collect::<Vec<_>>()
+}
+
+/// Every tool with the sentence the model reads about it.
+///
+/// `/permissions` shows this list rather than a hand-written one: a screen that
+/// claims to audit the agent's power has to name the tools the agent actually
+/// has, or it is auditing something else.
+pub fn tool_descriptions() -> Vec<(&'static str, &'static str)> {
+    spec()
+        .iter()
+        .map(|(name, description, _)| (*name, *description))
+        .collect()
+}
+
+/// Whether this tool changes something, for the permissions screen.
+pub fn is_write_tool(name: &str) -> bool {
+    requires_approval(name)
 }
 
 fn spec() -> Vec<(&'static str, &'static str, Value)> {
@@ -809,8 +1086,66 @@ fn spec() -> Vec<(&'static str, &'static str, Value)> {
             }),
         ),
         (
+            "kg_explore",
+            "One symbol's definition, the source snippet, and every place it is mentioned. Use it instead of reading a whole file when you want to know what a name is and how it is used.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "symbol": { "type": "string", "description": "Exact symbol name, optionally qualified (`Module::name`)." }
+                },
+                "required": ["symbol"]
+            }),
+        ),
+        (
+            "kg_callers",
+            "Who uses a symbol: the imports and JSX/function call sites that reach it. Use it before changing a signature to see the call sites a rename must follow.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "symbol": { "type": "string", "description": "Exact symbol name." },
+                    "limit": { "type": "integer", "description": "Maximum call sites (default 20)." }
+                },
+                "required": ["symbol"]
+            }),
+        ),
+        (
+            "kg_callees",
+            "What a function calls: the declarations it mentions, marked call-shaped where the source reads like a call. The mirror of kg_callers, and the pair to read before changing a signature or a body.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "symbol": { "type": "string", "description": "Exact symbol name." },
+                    "limit": { "type": "integer", "description": "Maximum callees (default 50)." }
+                },
+                "required": ["symbol"]
+            }),
+        ),
+        (
+            "kg_def",
+            "Where a symbol is declared, with a short snippet of the declaration. Use it when you need the file, line and kind rather than the graph around it; kg_explore adds references, callers and callees to the same answer.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "symbol": { "type": "string", "description": "Exact symbol name, optionally qualified." }
+                },
+                "required": ["symbol"]
+            }),
+        ),
+        (
+            "kg_refs",
+            "Every mention of a symbol, call sites and incidental mentions alike. Use it when kg_callers is too narrow: a type in a field, a constant named in a test, a name mentioned in prose.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "symbol": { "type": "string", "description": "Exact symbol name." },
+                    "limit": { "type": "integer", "description": "Maximum references (default 100)." }
+                },
+                "required": ["symbol"]
+            }),
+        ),
+        (
             "kg_status",
-            "What the code graph was built from, when, and how stale it is. Call it when a search unexpectedly returns nothing.",
+            "What the code graph was built from, when, and how stale it is. Call it when a search unexpectedly returns nothing — and when it says stale, ask the person to run /kg index before trusting another miss.",
             json!({ "type": "object", "properties": {} }),
         ),
         (
@@ -851,7 +1186,7 @@ fn wire_tools(kind: Kind) -> Value {
                 "description": description,
                 "input_schema": parameters,
             }),
-            Kind::OpenAi | Kind::Memnoth => json!({
+            Kind::OpenAi | Kind::Memnoth | Kind::Kilo => json!({
                 "type": "function",
                 "function": { "name": name, "description": description, "parameters": parameters },
             }),
@@ -1032,7 +1367,7 @@ impl<'a> Conversation<'a> {
                     "content": [{ "type": "text", "text": self.prompt }]
                 }));
             }
-            Kind::OpenAi | Kind::Memnoth => {
+            Kind::OpenAi | Kind::Memnoth | Kind::Kilo => {
                 self.messages.push(json!({
                     "role": "system",
                     "content": system_prompt(self.root)
@@ -1052,16 +1387,40 @@ impl<'a> Conversation<'a> {
         }
     }
 
+    /// Sampling knobs, added only when the config asked for them.
+    ///
+    /// Sending nothing is not the same as sending 0.7: the provider's own
+    /// default is the right answer for anyone who never opened the setting.
+    /// Anthropic spells reasoning as a thinking budget rather than an effort
+    /// level, so an OpenAI-shaped key is never sent there.
+    fn sampled(&self, mut body: Value) -> Value {
+        if let Some(object) = body.as_object_mut() {
+            if let Some(temperature) = self.settings.temperature {
+                object.insert("temperature".into(), json!(temperature));
+            }
+            if let Some(top_p) = self.settings.top_p {
+                object.insert("top_p".into(), json!(top_p));
+            }
+            if !matches!(self.settings.kind, Kind::Anthropic)
+                && takes_reasoning_effort(&self.settings.model)
+                && let Some(effort) = self.settings.reasoning_effort.as_deref()
+            {
+                object.insert("reasoning_effort".into(), json!(effort));
+            }
+        }
+        body
+    }
+
     fn request(&self) -> (Value, String, Vec<(&'static str, String)>) {
         match self.settings.kind {
             Kind::Anthropic => {
-                let body = json!({
+                let body = self.sampled(json!({
                     "model": self.settings.model,
                     "max_tokens": self.settings.max_tokens,
                     "system": system_prompt(self.root),
                     "messages": self.messages,
                     "tools": wire_tools(Kind::Anthropic),
-                });
+                }));
                 let url = format!("{}/v1/messages", self.settings.base_url);
                 let headers = vec![
                     ("anthropic-version", "2023-06-01".to_string()),
@@ -1072,14 +1431,14 @@ impl<'a> Conversation<'a> {
                 ];
                 (body, url, headers)
             }
-            Kind::OpenAi => {
-                let body = json!({
+            Kind::OpenAi | Kind::Kilo => {
+                let body = self.sampled(json!({
                     "model": self.settings.model,
                     "max_tokens": self.settings.max_tokens,
                     "messages": self.messages,
                     "tools": wire_tools(Kind::OpenAi),
                     "tool_choice": "auto",
-                });
+                }));
                 let url = format!("{}/chat/completions", self.settings.base_url);
                 let headers = vec![(
                     "authorization",
@@ -1091,13 +1450,13 @@ impl<'a> Conversation<'a> {
                 (body, url, headers)
             }
             Kind::Memnoth => {
-                let body = json!({
+                let body = self.sampled(json!({
                     "model": self.settings.model,
                     "max_tokens": self.settings.max_tokens,
                     "messages": self.messages,
                     "tools": wire_tools(Kind::OpenAi),
                     "tool_choice": "auto",
-                });
+                }));
                 let url = format!("{}/chat/completions", self.settings.base_url);
                 let headers = vec![(
                     "authorization",
@@ -1158,7 +1517,7 @@ impl<'a> Conversation<'a> {
                     raw_content: reply["content"].clone(),
                 })
             }
-            Kind::OpenAi => {
+            Kind::OpenAi | Kind::Kilo => {
                 let usage = &reply["usage"];
                 self.input_tokens += usage["prompt_tokens"].as_u64().unwrap_or(0);
                 self.output_tokens += usage["completion_tokens"].as_u64().unwrap_or(0);
@@ -1277,7 +1636,7 @@ impl<'a> Conversation<'a> {
                 self.messages
                     .push(json!({ "role": "user", "content": blocks }));
             }
-            Kind::OpenAi => {
+            Kind::OpenAi | Kind::Kilo => {
                 let mut message = raw_content;
                 if message["content"].is_null() {
                     message["content"] = Value::Null;
@@ -1317,7 +1676,7 @@ impl<'a> Conversation<'a> {
 /// written straight into the transcript. The configured key is stripped
 /// verbatim on top of the generic pattern redaction, so a provider that masks
 /// nothing still cannot put a secret on screen.
-fn scrub_secrets(text: &str, secret: Option<&str>) -> String {
+pub(crate) fn scrub_secrets(text: &str, secret: Option<&str>) -> String {
     let mut out = memnoth_auth::redaction::redact_token(text);
     if let Some(secret) = secret {
         let secret = secret.trim();
@@ -1351,7 +1710,8 @@ fn post_json(
         // Handle 402 (out of credits) specially for Memnoth provider
         if status.as_u16() == 402 && matches!(kind, Kind::Memnoth) {
             bail!(
-                "out of credits — run `mn credits` to check balance, top up at https://memnoth.astrivya.ai/billing"
+                "out of credits — run `mn credits` to check balance, top up at {}",
+                crate::context::console_url("usage")
             );
         }
         bail!(
@@ -1441,6 +1801,11 @@ mod tests {
             max_tokens: 512,
             api_key: Some("k".into()),
             pricing: None,
+            provider_name: None,
+            temperature: None,
+            top_p: None,
+            reasoning_effort: None,
+            key_source: Some("test".into()),
         }
     }
 
@@ -1451,6 +1816,20 @@ mod tests {
         assert!(error.contains("anthropic"), "{error}");
         assert_eq!(Kind::parse("OpenAI").unwrap(), Kind::OpenAi);
         assert_eq!(Kind::parse("claude").unwrap(), Kind::Anthropic);
+        assert_eq!(Kind::parse("kilo").unwrap(), Kind::Kilo);
+        assert_eq!(Kind::parse("Kilo-Gateway").unwrap(), Kind::Kilo);
+    }
+
+    #[test]
+    fn a_gateway_model_is_never_sent_a_reasoning_effort() {
+        // Kilo routes Claude through an OpenAI-shaped endpoint, so the model id
+        // decides, not the wire shape: the field is a 400 on these ids.
+        assert!(takes_reasoning_effort("o3"));
+        assert!(takes_reasoning_effort("gpt-5-mini"));
+        assert!(takes_reasoning_effort("openai/o3"));
+        assert!(!takes_reasoning_effort("anthropic/claude-sonnet-4.5"));
+        assert!(!takes_reasoning_effort("meta-llama/llama-3.1-70b"));
+        assert!(!takes_reasoning_effort("gpt-4o"));
     }
 
     #[test]
@@ -1495,6 +1874,54 @@ mod tests {
     }
 
     #[test]
+    fn a_session_offers_the_two_calls_that_locate_a_symbol_in_context() {
+        // Without these, an agent could search a name and ask for its blast
+        // radius but not read the declaration or find the call sites — the two
+        // questions a chat session actually starts with.
+        let names = tool_names();
+        assert!(names.contains(&"kg_explore"), "{names:?}");
+        assert!(names.contains(&"kg_callers"), "{names:?}");
+        // The other half of an edit: what the function calls, where it lives,
+        // and every mention. Without these a signature change is half-blind.
+        assert!(names.contains(&"kg_callees"), "{names:?}");
+        assert!(names.contains(&"kg_def"), "{names:?}");
+        assert!(names.contains(&"kg_refs"), "{names:?}");
+        assert!(matches!(
+            verb_for("kg_callees", &json!({ "symbol": "Globe" })),
+            Ok(Verb::Kg(KgArgs {
+                action: KgCommand::Callees { .. }
+            }))
+        ));
+        assert!(matches!(
+            verb_for("kg_def", &json!({ "symbol": "Globe" })),
+            Ok(Verb::Kg(KgArgs {
+                action: KgCommand::Def { .. }
+            }))
+        ));
+        assert!(matches!(
+            verb_for("kg_refs", &json!({ "symbol": "Globe" })),
+            Ok(Verb::Kg(KgArgs {
+                action: KgCommand::Refs { .. }
+            }))
+        ));
+
+        let explored = verb_for("kg_explore", &json!({ "symbol": "Globe" }));
+        assert!(matches!(
+            explored,
+            Ok(Verb::Kg(KgArgs {
+                action: KgCommand::Explore { .. }
+            }))
+        ));
+        let callers = verb_for("kg_callers", &json!({ "symbol": "Globe" }));
+        assert!(matches!(
+            callers,
+            Ok(Verb::Kg(KgArgs {
+                action: KgCommand::Callers { .. }
+            }))
+        ));
+    }
+
+    #[test]
     fn every_offered_tool_has_an_implementation_behind_it() {
         let input = json!({
             "query": "q", "name": "n", "symbol": "s", "at": "2026-01-01",
@@ -1518,6 +1945,8 @@ mod tests {
             "vault_recall",
             "vault_history",
             "kg_impact",
+            "kg_explore",
+            "kg_callers",
             "read_file",
             "kg_status",
         ] {
@@ -1625,6 +2054,13 @@ mod tests {
             "the longest prefix wins, so a mini model is not billed as its parent"
         );
         assert!(builtin_price("a-local-model").is_none());
+        assert_eq!(
+            builtin_price("anthropic/claude-sonnet-4.5")
+                .unwrap()
+                .input_per_mtok,
+            3.0,
+            "a gateway's vendor prefix does not hide the price"
+        );
     }
 
     fn test_context(root: &Path) -> crate::context::AppContext {
@@ -1645,7 +2081,7 @@ mod tests {
 
     #[test]
     fn both_wire_shapes_advertise_the_same_tool_names() {
-        for kind in [Kind::Anthropic, Kind::OpenAi, Kind::Memnoth] {
+        for kind in [Kind::Anthropic, Kind::OpenAi, Kind::Memnoth, Kind::Kilo] {
             let tools = wire_tools(kind);
             let names: Vec<&str> = tools
                 .as_array()
@@ -1653,7 +2089,9 @@ mod tests {
                 .iter()
                 .map(|tool| match kind {
                     Kind::Anthropic => tool["name"].as_str().unwrap(),
-                    Kind::OpenAi | Kind::Memnoth => tool["function"]["name"].as_str().unwrap(),
+                    Kind::OpenAi | Kind::Memnoth | Kind::Kilo => {
+                        tool["function"]["name"].as_str().unwrap()
+                    }
                 })
                 .collect();
             assert_eq!(names, tool_names());
