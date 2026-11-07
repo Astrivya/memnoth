@@ -126,6 +126,11 @@ fn settings(kind: Kind, base_url: &str) -> Settings {
         max_tokens: 128,
         api_key: Some("test-key".into()),
         pricing: None,
+        provider_name: None,
+        temperature: None,
+        top_p: None,
+        reasoning_effort: None,
+        key_source: Some("test".into()),
     }
 }
 
