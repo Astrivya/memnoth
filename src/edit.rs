@@ -39,6 +39,9 @@ pub const PREVIEW_LINES: usize = 14;
 pub struct Preview {
     /// Where the write will land, absolute.
     pub path: PathBuf,
+    /// The canonical directory `path` was resolved in, re-checked at write time
+    /// so a parent swapped for a symlink after the preview cannot redirect it.
+    pub parent: PathBuf,
     /// The same path relative to the workspace, for the screen.
     pub display: String,
     /// The file before the change (empty when it is being created).
@@ -55,6 +58,9 @@ pub struct Preview {
 
 impl Preview {
     /// The text a confirmation box shows: what, where, and the change.
+    ///
+    /// Both sides, not a line count. "1 line(s) → 1" is a change nobody can
+    /// judge, and a person who cannot judge a prompt learns to press `y`.
     pub fn confirmation(&self) -> String {
         let verb = if self.created { "create" } else { "edit" };
         let mut out = format!(
@@ -67,20 +73,113 @@ impl Preview {
             }
             return out;
         }
-        let removed = self.before.lines().count();
-        let added = self.after.lines().count();
-        let _ = (removed, added);
-        out.push_str(&format!(
-            "\n{} → {} bytes\n",
-            self.before.len(),
-            self.after.len()
-        ));
-        out.push_str(&format!(
-            "- {} line(s)\n+ {} line(s)",
-            self.removed, self.added
-        ));
+        out.push_str(&hunk(&self.before, &self.after, PREVIEW_LINES).text());
         out
     }
+}
+
+/// The part of a change a person needs to see.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Hunk {
+    context_before: Vec<String>,
+    removed: Vec<String>,
+    added: Vec<String>,
+    context_after: Vec<String>,
+    removed_elided: usize,
+    added_elided: usize,
+}
+
+impl Hunk {
+    /// Render as a diff: `  ` for context, `-` and `+` for the change.
+    fn text(&self) -> String {
+        let mut out = String::new();
+        for line in &self.context_before {
+            out.push_str(&format!("  {line}\n"));
+        }
+        for line in &self.removed {
+            out.push_str(&format!("- {line}\n"));
+        }
+        if self.removed_elided > 0 {
+            out.push_str(&format!(
+                "… ({} more line(s) removed)\n",
+                self.removed_elided
+            ));
+        }
+        for line in &self.added {
+            out.push_str(&format!("+ {line}\n"));
+        }
+        if self.added_elided > 0 {
+            out.push_str(&format!("… ({} more line(s) added)\n", self.added_elided));
+        }
+        for line in &self.context_after {
+            out.push_str(&format!("  {line}\n"));
+        }
+        out
+    }
+}
+
+/// The differing block of two texts, with a little context on each side.
+///
+/// A common prefix and suffix are trimmed first, so a one-line change in a
+/// thousand-line file does not turn the confirmation into the file. Each side is
+/// clipped to `limit` lines, and the remainder is counted rather than hidden.
+fn hunk(before: &str, after: &str, limit: usize) -> Hunk {
+    const CONTEXT: usize = 2;
+    let old: Vec<&str> = before.lines().collect();
+    let new: Vec<&str> = after.lines().collect();
+
+    let mut prefix = 0;
+    while prefix < old.len() && prefix < new.len() && old[prefix] == new[prefix] {
+        prefix += 1;
+    }
+    let mut suffix = 0;
+    while suffix < old.len() - prefix
+        && suffix < new.len() - prefix
+        && old[old.len() - 1 - suffix] == new[new.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+
+    let start = prefix.saturating_sub(CONTEXT);
+    let context_before = old[start..prefix]
+        .iter()
+        .take(CONTEXT)
+        .map(|line| line.to_string())
+        .collect();
+
+    let old_change: Vec<String> = old[prefix..old.len() - suffix]
+        .iter()
+        .map(|line| line.to_string())
+        .collect();
+    let new_change: Vec<String> = new[prefix..new.len() - suffix]
+        .iter()
+        .map(|line| line.to_string())
+        .collect();
+
+    let context_after = old[old.len() - suffix..(old.len() - suffix + CONTEXT).min(old.len())]
+        .iter()
+        .map(|line| line.to_string())
+        .collect();
+
+    let (removed, removed_elided) = clip(old_change, limit);
+    let (added, added_elided) = clip(new_change, limit);
+
+    Hunk {
+        context_before,
+        removed,
+        added,
+        context_after,
+        removed_elided,
+        added_elided,
+    }
+}
+
+fn clip(lines: Vec<String>, limit: usize) -> (Vec<String>, usize) {
+    if lines.len() <= limit {
+        return (lines, 0);
+    }
+    let elided = lines.len() - limit;
+    (lines.into_iter().take(limit).collect(), elided)
 }
 
 fn clip_lines(text: &str, limit: usize) -> Vec<String> {
@@ -139,7 +238,24 @@ pub fn resolve(root: &Path, relative: &str) -> Result<PathBuf> {
     let name = path
         .file_name()
         .with_context(|| format!("{trimmed} does not name a file"))?;
-    Ok(parent.join(name))
+    let resolved = parent.join(name);
+
+    // Canonicalising the parent is not enough on its own: `src/link` may be a
+    // symlink *file* that points at `/etc/passwd`, and a read would follow it.
+    // The target is checked too, so reading and writing agree that the path
+    // lands inside the workspace.
+    if resolved.exists() {
+        let target = resolved
+            .canonicalize()
+            .with_context(|| format!("{trimmed} cannot be resolved"))?;
+        if !target.starts_with(&canonical_root) {
+            bail!(
+                "{trimmed} resolves outside the workspace ({}), so it is refused",
+                target.display()
+            );
+        }
+    }
+    Ok(resolved)
 }
 
 /// Read a file for the model, optionally a line range.
@@ -184,6 +300,10 @@ pub fn read(
 /// "replace this file entirely" is too large to infer from an empty string.
 pub fn preview_edit(root: &Path, relative: &str, old: &str, new: &str) -> Result<Preview> {
     let path = resolve(root, relative)?;
+    let parent = path
+        .parent()
+        .map(Path::to_path_buf)
+        .with_context(|| format!("{relative} does not name a file in a directory"))?;
 
     if new.len() as u64 > MAX_FILE_BYTES {
         bail!("the new content is larger than {MAX_FILE_BYTES} bytes");
@@ -199,6 +319,7 @@ pub fn preview_edit(root: &Path, relative: &str, old: &str, new: &str) -> Result
         }
         return Ok(Preview {
             path,
+            parent,
             display: relative.trim().to_string(),
             before: String::new(),
             after: new.to_string(),
@@ -234,6 +355,7 @@ pub fn preview_edit(root: &Path, relative: &str, old: &str, new: &str) -> Result
 
     Ok(Preview {
         path,
+        parent,
         display: relative.trim().to_string(),
         before,
         after,
@@ -244,7 +366,51 @@ pub fn preview_edit(root: &Path, relative: &str, old: &str, new: &str) -> Result
 }
 
 /// Write a previewed change. The caller must have confirmed it first.
+///
+/// The confirmation is the last word, so what is written has to still be what
+/// was confirmed. Three things are re-checked here rather than trusted from the
+/// preview, because a prompt gives another process time to move things:
+///
+/// 1. the directory still resolves inside the workspace — a parent swapped for a
+///    symlink after the preview would otherwise redirect the write;
+/// 2. the target is not a symlink — writing through one leaves the workspace;
+/// 3. the file still holds the text the preview was computed from — a second
+///    writer would otherwise be silently overwritten by a change that was
+///    approved against the old file.
 pub fn apply(preview: &Preview) -> Result<String> {
+    let parent = preview
+        .path
+        .parent()
+        .with_context(|| format!("{} has no directory", preview.path.display()))?
+        .canonicalize()
+        .with_context(|| format!("{} does not exist", preview.path.display()))?;
+    if parent != preview.parent {
+        bail!(
+            "{} moved while the change was being confirmed; nothing was written",
+            preview.display
+        );
+    }
+    if preview.path.exists()
+        && std::fs::symlink_metadata(&preview.path)
+            .map(|meta| meta.file_type().is_symlink())
+            .unwrap_or(false)
+    {
+        bail!(
+            "{} is a symlink, and a write through it would land outside the workspace; \
+             nothing was written",
+            preview.display
+        );
+    }
+    if !preview.created {
+        let current = read_utf8(&preview.path)?;
+        if current != preview.before {
+            bail!(
+                "{} changed while the change was being confirmed; nothing was written",
+                preview.display
+            );
+        }
+    }
+
     std::fs::write(&preview.path, &preview.after)
         .with_context(|| format!("cannot write {}", preview.path.display()))?;
     if preview.created {
@@ -312,6 +478,57 @@ mod tests {
     }
 
     #[test]
+    fn the_confirmation_shows_both_sides_of_the_change() {
+        let (root, _guard) = workspace();
+        std::fs::write(root.join("a.txt"), "one\ntwo\nthree\n").unwrap();
+
+        let preview = preview_edit(&root, "a.txt", "two", "TWO").unwrap();
+        let box_text = preview.confirmation();
+        assert!(box_text.contains("- two"), "{box_text}");
+        assert!(box_text.contains("+ TWO"), "{box_text}");
+        // Context, so a person can see where the change lands.
+        assert!(box_text.contains("  one"), "{box_text}");
+        assert!(box_text.contains("  three"), "{box_text}");
+    }
+
+    #[test]
+    fn a_long_change_is_clipped_and_says_how_much_it_left_out() {
+        let before = (0..40)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let after = (0..40)
+            .map(|i| format!("changed {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let hunk = hunk(&before, &after, PREVIEW_LINES);
+        assert_eq!(hunk.removed.len(), PREVIEW_LINES);
+        assert_eq!(hunk.removed_elided, 40 - PREVIEW_LINES);
+
+        let text = hunk.text();
+        assert!(text.contains("more line(s) removed"), "{text}");
+        assert!(text.contains("more line(s) added"), "{text}");
+    }
+
+    #[test]
+    fn a_file_that_changed_after_the_preview_is_not_overwritten() {
+        let (root, _guard) = workspace();
+        let path = root.join("a.txt");
+        std::fs::write(&path, "before\n").unwrap();
+
+        let preview = preview_edit(&root, "a.txt", "before", "after").unwrap();
+        // Something else writes between the confirmation and the write.
+        std::fs::write(&path, "someone else\n").unwrap();
+
+        let error = apply(&preview).unwrap_err().to_string();
+        assert!(
+            error.contains("changed while the change was being confirmed"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "someone else\n");
+    }
+
+    #[test]
     fn an_ambiguous_snippet_is_refused_rather_than_guessed() {
         let (root, _guard) = workspace();
         std::fs::write(root.join("a.txt"), "same\nsame\n").unwrap();
@@ -369,6 +586,22 @@ mod tests {
         assert!(error.contains("tool state"), "{error}");
         let error = resolve(&root, ".memnoth/graph.db").unwrap_err().to_string();
         assert!(error.contains("tool state"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_file_cannot_be_read_out_of_the_workspace() {
+        // The parent canonicalises to the workspace, so only the target check
+        // stands between the agent and a file that is not in the tree.
+        let (root, _guard) = workspace();
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("secret.txt");
+        std::fs::write(&secret, "not yours\n").unwrap();
+        std::os::unix::fs::symlink(&secret, root.join("link.txt")).unwrap();
+
+        let error = read(&root, "link.txt", None, None).unwrap_err().to_string();
+        assert!(error.contains("outside the workspace"), "{error}");
+        assert!(resolve(&root, "link.txt").is_err());
     }
 
     #[test]
