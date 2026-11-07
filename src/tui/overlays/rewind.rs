@@ -1,4 +1,15 @@
-//! Rewind overlay: navigate session history, replay turns, branch from points.
+//! `/rewind`: the sessions on this machine, and the turns of this one.
+//!
+//! Both lists are reads of things that exist: `SessionStore::list` is the same
+//! listing `memnoth session list` prints, and the Turns tab is this session's
+//! own transcript, already on screen.
+//!
+//! What was removed, and why: a Checkpoints tab (nothing creates a checkpoint,
+//! so every row in it was invented), a Branches tab (same), and the resume /
+//! delete / pin / copy keys (no key here could perform them — deleting a
+//! session file from a picker with no confirmation is the opposite of safe).
+//! Switching sessions is `memnoth --resume <name>`: a process cannot swap the
+//! session it is recording, so the screen says that instead of pretending.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
@@ -7,7 +18,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap};
 
-use crate::tui::app::App;
+use crate::session::SessionStore;
+use crate::tui::app::{App, EntryRole};
 use crate::tui::overlays::{Overlay, OverlayAction, OverlayKind};
 
 #[derive(Debug, Default)]
@@ -15,57 +27,39 @@ pub struct RewindOverlay {
     visible: bool,
     tabs: Vec<RewindTab>,
     active_tab: usize,
+    /// Sessions on disk, newest first.
     sessions: Vec<SessionEntry>,
+    /// This session's transcript, oldest first.
     turns: Vec<TurnEntry>,
-    checkpoints: Vec<CheckpointEntry>,
+    /// Why a list is empty, when the reason is worth saying.
+    note: Option<String>,
     selected: usize,
     list_state: ListState,
     detail_view: bool,
     detail_content: String,
-    mode: RewindMode,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-enum RewindMode {
-    #[default]
-    Browse,
-    ConfirmBranch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RewindTab {
     Sessions,
     Turns,
-    Checkpoints,
-    Branches,
 }
 
 #[derive(Debug, Clone)]
 struct SessionEntry {
     name: String,
+    model: String,
     created: String,
-    last_active: String,
     message_count: usize,
+    path: String,
     is_current: bool,
-}
-
-#[derive(Debug, Clone)]
-struct CheckpointEntry {
-    id: String,
-    timestamp: String,
-    label: String,
-    turn_count: usize,
-    token_count: u32,
 }
 
 #[derive(Debug, Clone)]
 struct TurnEntry {
     index: usize,
-    timestamp: String,
-    role: String,
-    preview: String,
-    tokens: Option<u32>,
-    cost: Option<f64>,
+    role: &'static str,
+    text: String,
 }
 
 impl RewindOverlay {
@@ -73,12 +67,7 @@ impl RewindOverlay {
         let mut state = ListState::default();
         state.select(Some(0));
         Self {
-            tabs: vec![
-                RewindTab::Sessions,
-                RewindTab::Turns,
-                RewindTab::Checkpoints,
-                RewindTab::Branches,
-            ],
+            tabs: vec![RewindTab::Sessions, RewindTab::Turns],
             list_state: state,
             ..Default::default()
         }
@@ -93,119 +82,132 @@ impl RewindOverlay {
             .unwrap_or(RewindTab::Sessions)
     }
 
-    fn load_mock_data(&mut self) {
-        self.sessions = vec![
-            SessionEntry {
-                name: "session".to_string(),
-                created: "2024-01-15 10:00".to_string(),
-                last_active: "2m ago".to_string(),
-                message_count: 42,
-                is_current: true,
-            },
-            SessionEntry {
-                name: "feature-auth".to_string(),
-                created: "2024-01-14 14:30".to_string(),
-                last_active: "1d ago".to_string(),
-                message_count: 18,
-                is_current: false,
-            },
-            SessionEntry {
-                name: "bugfix-search".to_string(),
-                created: "2024-01-13 09:15".to_string(),
-                last_active: "2d ago".to_string(),
-                message_count: 7,
-                is_current: false,
-            },
-        ];
+    /// Read the sessions on disk and this session's transcript.
+    fn load(&mut self, app: &App) {
+        self.note = None;
 
-        self.turns = vec![
-            TurnEntry {
-                index: 41,
-                timestamp: "14:32".to_string(),
-                role: "assistant".to_string(),
-                preview: "Implemented the search overlay with vault and graph results".to_string(),
-                tokens: Some(1240),
-                cost: Some(0.0024),
-            },
-            TurnEntry {
-                index: 40,
-                timestamp: "14:31".to_string(),
-                role: "user".to_string(),
-                preview: "/search event sourcing architecture".to_string(),
-                tokens: None,
-                cost: None,
-            },
-            TurnEntry {
-                index: 39,
-                timestamp: "14:30".to_string(),
-                role: "assistant".to_string(),
-                preview: "Created decision: use event sourcing for session replay".to_string(),
-                tokens: Some(890),
-                cost: Some(0.0018),
-            },
-            TurnEntry {
-                index: 38,
-                timestamp: "14:29".to_string(),
-                role: "user".to_string(),
-                preview: "/vault remember architecture --kind decision \"Use event sourcing...\""
-                    .to_string(),
-                tokens: None,
-                cost: None,
-            },
-            TurnEntry {
-                index: 37,
-                timestamp: "14:25".to_string(),
-                role: "assistant".to_string(),
-                preview: "Refactored the diff viewer to use memnoth-ui DiffViewer widget"
-                    .to_string(),
-                tokens: Some(2100),
-                cost: Some(0.0042),
-            },
-        ];
-    }
+        match app.ctx.as_ref() {
+            Some(ctx) => {
+                let store = SessionStore::new(&ctx.sessions_dir);
+                self.sessions = store
+                    .list()
+                    .into_iter()
+                    .map(|summary| SessionEntry {
+                        is_current: summary.name == app.name,
+                        created: chrono::DateTime::<chrono::Utc>::from_timestamp_millis(
+                            summary.created_ms,
+                        )
+                        .map(|when| when.format("%Y-%m-%d %H:%M UTC").to_string())
+                        .unwrap_or_else(|| "unknown".to_string()),
+                        name: summary.name,
+                        model: summary.model,
+                        message_count: summary.messages,
+                        path: summary.path,
+                    })
+                    .collect();
+            }
+            None => {
+                self.sessions.clear();
+                self.note = Some(
+                    "no workspace context — the session list lives under the workspace's sessions \
+                     directory"
+                        .to_string(),
+                );
+            }
+        }
 
-    fn render_checkpoints(&mut self, frame: &mut Frame, area: Rect) {
-        let items: Vec<ListItem> = self
-            .checkpoints
+        // This session's own transcript: the same rows the pane is drawing.
+        self.turns = app
+            .entries
             .iter()
             .enumerate()
-            .map(|(i, c)| {
-                let selected = i == self.selected;
-                let style = if selected {
-                    Style::default()
-                        .bg(Color::Blue)
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                };
-
-                let lines = vec![
-                    Line::from(vec![
-                        Span::styled(&c.id, style),
-                        Span::styled(format!("  {}", c.label), style.fg(Color::Cyan)),
-                        Span::styled(
-                            format!("  {} turns, {} tok", c.turn_count, c.token_count),
-                            style.fg(Color::DarkGray),
-                        ),
-                    ]),
-                    Line::from(vec![
-                        Span::styled("    ", Style::default()),
-                        Span::styled(&c.timestamp, style.fg(Color::Gray)),
-                    ]),
-                ];
-                ListItem::new(lines).style(style)
+            .map(|(index, entry)| TurnEntry {
+                index,
+                role: match entry.role {
+                    EntryRole::User => "you",
+                    EntryRole::Answer => "answer",
+                    EntryRole::Error => "error",
+                    EntryRole::Info => "info",
+                    EntryRole::Tool => "tool",
+                    EntryRole::ToolDone => "tool done",
+                },
+                text: entry.text.clone(),
             })
             .collect();
 
-        let list = List::new(items)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Checkpoints "),
-            )
-            .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
-        frame.render_stateful_widget(list, area, &mut self.list_state);
+        self.clamp();
+    }
+
+    fn rows(&self) -> usize {
+        match self.tab() {
+            RewindTab::Sessions => self.sessions.len(),
+            RewindTab::Turns => self.turns.len(),
+        }
+    }
+
+    fn clamp(&mut self) {
+        let len = self.rows();
+        if len == 0 {
+            self.selected = 0;
+            self.list_state.select(None);
+        } else {
+            self.selected = self.selected.min(len - 1);
+            self.list_state.select(Some(self.selected));
+        }
+    }
+
+    fn select(&mut self, index: usize) {
+        if self.rows() == 0 {
+            return;
+        }
+        self.selected = index.min(self.rows() - 1);
+        self.list_state.select(Some(self.selected));
+    }
+
+    fn open_detail(&mut self) {
+        self.detail_view = true;
+        self.detail_content = match self.tab() {
+            RewindTab::Sessions => match self.sessions.get(self.selected) {
+                Some(session) => format!(
+                    "{}\n\nmodel      {}\ncreated    {}\nmessages   {}\nfile       {}\n\n{}",
+                    session.name,
+                    if session.model.is_empty() {
+                        "unknown (the file did not parse)"
+                    } else {
+                        session.model.as_str()
+                    },
+                    session.created,
+                    session.message_count,
+                    session.path,
+                    if session.is_current {
+                        "this is the session you are in."
+                    } else {
+                        "open it from a shell: `mn --resume <name>`.\n\
+                         A session cannot be switched from inside one — the file being \
+                         recorded is this one."
+                    }
+                ),
+                None => "nothing selected".to_string(),
+            },
+            RewindTab::Turns => match self.turns.get(self.selected) {
+                Some(turn) => format!("#{} · {}\n\n{}", turn.index, turn.role, turn.text),
+                None => "nothing selected".to_string(),
+            },
+        };
+    }
+
+    /// A line explaining a screen that has no rows.
+    fn state_text(&self) -> String {
+        if let Some(note) = &self.note {
+            return note.clone();
+        }
+        match self.tab() {
+            RewindTab::Sessions => {
+                "no sessions on disk yet — this one is written when its first answer lands"
+                    .to_string()
+            }
+            RewindTab::Turns => "this session has no turns yet".to_string(),
+        }
     }
 
     fn render_sessions(&mut self, frame: &mut Frame, area: Rect) {
@@ -224,7 +226,7 @@ impl RewindOverlay {
                     Style::default()
                 };
 
-                let current_mark = if s.is_current { " ●" } else { "" };
+                let current_mark = if s.is_current { " ● here" } else { "" };
                 let lines = vec![
                     Line::from(vec![
                         Span::styled(&s.name, style),
@@ -237,7 +239,15 @@ impl RewindOverlay {
                     Line::from(vec![
                         Span::styled("    ", Style::default()),
                         Span::styled(
-                            format!("Created: {}  Last: {}", s.created, s.last_active),
+                            format!(
+                                "{}  {}",
+                                s.created,
+                                if s.model.is_empty() {
+                                    "unreadable"
+                                } else {
+                                    s.model.as_str()
+                                }
+                            ),
                             style.fg(Color::Gray),
                         ),
                     ]),
@@ -247,7 +257,11 @@ impl RewindOverlay {
             .collect();
 
         let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title(" Sessions "))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!(" Sessions ({}) ", self.sessions.len())),
+            )
             .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
         frame.render_stateful_widget(list, area, &mut self.list_state);
     }
@@ -268,75 +282,36 @@ impl RewindOverlay {
                     Style::default()
                 };
 
-                let role_color = match t.role.as_str() {
-                    "user" => Color::Cyan,
-                    "assistant" => Color::Green,
+                let role_color = match t.role {
+                    "you" => Color::Cyan,
+                    "answer" => Color::Green,
+                    "error" => Color::Red,
                     _ => Color::Gray,
                 };
 
-                let tokens_str = t.tokens.map_or("".to_string(), |v| format!("  {} tok", v));
-                let cost_str = t.cost.map_or("".to_string(), |v| format!("  ${:.4}", v));
-
-                let lines = vec![
-                    Line::from(vec![
-                        Span::styled(
-                            format!("#{} ", t.index),
-                            Style::default().fg(Color::DarkGray),
-                        ),
-                        Span::styled(&t.timestamp, Style::default().fg(Color::Gray)),
-                        Span::styled(
-                            format!("  [{}]", t.role),
-                            Style::default().fg(role_color).add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(tokens_str, style.fg(Color::DarkGray)),
-                        Span::styled(cost_str, style.fg(Color::Yellow)),
-                    ]),
-                    Line::from(vec![
-                        Span::styled("    ", Style::default()),
-                        Span::styled(&t.preview, style.fg(Color::Gray)),
-                    ]),
-                ];
-                ListItem::new(lines).style(style)
-            })
-            .collect();
-
-        let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title(" Turns "))
-            .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
-        frame.render_stateful_widget(list, area, &mut self.list_state);
-    }
-
-    fn render_branches(&mut self, frame: &mut Frame, area: Rect) {
-        let branches = vec![
-            ("main", "feature-auth", "3 turns diverged"),
-            ("main", "bugfix-search", "1 turn diverged"),
-        ];
-
-        let items: Vec<ListItem> = branches
-            .iter()
-            .enumerate()
-            .map(|(i, (base, name, desc))| {
-                let selected = i == self.selected;
-                let style = if selected {
-                    Style::default()
-                        .bg(Color::Blue)
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                };
-
+                // One drawn row per entry: a wrapped line would make the
+                // selection highlight meaningless.
                 let lines = vec![Line::from(vec![
-                    Span::styled(*name, style),
-                    Span::styled(format!("  (from {})", base), style.fg(Color::Cyan)),
-                    Span::styled(format!("  {}", desc), style.fg(Color::DarkGray)),
+                    Span::styled(
+                        format!("#{} ", t.index),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled(
+                        format!("[{}] ", t.role),
+                        Style::default().fg(role_color).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(ellipsize(&t.text, 100), style.fg(Color::Gray)),
                 ])];
                 ListItem::new(lines).style(style)
             })
             .collect();
 
         let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title(" Branches "))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!(" This Session's Turns ({}) ", self.turns.len())),
+            )
             .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
         frame.render_stateful_widget(list, area, &mut self.list_state);
     }
@@ -353,12 +328,15 @@ impl Overlay for RewindOverlay {
 
     fn show(&mut self) {
         self.visible = true;
-        self.load_mock_data();
         self.active_tab = 0;
         self.selected = 0;
-        self.list_state.select(Some(0));
         self.detail_view = false;
-        self.mode = RewindMode::Browse;
+        self.detail_content.clear();
+    }
+
+    /// Reading needs the app: the session's paths and its transcript.
+    fn on_open(&mut self, app: &mut App) {
+        self.load(app);
     }
 
     fn hide(&mut self) {
@@ -373,26 +351,6 @@ impl Overlay for RewindOverlay {
 
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
-        // Handle confirmation mode
-        if self.mode == RewindMode::ConfirmBranch {
-            match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                    app.push(
-                        crate::tui::app::EntryRole::Info,
-                        "Branched from selected turn".to_string(),
-                    );
-                    self.mode = RewindMode::Browse;
-                    self.detail_view = false;
-                }
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                    self.mode = RewindMode::Browse;
-                    self.detail_view = false;
-                }
-                _ => {}
-            }
-            return OverlayAction::None;
-        }
-
         match key.code {
             KeyCode::Esc => {
                 if self.detail_view {
@@ -403,211 +361,60 @@ impl Overlay for RewindOverlay {
                 }
             }
             KeyCode::Tab => {
-                if !self.detail_view {
+                if !self.detail_view && !self.tabs.is_empty() {
                     self.active_tab = (self.active_tab + 1) % self.tabs.len();
                     self.selected = 0;
-                    self.list_state.select(Some(0));
+                    self.clamp();
                 }
             }
             KeyCode::BackTab => {
-                if !self.detail_view {
+                if !self.detail_view && !self.tabs.is_empty() {
                     self.active_tab = (self.active_tab + self.tabs.len() - 1) % self.tabs.len();
                     self.selected = 0;
-                    self.list_state.select(Some(0));
+                    self.clamp();
                 }
             }
             KeyCode::Up => {
                 if !self.detail_view && self.selected > 0 {
-                    self.selected -= 1;
-                    self.list_state.select(Some(self.selected));
+                    self.select(self.selected - 1);
                 }
             }
             KeyCode::Down => {
-                if !self.detail_view {
-                    let len = match self.tab() {
-                        RewindTab::Sessions => self.sessions.len(),
-                        RewindTab::Turns => self.turns.len(),
-                        RewindTab::Checkpoints => self.checkpoints.len(),
-                        RewindTab::Branches => 0,
-                    };
-                    if self.selected + 1 < len {
-                        self.selected += 1;
-                        self.list_state.select(Some(self.selected));
-                    }
+                if !self.detail_view && self.selected + 1 < self.rows() {
+                    self.select(self.selected + 1);
                 }
             }
             KeyCode::PageUp => {
                 if !self.detail_view {
-                    self.selected = self.selected.saturating_sub(10);
-                    self.list_state.select(Some(self.selected));
+                    self.select(self.selected.saturating_sub(10));
                 }
             }
             KeyCode::PageDown => {
                 if !self.detail_view {
-                    let len = match self.tab() {
-                        RewindTab::Sessions => self.sessions.len(),
-                        RewindTab::Turns => self.turns.len(),
-                        RewindTab::Checkpoints => self.checkpoints.len(),
-                        RewindTab::Branches => 0,
-                    };
-                    self.selected = (self.selected + 10).min(len.saturating_sub(1));
-                    self.list_state.select(Some(self.selected));
+                    self.select(self.selected.saturating_add(10));
                 }
             }
             KeyCode::Home => {
                 if !self.detail_view {
-                    self.selected = 0;
-                    self.list_state.select(Some(0));
+                    self.select(0);
                 }
             }
             KeyCode::End => {
                 if !self.detail_view {
-                    let len = match self.tab() {
-                        RewindTab::Sessions => self.sessions.len(),
-                        RewindTab::Turns => self.turns.len(),
-                        RewindTab::Checkpoints => self.checkpoints.len(),
-                        RewindTab::Branches => 0,
-                    };
-                    self.selected = len.saturating_sub(1);
-                    self.list_state.select(Some(self.selected));
+                    self.select(self.rows().saturating_sub(1));
                 }
             }
             KeyCode::Enter => {
                 if !self.detail_view {
-                    match self.tab() {
-                        RewindTab::Sessions => {
-                            if let Some(s) = self.sessions.get(self.selected) {
-                                if !s.is_current {
-                                    app.push(
-                                        crate::tui::app::EntryRole::Info,
-                                        format!("Resuming session: {}", s.name),
-                                    );
-                                    return OverlayAction::Close;
-                                }
-                            }
-                        }
-                        RewindTab::Turns => {
-                            self.detail_view = true;
-                            if let Some(t) = self.turns.get(self.selected) {
-                                self.detail_content = format!(
-                                    "Turn #{}\nTime: {}\nRole: {}\nTokens: {}\nCost: ${:.4}\n\n{}",
-                                    t.index,
-                                    t.timestamp,
-                                    t.role,
-                                    t.tokens.map_or("N/A".to_string(), |v| v.to_string()),
-                                    t.cost.unwrap_or(0.0),
-                                    t.preview
-                                );
-                            }
-                        }
-                        RewindTab::Checkpoints => {
-                            self.detail_view = true;
-                            if let Some(c) = self.checkpoints.get(self.selected) {
-                                self.detail_content = format!(
-                                    "Checkpoint: {}\nLabel: {}\nTime: {}\nTurns: {}\nTokens: {}",
-                                    c.id, c.label, c.timestamp, c.turn_count, c.token_count
-                                );
-                            }
-                        }
-                        _ => {}
-                    }
+                    self.open_detail();
                 }
             }
-            KeyCode::Char('b') => {
-                // Branch from current turn
-                if !self.detail_view && self.tab() == RewindTab::Turns {
-                    self.mode = RewindMode::ConfirmBranch;
-                    self.detail_view = true;
-                    if let Some(t) = self.turns.get(self.selected) {
-                        self.detail_content = format!(
-                            "Branch from turn #{}?\n\nThis will create a new session starting from this point.\n\ny: confirm · n: cancel",
-                            t.index
-                        );
-                    }
-                }
-            }
-            KeyCode::Char('c') if ctrl => {
-                // Copy
-                if !self.detail_view {
-                    match self.tab() {
-                        RewindTab::Sessions => {
-                            if let Some(s) = self.sessions.get(self.selected) {
-                                app.push(
-                                    crate::tui::app::EntryRole::Info,
-                                    format!("Copied session: {}", s.name),
-                                );
-                            }
-                        }
-                        RewindTab::Turns => {
-                            if let Some(t) = self.turns.get(self.selected) {
-                                app.push(
-                                    crate::tui::app::EntryRole::Info,
-                                    format!("Copied turn #{}", t.index),
-                                );
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            KeyCode::Char('p') => {
-                // Pin
-                if !self.detail_view {
-                    match self.tab() {
-                        RewindTab::Sessions => {
-                            if let Some(s) = self.sessions.get(self.selected) {
-                                app.push(
-                                    crate::tui::app::EntryRole::Info,
-                                    format!("Pinned session: {}", s.name),
-                                );
-                            }
-                        }
-                        RewindTab::Turns => {
-                            if let Some(t) = self.turns.get(self.selected) {
-                                app.push(
-                                    crate::tui::app::EntryRole::Info,
-                                    format!("Pinned turn #{}", t.index),
-                                );
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            KeyCode::Char('r') => {
-                // Resume session
-                if !self.detail_view && self.tab() == RewindTab::Sessions {
-                    if let Some(s) = self.sessions.get(self.selected) {
-                        if !s.is_current {
-                            app.push(
-                                crate::tui::app::EntryRole::Info,
-                                format!("Resuming session: {}", s.name),
-                            );
-                            return OverlayAction::Close;
-                        }
-                    }
-                }
-            }
-            KeyCode::Char('d') => {
-                // Delete session
-                if !self.detail_view && self.tab() == RewindTab::Sessions {
-                    if let Some(s) = self.sessions.get(self.selected) {
-                        if !s.is_current {
-                            app.push(
-                                crate::tui::app::EntryRole::Info,
-                                format!("Deleted session: {}", s.name),
-                            );
-                            self.sessions.remove(self.selected);
-                            self.selected =
-                                self.selected.min(self.sessions.len().saturating_sub(1));
-                            self.list_state.select(if self.sessions.is_empty() {
-                                None
-                            } else {
-                                Some(self.selected)
-                            });
-                        }
-                    }
-                }
+            // `r` rereads both lists. The screen changing is the answer; a
+            // transcript line for every press would be noise.
+            KeyCode::Char('r') if !ctrl => {
+                self.load(app);
+                self.detail_view = false;
+                self.detail_content.clear();
             }
             _ => {}
         }
@@ -630,15 +437,12 @@ impl Overlay for RewindOverlay {
             ])
             .split(area);
 
-        // Tabs
         let tab_titles: Vec<&str> = self
             .tabs
             .iter()
             .map(|t| match t {
                 RewindTab::Sessions => "Sessions",
                 RewindTab::Turns => "Turns",
-                RewindTab::Checkpoints => "Checkpoints",
-                RewindTab::Branches => "Branches",
             })
             .collect();
         let tabs = Tabs::new(tab_titles)
@@ -652,40 +456,36 @@ impl Overlay for RewindOverlay {
             );
         frame.render_widget(tabs, chunks[0]);
 
-        // Content
         if self.detail_view {
             let detail = Paragraph::new(self.detail_content.clone())
                 .style(Style::default().fg(Color::White))
                 .block(Block::default().borders(Borders::ALL).title(" Detail "))
-                .wrap(Wrap { trim: true });
+                .wrap(Wrap { trim: false });
             frame.render_widget(detail, chunks[1]);
+        } else if self.rows() == 0 {
+            let note = Paragraph::new(self.state_text())
+                .style(Style::default().fg(Color::Gray))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(match self.tab() {
+                            RewindTab::Sessions => " Sessions ",
+                            RewindTab::Turns => " This Session's Turns ",
+                        }),
+                )
+                .wrap(Wrap { trim: true });
+            frame.render_widget(note, chunks[1]);
         } else {
             match self.tab() {
                 RewindTab::Sessions => self.render_sessions(frame, chunks[1]),
                 RewindTab::Turns => self.render_turns(frame, chunks[1]),
-                RewindTab::Checkpoints => self.render_checkpoints(frame, chunks[1]),
-                RewindTab::Branches => self.render_branches(frame, chunks[1]),
             }
         }
 
-        // Help footer
-        let help_text = if self.mode == RewindMode::ConfirmBranch {
-            "y: confirm branch · n/esc: cancel"
-        } else if self.detail_view {
-            "esc: back · c: copy · p: pin · b: branch from turn"
+        let help_text = if self.detail_view {
+            "esc: back"
         } else {
-            match self.tab() {
-                RewindTab::Sessions => {
-                    "↑↓: navigate · enter: resume · r: resume · d: delete · c: copy · p: pin · tab: next tab · esc: close"
-                }
-                RewindTab::Turns => {
-                    "↑↓: navigate · enter: detail · b: branch · c: copy · p: pin · tab: next tab · esc: close"
-                }
-                RewindTab::Checkpoints => {
-                    "↑↓: navigate · enter: detail · c: copy · tab: next tab · esc: close"
-                }
-                RewindTab::Branches => "tab: next tab · esc: close",
-            }
+            "↑↓: move · enter: detail · tab: next tab · r: reread · esc: close"
         };
         let help = Paragraph::new(help_text)
             .style(Style::default().fg(Color::DarkGray))
@@ -695,19 +495,94 @@ impl Overlay for RewindOverlay {
 
     fn help_text(&self) -> Vec<(&'static str, &'static str)> {
         vec![
-            ("/rewind", "Open rewind overlay"),
-            ("Tab", "Switch tabs (Sessions/Turns/Checkpoints/Branches)"),
-            ("↑/↓", "Navigate"),
-            (
-                "Enter",
-                "Resume session / View turn detail / View checkpoint detail",
-            ),
-            ("B", "Branch from selected turn"),
-            ("R", "Resume session"),
-            ("D", "Delete session"),
-            ("Ctrl+C", "Copy entry"),
-            ("P", "Pin entry"),
-            ("Esc", "Close overlay"),
+            ("/rewind", "Sessions on disk, and this session's turns"),
+            ("Tab / Shift+Tab", "Switch Sessions / Turns"),
+            ("↑/↓", "Move"),
+            ("Enter", "Detail"),
+            ("R", "Reread"),
+            ("Esc", "Close / back from detail"),
         ]
+    }
+}
+
+/// One drawn line, cut to the pane's width.
+fn ellipsize(text: &str, max: usize) -> String {
+    let line = text.lines().next().unwrap_or("").trim();
+    if line.chars().count() <= max {
+        return line.to_string();
+    }
+    let mut out: String = line.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn turn(index: usize, role: &'static str, text: &str) -> TurnEntry {
+        TurnEntry {
+            index,
+            role,
+            text: text.to_string(),
+        }
+    }
+
+    #[test]
+    fn only_the_tabs_this_overlay_can_fill_exist() {
+        let overlay = RewindOverlay::new();
+        assert_eq!(
+            overlay.tabs,
+            vec![RewindTab::Sessions, RewindTab::Turns],
+            "checkpoints and branches were invented by the old screen"
+        );
+    }
+
+    #[test]
+    fn an_empty_session_list_is_words_not_an_empty_table() {
+        let overlay = RewindOverlay::new();
+        assert!(overlay.state_text().contains("no sessions on disk"));
+    }
+
+    /// The overlay opens on Sessions — the tab with rows a person can act on —
+    /// so a test about turns has to say which tab it is looking at.
+    fn on_turns(turns: Vec<TurnEntry>) -> RewindOverlay {
+        let mut overlay = RewindOverlay::new();
+        overlay.active_tab = overlay
+            .tabs
+            .iter()
+            .position(|tab| *tab == RewindTab::Turns)
+            .expect("a Turns tab exists");
+        overlay.turns = turns;
+        overlay.clamp();
+        overlay
+    }
+
+    #[test]
+    fn turns_come_from_the_transcript_that_is_on_screen() {
+        let mut overlay = on_turns(vec![
+            turn(0, "you", "/help"),
+            turn(1, "answer", "the commands are below"),
+        ]);
+        overlay.select(1);
+        overlay.open_detail();
+        assert!(overlay.detail_view);
+        assert!(overlay.detail_content.contains("the commands are below"));
+        assert!(overlay.detail_content.contains("answer"));
+    }
+
+    #[test]
+    fn selection_stops_at_the_last_row() {
+        let mut overlay = on_turns(vec![turn(0, "you", "a"), turn(1, "you", "b")]);
+        overlay.select(7);
+        assert_eq!(overlay.selected, 1);
+        overlay.select(0);
+        assert_eq!(overlay.selected, 0);
+    }
+
+    #[test]
+    fn a_title_with_a_newline_still_draws_one_row() {
+        assert_eq!(ellipsize("first line\nsecond", 40), "first line");
+        assert_eq!(ellipsize("abcdef", 4), "abc…");
     }
 }

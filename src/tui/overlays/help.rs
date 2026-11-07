@@ -5,7 +5,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs};
 
 use crate::tui::app::App;
 use crate::tui::overlays::{Overlay, OverlayAction, OverlayKind};
@@ -190,19 +190,54 @@ impl HelpOverlay {
         model.add_binding(KeyBinding::new(
             "Tab",
             "Next tab",
-            "Switch between Providers/Models/Settings/Status",
+            "All / Connected / Favorites / Reasoning",
         ));
-        model.add_binding(KeyBinding::new("↑/↓", "Navigate", "Move through entries"));
-        model.add_binding(KeyBinding::new("Enter", "Edit", "Edit selected setting"));
-        model.add_binding(KeyBinding::new("Space", "Toggle", "Toggle enabled/default"));
+        model.add_binding(KeyBinding::new("↑/↓", "Navigate", "Move through models"));
         model.add_binding(KeyBinding::new(
-            "D",
-            "Default",
-            "Set as default provider/model",
+            "←/→",
+            "Reasoning",
+            "Reasoning effort for the selected model",
         ));
-        model.add_binding(KeyBinding::new("T", "Test", "Test provider connection"));
-        model.add_binding(KeyBinding::new("Ctrl+C", "Copy", "Copy entry"));
-        model.add_binding(KeyBinding::new("R", "Refresh", "Reload model data"));
+        model.add_binding(KeyBinding::new(
+            "Enter",
+            "Use",
+            "Use this model now, and save it",
+        ));
+        model.add_binding(KeyBinding::new(
+            "/",
+            "Search",
+            "Filter by model, provider or id",
+        ));
+        model.add_binding(KeyBinding::new(
+            "1..6, 0",
+            "Provider",
+            "Filter by provider, 0 clears",
+        ));
+        model.add_binding(KeyBinding::new(
+            "s, Shift+S",
+            "Sort",
+            "Sort field, then direction",
+        ));
+        model.add_binding(KeyBinding::new(
+            "f",
+            "Favorite",
+            "Pin the model in the Favorites tab",
+        ));
+        model.add_binding(KeyBinding::new(
+            "c",
+            "Compare",
+            "Compare against the current model",
+        ));
+        model.add_binding(KeyBinding::new(
+            "i",
+            "Details",
+            "Context window, price and reasoning",
+        ));
+        model.add_binding(KeyBinding::new(
+            "R",
+            "Refresh",
+            "Fetch the provider's live model list",
+        ));
         model.add_binding(KeyBinding::new("Esc", "Close", "Close the model overlay"));
         help.add_group(model);
 
@@ -250,6 +285,11 @@ impl HelpOverlay {
             "Leave the session (also :q, Ctrl+C)",
         ));
         commands.add_binding(KeyBinding::new("/clear", "Clear", "Clear the transcript"));
+        commands.add_binding(KeyBinding::new(
+            "/home",
+            "Home",
+            "The session brief, over the transcript",
+        ));
         commands.add_binding(KeyBinding::new(
             "/sessions",
             "Sessions",
@@ -331,9 +371,44 @@ impl HelpOverlay {
             "Check MCP clients",
         ));
         commands.add_binding(KeyBinding::new(
+            "/projects",
+            "Cloud Projects",
+            "List, create, rename and delete the org's projects",
+        ));
+        commands.add_binding(KeyBinding::new(
+            "/keys",
+            "Cloud Keys",
+            "List, mint and revoke API keys; a minted secret is shown once",
+        ));
+        commands.add_binding(KeyBinding::new(
+            "/org",
+            "Organization",
+            "The org: members, roles and invites; the link is shown once",
+        ));
+        commands.add_binding(KeyBinding::new(
+            "/teams",
+            "Teams",
+            "List the org's teams; create one, or pick one to see its members",
+        ));
+        commands.add_binding(KeyBinding::new(
             "/teams join",
             "Teams Join",
             "Accept invite and join org",
+        ));
+        commands.add_binding(KeyBinding::new(
+            "/login",
+            "Sign in",
+            "Sign in to memnoth cloud with a one-time code",
+        ));
+        commands.add_binding(KeyBinding::new(
+            "/logout",
+            "Sign out",
+            "Forget this machine's cloud credentials",
+        ));
+        commands.add_binding(KeyBinding::new(
+            "/whoami",
+            "Who am I",
+            "Account, org, role and when the key expires",
         ));
         help.add_group(commands);
 
@@ -375,6 +450,11 @@ impl HelpOverlay {
             "↑/↓",
             "History",
             "Navigate command history",
+        ));
+        global.add_binding(KeyBinding::new(
+            "/",
+            "Commands",
+            "Type a slash to list commands under the prompt",
         ));
         global.add_binding(KeyBinding::new(
             "PgUp/PgDn",
@@ -829,11 +909,9 @@ impl Overlay for HelpOverlay {
                         self.list_state.select(Some(self.selected));
                     }
                 }
-                KeyCode::Down => {
-                    if self.selected + 1 < self.filtered_bindings.len() {
-                        self.selected += 1;
-                        self.list_state.select(Some(self.selected));
-                    }
+                KeyCode::Down if self.selected + 1 < self.filtered_bindings.len() => {
+                    self.selected += 1;
+                    self.list_state.select(Some(self.selected));
                 }
                 _ => {}
             }
@@ -859,7 +937,7 @@ impl Overlay for HelpOverlay {
                 self.list_state.select(Some(0));
             }
             KeyCode::Up => {
-                let len = match self.tab() {
+                let _len = match self.tab() {
                     HelpTab::Global => self
                         .global_help
                         .groups

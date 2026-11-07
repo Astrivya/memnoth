@@ -1,966 +1,885 @@
-//! ModelsOverlay: stunning model browser with tabs, filtering, sorting, and actions.
+//! ModelsOverlay: the one model surface — browse, search, compare, switch.
 //!
-//! Tabs: All / Connected / Favorites / Recommended.
-//! Columns: Model (name+provider), Context, Pricing (input/output),
-//! Capabilities (tools/vision/json), Speed, Status.
-//! Filter: provider, capability, price range, context.
-//! Sort: pricing, context, speed.
-//! Actions: Enter=select/set default, c=compare, f=favorite, i=details, /=search.
-//! Shows current default with ★.
-//! --json with full metadata.
+//! The list is the provider's own. When the session has a key, opening this
+//! screen asks that provider for `GET /models` on a worker thread and replaces
+//! its rows with the answer, so nothing is typed and nothing is guessed: what is
+//! on screen is what the endpoint will accept. The compiled-in catalogue is drawn
+//! first — a browser that opens empty while a request is in flight is worse than
+//! one that opens with rows it labels as the built-in list — and is the whole
+//! answer when there is no key, or when the endpoint refuses to list (which is
+//! said on screen rather than shown as "no models").
+//!
+//! The fetch is asynchronous because a synchronous one blocks the draw: the old
+//! `R` froze the frame for up to eight seconds, timeout included.
+//!
+//! `Enter` writes `[provider]` and saves it, but only for a provider that could
+//! actually run the turn — selecting a model on a keyless provider used to look
+//! like a switch and fail on the next message.
+//!
+//! The turn path reads `app.config`, not the startup snapshot, so the next
+//! message uses the new model without restarting the session.
+//!
+//! Keys:
+//!   ↑/↓ PgUp/PgDn Home/End   move
+//!   ←/→                      reasoning variant for the selected row
+//!   Enter                    use this model for the session, and save it
+//!   /                        search (type to filter, esc clears)
+//!   Tab                      All / Connected / Favorites / Reasoning
+//!   s / ctrl+S               sort field / direction
+//!   1..6 0                   provider filter / clear
+//!   f                        favorite (persisted in `[ui]`)
+//!   c                        compare with the current model
+//!   i                        details
+//!   R                        fetch the provider's live list
+//!   esc / q                  close
 
-use crate::context::Config;
-use crate::provider::{Pricing, Settings};
-use crate::tui::app::App;
+/// One compiled-in catalogue row: id, label, provider, context window, max
+/// output, tools, vision, structured JSON.
+type CatalogueRow = (
+    &'static str,
+    &'static str,
+    &'static str,
+    u32,
+    u32,
+    bool,
+    bool,
+    bool,
+);
+
+use crate::output::ellipsize;
+use crate::provider::{Kind, Settings, builtin_price};
+use crate::tui::app::{App, ModelsLoaded};
 use crate::tui::overlays::{Overlay, OverlayAction, OverlayKind};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use memnoth_auth::get_credential_sync;
-use memnoth_cloud_client::{CloudClient, ModelInfo};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
-/// Tab variants for the model browser.
+use ratatui::widgets::{
+    Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Tabs, Wrap,
+};
+
+/// One model, as the browser shows it.
+///
+/// `connected` is decided when the list is built, not per frame: reading the
+/// credential store is a blocking call and a table redraws sixty times a second.
+#[derive(Debug, Clone)]
+pub(crate) struct ModelRow {
+    pub id: String,
+    pub label: String,
+    pub provider: String,
+    pub context: u32,
+    pub max_output: u32,
+    pub input_per_mtok: Option<f64>,
+    pub output_per_mtok: Option<f64>,
+    /// Effort levels the model's API actually accepts.
+    pub variants: Vec<&'static str>,
+    pub tools: bool,
+    pub vision: bool,
+    pub json: bool,
+    pub deprecated: bool,
+    /// Came from the provider's own `GET /models`, not from this build.
+    pub live: bool,
+    pub connected: bool,
+}
+
+/// The catalogue this build ships.
+///
+/// Deliberately small and explicit: a table that tries to track every model is
+/// wrong within a release. Prices come from the same table the cost estimator
+/// uses, so the number on screen is the number in `session status`.
+pub(crate) fn catalogue() -> Vec<ModelRow> {
+    let specs: [CatalogueRow; 13] = [
+        // id, label, provider, context, max output, tools, vision, json
+        (
+            "claude-sonnet-4-5",
+            "Claude Sonnet 4.5",
+            "anthropic",
+            200_000,
+            64_000,
+            true,
+            true,
+            false,
+        ),
+        (
+            "claude-opus-4-1",
+            "Claude Opus 4.1",
+            "anthropic",
+            200_000,
+            32_000,
+            true,
+            true,
+            false,
+        ),
+        (
+            "claude-haiku-4-5",
+            "Claude Haiku 4.5",
+            "anthropic",
+            200_000,
+            32_000,
+            true,
+            true,
+            false,
+        ),
+        (
+            "gpt-5", "GPT-5", "openai", 400_000, 128_000, true, true, true,
+        ),
+        ("o3", "o3", "openai", 200_000, 100_000, true, true, true),
+        (
+            "o4-mini", "o4-mini", "openai", 200_000, 100_000, true, true, true,
+        ),
+        (
+            "gpt-4.1", "GPT-4.1", "openai", 1_000_000, 32_768, true, true, true,
+        ),
+        (
+            "gpt-4.1-mini",
+            "GPT-4.1 mini",
+            "openai",
+            1_000_000,
+            32_768,
+            true,
+            true,
+            true,
+        ),
+        (
+            "gpt-4o", "GPT-4o", "openai", 128_000, 16_384, true, true, true,
+        ),
+        (
+            "gpt-4o-mini",
+            "GPT-4o mini",
+            "openai",
+            128_000,
+            16_384,
+            true,
+            true,
+            true,
+        ),
+        (
+            "deepseek-chat",
+            "DeepSeek Chat",
+            "deepseek",
+            128_000,
+            8_192,
+            true,
+            false,
+            true,
+        ),
+        (
+            "deepseek-reasoner",
+            "DeepSeek Reasoner",
+            "deepseek",
+            128_000,
+            8_192,
+            false,
+            false,
+            true,
+        ),
+        (
+            "anthropic/claude-sonnet-4.5",
+            "Claude Sonnet 4.5 (gateway)",
+            "kilo",
+            200_000,
+            64_000,
+            true,
+            true,
+            false,
+        ),
+    ];
+
+    specs
+        .into_iter()
+        .map(
+            |(id, label, provider, context, max_output, tools, vision, json)| {
+                let pricing = builtin_price(id);
+                ModelRow {
+                    id: id.to_string(),
+                    label: label.to_string(),
+                    provider: provider.to_string(),
+                    context,
+                    max_output,
+                    input_per_mtok: pricing.map(|price| price.input_per_mtok),
+                    output_per_mtok: pricing.map(|price| price.output_per_mtok),
+                    variants: variants_for(id),
+                    tools,
+                    vision,
+                    json,
+                    deprecated: false,
+                    live: false,
+                    connected: false,
+                }
+            },
+        )
+        .collect()
+}
+
+/// The effort levels a model's API accepts, if any.
+///
+/// The predicate is the one the request path uses, so the arrows are offered on
+/// exactly the models that will not answer 400 when the field is sent; the list
+/// is empty everywhere else.
+fn variants_for(id: &str) -> Vec<&'static str> {
+    if crate::provider::takes_reasoning_effort(id) {
+        vec!["low", "medium", "high"]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Which tab is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ModelTab {
+enum Tab {
     All,
     Connected,
     Favorites,
-    Recommended,
+    Reasoning,
 }
 
-/// Speed rating for a model.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum SpeedRating {
-    Slow,
-    Medium,
-    Fast,
-}
-
-/// Status of a model (connected / available / deprecated).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ModelStatus {
-    Connected,
-    Available,
-    Deprecated,
-}
-
-/// A single model entry with full metadata.
-#[derive(Debug, Clone)]
-struct ModelEntry {
-    id: String,
-    name: String,
-    provider: String,
-    family: String,
-    context_window: u32,
-    max_output_tokens: u32,
-    input_cost_per_million_micros: i64,
-    output_cost_per_million_micros: i64,
-    supports_streaming: bool,
-    supports_tools: bool,
-    supports_vision: bool,
-    supports_json: bool,
-    capabilities: Vec<String>,
-    deprecated: bool,
-    speed: SpeedRating,
-    status: ModelStatus,
-    is_default: bool,
-    is_favorite: bool,
-}
-
-impl serde::Serialize for ModelEntry {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeStruct;
-        let mut s = serializer.serialize_struct("ModelEntry", 15)?;
-        s.serialize_field("id", &self.id)?;
-        s.serialize_field("name", &self.name)?;
-        s.serialize_field("provider", &self.provider)?;
-        s.serialize_field("family", &self.family)?;
-        s.serialize_field("context_window", &self.context_window)?;
-        s.serialize_field("max_output_tokens", &self.max_output_tokens)?;
-        s.serialize_field(
-            "input_cost_per_million_micros",
-            &self.input_cost_per_million_micros,
-        )?;
-        s.serialize_field(
-            "output_cost_per_million_micros",
-            &self.output_cost_per_million_micros,
-        )?;
-        s.serialize_field("supports_streaming", &self.supports_streaming)?;
-        s.serialize_field("supports_tools", &self.supports_tools)?;
-        s.serialize_field("supports_vision", &self.supports_vision)?;
-        s.serialize_field("supports_json", &self.supports_json)?;
-        s.serialize_field("capabilities", &self.capabilities)?;
-        s.serialize_field("deprecated", &self.deprecated)?;
-        s.serialize_field("speed", &speed_label(self.speed))?;
-        s.serialize_field("status", &status_text(self.status))?;
-        s.serialize_field("is_default", &self.is_default)?;
-        s.serialize_field("is_favorite", &self.is_favorite)?;
-        s.end()
+impl Tab {
+    fn label(self) -> &'static str {
+        match self {
+            Tab::All => "All",
+            Tab::Connected => "Connected",
+            Tab::Favorites => "Favorites",
+            Tab::Reasoning => "Reasoning",
+        }
     }
 }
 
-/// Sort fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum SortField {
     #[default]
-    Pricing,
+    Provider,
+    Model,
     Context,
-    Speed,
+    Input,
+    Output,
 }
 
-/// Sort direction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-enum SortDirection {
-    #[default]
-    Ascending,
-    Descending,
+impl SortField {
+    fn next(self) -> Self {
+        match self {
+            SortField::Provider => SortField::Model,
+            SortField::Model => SortField::Context,
+            SortField::Context => SortField::Input,
+            SortField::Input => SortField::Output,
+            SortField::Output => SortField::Provider,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            SortField::Provider => "provider",
+            SortField::Model => "model",
+            SortField::Context => "context",
+            SortField::Input => "input price",
+            SortField::Output => "output price",
+        }
+    }
 }
 
-/// Filter state for the model list.
-#[derive(Debug, Clone, Default)]
-struct ModelFilter {
-    provider: Option<String>,
-    capability: Option<String>,
-    min_price: Option<f64>,
-    max_price: Option<f64>,
-    min_context: Option<u32>,
-    search: String,
-}
-
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ModelsOverlay {
     visible: bool,
-    tabs: Vec<ModelTab>,
-    active_tab: usize,
-    models: Vec<ModelEntry>,
-    filtered: Vec<ModelEntry>,
+    tab: Tab,
+    rows: Vec<ModelRow>,
+    filtered: Vec<usize>,
     selected: usize,
-    filter: ModelFilter,
-    sort_field: SortField,
-    sort_direction: SortDirection,
-    details_popup: Option<ModelEntry>,
-    json_mode: bool,
+    table: TableState,
+    search: String,
+    searching: bool,
+    favorites: Vec<String>,
+    /// Effort chosen per model id, seeded from the config for the current one.
+    efforts: std::collections::BTreeMap<String, String>,
+    sort: SortField,
+    descending: bool,
+    provider_filter: Option<String>,
+    details: Option<usize>,
+    compare: Option<usize>,
+    note: Option<(bool, String)>,
+    /// Provider whose own list has replaced its catalogue rows.
+    live_for: Option<String>,
+    live_count: usize,
+    /// Provider being asked for its list right now.
+    loading: Option<String>,
+    /// The model the session is using, read once per open. Reading the config
+    /// in `render` meant a file and credential-store hit on every frame.
+    current: Option<String>,
 }
 
 impl ModelsOverlay {
-    /// The tab the overlay is showing.
-    fn tab(&self) -> ModelTab {
-        self.tabs
-            .get(self.active_tab)
-            .cloned()
-            .unwrap_or(ModelTab::All)
-    }
-
     pub fn new() -> Self {
-        let mut tabs = Vec::new();
-        tabs.push(ModelTab::All);
-        tabs.push(ModelTab::Connected);
-        tabs.push(ModelTab::Favorites);
-        tabs.push(ModelTab::Recommended);
-
         Self {
-            tabs,
-            models: Vec::new(),
+            visible: false,
+            tab: Tab::All,
+            rows: Vec::new(),
             filtered: Vec::new(),
-            filter: ModelFilter::default(),
-            sort_field: SortField::Pricing,
-            sort_direction: SortDirection::Ascending,
-            ..Default::default()
+            selected: 0,
+            table: TableState::default(),
+            search: String::new(),
+            searching: false,
+            favorites: Vec::new(),
+            efforts: std::collections::BTreeMap::new(),
+            sort: SortField::Provider,
+            descending: false,
+            provider_filter: None,
+            details: None,
+            compare: None,
+            note: None,
+            live_for: None,
+            live_count: 0,
+            loading: None,
+            current: None,
         }
     }
 
-    /// Fill the browser from the cloud catalogue and the built-in fallback.
-    ///
-    /// Public because the host is what knows when the overlay is pushed and it
-    /// holds the `App` the catalogue is read against — `show()` has neither.
-    pub fn load_models(&mut self, app: &mut App) {
-        self.models = self.fetch_available_models(app);
-        self.apply_filters();
-    }
+    /// Fill the browser: catalogue + saved preferences. Offline, so opening the
+    /// overlay cannot hang on a provider that is down.
+    fn reload(&mut self, app: &App) {
+        let settings = Settings::load(&app.config).ok();
 
-    fn fetch_available_models(&mut self, app: &mut App) -> Vec<ModelEntry> {
-        // The catalogue lives at the API base, which is not the provider base:
-        // `CloudClient` joins `models` onto it.
-        let base_url = std::env::var("MEMNOTH_API_URL")
-            .unwrap_or_else(|_| "https://memnoth.astrivya.ai/api/v1".to_string());
-        let api_key = std::env::var("MEMNOTH_API_KEY").ok();
+        self.favorites = app
+            .config
+            .ui
+            .as_ref()
+            .map(|ui| ui.favorite_models.clone())
+            .unwrap_or_default();
 
-        // The cloud answers with the OpenAI-shaped list (id, name, description).
-        // Pricing and capabilities come from the catalogue this build ships, so a
-        // model the cloud knows but we do not still appears — unpriced, not hidden.
-        let mut fetched = self.builtin_models_info();
-        if let Ok(mut client) = CloudClient::with_base_url(&base_url) {
-            if let Some(key) = api_key {
-                client.set_auth_token(key);
-            }
-            if let Ok(list) = client.models() {
-                for entry in list.data {
-                    if fetched.iter().any(|m| m.id == entry.id) {
-                        continue;
-                    }
-                    fetched.push(ModelInfo {
-                        id: entry.id,
-                        name: entry.name,
-                        provider: "memnoth".to_string(),
-                        family: String::new(),
-                        context_window: 0,
-                        max_output_tokens: 0,
-                        input_cost_per_million_micros: -1,
-                        output_cost_per_million_micros: -1,
-                        supports_streaming: true,
-                        supports_tools: false,
-                        supports_vision: false,
-                        capabilities: None,
-                        deprecated: Some(false),
-                        deprecation_date: None,
-                    });
+        self.current = settings.as_ref().map(|settings| settings.model.clone());
+
+        // The effort the session is actually using belongs to the selected
+        // model; keeping it in the map means moving the cursor does not forget
+        // what was chosen two rows up.
+        if let Some(settings) = &settings
+            && let Some(effort) = &settings.reasoning_effort
+        {
+            self.efforts.insert(settings.model.clone(), effort.clone());
+        }
+
+        self.rows = catalogue();
+        seed_connectivity(&mut self.rows, app, settings.as_ref());
+        self.live_for = None;
+        self.live_count = 0;
+
+        // With a key, the provider's own list is the truth and it is already on
+        // its way; the catalogue above is what fills the screen until it lands.
+        match settings.as_ref().filter(|settings| settings.ready()) {
+            Some(settings) => {
+                let provider = settings
+                    .provider_name
+                    .clone()
+                    .unwrap_or_else(|| settings.kind.name().to_string());
+                if self.tab == Tab::All && self.rows.iter().any(|row| row.connected) {
+                    self.tab = Tab::Connected;
                 }
+                self.begin_fetch(
+                    app,
+                    provider,
+                    settings.kind,
+                    settings.base_url.clone(),
+                    settings.api_key.clone(),
+                );
+            }
+            None => {
+                self.loading = None;
+                self.note = Some((
+                    false,
+                    "no provider has a key yet — open /connect, then come back".to_string(),
+                ));
             }
         }
 
-        let default_model = self.get_default_model(app);
+        self.apply_filters();
+        // The cursor starts on what the session is actually using, not on
+        // whichever id sorts first.
+        if let Some(current) = self.current.clone() {
+            self.focus(&current);
+        }
+    }
 
-        let mut entries: Vec<ModelEntry> = Vec::new();
-        for info in fetched {
-            let capabilities = info.capabilities.clone().unwrap_or_default();
-            let supports_json = capabilities.iter().any(|c| c == "json" || c == "json_mode");
-            let speed = infer_speed(&info.family);
-
-            let is_default = default_model.as_ref().map_or(false, |dm| dm == &info.id);
-            let status = if info.deprecated.unwrap_or(false) {
-                ModelStatus::Deprecated
-            } else if self.is_provider_connected(&info.provider, app) {
-                ModelStatus::Connected
-            } else {
-                ModelStatus::Available
+    /// Ask one provider for its own list, on a thread, and report to the host.
+    ///
+    /// The answer arrives in the event loop and is handed back through
+    /// `on_models_loaded`, so the draw never waits on an endpoint.
+    fn begin_fetch(
+        &mut self,
+        app: &App,
+        provider: String,
+        kind: Kind,
+        base_url: String,
+        key: Option<String>,
+    ) {
+        self.loading = Some(provider.clone());
+        let tx = app.models_tx.clone();
+        std::thread::spawn(move || {
+            let result = crate::provider::fetch_provider_models(kind, &base_url, key.as_deref());
+            let (ids, error) = match result {
+                Ok(mut ids) => {
+                    ids.sort();
+                    ids.dedup();
+                    (ids, None)
+                }
+                Err(error) => (Vec::new(), Some(format!("{error:#}"))),
             };
+            let _ = tx.send(ModelsLoaded {
+                provider,
+                ids,
+                error,
+            });
+        });
+    }
 
-            entries.push(ModelEntry {
-                id: info.id.clone(),
-                name: info.name.clone(),
-                provider: info.provider.clone(),
-                family: info.family.clone(),
-                context_window: info.context_window,
-                max_output_tokens: info.max_output_tokens,
-                input_cost_per_million_micros: info.input_cost_per_million_micros,
-                output_cost_per_million_micros: info.output_cost_per_million_micros,
-                supports_streaming: info.supports_streaming,
-                supports_tools: info.supports_tools,
-                supports_vision: info.supports_vision,
-                supports_json,
-                capabilities,
-                deprecated: info.deprecated.unwrap_or(false),
-                speed,
-                status,
-                is_default,
-                is_favorite: false,
+    /// Put the cursor on one id, if it is in the current view.
+    fn focus(&mut self, id: &str) {
+        if let Some(position) = self
+            .filtered
+            .iter()
+            .position(|index| self.rows[*index].id == id)
+        {
+            self.selected = position;
+            self.table.select(Some(position));
+        }
+    }
+
+    /// Replace one provider's rows with the list it published.
+    ///
+    /// Only that provider's rows: the catalogue entries for the others describe
+    /// providers this screen has not asked, and deleting them would make the
+    /// browser lose its content every time a gateway answered.
+    fn replace_live_rows(&mut self, provider: &str, ids: &[String]) {
+        let keep = self.selected_id();
+        self.rows.retain(|row| row.provider != provider);
+        for id in ids {
+            let pricing = builtin_price(id);
+            self.rows.push(ModelRow {
+                id: id.clone(),
+                // The id is the label: it is what the endpoint accepts, and a
+                // prettified name would be a second spelling to get wrong.
+                label: id.clone(),
+                provider: provider.to_string(),
+                // A models endpoint lists ids, not context windows or prices;
+                // `—` is honest about that where a guess would not be.
+                context: 0,
+                max_output: 0,
+                input_per_mtok: pricing.map(|price| price.input_per_mtok),
+                output_per_mtok: pricing.map(|price| price.output_per_mtok),
+                variants: variants_for(id),
+                tools: false,
+                vision: false,
+                json: false,
+                deprecated: false,
+                live: true,
+                connected: true,
             });
         }
-
-        entries.sort_by(|a, b| a.name.cmp(&b.name));
-        entries
-    }
-
-    fn builtin_models_info(&self) -> Vec<ModelInfo> {
-        vec![
-            ModelInfo {
-                id: "gpt-4o".to_string(),
-                name: "GPT-4o".to_string(),
-                provider: "openai".to_string(),
-                family: "gpt-4".to_string(),
-                context_window: 128000,
-                max_output_tokens: 4096,
-                input_cost_per_million_micros: 2500,
-                output_cost_per_million_micros: 10000,
-                supports_streaming: true,
-                supports_tools: true,
-                supports_vision: true,
-                capabilities: Some(vec!["tools".into(), "vision".into(), "json".into()]),
-                deprecated: Some(false),
-                deprecation_date: None,
-            },
-            ModelInfo {
-                id: "gpt-4o-mini".to_string(),
-                name: "GPT-4o Mini".to_string(),
-                provider: "openai".to_string(),
-                family: "gpt-4".to_string(),
-                context_window: 128000,
-                max_output_tokens: 4096,
-                input_cost_per_million_micros: 150,
-                output_cost_per_million_micros: 600,
-                supports_streaming: true,
-                supports_tools: true,
-                supports_vision: true,
-                capabilities: Some(vec!["tools".into(), "vision".into(), "json".into()]),
-                deprecated: Some(false),
-                deprecation_date: None,
-            },
-            ModelInfo {
-                id: "claude-3-5-sonnet-20241022".to_string(),
-                name: "Claude 3.5 Sonnet".to_string(),
-                provider: "anthropic".to_string(),
-                family: "claude-3".to_string(),
-                context_window: 200000,
-                max_output_tokens: 8192,
-                input_cost_per_million_micros: 3000,
-                output_cost_per_million_micros: 15000,
-                supports_streaming: true,
-                supports_tools: true,
-                supports_vision: true,
-                capabilities: Some(vec!["tools".into(), "vision".into(), "json".into()]),
-                deprecated: Some(false),
-                deprecation_date: None,
-            },
-            ModelInfo {
-                id: "claude-3-haiku-20240307".to_string(),
-                name: "Claude 3 Haiku".to_string(),
-                provider: "anthropic".to_string(),
-                family: "claude-3".to_string(),
-                context_window: 200000,
-                max_output_tokens: 4096,
-                input_cost_per_million_micros: 250,
-                output_cost_per_million_micros: 1250,
-                supports_streaming: true,
-                supports_tools: true,
-                supports_vision: true,
-                capabilities: Some(vec!["tools".into(), "vision".into(), "json".into()]),
-                deprecated: Some(false),
-                deprecation_date: None,
-            },
-        ]
-    }
-
-    fn get_default_model(&self, app: &App) -> Option<String> {
-        Settings::load(&app.config).ok().map(|s| s.model)
-    }
-
-    fn is_provider_connected(&self, provider: &str, _app: &App) -> bool {
-        match provider {
-            "anthropic" => std::env::var("ANTHROPIC_API_KEY").is_ok(),
-            "openai" => std::env::var("OPENAI_API_KEY").is_ok(),
-            "memnoth" => {
-                get_credential_sync("memnoth").is_ok() || std::env::var("MEMNOTH_API_KEY").is_ok()
-            }
-            _ => false,
+        self.apply_filters();
+        // Rows were replaced underneath the cursor; put it back on the same id,
+        // or on the model in use, rather than on whatever now sits at that
+        // position.
+        let back = keep
+            .filter(|id| self.rows.iter().any(|row| row.id == *id))
+            .or_else(|| self.current.clone());
+        if let Some(id) = back {
+            self.focus(&id);
         }
+    }
+
+    fn selected_id(&self) -> Option<String> {
+        self.row().map(|row| row.id.clone())
     }
 
     fn apply_filters(&mut self) {
-        self.filtered = self
-            .models
-            .iter()
-            .filter(|m| {
-                // Tab filter
-                match self.tab() {
-                    ModelTab::All => {}
-                    ModelTab::Connected => {
-                        if m.status != ModelStatus::Connected {
-                            return false;
-                        }
-                    }
-                    ModelTab::Favorites => {
-                        if !m.is_favorite {
-                            return false;
-                        }
-                    }
-                    ModelTab::Recommended => {
-                        if m.speed != SpeedRating::Fast {
-                            return false;
-                        }
-                    }
-                }
+        let needle = self.search.trim().to_ascii_lowercase();
+        let mut matched: Vec<usize> = Vec::new();
 
-                // Provider filter
-                if let Some(ref p) = self.filter.provider {
-                    if !m.provider.to_lowercase().contains(&p.to_lowercase()) {
-                        return false;
-                    }
-                }
-
-                // Capability filter
-                if let Some(ref c) = self.filter.capability {
-                    if !m
-                        .capabilities
-                        .iter()
-                        .any(|cap| cap.to_lowercase().contains(&c.to_lowercase()))
-                    {
-                        return false;
-                    }
-                }
-
-                // Price range filter
-                if let Some(min) = self.filter.min_price {
-                    let price = m.input_cost_per_million_micros as f64 / 1_000_000.0;
-                    if price < min {
-                        return false;
-                    }
-                }
-                if let Some(max) = self.filter.max_price {
-                    let price = m.input_cost_per_million_micros as f64 / 1_000_000.0;
-                    if price > max {
-                        return false;
-                    }
-                }
-
-                // Context filter
-                if let Some(min_ctx) = self.filter.min_context {
-                    if m.context_window < min_ctx {
-                        return false;
-                    }
-                }
-
-                // Search filter (matches name, provider, family)
-                if !self.filter.search.is_empty() {
-                    let q = self.filter.search.to_lowercase();
-                    if !m.name.to_lowercase().contains(&q)
-                        && !m.provider.to_lowercase().contains(&q)
-                        && !m.family.to_lowercase().contains(&q)
-                    {
-                        return false;
-                    }
-                }
-
-                true
-            })
-            .cloned()
-            .collect();
-
-        self.sort_models();
-    }
-
-    fn sort_models(&mut self) {
-        match self.sort_field {
-            SortField::Pricing => {
-                self.filtered.sort_by(|a, b| {
-                    let a_price = a.input_cost_per_million_micros;
-                    let b_price = b.input_cost_per_million_micros;
-                    if self.sort_direction == SortDirection::Ascending {
-                        a_price.cmp(&b_price)
-                    } else {
-                        b_price.cmp(&a_price)
-                    }
-                });
+        for (index, row) in self.rows.iter().enumerate() {
+            if let Some(provider) = &self.provider_filter
+                && &row.provider != provider
+            {
+                continue;
             }
-            SortField::Context => {
-                self.filtered.sort_by(|a, b| {
-                    if self.sort_direction == SortDirection::Ascending {
-                        a.context_window.cmp(&b.context_window)
-                    } else {
-                        b.context_window.cmp(&a.context_window)
-                    }
-                });
+            if !needle.is_empty()
+                && !row.id.to_ascii_lowercase().contains(&needle)
+                && !row.label.to_ascii_lowercase().contains(&needle)
+                && !row.provider.to_ascii_lowercase().contains(&needle)
+            {
+                continue;
             }
-            SortField::Speed => {
-                self.filtered.sort_by(|a, b| {
-                    if self.sort_direction == SortDirection::Ascending {
-                        a.speed.cmp(&b.speed)
-                    } else {
-                        b.speed.cmp(&a.speed)
-                    }
-                });
+            let keep = match self.tab {
+                Tab::All => true,
+                Tab::Connected => row.connected,
+                Tab::Favorites => self.favorites.iter().any(|id| id == &row.id),
+                Tab::Reasoning => !row.variants.is_empty(),
+            };
+            if keep {
+                matched.push(index);
             }
         }
+
+        let rows = &self.rows;
+        matched.sort_by(|left, right| {
+            let (a, b) = (&rows[*left], &rows[*right]);
+            let order = match self.sort {
+                SortField::Provider => a.provider.cmp(&b.provider).then(a.id.cmp(&b.id)),
+                SortField::Model => a.id.cmp(&b.id),
+                SortField::Context => a.context.cmp(&b.context).then(a.id.cmp(&b.id)),
+                SortField::Input => cmp_price(a.input_per_mtok, b.input_per_mtok),
+                SortField::Output => cmp_price(a.output_per_mtok, b.output_per_mtok),
+            };
+            if self.descending {
+                order.reverse()
+            } else {
+                order
+            }
+        });
+
+        self.filtered = matched;
         self.selected = self.selected.min(self.filtered.len().saturating_sub(1));
+        self.table.select(if self.filtered.is_empty() {
+            None
+        } else {
+            Some(self.selected)
+        });
     }
 
-    fn selected_model(&self) -> Option<&ModelEntry> {
-        self.filtered.get(self.selected)
+    fn row(&self) -> Option<&ModelRow> {
+        self.filtered
+            .get(self.selected)
+            .map(|index| &self.rows[*index])
     }
 
-    fn toggle_favorite(&mut self) {
-        if let Some(m) = self.selected_model() {
-            let id = m.id.clone();
-            if let Some(entry) = self.models.iter_mut().find(|e| e.id == id) {
-                entry.is_favorite = !entry.is_favorite;
-            }
-            self.apply_filters();
+    fn effort(&self, id: &str, variants: &[&'static str]) -> Option<String> {
+        if variants.is_empty() {
+            return None;
         }
+        self.efforts
+            .get(id)
+            .cloned()
+            .filter(|effort| variants.contains(&effort.as_str()))
+            .or_else(|| Some(variants[0].to_string()))
     }
 
-    fn set_as_default(&mut self, app: &mut App) {
-        // The selection lives in `filtered`, so take the identity out before the
-        // list is mutated — otherwise the borrow and the edit overlap.
-        let Some((id, name)) = self
-            .selected_model()
-            .map(|m| (m.id.clone(), m.name.clone()))
-        else {
+    /// Move the selected row's reasoning effort one level.
+    fn cycle_effort(&mut self, forward: bool) {
+        let Some(row) = self.row().cloned() else {
             return;
         };
-
-        for entry in &mut self.models {
-            entry.is_default = entry.id == id;
+        if row.variants.is_empty() {
+            self.note = Some((false, format!("{} takes no reasoning effort", row.id)));
+            return;
         }
+        let current = self
+            .effort(&row.id, &row.variants)
+            .and_then(|effort| row.variants.iter().position(|v| *v == effort))
+            .unwrap_or(0);
+        let next = if forward {
+            (current + 1) % row.variants.len()
+        } else {
+            (current + row.variants.len() - 1) % row.variants.len()
+        };
+        self.efforts
+            .insert(row.id.clone(), row.variants[next].to_string());
+    }
 
-        // Only the `[provider]` section this overlay owns is rewritten; every
-        // other section is carried over from the config that was read.
+    fn toggle_favorite(&mut self, app: &mut App) {
+        let Some(row) = self.row().cloned() else {
+            return;
+        };
+        if let Some(position) = self.favorites.iter().position(|id| id == &row.id) {
+            self.favorites.remove(position);
+        } else {
+            self.favorites.push(row.id.clone());
+        }
         let mut config = app.config.clone();
-        if let Ok(settings) = Settings::load(&app.config) {
-            config.provider = Some(crate::provider::ProviderConfig {
-                kind: Some(settings.kind.name().to_string()),
-                model: Some(id.clone()),
-                base_url: Some(settings.base_url.clone()),
-                max_tokens: Some(settings.max_tokens),
-                input_per_mtok: settings.pricing.as_ref().map(|p| p.input_per_mtok),
-                output_per_mtok: settings.pricing.as_ref().map(|p| p.output_per_mtok),
-            });
-            let _ = config.save(&app.config_path);
-        }
-
-        self.apply_filters();
-        app.push(
-            crate::tui::app::EntryRole::Info,
-            format!("Set {name} as default model"),
-        );
-    }
-
-    fn toggle_tab(&mut self) {
-        self.active_tab = (self.active_tab + 1) % self.tabs.len();
-        self.selected = 0;
-        self.apply_filters();
-    }
-
-    fn toggle_sort(&mut self) {
-        match self.sort_field {
-            SortField::Pricing => self.sort_field = SortField::Context,
-            SortField::Context => self.sort_field = SortField::Speed,
-            SortField::Speed => self.sort_field = SortField::Pricing,
+        config
+            .ui
+            .get_or_insert_with(Default::default)
+            .favorite_models = self.favorites.clone();
+        match config.save(&app.config_path) {
+            Ok(()) => {
+                app.config = config;
+                let verb = if self.favorites.contains(&row.id) {
+                    "favorited"
+                } else {
+                    "unfavorited"
+                };
+                self.note = Some((true, format!("{verb} {}", row.id)));
+            }
+            Err(error) => self.note = Some((false, format!("cannot save favorites: {error:#}"))),
         }
         self.apply_filters();
     }
 
-    fn toggle_sort_direction(&mut self) {
-        self.sort_direction = match self.sort_direction {
-            SortDirection::Ascending => SortDirection::Descending,
-            SortDirection::Descending => SortDirection::Ascending,
+    /// Make the selected model the session's model.
+    ///
+    /// Everything not being changed is carried over from the config that was
+    /// read: `max_tokens`, explicit rates, `base_url`. Switching families also
+    /// switches the wire shape and the preset, because a Claude id on an OpenAI
+    /// endpoint is a 404, not a preference.
+    fn apply_selection(&mut self, app: &mut App) {
+        let Some(row) = self.row().cloned() else {
+            return;
         };
-        self.apply_filters();
-    }
-
-    fn set_search(&mut self, search: String) {
-        self.filter.search = search;
-        self.apply_filters();
-    }
-
-    fn clear_search(&mut self) {
-        self.filter.search.clear();
-        self.apply_filters();
-    }
-
-    fn set_provider_filter(&mut self, provider: String) {
-        if provider.is_empty() {
-            self.filter.provider = None;
-        } else {
-            self.filter.provider = Some(provider);
-        }
-        self.apply_filters();
-    }
-
-    fn set_capability_filter(&mut self, capability: String) {
-        if capability.is_empty() {
-            self.filter.capability = None;
-        } else {
-            self.filter.capability = Some(capability);
-        }
-        self.apply_filters();
-    }
-
-    fn set_min_price(&mut self, price: f64) {
-        self.filter.min_price = Some(price);
-        self.apply_filters();
-    }
-
-    fn set_max_price(&mut self, price: f64) {
-        self.filter.max_price = Some(price);
-        self.apply_filters();
-    }
-
-    fn set_min_context(&mut self, context: u32) {
-        self.filter.min_context = Some(context);
-        self.apply_filters();
-    }
-
-    fn clear_filters(&mut self) {
-        self.filter = ModelFilter::default();
-        self.apply_filters();
-    }
-
-    fn input_price(&self, m: &ModelEntry) -> f64 {
-        m.input_cost_per_million_micros as f64 / 1_000_000.0
-    }
-
-    fn output_price(&self, m: &ModelEntry) -> f64 {
-        m.output_cost_per_million_micros as f64 / 1_000_000.0
-    }
-
-    fn format_price(micros: i64) -> String {
-        if micros < 0 {
-            "N/A".to_string()
-        } else {
-            format!("${:.4}/M", micros as f64 / 1_000_000.0)
-        }
-    }
-
-    fn render_header(&self, frame: &mut Frame, area: Rect) {
-        let tab_titles: Vec<&str> = self
-            .tabs
-            .iter()
-            .map(|t| match t {
-                ModelTab::All => "All",
-                ModelTab::Connected => "Connected",
-                ModelTab::Favorites => "Favorites",
-                ModelTab::Recommended => "Recommended",
-            })
-            .collect();
-
-        let tabs = ratatui::widgets::Tabs::new(tab_titles)
-            .block(Block::default().borders(Borders::ALL).title(" Models "))
-            .select(self.active_tab)
-            .style(Style::default().fg(Color::Gray))
-            .highlight_style(
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            );
-        frame.render_widget(tabs, area);
-    }
-
-    fn render_table(&mut self, frame: &mut Frame, area: Rect) {
-        let mut rows: Vec<ratatui::widgets::ListItem> = Vec::new();
-        for (idx, m) in self.filtered.iter().enumerate() {
-            let is_selected = self.selected == idx;
-            let default_marker = if m.is_default { " ★" } else { "" };
-            let favorite_marker = if m.is_favorite { " ⭐" } else { "" };
-
-            let model_line = Line::from(vec![
-                Span::styled(
-                    format!("{}{}{}", m.name, default_marker, favorite_marker),
-                    if is_selected {
-                        Style::default()
-                            .fg(Color::Black)
-                            .bg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD)
-                    } else if m.is_default {
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default()
-                    },
-                ),
-                Span::styled(
-                    format!(" │ {}", m.provider),
-                    if is_selected {
-                        Style::default().fg(Color::Black).bg(Color::Cyan)
-                    } else {
-                        Style::default().fg(Color::DarkGray)
-                    },
-                ),
-            ]);
-
-            let context_line = Line::from(vec![Span::styled(
-                format!("{}k", m.context_window / 1000),
-                if is_selected {
-                    Style::default().fg(Color::Black).bg(Color::Cyan)
-                } else {
-                    Style::default()
-                },
-            )]);
-
-            let price_line = Line::from(vec![Span::styled(
-                format!("${:.4} / ${:.4}", self.input_price(m), self.output_price(m)),
-                if is_selected {
-                    Style::default().fg(Color::Black).bg(Color::Cyan)
-                } else {
-                    Style::default()
-                },
-            )]);
-
-            let caps_line = Line::from(vec![Span::styled(
+        // A model on a provider with no key cannot answer a turn. Writing it
+        // anyway looked like a switch and failed on the next message, which
+        // reads as a model problem instead of a missing connection.
+        if !row.connected {
+            self.note = Some((
+                false,
                 format!(
-                    "{} {} {}",
-                    if m.supports_tools { "🔧" } else { "⚪" },
-                    if m.supports_vision { "👁️" } else { "⚪" },
-                    if m.supports_json { "JSON" } else { "  " },
+                    "no key for {} — open /connect to add one, then pick here",
+                    row.provider
                 ),
-                if is_selected {
-                    Style::default().fg(Color::Black).bg(Color::Cyan)
-                } else {
-                    Style::default()
-                },
-            )]);
+            ));
+            return;
+        }
+        let mut section = app.config.provider.clone().unwrap_or_default();
+        let target = kind_of(&row.provider);
+        let family_changed = section
+            .kind
+            .as_deref()
+            .map(|kind| !kind.eq_ignore_ascii_case(target.name()))
+            .unwrap_or(true)
+            || section
+                .name
+                .as_deref()
+                .map(|name| name != row.provider)
+                .unwrap_or(true);
 
-            let speed_style = match m.speed {
-                SpeedRating::Slow => Color::Red,
-                SpeedRating::Medium => Color::Yellow,
-                SpeedRating::Fast => Color::Green,
-            };
-            let speed_line = Line::from(vec![Span::styled(
-                speed_label(m.speed),
-                if is_selected {
-                    Style::default().fg(Color::Black).bg(Color::Cyan)
-                } else {
-                    Style::default().fg(speed_style)
-                },
-            )]);
+        section.kind = Some(target.name().to_string());
+        section.name = Some(row.provider.clone());
+        section.model = Some(row.id.clone());
+        section.reasoning_effort = self.effort(&row.id, &row.variants);
 
-            let status_style = match m.status {
-                ModelStatus::Connected => Color::Green,
-                ModelStatus::Available => Color::Cyan,
-                ModelStatus::Deprecated => Color::Red,
-            };
-            let status_label = match m.status {
-                ModelStatus::Connected => "●",
-                ModelStatus::Available => "○",
-                ModelStatus::Deprecated => "✗",
-            };
-            let status_line = Line::from(vec![Span::styled(
-                format!("{} {}", status_label, status_text(m.status)),
-                if is_selected {
-                    Style::default().fg(Color::Black).bg(Color::Cyan)
-                } else {
-                    Style::default().fg(status_style)
-                },
-            )]);
-
-            let combined = Line::from(vec![
-                Span::raw(model_line.spans[0].content.clone()),
-                Span::raw(" │ "),
-                Span::raw(context_line.spans[0].content.clone()),
-                Span::raw(" │ "),
-                Span::raw(price_line.spans[0].content.clone()),
-                Span::raw(" │ "),
-                Span::raw(caps_line.spans[0].content.clone()),
-                Span::raw(" │ "),
-                Span::raw(speed_line.spans[0].content.clone()),
-                Span::raw(" │ "),
-                Span::raw(status_line.spans[0].content.clone()),
-            ]);
-
-            let row_style = if is_selected {
-                Style::default().bg(Color::Cyan).fg(Color::Black)
-            } else if idx % 2 == 1 {
-                Style::default().bg(Color::DarkGray)
-            } else {
-                Style::default()
-            };
-
-            rows.push(ratatui::widgets::ListItem::new(combined).style(row_style));
+        if family_changed {
+            section.base_url = Some(base_url_for(&row.provider, target));
+            // An explicit rate is a statement about the old model; carrying it
+            // to a new one would price Sonnet at GPT rates.
+            section.input_per_mtok = None;
+            section.output_per_mtok = None;
         }
 
-        let list = ratatui::widgets::List::new(rows)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(format!(" {} models ", self.filtered.len()))
-                    .border_style(Style::default().fg(Color::Gray)),
-            )
-            .highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan));
-
-        let mut list_state = ratatui::widgets::ListState::default();
-        if !self.filtered.is_empty() {
-            list_state.select(Some(self.selected.min(self.filtered.len() - 1)));
+        let effort = section.reasoning_effort.clone();
+        let mut config = app.config.clone();
+        config.provider = Some(section);
+        match config.save(&app.config_path) {
+            Ok(()) => {
+                app.config = config;
+                self.current = Some(row.id.clone());
+                let effort = effort
+                    .map(|effort| format!(" · reasoning {effort}"))
+                    .unwrap_or_default();
+                self.note = Some((
+                    true,
+                    format!("{} · {}{} — active now", row.id, row.provider, effort),
+                ));
+            }
+            Err(error) => {
+                self.note = Some((false, format!("cannot save the model: {error:#}")));
+            }
         }
-
-        frame.render_stateful_widget(list, area, &mut list_state);
     }
 
-    fn render_footer(&mut self, frame: &mut Frame, area: Rect) {
-        let filter_hint = if !self.filter.search.is_empty() {
-            format!("search: {} │ ", self.filter.search)
-        } else {
-            String::new()
+    /// Ask the configured provider for its own list again.
+    fn refresh_live(&mut self, app: &mut App) {
+        let settings = match Settings::load(&app.config) {
+            Ok(settings) => settings,
+            Err(error) => {
+                self.note = Some((false, format!("cannot read the config: {error:#}")));
+                return;
+            }
         };
-
-        let sort_hint = match self.sort_field {
-            SortField::Pricing => "sort: price",
-            SortField::Context => "sort: context",
-            SortField::Speed => "sort: speed",
-        };
-
-        let direction_hint = match self.sort_direction {
-            SortDirection::Ascending => " ▲",
-            SortDirection::Descending => " ▼",
-        };
-
-        let tab_hint = match self.tab() {
-            ModelTab::All => "tab: all",
-            ModelTab::Connected => "tab: connected",
-            ModelTab::Favorites => "tab: favorites",
-            ModelTab::Recommended => "tab: recommended",
-        };
-
-        let help_text = format!(
-            "{} {} {} │ {} │ ↑↓: nav · enter: default · c: compare · f: favorite · i: details · /: search · tab: next · s: sort · esc: close",
-            filter_hint, sort_hint, direction_hint, tab_hint
+        if !settings.ready() {
+            self.note = Some((
+                false,
+                "no provider has a key yet — open /connect to add one".to_string(),
+            ));
+            return;
+        }
+        let provider = settings
+            .provider_name
+            .clone()
+            .unwrap_or_else(|| settings.kind.name().to_string());
+        self.begin_fetch(
+            app,
+            provider,
+            settings.kind,
+            settings.base_url.clone(),
+            settings.api_key.clone(),
         );
-
-        let help = Paragraph::new(help_text)
-            .style(Style::default().fg(Color::DarkGray))
-            .block(Block::default().borders(Borders::ALL));
-        frame.render_widget(help, area);
     }
 
-    fn render_details_popup(&mut self, frame: &mut Frame, area: Rect) {
-        if let Some(ref m) = self.details_popup {
-            let width = ((area.width as u32 * 4 / 5) as u16).clamp(60, area.width);
-            let height = ((area.height as u32 * 3 / 4) as u16).clamp(20, area.height);
-            let popup = Rect::new(
-                area.x + (area.width - width) / 2,
-                area.y + (area.height - height) / 2,
-                width,
-                height,
-            );
+    fn set_provider_filter(&mut self, provider: &str) {
+        self.provider_filter = if self.provider_filter.as_deref() == Some(provider) {
+            None
+        } else {
+            Some(provider.to_string())
+        };
+        self.apply_filters();
+    }
 
-            frame.render_widget(Clear, popup);
+    fn move_by(&mut self, delta: isize) {
+        if self.filtered.is_empty() {
+            return;
+        }
+        let last = self.filtered.len() - 1;
+        self.selected = if delta < 0 {
+            self.selected.saturating_sub(delta.unsigned_abs())
+        } else {
+            self.selected.saturating_add(delta as usize).min(last)
+        };
+        self.table.select(Some(self.selected));
+    }
 
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .title(format!(" {} — Details ", m.name))
-                .border_style(Style::default().fg(Color::Cyan));
-            frame.render_widget(block, popup);
+    fn close_popups(&mut self) -> bool {
+        if self.details.take().is_some() || self.compare.take().is_some() {
+            return true;
+        }
+        false
+    }
 
-            let inner = popup.inner(ratatui::layout::Margin {
-                vertical: 1,
-                horizontal: 1,
-            });
-
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(1),
-                    Constraint::Length(1),
-                    Constraint::Length(1),
-                    Constraint::Length(1),
-                    Constraint::Length(1),
-                    Constraint::Length(1),
-                    Constraint::Length(1),
-                    Constraint::Length(1),
-                    Constraint::Min(0),
-                ])
-                .split(inner);
-
-            let lines: Vec<Line> = vec![
-                Line::from(vec![
-                    Span::styled(
-                        "ID: ",
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(&m.id),
-                ]),
-                Line::from(vec![
-                    Span::styled(
-                        "Provider: ",
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(&m.provider),
-                ]),
-                Line::from(vec![
-                    Span::styled(
-                        "Family: ",
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(&m.family),
-                ]),
-                Line::from(vec![
-                    Span::styled(
-                        "Context: ",
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(format!("{}k tokens", m.context_window / 1000)),
-                ]),
-                Line::from(vec![
-                    Span::styled(
-                        "Max Output: ",
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(format!("{} tokens", m.max_output_tokens)),
-                ]),
-                Line::from(vec![
-                    Span::styled(
-                        "Input Price: ",
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(Self::format_price(m.input_cost_per_million_micros)),
-                ]),
-                Line::from(vec![
-                    Span::styled(
-                        "Output Price: ",
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(Self::format_price(m.output_cost_per_million_micros)),
-                ]),
-                Line::from(vec![
-                    Span::styled(
-                        "Capabilities: ",
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(m.capabilities.join(", ")),
-                ]),
-            ];
-
-            for (i, line) in lines.iter().enumerate() {
-                if i < chunks.len() {
-                    frame.render_widget(Paragraph::new(line.clone()), chunks[i]);
-                }
-            }
-
-            let hint = Paragraph::new("press any key to close")
-                .style(Style::default().fg(Color::DarkGray))
-                .block(Block::default().borders(Borders::ALL));
-            frame.render_widget(hint, area);
+    /// What the box is showing: the provider's own list, a request in flight,
+    /// or the compiled-in fallback. Said in the border rather than in a row of
+    /// its own, because it is a caption for the table under it.
+    fn title(&self) -> String {
+        match (&self.loading, &self.live_for) {
+            (Some(provider), _) => format!(" Models — asking {provider} for its list… "),
+            (None, Some(provider)) => format!(
+                " Models — {provider} · {} from the provider ",
+                self.live_count
+            ),
+            (None, None) => " Models — built-in list ".to_string(),
         }
     }
 
-    fn render_json(&self, frame: &mut Frame, area: Rect) {
-        if self.json_mode {
-            if let Some(m) = self.selected_model() {
-                let json = serde_json::to_string_pretty(m).unwrap_or_default();
-                let popup_width = ((area.width as u32 * 9 / 10) as u16).clamp(80, area.width);
-                let popup_height = ((area.height as u32 * 8 / 10) as u16).clamp(20, area.height);
-                let popup = Rect::new(
-                    area.x + (area.width - popup_width) / 2,
-                    area.y + (area.height - popup_height) / 2,
-                    popup_width,
-                    popup_height,
-                );
+    /// The status row. Drawn every frame so the table above it never moves.
+    fn status(&self, width: u16) -> Line<'static> {
+        let room = (width as usize).saturating_sub(2);
+        let (marker, color, text) = match &self.note {
+            Some((true, text)) => ("✓", Color::Green, text.clone()),
+            Some((false, text)) => ("✗", Color::Red, text.clone()),
+            None if self.filtered.is_empty() => (
+                "›",
+                Color::Yellow,
+                "no model matches — / changes the filter, 0 clears the provider".to_string(),
+            ),
+            None => (" ", Color::DarkGray, String::new()),
+        };
+        Line::from(vec![
+            Span::styled(format!("{marker} "), Style::default().fg(color)),
+            Span::styled(ellipsize(&text, room), Style::default().fg(color)),
+        ])
+    }
 
-                frame.render_widget(Clear, popup);
-
-                let block = Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Model Metadata (JSON) ")
-                    .border_style(Style::default().fg(Color::Cyan));
-                frame.render_widget(block, popup);
-
-                let inner = popup.inner(ratatui::layout::Margin {
-                    vertical: 1,
-                    horizontal: 1,
-                });
-
-                let paragraph = Paragraph::new(json)
-                    .block(Block::default().borders(Borders::NONE))
-                    .wrap(Wrap { trim: false });
-                frame.render_widget(paragraph, inner);
-            }
+    /// The hint row: one line, always present, ellipsized rather than wrapped.
+    fn hints(&self) -> &'static str {
+        if self.searching {
+            "type to filter · enter keeps the filter · esc clears it"
+        } else {
+            "↑↓ move · enter use · ←→ reasoning · / search · tab filter · f favorite · i details · R refresh · esc close"
         }
+    }
+}
+
+impl Default for ModelsOverlay {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn cmp_price(left: Option<f64>, right: Option<f64>) -> std::cmp::Ordering {
+    match (left, right) {
+        (Some(left), Some(right)) => left
+            .partial_cmp(&right)
+            .unwrap_or(std::cmp::Ordering::Equal),
+        // Unpriced sorts last either way, and never looks like "free".
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    }
+}
+
+/// The wire shape a provider preset speaks.
+fn kind_of(provider: &str) -> Kind {
+    crate::connect::known_providers()
+        .iter()
+        .find(|info| info.name == provider)
+        .map(|info| info.kind)
+        .unwrap_or(Kind::OpenAi)
+}
+
+/// The endpoint a preset lives at.
+fn base_url_for(provider: &str, kind: Kind) -> String {
+    crate::connect::known_providers()
+        .iter()
+        .find(|info| info.name == provider)
+        .map(|info| info.default_base_url)
+        .filter(|url| !url.is_empty())
+        .unwrap_or_else(|| kind.default_base_url())
+        .to_string()
+}
+
+/// Whether a turn could run on this provider right now.
+///
+/// The same precedence the request path uses: a stored preset key, the account
+/// token for Memnoth, then the provider's own environment variable, then the
+/// resolved settings for the provider this session is already pointed at.
+fn provider_ready(_app: &App, settings: Option<&Settings>, provider: &str) -> bool {
+    let preset = crate::connect::known_providers()
+        .into_iter()
+        .find(|info| info.name == provider);
+
+    if let Some(info) = &preset {
+        if !info.env_var.is_empty() && std::env::var(info.env_var).is_ok() {
+            return true;
+        }
+        if let Ok(Some(key)) = crate::connect::get_provider_key(info.name)
+            && !key.trim().is_empty()
+        {
+            return true;
+        }
+    }
+
+    let Some(settings) = settings.filter(|settings| settings.ready()) else {
+        return false;
+    };
+    if settings.kind == Kind::Memnoth && provider == "memnoth" {
+        return true;
+    }
+    settings.kind == kind_of(provider)
+        && settings
+            .provider_name
+            .as_deref()
+            .map(|name| name == provider)
+            .unwrap_or(true)
+        && settings.api_key.is_some()
+}
+
+/// Fill `connected` once per provider, not once per row: reading the credential
+/// store is a blocking call, and six of them is already enough per open.
+fn seed_connectivity(rows: &mut [ModelRow], app: &App, settings: Option<&Settings>) {
+    let mut cache: std::collections::BTreeMap<String, bool> = std::collections::BTreeMap::new();
+    for row in rows.iter_mut() {
+        let ready = *cache
+            .entry(row.provider.clone())
+            .or_insert_with(|| provider_ready(app, settings, &row.provider));
+        row.connected = ready;
+    }
+}
+
+fn format_context(tokens: u32) -> String {
+    match tokens {
+        0 => "—".to_string(),
+        tokens if tokens >= 1_000_000 => format!("{}M", tokens / 1_000_000),
+        tokens if tokens >= 1_000 => format!("{}k", tokens / 1_000),
+        tokens => tokens.to_string(),
+    }
+}
+
+fn format_price(price: Option<f64>) -> String {
+    match price {
+        Some(price) if price < 1.0 => format!("{price:.2}"),
+        Some(price) => format!("{price:.1}"),
+        None => "—".to_string(),
     }
 }
 
@@ -975,14 +894,52 @@ impl Overlay for ModelsOverlay {
 
     fn show(&mut self) {
         self.visible = true;
-        // load_models will be called by the app when it has a valid App context
-        self.active_tab = 0;
-        self.selected = 0;
+        self.searching = false;
+        self.details = None;
+        self.compare = None;
+        self.note = None;
+    }
+
+    fn on_open(&mut self, app: &mut App) {
+        self.reload(app);
+    }
+
+    fn on_models_loaded(&mut self, result: &ModelsLoaded) {
+        // Another open browser may have asked too; only the answer to the
+        // request this screen is waiting on changes what it shows.
+        if self.loading.as_deref() != Some(result.provider.as_str()) {
+            return;
+        }
+        self.loading = None;
+        match &result.error {
+            None => {
+                self.replace_live_rows(&result.provider, &result.ids);
+                self.live_count = result.ids.len();
+                self.live_for = Some(result.provider.clone());
+                self.note = Some((
+                    true,
+                    format!(
+                        "{} models listed by {} — enter uses one",
+                        result.ids.len(),
+                        result.provider
+                    ),
+                ));
+            }
+            Some(error) => {
+                self.live_for = None;
+                self.note = Some((
+                    false,
+                    format!(
+                        "{} did not list its models ({error}) — showing the built-in list",
+                        result.provider
+                    ),
+                ));
+            }
+        }
     }
 
     fn hide(&mut self) {
         self.visible = false;
-        self.details_popup = None;
     }
 
     fn handle_key(&mut self, key: KeyEvent, app: &mut App) -> OverlayAction {
@@ -990,11 +947,36 @@ impl Overlay for ModelsOverlay {
             return OverlayAction::None;
         }
 
-        // Details popup takes priority
-        if self.details_popup.is_some() {
+        // A popup owns its dismissal, so the key that closes it cannot also act
+        // on the row behind it.
+        if self.close_popups() {
+            return OverlayAction::None;
+        }
+
+        if self.searching {
             match key.code {
-                KeyCode::Esc | KeyCode::Enter => {
-                    self.details_popup = None;
+                KeyCode::Esc => {
+                    self.searching = false;
+                    self.search.clear();
+                    self.apply_filters();
+                }
+                KeyCode::Enter => {
+                    // Enter finishes the filter. It used to also switch the
+                    // model, so typing a query and pressing enter changed what
+                    // answers the next turn — the one decision that should
+                    // never happen while you are still narrowing the list.
+                    self.searching = false;
+                }
+                KeyCode::Backspace => {
+                    self.search.pop();
+                    self.apply_filters();
+                }
+                KeyCode::Char(ch)
+                    if !key.modifiers.contains(KeyModifiers::CONTROL)
+                        && !key.modifiers.contains(KeyModifiers::ALT) =>
+                {
+                    self.search.push(ch);
+                    self.apply_filters();
                 }
                 _ => {}
             }
@@ -1002,156 +984,514 @@ impl Overlay for ModelsOverlay {
         }
 
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-
         match key.code {
-            KeyCode::Esc => return OverlayAction::Close,
-            KeyCode::Char('q') => return OverlayAction::Close,
+            KeyCode::Esc | KeyCode::Char('q') => return OverlayAction::Close,
+            KeyCode::Char('/') => self.searching = true,
             KeyCode::Tab => {
-                self.toggle_tab();
+                self.tab = match self.tab {
+                    Tab::All => Tab::Connected,
+                    Tab::Connected => Tab::Favorites,
+                    Tab::Favorites => Tab::Reasoning,
+                    Tab::Reasoning => Tab::All,
+                };
+                self.selected = 0;
+                self.apply_filters();
             }
-            KeyCode::Char('s') => {
-                self.toggle_sort();
-            }
-            KeyCode::Char('S') if ctrl => {
-                self.toggle_sort_direction();
-            }
-            KeyCode::Up => {
-                if self.selected > 0 {
-                    self.selected -= 1;
-                }
-            }
-            KeyCode::Down => {
-                if self.selected + 1 < self.filtered.len() {
-                    self.selected += 1;
-                }
-            }
+            KeyCode::Up => self.move_by(-1),
+            KeyCode::Down => self.move_by(1),
+            KeyCode::PageUp => self.move_by(-10),
+            KeyCode::PageDown => self.move_by(10),
             KeyCode::Home => {
                 self.selected = 0;
+                self.table.select(Some(0));
             }
             KeyCode::End => {
                 self.selected = self.filtered.len().saturating_sub(1);
+                self.table.select(Some(self.selected));
             }
-            KeyCode::PageUp => {
-                self.selected = self.selected.saturating_sub(10);
+            KeyCode::Left => self.cycle_effort(false),
+            KeyCode::Right => self.cycle_effort(true),
+            KeyCode::Enter => self.apply_selection(app),
+            KeyCode::Char('f') => self.toggle_favorite(app),
+            KeyCode::Char('c') => self.compare = Some(self.selected),
+            KeyCode::Char('i') => self.details = Some(self.selected),
+            KeyCode::Char('s') if ctrl => {
+                self.descending = !self.descending;
+                self.apply_filters();
             }
-            KeyCode::PageDown => {
-                self.selected = (self.selected + 10).min(self.filtered.len().saturating_sub(1));
+            KeyCode::Char('S') => {
+                self.descending = !self.descending;
+                self.apply_filters();
             }
-            KeyCode::Enter => {
-                self.set_as_default(app);
+            KeyCode::Char('s') => {
+                self.sort = self.sort.next();
+                self.apply_filters();
             }
-            KeyCode::Char('c') => {
-                if let Some(m) = self.selected_model() {
-                    app.push(
-                        crate::tui::app::EntryRole::Info,
-                        format!("Compare: {} vs default", m.name),
-                    );
+            KeyCode::Char('r') if ctrl => self.refresh_live(app),
+            KeyCode::Char('R') => self.refresh_live(app),
+            KeyCode::Char('0') => {
+                self.provider_filter = None;
+                self.apply_filters();
+            }
+            KeyCode::Char(digit @ '1'..='6') => {
+                let index = digit as usize - '1' as usize;
+                let providers = crate::connect::known_providers();
+                if let Some(info) = providers.get(index) {
+                    let name = info.name.to_string();
+                    self.set_provider_filter(&name);
                 }
-            }
-            KeyCode::Char('f') => {
-                self.toggle_favorite();
-            }
-            KeyCode::Char('i') => {
-                if let Some(m) = self.selected_model() {
-                    self.details_popup = Some(m.clone());
-                }
-            }
-            KeyCode::Char('/') => {
-                app.push(
-                    crate::tui::app::EntryRole::Info,
-                    "Type search query...".to_string(),
-                );
-            }
-            KeyCode::Char('1') => {
-                self.set_provider_filter("openai".to_string());
-            }
-            KeyCode::Char('2') => {
-                self.set_provider_filter("anthropic".to_string());
-            }
-            KeyCode::Char('3') => {
-                self.set_provider_filter("memnoth".to_string());
-            }
-            KeyCode::Char('r') => {
-                self.clear_filters();
             }
             _ => {}
         }
         OverlayAction::None
     }
 
+    /// A pasted query is a search, not a set of key presses.
+    fn handle_paste(&mut self, text: &str) -> bool {
+        if !self.searching {
+            return false;
+        }
+        self.search
+            .extend(text.chars().filter(|ch| !ch.is_control()));
+        self.apply_filters();
+        true
+    }
+
     fn render(&mut self, frame: &mut Frame, area: Rect, _app: &App) {
         if !self.visible {
             return;
         }
-
         frame.render_widget(Clear, area);
 
+        // Status and hints are two fixed rows at the bottom. They exist whether
+        // or not they have anything to say, so a note cannot move the table —
+        // and the hints no longer disappear behind the note that replaced them.
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3), // Tabs
-                Constraint::Min(0),    // Table
-                Constraint::Length(3), // Footer
+                Constraint::Length(3),
+                Constraint::Length(2),
+                Constraint::Min(4),
+                Constraint::Length(1),
+                Constraint::Length(1),
             ])
             .split(area);
 
-        self.render_header(frame, chunks[0]);
-        self.render_table(frame, chunks[1]);
-        self.render_footer(frame, chunks[2]);
+        let titles: Vec<&str> = [Tab::All, Tab::Connected, Tab::Favorites, Tab::Reasoning]
+            .iter()
+            .map(|tab| tab.label())
+            .collect();
+        let active = [Tab::All, Tab::Connected, Tab::Favorites, Tab::Reasoning]
+            .iter()
+            .position(|tab| *tab == self.tab)
+            .unwrap_or(0);
+        let tabs = Tabs::new(titles)
+            .block(Block::default().borders(Borders::ALL).title(self.title()))
+            .select(active)
+            .style(Style::default().fg(Color::Gray))
+            .highlight_style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            );
+        frame.render_widget(tabs, chunks[0]);
 
-        if self.details_popup.is_some() {
-            self.render_details_popup(frame, area);
+        // Search line and the active filters, so a filtered-out model is
+        // explainable rather than missing.
+        let search = if self.searching {
+            format!("search: {}", self.search)
+        } else if self.search.is_empty() {
+            "search: /".to_string()
+        } else {
+            format!("search: {}", self.search)
+        };
+        let filter = self
+            .provider_filter
+            .as_ref()
+            .map(|provider| format!(" · provider {provider}"))
+            .unwrap_or_default();
+        let sort = format!(
+            " · sort {}{}",
+            self.sort.label(),
+            if self.descending { " ▼" } else { " ▲" }
+        );
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(search, Style::default().fg(Color::Cyan)),
+                Span::styled(filter, Style::default().fg(Color::Yellow)),
+                Span::styled(sort, Style::default().fg(Color::DarkGray)),
+            ])),
+            chunks[1],
+        );
+        // A real caret in the field, not a block glyph that cannot be typed
+        // over: ratatui places the terminal's own cursor.
+        if self.searching {
+            let prefix = "search: ".chars().count() as u16;
+            let typed = self.search.chars().count() as u16;
+            let x =
+                (chunks[1].x + prefix + typed).min(chunks[1].x + chunks[1].width.saturating_sub(1));
+            frame.set_cursor_position(Position::new(x, chunks[1].y));
         }
 
-        if self.json_mode {
-            self.render_json(frame, area);
+        let default_model = self.current.clone();
+        let mut rows: Vec<Row> = Vec::new();
+        for (position, index) in self.filtered.iter().enumerate() {
+            let row = &self.rows[*index];
+            let selected = position == self.selected;
+            let is_default = default_model.as_deref() == Some(row.id.as_str());
+            let favorite = self.favorites.iter().any(|id| id == &row.id);
+            let effort = self.effort(&row.id, &row.variants);
+            let effort_text = match (&effort, row.variants.is_empty()) {
+                (Some(effort), _) => effort.clone(),
+                (None, true) => "—".to_string(),
+                _ => "—".to_string(),
+            };
+            let status = if row.deprecated {
+                "✗ deprecated"
+            } else if row.connected {
+                "● ready"
+            } else {
+                "○ no key"
+            };
+
+            let mut name = row.label.clone();
+            if is_default {
+                name.push_str(" ★");
+            }
+            if favorite {
+                name.push_str(" ⭐");
+            }
+            if row.live {
+                name.push_str(" +");
+            }
+
+            let style = if selected {
+                Style::default().bg(Color::Cyan).fg(Color::Black)
+            } else {
+                Style::default()
+            };
+            rows.push(
+                Row::new(vec![
+                    Cell::from(name),
+                    Cell::from(row.provider.clone()),
+                    Cell::from(format_context(row.context)),
+                    Cell::from(format_price(row.input_per_mtok)),
+                    Cell::from(format_price(row.output_per_mtok)),
+                    Cell::from(effort_text),
+                    Cell::from(status),
+                ])
+                .style(style),
+            );
+        }
+
+        let header = Row::new(vec![
+            Cell::from("model"),
+            Cell::from("provider"),
+            Cell::from("ctx"),
+            Cell::from("$in"),
+            Cell::from("$out"),
+            Cell::from("reasoning"),
+            Cell::from("status"),
+        ])
+        .style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        );
+
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Min(28),
+                Constraint::Length(11),
+                Constraint::Length(6),
+                Constraint::Length(7),
+                Constraint::Length(7),
+                Constraint::Length(10),
+                Constraint::Length(12),
+            ],
+        )
+        .header(header)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!(" {} models ", self.filtered.len())),
+        )
+        .row_highlight_style(Style::default().bg(Color::Cyan).fg(Color::Black))
+        .highlight_symbol(" ");
+
+        let mut state = self.table.clone();
+        state.select(if self.filtered.is_empty() {
+            None
+        } else {
+            Some(self.selected)
+        });
+        frame.render_stateful_widget(table, chunks[2], &mut state);
+
+        frame.render_widget(Paragraph::new(self.status(chunks[3].width)), chunks[3]);
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                ellipsize(self.hints(), chunks[4].width as usize),
+                Style::default().fg(Color::DarkGray),
+            ))),
+            chunks[4],
+        );
+
+        if let Some(index) = self.details
+            && let Some(row) = self.filtered.get(index).and_then(|i| self.rows.get(*i))
+        {
+            self.render_details(frame, area, row);
+        }
+        if let Some(index) = self.compare
+            && let Some(row) = self.filtered.get(index).and_then(|i| self.rows.get(*i))
+        {
+            self.render_compare(frame, area, row, default_model.as_deref());
         }
     }
 
     fn help_text(&self) -> Vec<(&'static str, &'static str)> {
         vec![
-            ("/models", "Open model browser overlay"),
-            ("Tab", "Switch tabs (All/Connected/Favorites/Recommended)"),
-            ("↑/↓", "Navigate models"),
-            ("PgUp/PgDn", "Page navigation"),
-            ("Home/End", "Jump to start/end"),
-            ("Enter", "Set as default model"),
-            ("C", "Compare with default"),
-            ("F", "Toggle favorite"),
-            ("I", "Show model details"),
-            ("/", "Search models"),
-            ("1/2/3", "Filter by provider (openai/anthropic/memnoth)"),
-            ("R", "Clear filters"),
-            ("S", "Cycle sort (price/context/speed)"),
-            ("Ctrl+S", "Toggle sort direction"),
-            ("Esc", "Close overlay"),
+            ("/models", "The models your provider lists (alias: /model)"),
+            ("↑/↓", "Move"),
+            ("←/→", "Reasoning variant for the selected model"),
+            ("Enter", "Use this model now, and save it"),
+            ("/", "Filter by model id or provider"),
+            ("Tab", "All / Connected / Favorites / Reasoning"),
+            ("1..6, 0", "Filter by provider, 0 clears"),
+            ("s, Shift+S", "Sort field, direction"),
+            ("f", "Favorite (persisted)"),
+            ("c", "Compare with the current model"),
+            ("i", "Details"),
+            ("R", "Ask the provider for its list again"),
+            ("esc", "Close"),
         ]
     }
 }
 
-fn speed_label(speed: SpeedRating) -> &'static str {
-    match speed {
-        SpeedRating::Slow => "Slow",
-        SpeedRating::Medium => "Med",
-        SpeedRating::Fast => "Fast",
+impl ModelsOverlay {
+    fn render_details(&self, frame: &mut Frame, area: Rect, row: &ModelRow) {
+        let width = ((area.width as u32 * 4 / 5) as u16).clamp(56, area.width);
+        let height = ((area.height as u32 * 3 / 4) as u16).clamp(16, area.height);
+        let popup = Rect::new(
+            area.x + (area.width - width) / 2,
+            area.y + (area.height - height) / 2,
+            width,
+            height,
+        );
+        frame.render_widget(Clear, popup);
+
+        let effort = self.effort(&row.id, &row.variants);
+        let lines = vec![
+            format!("id            {}", row.id),
+            format!("provider      {}", row.provider),
+            format!(
+                "context       {} in · {} out",
+                format_context(row.context),
+                format_context(row.max_output)
+            ),
+            format!(
+                "price         ${} in · ${} out per Mtok",
+                format_price(row.input_per_mtok),
+                format_price(row.output_per_mtok)
+            ),
+            format!(
+                "reasoning     {}",
+                match (&effort, row.variants.is_empty()) {
+                    (Some(effort), _) => format!("{effort} ({})", row.variants.join(" / ")),
+                    _ => "not supported".to_string(),
+                }
+            ),
+            format!(
+                "capabilities  {}{}{}",
+                if row.tools { "tools " } else { "" },
+                if row.vision { "vision " } else { "" },
+                if row.json { "json" } else { "" }
+            ),
+            format!(
+                "status        {}{}",
+                if row.connected {
+                    "key present"
+                } else {
+                    "no key"
+                },
+                if row.deprecated { " · deprecated" } else { "" }
+            ),
+            String::new(),
+            if row.live {
+                "from the provider's own /models; unpriced entries are priced".to_string()
+            } else {
+                "from the catalogue in this build; Enter makes it active".to_string()
+            },
+            if row.live {
+                "by the built-in table only, so '—' means unknown.".to_string()
+            } else {
+                "immediately — no restart.".to_string()
+            },
+        ];
+
+        let text: Vec<Line> = lines
+            .into_iter()
+            .map(|line| Line::from(Span::raw(line)))
+            .collect();
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(format!(" {} — details ", row.label))
+            .border_style(Style::default().fg(Color::Cyan));
+        frame.render_widget(
+            Paragraph::new(text).wrap(Wrap { trim: false }).block(block),
+            popup,
+        );
+    }
+
+    fn render_compare(&self, frame: &mut Frame, area: Rect, row: &ModelRow, default: Option<&str>) {
+        let current = default.unwrap_or("(none)");
+        let width = ((area.width as u32 * 3 / 4) as u16).clamp(60, area.width);
+        let height = 14.min(area.height);
+        let popup = Rect::new(
+            area.x + (area.width - width) / 2,
+            area.y + (area.height - height) / 2,
+            width,
+            height,
+        );
+        frame.render_widget(Clear, popup);
+
+        // 100k in, 4k out: one long session turn, so the numbers are comparable
+        // rather than abstract.
+        let estimate = |model: &ModelRow| match (model.input_per_mtok, model.output_per_mtok) {
+            (Some(input), Some(output)) => {
+                format!("${:.2}", input * 0.1 + output * 0.004)
+            }
+            _ => "unpriced".to_string(),
+        };
+        let current_row = self.rows.iter().find(|candidate| candidate.id == current);
+        let price = |model: Option<&ModelRow>, pick: fn(&ModelRow) -> Option<f64>| match model {
+            Some(model) => format_price(pick(model)),
+            None => "—".to_string(),
+        };
+
+        let lines = vec![
+            Line::from(vec![
+                Span::styled("                  ", Style::default()),
+                Span::styled(
+                    format!("{:>16}", "current"),
+                    Style::default().fg(Color::Gray),
+                ),
+                Span::styled(
+                    format!("{:>18}", "selected"),
+                    Style::default().fg(Color::Cyan),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("model             ", Style::default().fg(Color::Cyan)),
+                Span::raw(format!("{:>16}", truncate(current, 16))),
+                Span::raw(format!("{:>18}", truncate(&row.id, 18))),
+            ]),
+            Line::from(vec![
+                Span::styled("provider          ", Style::default().fg(Color::Cyan)),
+                Span::raw(format!(
+                    "{:>16}",
+                    truncate(
+                        current_row
+                            .map(|model| model.provider.as_str())
+                            .unwrap_or("—"),
+                        16
+                    )
+                )),
+                Span::raw(format!("{:>18}", row.provider)),
+            ]),
+            Line::from(vec![
+                Span::styled("context           ", Style::default().fg(Color::Cyan)),
+                Span::raw(format!(
+                    "{:>16}",
+                    format_context(current_row.map(|model| model.context).unwrap_or(0))
+                )),
+                Span::raw(format!("{:>18}", format_context(row.context))),
+            ]),
+            Line::from(vec![
+                Span::styled("in $/Mtok         ", Style::default().fg(Color::Cyan)),
+                Span::raw(format!(
+                    "{:>16}",
+                    price(current_row, |model| model.input_per_mtok)
+                )),
+                Span::raw(format!("{:>18}", format_price(row.input_per_mtok))),
+            ]),
+            Line::from(vec![
+                Span::styled("out $/Mtok        ", Style::default().fg(Color::Cyan)),
+                Span::raw(format!(
+                    "{:>16}",
+                    price(current_row, |model| model.output_per_mtok)
+                )),
+                Span::raw(format!("{:>18}", format_price(row.output_per_mtok))),
+            ]),
+            Line::from(vec![
+                Span::styled("100k in + 4k out  ", Style::default().fg(Color::Cyan)),
+                Span::raw(format!(
+                    "{:>16}",
+                    current_row.map(estimate).unwrap_or_else(|| "—".to_string())
+                )),
+                Span::raw(format!("{:>18}", estimate(row))),
+            ]),
+            Line::from(""),
+            Line::from(Span::styled(
+                "enter uses the selected model · esc closes",
+                Style::default().fg(Color::DarkGray),
+            )),
+        ];
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" compare ")
+            .border_style(Style::default().fg(Color::Cyan));
+        frame.render_widget(Paragraph::new(lines).block(block), popup);
     }
 }
 
-fn status_text(status: ModelStatus) -> &'static str {
-    match status {
-        ModelStatus::Connected => "Connected",
-        ModelStatus::Available => "Available",
-        ModelStatus::Deprecated => "Deprecated",
+fn truncate(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
     }
+    let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
 }
 
-fn infer_speed(family: &str) -> SpeedRating {
-    let f = family.to_lowercase();
-    if f.contains("haiku") || f.contains("mini") || f.contains("flash") {
-        SpeedRating::Fast
-    } else if f.contains("opus") || f.contains("sonnet") || f.contains("4o") || f.contains("70b") {
-        SpeedRating::Medium
-    } else {
-        SpeedRating::Slow
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_catalogue_is_priced_from_the_shared_table() {
+        let rows = catalogue();
+        let sonnet = rows
+            .iter()
+            .find(|row| row.id == "claude-sonnet-4-5")
+            .expect("sonnet is in the catalogue");
+        assert_eq!(sonnet.input_per_mtok, Some(3.0));
+        assert_eq!(sonnet.output_per_mtok, Some(15.0));
+    }
+
+    #[test]
+    fn only_reasoning_models_offer_effort_levels() {
+        assert!(variants_for("o3").contains(&"high"));
+        assert!(variants_for("gpt-5").contains(&"medium"));
+        assert!(variants_for("claude-sonnet-4-5").is_empty());
+        assert!(variants_for("gpt-4o").is_empty());
+    }
+
+    #[test]
+    fn an_unknown_model_sorts_last_and_prints_as_unknown() {
+        assert_eq!(format_price(None), "—");
+        assert_eq!(
+            cmp_price(Some(1.0), None),
+            std::cmp::Ordering::Less,
+            "a priced model outranks an unpriced one"
+        );
+    }
+
+    #[test]
+    fn context_windows_read_as_tokens_people_recognise() {
+        assert_eq!(format_context(200_000), "200k");
+        assert_eq!(format_context(1_000_000), "1M");
+        assert_eq!(format_context(0), "—");
     }
 }
