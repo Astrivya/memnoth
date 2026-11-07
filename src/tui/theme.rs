@@ -2,7 +2,7 @@
 
 use ratatui::style::{Color, Modifier, Style};
 
-use crate::tui::app::{ScreenReaderMode, Theme};
+use crate::tui::app::Theme;
 
 /// Color scheme for a theme
 #[derive(Debug, Clone)]
@@ -126,6 +126,9 @@ impl ColorScheme {
             crate::tui::app::EntryRole::Answer => (self.assistant, "▶"),
             crate::tui::app::EntryRole::Info => (self.info, "ℹ"),
             crate::tui::app::EntryRole::Error => (self.error, "✗"),
+            // A tool row's glyph is its state, so it is not themed away.
+            crate::tui::app::EntryRole::Tool => (self.tool, "▌"),
+            crate::tui::app::EntryRole::ToolDone => (self.success, "✓"),
         };
 
         let mut style = Style::default().fg(base_color).add_modifier(Modifier::BOLD);
@@ -152,6 +155,8 @@ impl ScreenReaderOutput {
             crate::tui::app::EntryRole::Answer => "[ASSISTANT]",
             crate::tui::app::EntryRole::Info => "[INFO]",
             crate::tui::app::EntryRole::Error => "[ERROR]",
+            crate::tui::app::EntryRole::Tool => "[TOOL]",
+            crate::tui::app::EntryRole::ToolDone => "[TOOL]",
         };
         format!("{} {}", role_str, entry.text)
     }
@@ -172,8 +177,9 @@ impl ScreenReaderOutput {
 /help                      this list
 /quit                      leave (also :q, ctrl-c)
 /clear                     clear the transcript
+/home                      the brief: what is here, what is missing
 /sessions                  sessions on disk, and how to resume them
-/model                     open model overlay
+/models                    browse, search and switch models (alias: /model)
 /search                    open search overlay
 /search <query>            ask the vault and the graph (no model)
 /context                   open context overlay
