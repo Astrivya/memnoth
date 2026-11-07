@@ -815,6 +815,14 @@ impl<'a> Toolbox<'a> {
         )
     }
 
+    fn kg_index(&mut self, input: &Value) -> Result<String> {
+        let full = input["full"].as_bool().unwrap_or(false);
+        let no_embed = input["no_embed"].as_bool().unwrap_or(false);
+        let mut quiet = |_: &str| {};
+        let report = crate::kg::index(self.ctx, full, no_embed, &mut quiet)?;
+        Ok(crate::kg::render_index(&report))
+    }
+
     fn edit_file(&mut self, input: &Value) -> Result<String> {
         let path = text_arg("edit_file", input, "path")?;
         let old = input["old"].as_str().unwrap_or("");
@@ -889,7 +897,29 @@ impl Tools for Toolbox<'_> {
                 return crate::edit::read(&self.ctx.root, &path, start, end);
             }
             "edit_file" => return self.edit_file(input),
+            // `kg_index` is dispatched here rather than through its verb for one
+            // reason: `memnoth kg index` narrates its progress to stderr, which
+            // is right in a terminal and wrong under the alternate screen. The
+            // body is the same `kg::index`, rendered by the same function.
+            "kg_index" => return self.kg_index(input),
             _ => {}
+        }
+
+        // A graph question in a workspace that has never been indexed used to
+        // answer "no code graph", leaving the model with nothing to do but ask
+        // the person to run `/kg index`. The graph is derived data, not their
+        // work, so the agent builds it once and answers from it.
+        //
+        // The test is the file, not `kg::status`: status stats every indexed
+        // path to count staleness, and paying that on every graph call to learn
+        // "there is no graph" would be the wrong trade. A graph that exists but
+        // cannot be read fails in the tool itself, and `kg_status` names it.
+        let auto_indexed = name.starts_with("kg_")
+            && !matches!(name, "kg_status" | "kg_index")
+            && !self.ctx.graph_path.is_file();
+        if auto_indexed {
+            let mut quiet = |_: &str| {};
+            crate::kg::index(self.ctx, false, false, &mut quiet)?;
         }
 
         let verb = verb_for(name, input)?;
@@ -897,6 +927,14 @@ impl Tools for Toolbox<'_> {
             self.confirm(&approval_for(name, input))?;
         }
         let outcome = crate::commands::execute(self.ctx, &verb)?;
+        if auto_indexed {
+            // Said out loud: a graph that appeared mid-turn is a fact about the
+            // answer, and the model should not cite it as if it had been there.
+            return Ok(format!(
+                "this workspace had no code graph, so it was indexed just now before this answer\n\n{}",
+                outcome.text
+            ));
+        }
         Ok(outcome.text)
     }
 
@@ -1232,8 +1270,19 @@ fn spec() -> Vec<(&'static str, &'static str, Value)> {
             }),
         ),
         (
+            "kg_index",
+            "Build or refresh the code graph for this workspace. Derived data, not a change to the person's work, so you may call it yourself without asking — do it when kg_status says the graph is not indexed or is stale, and never tell the person to run `memnoth kg index` for something you can do.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "full": { "type": "boolean", "description": "Rebuild from scratch instead of updating changed files." },
+                    "no_embed": { "type": "boolean", "description": "Skip embedding symbols, for a structural-only rebuild." }
+                }
+            }),
+        ),
+        (
             "kg_status",
-            "What the code graph was built from, when, and how stale it is. Call it when a search unexpectedly returns nothing — and when it says stale, ask the person to run /kg index before trusting another miss.",
+            "What the code graph was built from, when, and how stale it is. Call it when a search unexpectedly returns nothing — and when it says the graph is missing or stale, refresh it with kg_index before trusting another miss.",
             json!({ "type": "object", "properties": {} }),
         ),
         (
@@ -1295,12 +1344,14 @@ fn system_prompt(root: &Path) -> String {
          them before answering a question about this codebase or this team's history — a guess that \
          reads fluently is worse than a tool call that returns nothing. Cite what you used: \
          `path:line` for code, the entity name for a vault fact. Say plainly when a store has \
-         nothing, or when the graph is not indexed; do not fill the gap with invention.\n\n\
-         Two tools change state: `vault_remember` records a belief and `edit_file` changes a \
-         file. The user sees every one of them and must approve it first; if they decline, do not \
-         retry it, do not repeat it in different words, and say what you would have changed. Never \
-         claim a change a tool did not make, and never claim to have run a command — those tools \
-         are the only actions you have.\n\n\
+         nothing; do not fill the gap with invention.\n\n\
+         Three tools change state: `kg_index` builds the code graph, `vault_remember` records a \
+         belief and `edit_file` changes a file. Indexing is derived data, so call `kg_index` \
+         yourself whenever the graph is missing or `kg_status` says it is stale — never ask the \
+         person to run `memnoth kg index` for you. The other two the user sees and must approve it \
+         first; if they decline, do not retry it, do not repeat it in different words, and say \
+         what you would have changed. Never claim a change a tool did not make, and never claim to \
+         have run a command — those tools are the only actions you have.\n\n\
          Read a file before editing it, and copy the snippet for `old` exactly from `read_file`. If \
          the tool says the text does not match or is ambiguous, read again; do not guess a second \
          snippet.\n\n\
@@ -2016,8 +2067,8 @@ mod tests {
             "text": "t", "path": "p", "new": "n"
         });
         for name in tool_names() {
-            let implemented =
-                matches!(name, "read_file" | "edit_file") || verb_for(name, &input).is_ok();
+            let implemented = matches!(name, "read_file" | "edit_file" | "kg_index")
+                || verb_for(name, &input).is_ok();
             assert!(
                 implemented,
                 "{name} is advertised without an implementation"
@@ -2040,6 +2091,29 @@ mod tests {
         ] {
             assert!(!requires_approval(read_only), "{read_only}");
         }
+    }
+
+    /// The agent may index itself: the graph is derived data, so there is no
+    /// approval card and no "run this command for me" hand-off. A workspace
+    /// with no graph at all is indexed on the way to answering the question.
+    #[test]
+    fn the_agent_indexes_itself_instead_of_asking_the_person_to_run_a_command() {
+        assert!(!requires_approval("kg_index"));
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "pub fn widget() {}\n").unwrap();
+        let ctx = test_context(dir.path());
+        let mut tools = Toolbox::new(&ctx);
+
+        let answer = tools
+            .call("kg_search", &json!({ "query": "widget" }))
+            .expect("a graph question must build the graph it needs");
+        assert!(ctx.graph_path.is_file(), "the graph is on disk");
+        assert!(answer.contains("indexed just now"), "{answer}");
+
+        // An explicit refresh is the same build, without the footnote.
+        let refreshed = tools.call("kg_index", &json!({})).expect("kg_index works");
+        assert!(!refreshed.contains("indexed just now"), "{refreshed}");
     }
 
     #[test]
