@@ -103,7 +103,7 @@ fn enqueue(ctx: &AppContext, name: &str, session: &Session, event: Event) {
     };
     // A send to a worker that failed to start is a dropped report, which is the
     // same outcome as a plane that refused it: nothing to raise, nothing to say.
-    let _ = worker().send(Message::Report(job));
+    let _ = worker().send(Message::Report(Box::new(job)));
 }
 
 /// The one worker channel. `None` until a report is first queued, which is what
@@ -112,7 +112,10 @@ static TX: OnceLock<Sender<Message>> = OnceLock::new();
 
 /// One message for the worker: a row to post, or a barrier to wait behind.
 enum Message {
-    Report(Job),
+    // Boxed: a `Job` is a whole session row with its event list, and the
+    // barrier beside it is sixteen bytes. Unboxed, every queue slot paid for
+    // the largest row a session could produce.
+    Report(Box<Job>),
     /// Answered only after every message queued before it has been handled,
     /// which is what makes [`flush`] a barrier rather than a sleep.
     Barrier(Sender<()>),
