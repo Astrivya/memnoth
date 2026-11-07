@@ -576,6 +576,12 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
     // the close is reported before the screen is torn down. `settle` has already
     // written the session file; this only tells the plane about it.
     crate::report::finished(ctx, &app.name, &session);
+    // The close is queued, and the process is about to end: the worker is a
+    // detached thread, so without waiting here the one report that makes the
+    // plane roll this session into usage is killed with the process and the row
+    // stays `running`. Bounded, so an unreachable plane delays exit by at most
+    // five seconds and never more.
+    crate::report::flush(std::time::Duration::from_secs(5));
 
     drop(terminal);
     drop(guard);

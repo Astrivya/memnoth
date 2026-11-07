@@ -103,7 +103,44 @@ fn enqueue(ctx: &AppContext, name: &str, session: &Session, event: Event) {
     };
     // A send to a worker that failed to start is a dropped report, which is the
     // same outcome as a plane that refused it: nothing to raise, nothing to say.
-    let _ = worker().send(job);
+    let _ = worker().send(Message::Report(job));
+}
+
+/// The one worker channel. `None` until a report is first queued, which is what
+/// lets [`flush`] tell "nothing to wait for" from "a worker is running".
+static TX: OnceLock<Sender<Message>> = OnceLock::new();
+
+/// One message for the worker: a row to post, or a barrier to wait behind.
+enum Message {
+    Report(Job),
+    /// Answered only after every message queued before it has been handled,
+    /// which is what makes [`flush`] a barrier rather than a sleep.
+    Barrier(Sender<()>),
+}
+
+/// Wait until every report queued before this call has been sent, or `timeout`.
+///
+/// The screen reports its close and then returns from `run`, which ends the
+/// process. The worker is a detached thread, so it is killed with the process —
+/// and the close, the one report that makes the plane roll a session into usage,
+/// was the one most likely to be lost. Observed rather than theoretical: a live
+/// TUI session posted `started` (the dashboard showed it, with its project) and
+/// never posted an end, so it sat `running` forever and its work never reached
+/// the charts.
+///
+/// Bounded on purpose: a plane that cannot be reached costs at most `timeout` of
+/// exit, never a hang.
+pub fn flush(timeout: std::time::Duration) {
+    // `get`, not `get_or_init`: a machine that never queued a report has no
+    // worker, and starting one just to wait on it would be absurd.
+    let Some(tx) = TX.get() else {
+        return;
+    };
+    let (done_tx, done_rx) = channel();
+    if tx.send(Message::Barrier(done_tx)).is_err() {
+        return;
+    }
+    let _ = done_rx.recv_timeout(timeout);
 }
 
 /// The one worker thread, started on first use.
@@ -112,15 +149,22 @@ fn enqueue(ctx: &AppContext, name: &str, session: &Session, event: Event) {
 /// turn, and a thread each would be a thread per keystroke's worth of work
 /// whenever the plane is slow. Serialising them also keeps the plane's view of a
 /// session ordered — a close can never overtake the update that preceded it.
-fn worker() -> &'static Sender<Job> {
-    static TX: OnceLock<Sender<Job>> = OnceLock::new();
+fn worker() -> &'static Sender<Message> {
     TX.get_or_init(|| {
-        let (tx, rx): (Sender<Job>, Receiver<Job>) = channel();
+        let (tx, rx): (Sender<Message>, Receiver<Message>) = channel();
         let spawned = std::thread::Builder::new()
             .name("memnoth-report".to_string())
             .spawn(move || {
-                while let Ok(job) = rx.recv() {
-                    send(&job);
+                while let Ok(message) = rx.recv() {
+                    match message {
+                        Message::Report(job) => send(&job),
+                        // Every earlier message has been handled by the time this
+                        // arrives, because one thread consumes the channel in
+                        // order.
+                        Message::Barrier(done) => {
+                            let _ = done.send(());
+                        }
+                    }
                 }
             });
         if let Err(error) = spawned {
@@ -141,7 +185,15 @@ fn send(job: &Job) {
         }
     };
     let mode = crate::sync::get_sync_privacy_mode(&job.ctx);
-    let report = body(&job.ctx.root, mode, &job.name, &job.session, job.event);
+    let project = project_id(&job.ctx);
+    let report = body(
+        &job.ctx.root,
+        mode,
+        project.as_deref(),
+        &job.name,
+        &job.session,
+        job.event,
+    );
     if let Err(error) = client.record_session(&report) {
         append_log(
             Some(&job.ctx),
@@ -174,6 +226,7 @@ fn send(job: &Job) {
 fn body(
     root: &std::path::Path,
     mode: SyncPrivacyMode,
+    project: Option<&str>,
     name: &str,
     session: &Session,
     event: Event,
@@ -203,7 +256,7 @@ fn body(
         files: files.len() as i64,
         cost_micros: cost_micros as i64,
         workspace: root.to_string_lossy().to_string(),
-        project_id: project_id(),
+        project_id: project.map(str::to_string),
         control_url: None,
         events: transcript(mode, &messages),
         started_at: Some(rfc3339(session.created_ms)),
@@ -274,12 +327,31 @@ fn bounded(text: &str) -> String {
     format!("{cut}…")
 }
 
-/// The cloud project every session from this machine is filed under, when
-/// configured.
+/// The cloud project every session from this machine is filed under, when one is
+/// set.
 ///
-/// Read per call rather than cached: the variable is a setting, and the plane
-/// makes the final decision anyway (a project-scoped key supplies its own).
-pub(crate) fn project_id() -> Option<String> {
+/// `MEMNOTH_PROJECT_ID` wins over the stored choice: an exported variable is how
+/// one run — a CI job, a scratch session — attributes itself, while the config
+/// file is how a person attributes every run on the machine. Read per call rather
+/// than cached: the plane makes the final decision anyway (a project-scoped key
+/// supplies its own project when the body is silent).
+///
+/// A session reported with no project is not lost — it lands in the console's
+/// unassigned queue — which is why the absence is `None` here rather than an
+/// empty string the plane would have to interpret.
+pub(crate) fn project_id(ctx: &AppContext) -> Option<String> {
+    env_project_id().or_else(|| {
+        ctx.config()
+            .project
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    })
+}
+
+/// `MEMNOTH_PROJECT_ID`, when it names a project.
+pub(crate) fn env_project_id() -> Option<String> {
     std::env::var("MEMNOTH_PROJECT_ID")
         .ok()
         .map(|value| value.trim().to_string())
@@ -380,6 +452,7 @@ mod tests {
         let running = body(
             std::path::Path::new("/w"),
             SyncPrivacyMode::Balanced,
+            None,
             "session",
             &session,
             Event::Updated,
@@ -397,6 +470,7 @@ mod tests {
         let closed = body(
             std::path::Path::new("/w"),
             SyncPrivacyMode::Balanced,
+            None,
             "session",
             &session,
             Event::Finished,
@@ -411,6 +485,7 @@ mod tests {
         let quiet = body(
             std::path::Path::new("/w"),
             SyncPrivacyMode::MetadataOnly,
+            None,
             "session",
             &session,
             Event::Finished,

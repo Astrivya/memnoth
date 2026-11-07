@@ -1141,6 +1141,9 @@ pub enum ProjectsCommand {
     /// Delete a project. Its sessions are kept, unassigned.
     #[command(name = "delete")]
     Delete(ProjectsDeleteArgs),
+    /// File every session from this machine under a project.
+    #[command(name = "use")]
+    Use(ProjectsUseArgs),
 }
 
 /// Arguments for `mn projects list`.
@@ -1193,6 +1196,23 @@ pub struct ProjectsDeleteArgs {
     /// Delete without asking for confirmation.
     #[arg(long)]
     pub yes: bool,
+
+    /// Output as JSON.
+    #[arg(long, global = true)]
+    pub json: bool,
+}
+
+/// Arguments for `mn projects use`.
+#[derive(Debug, Args)]
+pub struct ProjectsUseArgs {
+    /// Project id, as `mn projects list` prints it. Omit it to print the current
+    /// choice.
+    #[arg(value_name = "ID")]
+    pub id: Option<String>,
+
+    /// Stop filing sessions under a project; they report as unassigned again.
+    #[arg(long)]
+    pub clear: bool,
 
     /// Output as JSON.
     #[arg(long, global = true)]
