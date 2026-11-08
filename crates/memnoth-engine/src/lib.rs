@@ -96,6 +96,7 @@ pub use namespace::{
 pub use reflect::{
     REFLECTION_KIND, ReflectPolicy, Reflection, reflect_all, reflect_entity, reflections_for,
 };
+pub use store::proposals::{PROPOSAL_TTL_MS, Proposal};
 pub use store::{
     DEFAULT_BUSY_TIMEOUT_MS, MemoryEngine, VaultOptions, content_hash_entity,
     content_hash_observation, intervals_overlap, normalize_instant, utc_day,

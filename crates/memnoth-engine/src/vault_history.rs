@@ -20,6 +20,7 @@
 
 use crate::store::MemoryEngine;
 use anyhow::{Context, Result};
+use rusqlite::OptionalExtension;
 use rusqlite::params;
 use serde_json::{Value, json};
 
@@ -272,7 +273,7 @@ pub fn vault_contradictions(engine: &MemoryEngine, name: &str) -> Result<Value> 
     }
     let conn = engine.connection();
     let mut contradicted = Vec::new();
-    for id in ids {
+    for &id in &ids {
         // journaled entity versions record renames/revokes with reasons
         let mut stmt = conn
             .prepare(
@@ -284,8 +285,23 @@ pub fn vault_contradictions(engine: &MemoryEngine, name: &str) -> Result<Value> 
         let rows = stmt.query_map(params![id], |r| {
             let snapshot: String = r.get(0)?;
             let parsed: Value = serde_json::from_str(&snapshot).unwrap_or(Value::Null);
+            // The previous belief is the *content* of the disagreement, not
+            // just the fact that one happened. Flatten name/summary so a
+            // caller (and the CLI text) can show both sides without knowing
+            // the journal snapshot's shape.
+            let previous_name = parsed
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            let previous_summary = parsed
+                .get("summary")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
             Ok(json!({
                 "previous": parsed,
+                "previous_name": previous_name,
+                "previous_summary": previous_summary,
+                "previous_valid_from": r.get::<_, Option<i64>>(1)?,
                 "valid_to": r.get::<_, Option<i64>>(2)?,
                 "reason": r.get::<_, Option<String>>(3)?,
             }))
@@ -313,12 +329,74 @@ pub fn vault_contradictions(engine: &MemoryEngine, name: &str) -> Result<Value> 
             contradicted.push(row?);
         }
     }
+    // The other half of "a contradictory pair is visible": the previous belief
+    // is useless without the belief that replaced it, and the current side is
+    // the one a caller will act on. It carries its author, because "who says"
+    // is part of what makes a contradiction reviewable.
+    let current_belief = current_belief_for(engine, &ids)?;
+
     Ok(json!({
         "entity": name,
         "contradictions": contradicted,
         "count": contradicted.len(),
-        "guidance": "previous versions carry the change_reason; treat current belief with caution where contradictions exist",
+        "current_belief": current_belief,
+        "guidance": "both sides are returned: `previous_*` is the belief that closed and `current_belief` is what the vault holds now; treat the current side with caution where contradictions exist",
     }))
+}
+
+/// The open belief across a lineage, with the facts behind it and the author
+/// each fact records. `None` when every generation is closed.
+fn current_belief_for(engine: &MemoryEngine, ids: &[i64]) -> Result<Value> {
+    if ids.is_empty() {
+        return Ok(Value::Null);
+    }
+    let conn = engine.connection();
+    for id in ids {
+        let row = conn
+            .query_row(
+                "SELECT id, name, summary, valid_from FROM entities \
+                 WHERE id = ?1 AND valid_to IS NULL \
+                   AND (invalid_at IS NULL OR invalid_at > ?2)",
+                params![id, crate::now_ms()],
+                |r| {
+                    Ok(json!({
+                        "entity_id": r.get::<_, i64>(0)?,
+                        "name": r.get::<_, String>(1)?,
+                        "summary": r.get::<_, Option<String>>(2)?,
+                        "valid_from": r.get::<_, i64>(3)?,
+                    }))
+                },
+            )
+            .optional()?;
+        let Some(mut current) = row else {
+            continue;
+        };
+        let mut stmt = conn
+            .prepare(
+                "SELECT content, kind, confidence, valid_from, recorded_at, provenance \
+                 FROM observations WHERE entity_id = ?1 AND valid_to IS NULL \
+                   AND (invalid_at IS NULL OR invalid_at > ?2) \
+                 ORDER BY valid_from, id",
+            )
+            .context("prepare current belief query")?;
+        let facts = stmt
+            .query_map(params![id, crate::now_ms()], |r| {
+                let provenance: String = r.get(5)?;
+                Ok(json!({
+                    "content": r.get::<_, String>(0)?,
+                    "kind": r.get::<_, String>(1)?,
+                    "confidence": r.get::<_, f64>(2)?,
+                    "valid_from": r.get::<_, i64>(3)?,
+                    "recorded_at": r.get::<_, Option<i64>>(4)?,
+                    "provenance": serde_json::from_str::<Value>(&provenance)
+                        .unwrap_or(Value::Null),
+                }))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        current["facts"] = Value::Array(facts);
+        return Ok(current);
+    }
+    Ok(Value::Null)
 }
 
 /// Vault-wide contradiction audit: every explicitly revoked relation with the
@@ -702,6 +780,44 @@ mod tests {
             .filter_map(|x| x["kind"].as_str())
             .collect();
         assert!(kinds.contains(&"partners-with"));
+        // The open side of the disagreement is returned too: the reason alone
+        // cannot tell a reviewer what replaced the closed belief.
+        assert_eq!(c["current_belief"]["name"], "acme-corp");
+    }
+
+    #[test]
+    fn a_current_belief_names_the_person_who_recorded_it() {
+        let eng = MemoryEngine::open_in_memory().unwrap();
+        let a = eng
+            .add_entity(EntityKind::Concept, "acme", 1.0, T0)
+            .unwrap();
+        let b = eng
+            .add_entity(EntityKind::Concept, "beta", 1.0, T0)
+            .unwrap();
+        let r = eng.add_relation(a, b, "partners-with", 1.0, T0).unwrap();
+        eng.revoke_relation(r, "deal fell through", T0 + DAY)
+            .unwrap();
+        eng.ingest_observation_attributed(
+            a,
+            "deploys on fridays",
+            "gotcha",
+            0.9,
+            T0,
+            r#"{"user":"asha","agent":"cli"}"#,
+            Some(T0),
+        )
+        .unwrap();
+
+        let c = vault_contradictions(&eng, "acme").unwrap();
+        assert_eq!(c["current_belief"]["name"], "acme");
+        assert_eq!(
+            c["current_belief"]["facts"][0]["content"],
+            "deploys on fridays"
+        );
+        assert_eq!(
+            c["current_belief"]["facts"][0]["provenance"]["user"], "asha",
+            "a shared vault must say who learned the fact: {c}"
+        );
     }
 
     #[test]

@@ -86,7 +86,9 @@ CREATE TABLE IF NOT EXISTS observations (
     valid_from INTEGER NOT NULL,
     valid_to   INTEGER,
     content_hash TEXT,
-    invalid_at INTEGER
+    invalid_at INTEGER,
+    recorded_at  INTEGER,
+    provenance   TEXT    NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS idx_observations_entity ON observations(entity_id);
 
@@ -179,4 +181,29 @@ CREATE VIRTUAL TABLE IF NOT EXISTS observations_fts USING fts5(
 CREATE TRIGGER IF NOT EXISTS observations_fts_ai AFTER INSERT ON observations BEGIN
     INSERT INTO observations_fts(rowid, content) VALUES (new.id, new.content);
 END;
+
+-- Proposed beliefs (D18). Unattended writes wait here instead of becoming
+-- observations, so every reader of the vault is blind to them by construction
+-- rather than by remembering to filter. `observation_id` is filled only by an
+-- acceptance, which is the single path from this table into `observations`.
+-- `expires_at` is honoured by `expire_proposals`; nothing auto-accepts.
+CREATE TABLE IF NOT EXISTS proposals (
+    id               INTEGER PRIMARY KEY,
+    entity_name      TEXT    NOT NULL,
+    entity_canonical TEXT    NOT NULL,
+    entity_kind      TEXT    NOT NULL DEFAULT 'concept',
+    content          TEXT    NOT NULL,
+    kind             TEXT    NOT NULL DEFAULT 'fact',
+    confidence       REAL    NOT NULL DEFAULT 1.0,
+    provenance       TEXT    NOT NULL DEFAULT '{}',
+    content_hash     TEXT    NOT NULL,
+    proposed_at      INTEGER NOT NULL,
+    expires_at       INTEGER NOT NULL,
+    status           TEXT    NOT NULL DEFAULT 'proposed',
+    decided_at       INTEGER,
+    decided_by       TEXT,
+    decision_reason  TEXT,
+    observation_id   INTEGER REFERENCES observations(id)
+);
+CREATE INDEX IF NOT EXISTS idx_proposals_open ON proposals(status, expires_at);
 "#;

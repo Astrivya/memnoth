@@ -33,6 +33,30 @@ impl MemoryEngine {
         confidence: f64,
         valid_from: i64,
     ) -> Result<i64> {
+        self.ingest_observation_attributed(
+            entity_id, content, kind, confidence, valid_from, "{}", None,
+        )
+    }
+
+    /// The attributed write path: same idempotency as
+    /// [`Self::ingest_observation_idempotent`], plus the provenance JSON that
+    /// names **who** learned it (`{"user":"…","agent":"…"}`) and the
+    /// `recorded_at` instant, which is not the same axis as `valid_from`.
+    ///
+    /// A duplicate on the same day returns the existing row and keeps the
+    /// provenance it was first written with — re-remembering the same fact must
+    /// not silently re-attribute it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn ingest_observation_attributed(
+        &self,
+        entity_id: i64,
+        content: &str,
+        kind: &str,
+        confidence: f64,
+        valid_from: i64,
+        provenance: &str,
+        recorded_at: Option<i64>,
+    ) -> Result<i64> {
         let valid_from = normalize_instant(valid_from);
         let hash = content_hash_observation(content, kind);
         if let Some(id) = self
@@ -47,9 +71,18 @@ impl MemoryEngine {
             return Ok(id);
         }
         self.conn.execute(
-            "INSERT INTO observations (entity_id, content, kind, confidence, valid_from, content_hash)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![entity_id, content, kind, confidence, valid_from, hash],
+            "INSERT INTO observations (entity_id, content, kind, confidence, valid_from, content_hash, recorded_at, provenance)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                entity_id,
+                content,
+                kind,
+                confidence,
+                valid_from,
+                hash,
+                recorded_at,
+                provenance
+            ],
         )?;
         Ok(self.conn.last_insert_rowid())
     }

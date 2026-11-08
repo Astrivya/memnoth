@@ -234,6 +234,11 @@ fn apply_w1_migrations(conn: &Connection) -> Result<()> {
         "ALTER TABLE relations ADD COLUMN invalid_at INTEGER",
         "ALTER TABLE observations ADD COLUMN content_hash TEXT",
         "ALTER TABLE observations ADD COLUMN invalid_at INTEGER",
+        // T3: attribution. `recorded_at` is when we learned it, distinct from
+        // `valid_from` (when it was true); `provenance` names the person and
+        // agent that wrote it. Additive, so an old vault opens unchanged.
+        "ALTER TABLE observations ADD COLUMN recorded_at INTEGER",
+        "ALTER TABLE observations ADD COLUMN provenance TEXT NOT NULL DEFAULT '{}'",
         // W2 runner columns (additive, defaulted; backfilled below).
         "ALTER TABLE entities ADD COLUMN proof_count INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE entities ADD COLUMN consolidated_at INTEGER",
@@ -264,7 +269,8 @@ fn apply_w1_migrations(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_entities_consolidated_at ON entities(consolidated_at);
         CREATE INDEX IF NOT EXISTS idx_relations_invalid_at ON relations(invalid_at);
         CREATE INDEX IF NOT EXISTS idx_observations_content_hash ON observations(content_hash);
-        CREATE INDEX IF NOT EXISTS idx_observations_invalid_at ON observations(invalid_at);",
+        CREATE INDEX IF NOT EXISTS idx_observations_invalid_at ON observations(invalid_at);
+        CREATE INDEX IF NOT EXISTS idx_observations_recorded_at ON observations(recorded_at);",
     )?;
     // Backfill content hashes for rows written pre-W1.
     //
@@ -280,7 +286,11 @@ fn apply_w1_migrations(conn: &Connection) -> Result<()> {
     // guarantees; support can read this to know what a user's file contains,
     // and future migrations can key off it instead of trying DDL and
     // swallowing the error.
-    conn.execute_batch("PRAGMA user_version = 2;")?;
+    // 4 adds `proposals`; the table itself is created by `SCHEMA_SQL` with
+    // `IF NOT EXISTS`, so an existing vault gains it on the next open. The
+    // version is bumped so support can tell a pre-proposals file from a
+    // post-proposals one without guessing from the schema.
+    conn.execute_batch("PRAGMA user_version = 4;")?;
     Ok(())
 }
 
@@ -1028,5 +1038,6 @@ mod tests;
 
 mod graph;
 mod history;
+pub mod proposals;
 mod scoring;
 mod search;
