@@ -147,7 +147,7 @@ pub fn metadata(config: &AuthConfig, resource: &str) -> Value {
         // advertise only the header method.
         "bearer_methods_supported": ["header"],
         "resource_name": "Memnoth MCP Server",
-        "resource_documentation": "https://github.com/amruthjakku/memnoth/blob/master/docs/MCP.md",
+        "resource_documentation": "https://github.com/astrivya/memnoth/blob/master/docs/MCP.md",
     });
     let servers = authorization_servers(config);
     if !servers.is_empty() {

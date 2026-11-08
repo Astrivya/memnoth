@@ -1,6 +1,6 @@
 # @astrivya/mcp
 
-Launcher for the [memnoth](https://github.com/amruthjakku/memnoth) MCP server.
+Launcher for the [memnoth](https://github.com/astrivya/memnoth) MCP server.
 
 **This package bundles the server binary** in `vendor/<platform>-<arch>/memnoth-mcp`
 (`memnoth-mcp.exe` on Windows; six targets: `win32-x64`, `win32-arm64`, `linux-x64`,
