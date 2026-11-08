@@ -55,6 +55,11 @@ pub struct Header {
     pub id: String,
     pub model: String,
     pub created_ms: i64,
+    /// The control-plane project this session was reported under, when there
+    /// was one. Additive and defaulted: sessions written before per-project
+    /// attribution load with `None` rather than being refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
 }
 
 /// One turn's context receipt, as written to the session log.
@@ -128,12 +133,65 @@ pub struct WriteReceipt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<usize>,
 }
+/// Who approved a change, and under what rule.
+///
+/// An approval that lives only in a screen is unanswerable later: a reviewer
+/// asking "who approved this write" has no artifact to open. This row is that
+/// artifact, written beside the write it authorised. `approved_by` is the
+/// person at the keyboard, not the agent that asked — that distinction is the
+/// whole point of recording it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalRecord {
+    /// Discriminator, so `load` can tell this row from the other shapes without
+    /// guessing at field names.
+    pub record: String,
+    pub at_ms: i64,
+    /// The tool that asked (`edit_file`, `vault_remember`).
+    pub tool: String,
+    /// One line naming what changed.
+    pub subject: String,
+    /// `true` when the person allowed it, `false` when they refused.
+    pub approved: bool,
+    /// The person at the keyboard. Never the agent.
+    pub approved_by: String,
+    /// The policy or prompt that decided it; `"user"` for a screen approval.
+    pub rule: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<usize>,
+}
+
+impl ApprovalRecord {
+    /// The discriminator value written on every approval row.
+    pub const KIND: &'static str = "approval";
+
+    /// A decision by the person at the keyboard.
+    pub fn user(tool: &str, subject: &str, approved: bool, approved_by: &str) -> Self {
+        Self {
+            record: Self::KIND.to_string(),
+            at_ms: now_ms(),
+            tool: tool.to_string(),
+            subject: subject.to_string(),
+            approved,
+            approved_by: approved_by.to_string(),
+            rule: "user".to_string(),
+            turn_id: None,
+        }
+    }
+
+    /// Attach the turn this decision belongs to.
+    pub fn at_turn(mut self, turn_id: usize) -> Self {
+        self.turn_id = Some(turn_id);
+        self
+    }
+}
+
 /// The version this build writes, and the newest it can read.
 ///
-/// 1 → messages only, 2 → `TurnReceipt` rows, 3 → `WriteReceipt` rows. Reading is additive: an
+/// 1 → messages only, 2 → `TurnReceipt` rows, 3 → `WriteReceipt` rows,
+/// 4 → checkpoints, 5 → `ApprovalRecord` rows. Reading is additive: an
 /// older file has fewer row kinds and needs no migration. A *newer* file is refused by name rather
 /// than by a parse error halfway through, which is the difference between "upgrade" and "corrupt".
-pub const FORMAT_VERSION: u32 = 4;
+pub const FORMAT_VERSION: u32 = 5;
 
 /// A conversation with the model, plus the two counters the status bar shows.
 #[derive(Clone, Debug)]
@@ -148,9 +206,17 @@ pub struct Session {
     pub writes: Vec<WriteReceipt>,
     /// Checkpoints for /rewind and /revert — one per turn boundary.
     pub checkpoints: Vec<Checkpoint>,
+    /// One row per approval decision, so `mn receipt` can answer "who allowed
+    /// this" from the session file rather than from a screenshot.
+    pub approvals: Vec<ApprovalRecord>,
     /// Totals reported by the provider; zero until a transport is wired.
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// The project this session's spend belongs to, as reported to the plane.
+    /// `None` is "unassigned", not "unknown": it is the state the console's
+    /// unassigned queue shows, and the reason `mn stats` prints a project row
+    /// only when it has one.
+    pub project_id: Option<String>,
 }
 
 impl Session {
@@ -166,14 +232,29 @@ impl Session {
             receipts: Vec::new(),
             writes: Vec::new(),
             checkpoints: Vec::new(),
+            approvals: Vec::new(),
             input_tokens: 0,
             output_tokens: 0,
+            project_id: None,
         }
     }
 
     /// Record one completed file edit.
     pub fn record_write(&mut self, write: WriteReceipt) {
         self.writes.push(write);
+    }
+
+    /// Record one approval decision.
+    pub fn record_approval(&mut self, approval: ApprovalRecord) {
+        self.approvals.push(approval);
+    }
+
+    /// Decisions recorded for one turn.
+    pub fn approvals_for_turn(&self, turn_id: usize) -> Vec<&ApprovalRecord> {
+        self.approvals
+            .iter()
+            .filter(|approval| approval.turn_id == Some(turn_id))
+            .collect()
     }
 
     /// Record one turn's receipt.
@@ -249,8 +330,10 @@ impl Session {
             receipts: Vec::new(),
             writes: Vec::new(),
             checkpoints: Vec::new(),
+            approvals: Vec::new(),
             input_tokens: 0,
             output_tokens: 0,
+            project_id: None,
         }
     }
 
@@ -365,6 +448,7 @@ impl Session {
             id: self.id.clone(),
             model: self.model.clone(),
             created_ms: self.created_ms,
+            project_id: self.project_id.clone(),
         })?);
         out.push('\n');
         for message in &self.messages {
@@ -381,6 +465,10 @@ impl Session {
         }
         for checkpoint in &self.checkpoints {
             out.push_str(&serde_json::to_string(checkpoint)?);
+            out.push('\n');
+        }
+        for approval in &self.approvals {
+            out.push_str(&serde_json::to_string(approval)?);
             out.push('\n');
         }
         // Write-then-rename: a crash mid-save leaves the previous session intact rather
@@ -418,6 +506,7 @@ impl Session {
         let mut receipts: Vec<TurnReceipt> = Vec::new();
         let mut writes = Vec::new();
         let mut checkpoints = Vec::new();
+        let mut approvals = Vec::new();
         for line in lines {
             // Four row kinds, told apart by shape rather than by a `kind` field: a message has a
             // `role`, a turn receipt has a `prefix_hash`, a write receipt has both sides, a
@@ -425,7 +514,13 @@ impl Session {
             // receipt existed readable without a migration.
             let value: Value = serde_json::from_str(line)
                 .with_context(|| format!("malformed line in {}", path.display()))?;
-            if value.get("before").is_some() && value.get("after").is_some() {
+            if value.get("record").and_then(Value::as_str) == Some(ApprovalRecord::KIND) {
+                approvals.push(
+                    serde_json::from_value(value).with_context(|| {
+                        format!("malformed approval line in {}", path.display())
+                    })?,
+                );
+            } else if value.get("before").is_some() && value.get("after").is_some() {
                 writes.push(serde_json::from_value(value).with_context(|| {
                     format!("malformed write receipt line in {}", path.display())
                 })?);
@@ -456,10 +551,12 @@ impl Session {
             id: header.id,
             model: header.model,
             created_ms: header.created_ms,
+            project_id: header.project_id,
             messages,
             receipts,
             writes,
             checkpoints,
+            approvals,
             input_tokens,
             output_tokens,
         })
@@ -560,14 +657,15 @@ mod tests {
     fn a_newer_format_is_refused_by_name_not_as_a_parse_error() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("future.jsonl");
+        let future = FORMAT_VERSION + 1;
         std::fs::write(
             &path,
-            "{\"version\":5,\"id\":\"f\",\"model\":\"m\",\"created_ms\":1}\n",
+            format!("{{\"version\":{future},\"id\":\"f\",\"model\":\"m\",\"created_ms\":1}}\n"),
         )
         .unwrap();
         let error = format!("{:#}", Session::load(&path).unwrap_err());
         assert!(error.contains("newer memnoth"), "{error}");
-        assert!(error.contains("format 5"), "{error}");
+        assert!(error.contains(&format!("format {future}")), "{error}");
     }
 
     #[test]
