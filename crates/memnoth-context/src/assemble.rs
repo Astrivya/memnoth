@@ -115,27 +115,35 @@ pub fn assemble(pieces: Vec<Piece>, slots: &[Slot], budget: &Budget) -> Assembly
     let mut slot_used = vec![0usize; slots.len()];
     let mut receipts = Vec::with_capacity(ordered.len());
     let mut whole = StableHasher::new();
-    let mut prefix_only = StableHasher::new();
+    // Admitted prefix pieces, hashed after the loop in canonical order. Hashing
+    // them as they arrive made the receipt depend on caller order while
+    // `prefix_hash` did not (B3).
+    let mut admitted_prefix: Vec<Piece> = Vec::new();
 
     for piece in &ordered {
         let tokens = estimate_tokens(&piece.text);
 
-        // Find the slot index for this piece's slot name.
-        let slot_index = slot_caps.iter().position(|(name, _)| *name == piece.slot);
+        // An unregistered slot is a bug in the caller, not a reason to panic
+        // mid-assembly (B2). Drop it: `budget::allocate` reports the same case
+        // as `DropReason::UnknownSlot`, and dropping keeps a typo from being
+        // admitted under an uncapped name.
+        let Some(slot_index) = slot_caps.iter().position(|(name, _)| *name == piece.slot) else {
+            continue;
+        };
 
         // Enforce per-slot ceiling: skip pieces that would exceed their slot cap.
-        if let Some(index) = slot_index {
-            let cap = slot_caps[index].1;
-            if slot_used[index] + tokens > cap {
-                continue; // Drop this piece: slot ceiling would be exceeded.
-            }
-            slot_used[index] += tokens;
+        let cap = slot_caps[slot_index].1;
+        if slot_used[slot_index] + tokens > cap {
+            continue;
         }
 
-        // Enforce overall budget ceiling.
+        // Enforce the overall ceiling against what has actually been admitted.
+        // Accounting is committed once, below, after both checks (B1): adding
+        // before them counted every piece twice and leaked the tokens of a
+        // piece the total budget then rejected.
         let used_so_far: usize = slot_used.iter().sum();
         if used_so_far + tokens > budget.total {
-            continue; // Drop this piece: overall budget would be exceeded.
+            continue;
         }
 
         let mut piece_hasher = StableHasher::new();
@@ -146,14 +154,9 @@ pub fn assemble(pieces: Vec<Piece>, slots: &[Slot], budget: &Budget) -> Assembly
         whole.write(piece.slot);
         whole.write(&piece.text);
         if piece.layer.is_prefix() {
-            prefix_only.write(piece.slot);
-            prefix_only.write(&piece.text);
+            admitted_prefix.push(piece.clone());
         }
 
-        let slot_index = slot_caps
-            .iter()
-            .position(|(name, _)| *name == piece.slot)
-            .expect("piece slot must be registered in default_slots");
         slot_used[slot_index] += tokens;
         layer_tokens_used[piece.layer.index()] += tokens;
         receipts.push(PieceReceipt {
@@ -182,7 +185,7 @@ pub fn assemble(pieces: Vec<Piece>, slots: &[Slot], budget: &Budget) -> Assembly
         receipt: Receipt {
             layer_tokens: layer_tokens_used,
             total_tokens,
-            prefix_hash: prefix_only.finish(),
+            prefix_hash: prefix_hash(&admitted_prefix),
             hash: whole.finish(),
             pieces: receipts,
         },
@@ -194,8 +197,20 @@ pub fn assemble(pieces: Vec<Piece>, slots: &[Slot], budget: &Budget) -> Assembly
 /// Takes the pieces rather than the rendered string so a caller can compare "what is about to be
 /// sent" with "what was sent last turn" before rendering. `Turn` pieces are ignored.
 pub fn prefix_hash(prefix: &[Piece]) -> u64 {
+    // Canonical order: layer, then slot, then text. The caller's order is not
+    // part of the identity, so two callers that supply the same pieces in a
+    // different order must agree (B3). `assemble` hashes its admitted prefix
+    // through this function, so the receipt and this free function cannot
+    // disagree.
+    let mut pieces: Vec<&Piece> = prefix
+        .iter()
+        .filter(|piece| piece.layer.is_prefix())
+        .collect();
+    pieces.sort_by(|a, b| {
+        (a.layer.index(), a.slot, &a.text).cmp(&(b.layer.index(), b.slot, &b.text))
+    });
     let mut hasher = StableHasher::new();
-    for piece in prefix.iter().filter(|piece| piece.layer.is_prefix()) {
+    for piece in pieces {
         hasher.write(piece.slot);
         hasher.write(&piece.text);
     }
@@ -371,6 +386,96 @@ mod tests {
         assert_eq!(assembly.receipt.total_tokens, 0);
         assert!(assembly.receipt.pieces.is_empty());
         assert_eq!(assembly.receipt.layer_tokens, [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn a_slot_filled_to_its_cap_counts_each_piece_once() {
+        let slots = vec![Slot {
+            name: "identity",
+            max_tokens: 200,
+        }];
+        // 400 chars = 100 tokens under the four-chars-per-token estimate.
+        let pieces = vec![
+            Piece {
+                layer: Layer::Global,
+                slot: "identity",
+                text: "a".repeat(400),
+            },
+            Piece {
+                layer: Layer::Global,
+                slot: "identity",
+                text: "b".repeat(400),
+            },
+        ];
+        let assembly = assemble(pieces, &slots, &Budget { total: 200 });
+        assert_eq!(assembly.receipt.pieces.len(), 2, "both fit exactly");
+        assert_eq!(assembly.receipt.total_tokens, 200);
+        assert_eq!(
+            assembly.receipt.total_tokens,
+            assembly
+                .receipt
+                .pieces
+                .iter()
+                .map(|piece| piece.tokens)
+                .sum::<usize>(),
+            "total_tokens must equal the sum of admitted pieces"
+        );
+    }
+
+    #[test]
+    fn an_unregistered_slot_is_dropped_without_a_panic() {
+        let (slots, budget) = test_budget();
+        let assembly = assemble(
+            vec![Piece {
+                layer: Layer::Global,
+                slot: "typo",
+                text: "uncapped text must not be admitted".to_string(),
+            }],
+            &slots,
+            &budget,
+        );
+        assert!(assembly.prefix.is_empty());
+        assert_eq!(assembly.receipt.total_tokens, 0);
+        assert!(assembly.receipt.pieces.is_empty());
+    }
+
+    #[test]
+    fn a_piece_rejected_by_the_total_budget_does_not_consume_its_slot() {
+        // 10-token slot, 7-token total: the first 6-token piece fits, the
+        // second (6) is over total and must not reserve slot capacity. With the
+        // old double-count it did, and the third piece was refused as well.
+        let slots = vec![Slot {
+            name: "identity",
+            max_tokens: 10,
+        }];
+        let piece = |text: &str| Piece {
+            layer: Layer::Global,
+            slot: "identity",
+            text: text.to_string(),
+        };
+        let assembly = assemble(
+            vec![piece(&"a".repeat(24)), piece(&"b".repeat(24)), piece("c")],
+            &slots,
+            &Budget { total: 7 },
+        );
+        assert_eq!(
+            assembly.receipt.pieces.len(),
+            2,
+            "the small piece still fits"
+        );
+        assert_eq!(assembly.receipt.total_tokens, 7);
+    }
+
+    #[test]
+    fn prefix_hash_does_not_depend_on_caller_order() {
+        let (slots, budget) = test_budget();
+        let first = vec![project("rules"), global(), turn("tail")];
+        let second = vec![global(), turn("other tail"), project("rules")];
+        assert_eq!(prefix_hash(&first), prefix_hash(&second));
+        assert_eq!(
+            assemble(first, &slots, &budget).receipt.prefix_hash,
+            assemble(second, &slots, &budget).receipt.prefix_hash
+        );
     }
 
     #[test]
