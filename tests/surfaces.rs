@@ -198,21 +198,31 @@ fn serve_with_port_zero_announces_the_bound_port() {
     // The banner is written as soon as the listener is bound, so a thread that
     // drains stderr until the first port line answers within the same budget a
     // connection would get.
+    // The reader drains to EOF after it finds the port instead of breaking.
+    // Dropping the pipe closes the child's stderr, and on Windows the next
+    // `eprintln!` in the banner then fails with a broken pipe, which panics the
+    // server before it ever accepts — the announced port is real but nothing is
+    // left listening. Reading to the end keeps the pipe open for the lifetime of
+    // the process under test.
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         use std::io::BufRead;
+        let mut announced = false;
         for line in std::io::BufReader::new(stderr)
             .lines()
             .map_while(Result::ok)
         {
+            if announced {
+                continue;
+            }
             if let Some((_, address)) = line.split_once("http://")
                 && let Some(port) = address
                     .rsplit(':')
                     .next()
                     .and_then(|port| port.trim().parse::<u16>().ok())
             {
+                announced = true;
                 let _ = tx.send(port);
-                break;
             }
         }
     });

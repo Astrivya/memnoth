@@ -176,6 +176,7 @@ pub fn expand_deny_globs(
         .map_err(|_| "could not build glob set".to_string())?;
 
     let mut matched: BTreeSet<String> = BTreeSet::new();
+    let mut matched_files: usize = 0;
     let mut visited: usize = 0;
 
     // Overlapping globs share one walk per root. A nested root already
@@ -245,7 +246,13 @@ pub fn expand_deny_globs(
                 ));
             }
             if glob_set.is_match(entry.path()) {
-                insert_match(&mut matched, entry.path(), globs, caps.matches)?;
+                insert_match(
+                    &mut matched,
+                    &mut matched_files,
+                    entry.path(),
+                    globs,
+                    caps.matches,
+                )?;
             }
         }
     }
@@ -258,10 +265,23 @@ pub fn expand_deny_globs(
 /// location. A non-UTF8 path fails closed.
 fn insert_match(
     matched: &mut BTreeSet<String>,
+    matched_files: &mut usize,
     path: &Path,
     globs: &[String],
     max_matches: usize,
 ) -> Result<(), String> {
+    // The cap counts files the walk matched, not entries in `matched`: masking
+    // a symlink's canonical target adds a second path for the same file, and on
+    // macOS every tempdir path canonicalizes from `/var/…` to `/private/var/…`,
+    // so counting set entries refused a workspace that matched exactly the cap.
+    *matched_files += 1;
+    if *matched_files > max_matches {
+        return Err(format!(
+            "the deny globs {globs:?} matched over {max_matches} files; \
+             use narrower globs, or deny a parent directory as an exact \
+             path instead"
+        ));
+    }
     let mut candidates = vec![path.to_path_buf()];
     candidates.extend(
         dunce::canonicalize(path)
@@ -275,13 +295,6 @@ fn insert_match(
             ));
         };
         matched.insert(text.to_owned());
-        if matched.len() > max_matches {
-            return Err(format!(
-                "the deny globs {globs:?} matched over {max_matches} files; \
-                 use narrower globs, or deny a parent directory as an exact \
-                 path instead"
-            ));
-        }
     }
     Ok(())
 }

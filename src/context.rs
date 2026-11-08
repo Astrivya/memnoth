@@ -213,6 +213,23 @@ pub struct PrivacyConfig {
 }
 
 impl Config {
+    /// The single gate every outbound path consults before it sends anything.
+    ///
+    /// Defaults to **off**. `OPEN_CORE.md` and
+    /// `web/content/docs/concepts.mdx` both promise that nothing leaves the
+    /// machine by default; the call sites this replaces used `.unwrap_or(true)`,
+    /// which made that promise false for every fresh install.
+    ///
+    /// One function on purpose: with the default written out at each call site,
+    /// a third egress path could quietly pick a different one. Any new path that
+    /// sends data asks this, and `mn privacy show-data` is expected to list it.
+    pub fn telemetry_enabled(&self) -> bool {
+        self.privacy
+            .as_ref()
+            .and_then(|p| p.telemetry_enabled)
+            .unwrap_or(false)
+    }
+
     /// Read the config, or return defaults when it does not exist.
     ///
     /// A malformed config is an error rather than a silent reset: the file holds
@@ -392,6 +409,11 @@ impl AppContext {
     /// means an installed bundle can ship both and never depend on `PATH`.
     pub fn mcp_binary(&self) -> Option<PathBuf> {
         if let Some(path) = std::env::var_os("MEMNOTH_MCP_BIN").map(PathBuf::from) {
+            // Absolutized before it is returned: the server is spawned with
+            // `current_dir(workspace)`, so a relative `MEMNOTH_MCP_BIN` such as
+            // CI's `target/debug/memnoth-mcp` would be resolved inside the
+            // workspace, where no such file exists.
+            let path = std::path::absolute(&path).unwrap_or(path);
             return path.is_file().then_some(path);
         }
         let exe = std::env::current_exe().ok()?;
