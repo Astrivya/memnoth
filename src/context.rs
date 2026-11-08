@@ -354,14 +354,67 @@ impl AppContext {
         Self::resolve(cli)
     }
 
+    /// The one coordination board every surface reads.
+    ///
+    /// It lives in the state directory rather than beside the vault so `mn
+    /// team`, the TUI and worker reviews see the same rows across workspaces;
+    /// the workspace is a column on a row, not a file path. Before this, three
+    /// surfaces opened three different databases and none of them agreed.
+    pub fn coord_path(&self) -> PathBuf {
+        self.home.join("coord.db")
+    }
+
     /// Open (creating if needed) this invocation's vault.
     pub fn open_vault(&self) -> Result<memnoth_engine::MemoryEngine> {
         if let Some(parent) = self.vault_path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("cannot create {}", parent.display()))?;
         }
-        memnoth_engine::open_vault(&self.vault_path)
-            .with_context(|| format!("cannot open the vault at {}", self.vault_path.display()))
+        let engine = memnoth_engine::open_vault(&self.vault_path)
+            .with_context(|| format!("cannot open the vault at {}", self.vault_path.display()))?;
+        // Every vault open attaches the same destination, which is what makes
+        // `mn audit` a record of the vault rather than of whichever command
+        // happened to remember to write it. A malformed log fails the open: a
+        // vault that silently stops auditing is worse than one that refuses to
+        // start until the break is looked at (`mn audit verify` names it).
+        let audit_path = self.audit_path();
+        let mut ledger = memnoth_engine::AuditLedger::resume(&audit_path).with_context(|| {
+            format!(
+                "cannot resume the audit chain at {}; run `mn audit verify`",
+                audit_path.display()
+            )
+        })?;
+        ledger.set_actor(&self.actor());
+        engine.attach_audit(ledger);
+        Ok(engine)
+    }
+
+    /// The hash-chained audit destination for this namespace.
+    ///
+    /// One file per namespace, beside the vault, because a shared trail for
+    /// every namespace would make `mn audit verify` report one tenant's break
+    /// as everyone's.
+    pub fn audit_path(&self) -> PathBuf {
+        self.home
+            .join("audit")
+            .join(format!("{}.jsonl", self.namespace))
+    }
+
+    /// The person at the keyboard, as recorded on approvals and audit events.
+    ///
+    /// `MEMNOTH_USER` first so a shared workstation or a scripted run can name
+    /// the accountable person; the OS identity is the fallback. `"unknown"` is
+    /// stated rather than guessed.
+    pub fn actor(&self) -> String {
+        for key in ["MEMNOTH_USER", "USERNAME", "USER"] {
+            if let Ok(value) = std::env::var(key) {
+                let value = value.trim();
+                if !value.is_empty() {
+                    return value.to_string();
+                }
+            }
+        }
+        "unknown".to_string()
     }
 
     /// The endpoint `mcp add` writes into client configs.
@@ -646,5 +699,34 @@ mod tests {
         assert_eq!(back.mcp_url(), "http://127.0.0.1:8788/mcp");
         assert_eq!(back.profile(), "code");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn telemetry_is_off_unless_the_user_turned_it_on() {
+        // The published promise is "nothing by default". The call sites used to
+        // spell their own default (`.unwrap_or(true)`), which is how that
+        // promise became false for every fresh install. This pins the one gate.
+        assert!(
+            !Config::default().telemetry_enabled(),
+            "a fresh install must not report"
+        );
+
+        let explicit_off = Config {
+            privacy: Some(PrivacyConfig {
+                mode: None,
+                telemetry_enabled: Some(false),
+            }),
+            ..Default::default()
+        };
+        assert!(!explicit_off.telemetry_enabled());
+
+        let explicit_on = Config {
+            privacy: Some(PrivacyConfig {
+                mode: Some("metadata-only".into()),
+                telemetry_enabled: Some(true),
+            }),
+            ..Default::default()
+        };
+        assert!(explicit_on.telemetry_enabled());
     }
 }

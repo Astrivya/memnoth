@@ -74,6 +74,15 @@ use crate::tui::app::{
 /// one event never jumps a screen, and a long answer still scrolls quickly.
 const WHEEL_LINES: usize = 3;
 
+/// What a finished turn produced: the answer, the writes, and the approvals
+/// that authorised them. One alias so the event and `settle` state the same
+/// shape rather than repeating a three-part tuple at both ends.
+type TurnOutcome = anyhow::Result<(
+    provider::Answer,
+    Vec<WriteReceipt>,
+    Vec<memnoth_session::ApprovalRecord>,
+)>;
+
 /// What a running turn reports back to the screen.
 enum TurnEvent {
     /// One tool call the model is about to make (or made).
@@ -86,7 +95,7 @@ enum TurnEvent {
         reply: mpsc::Sender<bool>,
     },
     /// The turn finished, successfully or not, with what it wrote.
-    Done(Box<anyhow::Result<(provider::Answer, Vec<WriteReceipt>)>>),
+    Done(Box<TurnOutcome>),
 }
 
 /// A model turn that is currently in flight.
@@ -1639,8 +1648,9 @@ fn start_turn(
         // The screen needs the answer and what was written, not the toolbox:
         // the toolbox borrows this worker's context and cannot outlive it.
         let writes = tools.take_writes();
+        let approvals = tools.take_approvals();
         let _ = tx.send(TurnEvent::Done(Box::new(
-            result.map(|answer| (answer, writes)),
+            result.map(|answer| (answer, writes, approvals)),
         )));
     });
 
@@ -1659,10 +1669,10 @@ fn settle(
     session: &mut Session,
     busy: &Busy,
     tools: usize,
-    result: anyhow::Result<(provider::Answer, Vec<WriteReceipt>)>,
+    result: TurnOutcome,
 ) {
     match result {
-        Ok((answer, writes)) => {
+        Ok((answer, writes, approvals)) => {
             app.push(EntryRole::Answer, answer.text.clone());
             // The file records the model that actually answered, so a resumed
             // session does not claim a model that never ran.
@@ -1681,6 +1691,13 @@ fn settle(
             // Record write receipts from the turn
             for write in writes {
                 session.record_write(write);
+            }
+
+            // And the decisions that authorised them. A write in the file with
+            // no matching approval row is now a visible anomaly rather than the
+            // normal state of every session.
+            for approval in approvals {
+                session.record_approval(approval);
             }
 
             // One receipt per turn is also what makes the pane's cost honest:
@@ -2058,7 +2075,7 @@ fn session_cost_micros(ctx: &AppContext, session: &Session) -> Option<u64> {
 /// says `on this machine` rather than implying two laptops agree.
 fn teams_line(ctx: &AppContext, id: &crate::auth::Identity) -> String {
     let mut line = id.org_name.trim().to_string();
-    if let Ok(coord) = memnoth_coord::Coord::open(&ctx.vault_path)
+    if let Ok(coord) = memnoth_coord::Coord::open(&ctx.coord_path())
         && let Ok(rows) = coord.status()
     {
         let active: Vec<_> = rows.iter().filter(|row| !row.stale).collect();
@@ -2322,11 +2339,12 @@ fn context_pane(ctx: &AppContext, session: &Session) -> String {
         Err(_) => out.push_str("  missing\n  /vault init\n"),
     }
 
-    // Coordination lives in the same database; opening it is skipped when the
-    // vault is absent so a session never creates one as a side effect.
-    if ctx.vault_path.exists() {
+    // Coordination is its own database in the state directory — the same one
+    // `mn team` reads. Opening is skipped until it exists so a status screen
+    // never creates a board as a side effect.
+    if ctx.coord_path().exists() {
         out.push_str("\ncoordination\n");
-        match memnoth_coord::Coord::open(&ctx.vault_path) {
+        match memnoth_coord::Coord::open(&ctx.coord_path()) {
             Ok(coord) => match coord.status() {
                 Ok(rows) => {
                     let active: Vec<_> = rows.iter().filter(|row| !row.stale).collect();

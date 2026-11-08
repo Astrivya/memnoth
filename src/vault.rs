@@ -455,22 +455,58 @@ pub fn contradictions(ctx: &AppContext, name: Option<&str>) -> Result<Outcome, E
         for row in &rows {
             match (row["source"].as_str(), row["target"].as_str()) {
                 (Some(source), Some(target)) => {
+                    let from = row["valid_from"].as_i64().map(rfc3339).unwrap_or_default();
+                    let until = row["revoked_at"].as_i64().map(rfc3339).unwrap_or_default();
                     text.push_str(&format!(
-                        "  {} --{}--> {}  {}\n    reason: {}\n",
-                        source,
+                        "  {source} --{}--> {target}\n    believed {from} → revoked {until}\n    reason: {}\n",
                         row["kind"].as_str().unwrap_or("relation"),
-                        target,
-                        row["revoked_at"].as_i64().map(rfc3339).unwrap_or_default(),
                         row["reason"].as_str().unwrap_or("(none recorded)"),
                     ));
                 }
                 _ => {
+                    // Both sides, not just the closing date. A contradiction is
+                    // a pair of beliefs; showing only "previous version closed"
+                    // made this verb unable to answer what was disagreed about.
+                    let previous_name = row["previous_name"].as_str().unwrap_or("(unnamed)");
+                    let from = row["previous_valid_from"]
+                        .as_i64()
+                        .map(rfc3339)
+                        .unwrap_or_default();
+                    let until = row["valid_to"].as_i64().map(rfc3339).unwrap_or_default();
+                    text.push_str(&format!("  previous: {previous_name}  {from} → {until}\n"));
+                    if let Some(summary) = row["previous_summary"].as_str() {
+                        text.push_str(&format!("    said: {summary}\n"));
+                    }
                     text.push_str(&format!(
-                        "  previous version closed {}  reason: {}\n",
-                        row["valid_to"].as_i64().map(rfc3339).unwrap_or_default(),
-                        row["reason"].as_str().unwrap_or("(none recorded)"),
+                        "    reason: {}\n",
+                        row["reason"].as_str().unwrap_or("(none recorded)")
                     ));
                 }
+            }
+        }
+        if let Some(current) = report["current_belief"].as_object() {
+            let name = current
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(none)");
+            let since = current
+                .get("valid_from")
+                .and_then(|v| v.as_i64())
+                .map(rfc3339)
+                .unwrap_or_default();
+            text.push_str(&format!("  now believes: {name}  (since {since})\n"));
+            for fact in current
+                .get("facts")
+                .and_then(|v| v.as_array())
+                .into_iter()
+                .flatten()
+            {
+                let author = fact["provenance"]["user"].as_str().unwrap_or("unknown");
+                text.push_str(&format!(
+                    "    [{}] {}  — {author}\n",
+                    fact["kind"].as_str().unwrap_or("fact"),
+                    ellipsize(fact["content"].as_str().unwrap_or_default(), 96)
+                ));
             }
         }
         let mut cmds = vec![
@@ -490,6 +526,7 @@ pub fn contradictions(ctx: &AppContext, name: Option<&str>) -> Result<Outcome, E
         json!({
             "scope": scope,
             "contradictions": rows,
+            "current_belief": report["current_belief"].clone(),
             "next_commands": next_commands,
         }),
     ))
@@ -503,6 +540,7 @@ pub fn remember(
     confidence: Option<f64>,
     entity_kind: &str,
     text: &[String],
+    author: Option<&str>,
 ) -> Result<Outcome, ErrorOutcome> {
     let content = text.join(" ");
     let content = content.trim();
@@ -565,10 +603,24 @@ pub fn remember(
             true,
         ),
     };
+    // Provenance names the person, not just "the CLI". A shared vault whose
+    // facts only say an agent wrote them cannot answer the first question a
+    // team asks about a belief: who decided this.
+    let author = acting_user(author);
+    let provenance = json!({"user": author, "agent": "cli"}).to_string();
     // Idempotent: recording the same fact twice on the same day returns the live
-    // row instead of writing a second copy that reads as corroboration.
+    // row instead of writing a second copy that reads as corroboration. The
+    // first write keeps its attribution; re-remembering does not re-author it.
     let observation_id = engine
-        .ingest_observation_idempotent(entity_id, content, &kind, confidence, now)
+        .ingest_observation_attributed(
+            entity_id,
+            content,
+            &kind,
+            confidence,
+            now,
+            &provenance,
+            Some(now),
+        )
         .map_err(|e| {
             ErrorOutcome::new(ExitCode::Unexpected, "failed to record fact")
                 .with_cause(e.to_string())
@@ -577,7 +629,7 @@ pub fn remember(
         })?;
 
     let text = format!(
-        "remembered\n  entity  {name} (#{entity_id}{})\n  kind    {kind}\n  fact    {content}\n",
+        "remembered\n  entity  {name} (#{entity_id}{})\n  kind    {kind}\n  author  {author}\n  fact    {content}\n",
         if created { ", created" } else { "" }
     );
 
@@ -597,8 +649,275 @@ pub fn remember(
             "kind": kind,
             "content": content,
             "confidence": confidence,
+            "author": author,
+            "provenance": serde_json::from_str::<serde_json::Value>(&provenance)
+                .unwrap_or(serde_json::Value::Null),
+            "recorded_at": now,
             "at": now,
             "next_commands": next_commands,
+        }),
+    ))
+}
+
+/// Who is acting: the explicit flag first, then `MEMNOTH_USER`, then the OS
+/// user. `unknown` is honest; the alternative is a fabricated name on a belief.
+fn acting_user(explicit: Option<&str>) -> String {
+    explicit
+        .map(str::to_owned)
+        .or_else(|| std::env::var("MEMNOTH_USER").ok())
+        .or_else(|| std::env::var("USERNAME").ok())
+        .or_else(|| std::env::var("USER").ok())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// `memnoth vault propose` — a belief an agent or teammate suggests but does
+/// not assert.
+///
+/// The proposal lands in its own table. That is the enforcement: no reader of
+/// the vault has to filter it out, because recall and search read observations
+/// and a proposal is not one.
+pub fn propose(
+    ctx: &AppContext,
+    name: &str,
+    kind: &str,
+    confidence: Option<f64>,
+    entity_kind: &str,
+    text: &[String],
+    author: Option<&str>,
+) -> Result<Outcome, ErrorOutcome> {
+    let content = text.join(" ");
+    let content = content.trim();
+    if content.is_empty() {
+        return Err(ErrorOutcome::usage("the belief is empty")
+            .with_cause("no belief text provided")
+            .with_fix("provide the belief after the `--` separator"));
+    }
+    let kind = kind.trim().to_ascii_lowercase();
+    if !OBSERVATION_KINDS.contains(&kind.as_str()) {
+        return Err(ErrorOutcome::usage(format!(
+            "unknown observation kind {kind:?}; use one of {}",
+            OBSERVATION_KINDS.join(", ")
+        ))
+        .with_fix("use one of: fact, decision, lesson, gotcha, correction"));
+    }
+    let confidence = confidence.unwrap_or(0.9);
+    if !(0.0..=1.0).contains(&confidence) {
+        return Err(ErrorOutcome::usage(
+            "--confidence must be between 0.0 and 1.0",
+        ));
+    }
+    let entity_kind = parse_entity_kind(entity_kind).map_err(|e| {
+        ErrorOutcome::usage(e.to_string())
+            .with_fix("use concept, person, file, symbol, decision, project, tool, event or other")
+    })?;
+
+    let author = acting_user(author);
+    let provenance = json!({"user": author, "agent": "cli"}).to_string();
+    let engine = open_for(ctx, "propose")?;
+    let now = now_ms();
+    let (id, created) = engine
+        .propose_belief(
+            name,
+            entity_kind,
+            content,
+            &kind,
+            confidence,
+            &provenance,
+            now,
+        )
+        .map_err(|e| {
+            ErrorOutcome::new(ExitCode::Unexpected, "failed to record proposal")
+                .with_cause(e.to_string())
+                .with_fix("check the entity name and the belief text")
+        })?;
+    let expires_at = engine
+        .proposal(id)
+        .ok()
+        .flatten()
+        .map(|p| p.expires_at)
+        .unwrap_or(now);
+
+    let body = if created {
+        format!(
+            "proposed\n  id       #{id}\n  entity   {name}\n  author   {author}\n  belief   {content}\n  expires  {}\n  this is not a belief yet; `memnoth vault approve {id}` makes it one\n",
+            crate::output::rfc3339(expires_at)
+        )
+    } else {
+        format!(
+            "proposed\n  id       #{id} (an identical belief is already waiting; joined, not duplicated)\n  entity   {name}\n  belief   {content}\n"
+        )
+    };
+
+    Ok(Outcome::new(
+        "vault.propose",
+        body.trim_end(),
+        json!({
+            "id": id,
+            "created": created,
+            "entity": name,
+            "content": content,
+            "kind": kind,
+            "confidence": confidence,
+            "author": author,
+            "expires_at": expires_at,
+            "status": "proposed",
+            "next_commands": [
+                format!("memnoth vault approve {id}"),
+                format!("memnoth vault reject {id} --reason \"…\""),
+            ],
+        }),
+    ))
+}
+
+/// `memnoth vault proposals` — what is waiting, and what already expired.
+pub fn proposals(
+    ctx: &AppContext,
+    status: Option<&str>,
+    json_output: bool,
+) -> Result<Outcome, ErrorOutcome> {
+    let status = status.map(|s| s.trim().to_ascii_lowercase());
+    if let Some(s) = status.as_deref()
+        && !["proposed", "accepted", "rejected", "expired"].contains(&s)
+    {
+        return Err(
+            ErrorOutcome::usage(format!("unknown proposal status {s:?}"))
+                .with_fix("use proposed, accepted, rejected or expired"),
+        );
+    }
+    let engine = open_for(ctx, "proposals")?;
+    let now = now_ms();
+    let list = engine.list_proposals(status.as_deref(), now).map_err(|e| {
+        ErrorOutcome::new(ExitCode::Unexpected, "failed to read proposals")
+            .with_cause(e.to_string())
+            .with_fix("check vault integrity with `memnoth vault status`")
+    })?;
+
+    let waiting = list.iter().filter(|p| p.status == "proposed").count();
+    let mut body = format!(
+        "proposals  {waiting} waiting{} of {}\n",
+        if list.len() == waiting {
+            String::new()
+        } else {
+            format!(", {} decided or expired", list.len() - waiting)
+        },
+        list.len()
+    );
+    if list.is_empty() {
+        body.push_str("  nothing proposed; unattended writes land here first\n");
+    } else {
+        body.push_str("  id   status     entity                 belief\n");
+        for p in &list {
+            let detail = if p.status == "proposed" {
+                format!("expires {}", crate::output::rfc3339(p.expires_at))
+            } else if let Some(reason) = &p.decision_reason {
+                format!("rejected: {reason}")
+            } else if let Some(by) = &p.decided_by {
+                format!("{by} {}", p.status)
+            } else {
+                p.status.clone()
+            };
+            body.push_str(&format!(
+                "  #{:<4} {:<9} {:<22} {} ({detail})\n",
+                p.id,
+                p.status,
+                ellipsize(&p.entity_name, 22),
+                ellipsize(&p.content, 48),
+            ));
+        }
+    }
+
+    let next_commands = if waiting > 0 {
+        vec![
+            "memnoth vault approve <id>".to_string(),
+            "memnoth vault reject <id> --reason \"…\"".to_string(),
+        ]
+    } else {
+        vec!["memnoth vault recall <query>".to_string()]
+    };
+
+    let json_data = if json_output {
+        json!({
+            "proposals": list,
+            "count": list.len(),
+            "waiting": waiting,
+        })
+    } else {
+        json!({
+            "proposals": list,
+            "count": list.len(),
+            "waiting": waiting,
+            "next_commands": next_commands,
+        })
+    };
+
+    if json_output {
+        return Ok(Outcome::new("vault.proposals", "", json_data));
+    }
+    Ok(Outcome::new("vault.proposals", body.trim_end(), json_data))
+}
+
+/// `memnoth vault approve <id>` — the one path from a proposal to a belief.
+pub fn approve(ctx: &AppContext, id: i64, by: Option<&str>) -> Result<Outcome, ErrorOutcome> {
+    let actor = acting_user(by);
+    let engine = open_for(ctx, "approve")?;
+    let now = now_ms();
+    let proposal = engine.accept_proposal(id, &actor, now).map_err(|e| {
+        ErrorOutcome::usage(format!("cannot accept proposal #{id}"))
+            .with_cause(e.to_string())
+            .with_fix("run `memnoth vault proposals` to see which proposals still wait")
+    })?;
+    let proposer = serde_json::from_str::<serde_json::Value>(&proposal.provenance)
+        .ok()
+        .and_then(|v| v.get("user").and_then(|u| u.as_str()).map(str::to_owned))
+        .unwrap_or_else(|| "unknown".to_string());
+    let body = format!(
+        "approved\n  id       #{id}\n  entity   {}\n  belief   {}\n  author   {proposer}\n  approved {actor}\n",
+        proposal.entity_name, proposal.content,
+    );
+    Ok(Outcome::new(
+        "vault.approve",
+        body.trim_end(),
+        json!({
+            "id": id,
+            "status": proposal.status,
+            "observation_id": proposal.observation_id,
+            "entity": proposal.entity_name,
+            "content": proposal.content,
+            "approved_by": actor,
+        }),
+    ))
+}
+
+/// `memnoth vault reject <id>` — a decision that keeps its reason.
+pub fn reject(
+    ctx: &AppContext,
+    id: i64,
+    reason: &str,
+    by: Option<&str>,
+) -> Result<Outcome, ErrorOutcome> {
+    let actor = acting_user(by);
+    let engine = open_for(ctx, "reject")?;
+    let now = now_ms();
+    let proposal = engine
+        .reject_proposal(id, &actor, reason, now)
+        .map_err(|e| {
+            ErrorOutcome::usage(format!("cannot reject proposal #{id}"))
+                .with_cause(e.to_string())
+                .with_fix("run `memnoth vault proposals` to see which proposals still wait")
+        })?;
+    let body = format!(
+        "rejected\n  id       #{id}\n  entity   {}\n  belief   {}\n  by       {actor}\n  reason   {reason}\n",
+        proposal.entity_name, proposal.content
+    );
+    Ok(Outcome::new(
+        "vault.reject",
+        body.trim_end(),
+        json!({
+            "id": id,
+            "status": proposal.status,
+            "entity": proposal.entity_name,
+            "reason": reason,
+            "rejected_by": actor,
         }),
     ))
 }
@@ -2976,6 +3295,7 @@ mod tests {
             Some(0.8),
             "decision",
             &["use".into(), "httpOnly".into(), "cookies".into()],
+            None,
         )
         .unwrap();
 
@@ -2999,8 +3319,8 @@ mod tests {
         let dir = temp("idem");
         let ctx = context(&dir);
         init(&ctx).unwrap();
-        let first = remember(&ctx, "x", "fact", None, "concept", &["same".into()]).unwrap();
-        let second = remember(&ctx, "x", "fact", None, "concept", &["same".into()]).unwrap();
+        let first = remember(&ctx, "x", "fact", None, "concept", &["same".into()], None).unwrap();
+        let second = remember(&ctx, "x", "fact", None, "concept", &["same".into()], None).unwrap();
         assert_eq!(
             first.data["observation_id"], second.data["observation_id"],
             "the same fact on the same day must not be stored twice"
@@ -3015,11 +3335,11 @@ mod tests {
         let dir = temp("kind");
         let ctx = context(&dir);
         init(&ctx).unwrap();
-        let error = remember(&ctx, "x", "opionion", None, "concept", &["y".into()])
+        let error = remember(&ctx, "x", "opionion", None, "concept", &["y".into()], None)
             .unwrap_err()
             .to_string();
         assert!(error.contains("unknown observation kind"), "{error}");
-        let error = remember(&ctx, "x", "fact", None, "widget", &["y".into()])
+        let error = remember(&ctx, "x", "fact", None, "widget", &["y".into()], None)
             .unwrap_err()
             .to_string();
         assert!(error.contains("unknown entity kind"), "{error}");

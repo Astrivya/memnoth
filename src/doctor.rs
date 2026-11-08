@@ -83,13 +83,117 @@ pub fn report(ctx: &AppContext) -> Result<Outcome> {
         }),
     ))
 }
-/// `memnoth doctor` with optional `--fix`.
+/// `memnoth doctor` with optional `--fix` or `--bundle`.
 pub fn run(ctx: &AppContext, args: &DoctorArgs) -> Result<Outcome> {
-    if args.fix {
+    if let Some(path) = &args.bundle {
+        bundle(ctx, path, ctx.json)
+    } else if args.fix {
         fix(ctx, args.yes)
     } else {
         report(ctx)
     }
+}
+
+/// `doctor --bundle <path>` — the support artifact that cannot leak the workspace.
+///
+/// A support bundle is read by someone outside the machine, so it is built from
+/// an allow-list rather than by redacting a report: counts, versions and the
+/// namespace label go in; paths, environment values, prompts, session rows and
+/// vault content never get read at all. Redaction that starts from everything
+/// is a filter with a hole; this starts from nothing.
+pub fn bundle(ctx: &AppContext, out: &str, as_json: bool) -> Result<Outcome> {
+    let document = bundle_document(ctx)?;
+    let body = format!("{}\n", serde_json::to_string_pretty(&document)?);
+    if let Some(parent) = std::path::Path::new(out).parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    std::fs::write(out, &body).with_context(|| format!("write support bundle {out}"))?;
+    let data = json!({
+        "schema": "mn-support/1",
+        "path": out,
+        "bytes": body.len(),
+        "redacted": true,
+    });
+    let text = if as_json {
+        serde_json::to_string_pretty(&data)?
+    } else {
+        format!(
+            "Wrote redacted support bundle to {out} ({} bytes)\n\
+             Included: versions, platform, workspace label, store sizes, audit counts, profile.\n\
+             Excluded: absolute paths, credentials, prompts, session rows and vault content.",
+            body.len()
+        )
+    };
+    Ok(Outcome::new("doctor.bundle", text, data))
+}
+
+/// The bundle's content, built only from values that are safe to share.
+fn bundle_document(ctx: &AppContext) -> Result<Value> {
+    let audit_path = ctx.audit_path();
+    let audit = if audit_path.is_file() {
+        memnoth_engine::verify_log(&audit_path)?
+    } else {
+        memnoth_engine::AuditVerification {
+            events: 0,
+            ok: true,
+            first_bad_seq: None,
+            reason: None,
+        }
+    };
+    let generated_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    Ok(json!({
+        "schema": "mn-support/1",
+        "generated_at_ms": generated_at_ms,
+        "version": env!("CARGO_PKG_VERSION"),
+        "platform": {
+            "os": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+        },
+        "redaction": {
+            "paths": "absolute paths replaced by labels",
+            "secrets": "no environment or config value is read",
+            "content": "no prompts, session rows, file contents or vault rows",
+        },
+        // The directory name is the one human label that helps a maintainer
+        // recognise the report; the absolute path is where identity leaks.
+        "workspace": {
+            "label": ctx
+                .root
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("<root>"),
+            "root": "<workspace>",
+        },
+        "state": {
+            "home": "<state>",
+            "config_exists": ctx.config_path.is_file(),
+        },
+        "vault": {
+            "namespace": ctx.namespace,
+            "exists": ctx.vault_path.is_file(),
+            "bytes": file_len(&ctx.vault_path),
+        },
+        "graph": {
+            "exists": ctx.graph_path.is_file(),
+            "bytes": file_len(&ctx.graph_path),
+        },
+        "audit": {
+            "path": "<state>/audit/<namespace>.jsonl",
+            "exists": audit_path.is_file(),
+            "events": audit.events,
+            "ok": audit.ok,
+        },
+        "profile": ctx.profile(),
+    }))
+}
+
+fn file_len(path: &std::path::Path) -> Option<u64> {
+    std::fs::metadata(path).ok().map(|meta| meta.len())
 }
 /// Apply fixes for detected issues.
 fn fix(ctx: &AppContext, yes: bool) -> Result<Outcome> {
@@ -664,4 +768,57 @@ fn next_step(vault: &Section, graph: &Section, provider: &Section, mcp: &Section
         );
     }
     lines
+}
+
+#[cfg(test)]
+mod bundle_tests {
+    use super::*;
+
+    fn context(root: &std::path::Path) -> AppContext {
+        AppContext {
+            root: root.to_path_buf(),
+            home: root.join("home"),
+            vault_path: root.join("home").join("vault.db"),
+            namespace: "default".to_string(),
+            graph_path: root.join(".memnoth").join("graph.db"),
+            sessions_dir: root.join("home").join("sessions"),
+            config_path: root.join("home").join("config.toml"),
+            config: crate::context::Config::default(),
+            json: false,
+            quiet: true,
+            exe_path: std::path::PathBuf::from("memnoth"),
+        }
+    }
+
+    #[test]
+    fn a_bundle_carries_counts_not_paths_or_content() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("home")).unwrap();
+        std::fs::write(dir.path().join("home").join("vault.db"), "SECRET-VAULT-ROW").unwrap();
+        let ctx = context(dir.path());
+        let text = bundle_document(&ctx).unwrap().to_string();
+        assert!(!text.contains("SECRET-VAULT-ROW"), "{text}");
+        assert!(
+            !text.contains(&dir.path().display().to_string()),
+            "an absolute path leaked: {text}"
+        );
+        assert!(text.contains("<workspace>"), "{text}");
+        assert!(text.contains("<state>"), "{text}");
+        assert!(text.contains("\"exists\":true"), "{text}");
+    }
+
+    #[test]
+    fn writing_a_bundle_reports_the_path_it_wrote() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = context(dir.path());
+        let out = dir.path().join("support.json");
+        let outcome = bundle(&ctx, out.to_str().unwrap(), false).expect("bundle");
+        let body = std::fs::read_to_string(&out).expect("written");
+        assert!(body.contains("mn-support/1"), "{body}");
+        assert_eq!(outcome.data["redacted"], true);
+        assert!(
+            !body.contains(&ctx.home.display().to_string()),
+            "the state path leaked: {body}"
+        );
+    }
 }

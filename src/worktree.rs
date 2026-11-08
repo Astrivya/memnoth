@@ -41,8 +41,11 @@ pub fn run_batch(ctx: &AppContext, args: &BatchCmdArgs) -> Result<Outcome, Error
 
     let runtime = tokio::runtime::Runtime::new()
         .map_err(|e| ErrorOutcome::from_anyhow(&anyhow::Error::from(e)))?;
+    // The batch board is the CLI's board: a worker claim must be visible to
+    // `mn team presence`, or the lock the worker holds is a private comment.
+    let room = ctx.coord_path();
     let results = runtime
-        .block_on(execute_batch(&repo_root, config))
+        .block_on(execute_batch(&repo_root, config, Some(&room)))
         .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
 
     // Serialized on every run, not only under `--json`: the TUI builds its

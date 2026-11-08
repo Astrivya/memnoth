@@ -11,9 +11,9 @@ use crate::completion::{Shell, install, show_completions};
 use crate::context::AppContext;
 use crate::output::{ErrorOutcome, ExitCode, Outcome};
 use crate::{
-    automation, billing, cloud, config_cmd, connect, docs, doctor, feedback, keys, kg, mcp, models,
-    open, org, projects, serve, session_cmd, setup, stats, team, teams, telemetry, update_cmd,
-    usage, vault, watch, worktree,
+    audit_cmd, automation, billing, cloud, config_cmd, connect, docs, doctor, feedback, keys, kg,
+    mcp, models, open, org, projects, receipt, serve, session_cmd, setup, stats, team, teams,
+    telemetry, update_cmd, usage, vault, watch, worktree,
 };
 
 pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
@@ -84,6 +84,8 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
             .map_err(|e| ErrorOutcome::from_anyhow(&e)),
         },
         Verb::Doctor(args) => doctor::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
+        Verb::Receipt(args) => receipt::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
+        Verb::Audit(args) => audit_cmd::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
         Verb::Vault(args) => match &args.action {
             VaultCommand::Init => vault::init(ctx),
             VaultCommand::Status => vault::status(ctx),
@@ -98,7 +100,39 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
                 confidence,
                 entity_kind,
                 text,
-            } => vault::remember(ctx, name, kind, *confidence, entity_kind, text),
+                author,
+            } => vault::remember(
+                ctx,
+                name,
+                kind,
+                *confidence,
+                entity_kind,
+                text,
+                author.as_deref(),
+            ),
+            VaultCommand::Propose {
+                name,
+                kind,
+                confidence,
+                entity_kind,
+                text,
+                author,
+            } => vault::propose(
+                ctx,
+                name,
+                kind,
+                *confidence,
+                entity_kind,
+                text,
+                author.as_deref(),
+            ),
+            VaultCommand::Proposals { status, json } => {
+                vault::proposals(ctx, status.as_deref(), *json)
+            }
+            VaultCommand::Approve { id, by } => vault::approve(ctx, *id, by.as_deref()),
+            VaultCommand::Reject { id, reason, by } => {
+                vault::reject(ctx, *id, reason, by.as_deref())
+            }
             VaultCommand::Recall { query, limit, at } => {
                 vault::recall(ctx, query, *limit, at.as_deref())
             }

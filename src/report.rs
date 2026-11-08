@@ -180,6 +180,12 @@ fn worker() -> &'static Sender<Message> {
 
 /// Build and post one report. Runs on the worker thread.
 fn send(job: &Job) {
+    // Reporting a session *is* telemetry: it carries the workspace path and the
+    // model, and the switch in `privacy` is the only thing that may authorise
+    // it. Before this check the switch changed a status line and nothing else.
+    if !job.ctx.config().telemetry_enabled() {
+        return;
+    }
     let client = match crate::sync::get_cloud_client(&job.ctx) {
         Ok(client) => client,
         Err(error) => {

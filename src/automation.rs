@@ -76,6 +76,27 @@ exit 0
     .to_string()
 }
 
+/// Generate the post-commit hook that writes the change receipt.
+///
+/// Post-commit, not pre-commit: a receipt names a commit id, and that id does
+/// not exist until the commit succeeds. A receipt written before the commit
+/// would describe one that might never happen.
+fn post_commit_hook_content() -> String {
+    r#"#!/bin/sh
+# memnoth post-commit hook
+# Writes the mn-receipt/1 document for the commit that just landed.
+# Non-blocking: a receipt is evidence, not a gate on committing.
+
+if ! command -v mn >/dev/null 2>&1; then
+    exit 0
+fi
+
+mn receipt write >/dev/null 2>&1 || echo "memnoth: receipt not written (non-blocking)"
+exit 0
+"#
+    .to_string()
+}
+
 /// Generate .pre-commit-hooks.yaml for pre-commit framework.
 fn pre_commit_hooks_yaml() -> String {
     r#"# memnoth pre-commit hooks configuration
@@ -206,9 +227,30 @@ fn hook_install(ctx: &AppContext, args: &HookInstallArgs) -> Result<Outcome> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&pre_commit_path)?.permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&pre_commit_path, perms)?;
+        for path in [&pre_commit_path] {
+            let mut perms = fs::metadata(path)?.permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(path, perms)?;
+        }
+    }
+
+    // The receipt needs the commit id, so it is written after the commit.
+    let post_commit_path = hooks_dir.join("post-commit");
+    let install_post = !post_commit_path.exists()
+        || args.force
+        || fs::read_to_string(&post_commit_path)
+            .map(|text| text.contains("memnoth post-commit hook"))
+            .unwrap_or(false);
+    if install_post {
+        fs::write(&post_commit_path, post_commit_hook_content())
+            .context("Failed to write post-commit hook")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&post_commit_path)?.permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&post_commit_path, perms)?;
+        }
     }
 
     // Also write .pre-commit-hooks.yaml for pre-commit framework
@@ -219,13 +261,15 @@ fn hook_install(ctx: &AppContext, args: &HookInstallArgs) -> Result<Outcome> {
     }
 
     let text = format!(
-        "Installed pre-commit hook at {}\nAlso wrote .pre-commit-hooks.yaml for pre-commit framework",
-        pre_commit_path.display()
+        "Installed pre-commit hook at {}\nInstalled post-commit receipt hook at {}\nAlso wrote .pre-commit-hooks.yaml for pre-commit framework",
+        pre_commit_path.display(),
+        post_commit_path.display()
     );
 
     let data = json!({
         "installed": true,
         "hook_path": pre_commit_path.display().to_string(),
+        "receipt_hook_path": post_commit_path.display().to_string(),
         "hooks_yaml_path": hooks_yaml_path.display().to_string(),
     });
 

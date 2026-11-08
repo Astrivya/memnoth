@@ -36,6 +36,11 @@ pub fn run(ctx: &AppContext, args: &crate::cli::StatsArgs) -> Result<Outcome> {
 
     let sessions = count_session_files(ctx);
     let local = insights(&load_local_receipts(ctx)?, sessions);
+    // Per-project spend is read from the session headers, not from today's
+    // config: a receipt belongs to the project it was spent under. Historical
+    // sessions written before the header carried a project are "unassigned",
+    // which is a state the console already shows rather than a guess.
+    let projects = project_spend(ctx)?;
 
     // Offline is a normal state on a laptop. The reason is kept, because "no
     // cloud" and "not signed in" are different fixes.
@@ -63,6 +68,7 @@ pub fn run(ctx: &AppContext, args: &crate::cli::StatsArgs) -> Result<Outcome> {
             "models": usage.models,
             "reconciliation": reconciliation,
             "insights": insight_json(&local),
+            "projects": project_rows_json(&projects),
         }),
         None => json!({
             "range": "local",
@@ -73,15 +79,19 @@ pub fn run(ctx: &AppContext, args: &crate::cli::StatsArgs) -> Result<Outcome> {
             "models": local_models_json(&local),
             "reconciliation": local_only(&local),
             "insights": insight_json(&local),
+            "projects": project_rows_json(&projects),
             "offline": offline.as_deref(),
         }),
     };
 
-    let text = if args.json {
+    let mut text = if args.json {
         serde_json::to_string_pretty(&data)?
     } else {
         render(&local, cloud.as_ref(), offline.as_deref())
     };
+    if !args.json && !projects.is_empty() {
+        text.push_str(&render_projects(&projects));
+    }
 
     Ok(Outcome::new("stats.show", text, data))
 }
@@ -215,6 +225,90 @@ fn load_local_receipts(ctx: &AppContext) -> Result<Vec<LocalReceipt>> {
         }
     }
     Ok(receipts)
+}
+
+/// Spend grouped by the project a session recorded when it started.
+#[derive(Debug, Default)]
+struct ProjectSpend {
+    project: String,
+    tokens: i64,
+    turns: usize,
+    cost_usd: f64,
+}
+
+fn project_spend(ctx: &AppContext) -> Result<Vec<ProjectSpend>> {
+    let Ok(entries) = std::fs::read_dir(&ctx.sessions_dir) else {
+        return Ok(Vec::new());
+    };
+    let mut by_project: HashMap<String, ProjectSpend> = HashMap::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let Ok(session) = Session::load(&path) else {
+            continue;
+        };
+        let project = session
+            .project_id
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "unassigned".to_string());
+        let row = by_project
+            .entry(project.clone())
+            .or_insert_with(|| ProjectSpend {
+                project,
+                ..Default::default()
+            });
+        for receipt in &session.receipts {
+            row.tokens += receipt.total_tokens as i64;
+            row.turns += 1;
+            row.cost_usd += receipt.cost_micros.unwrap_or(0) as f64 / 1_000_000.0;
+        }
+    }
+    let mut rows: Vec<ProjectSpend> = by_project
+        .into_values()
+        .filter(|row| row.turns > 0)
+        .collect();
+    rows.sort_by(|a, b| {
+        b.cost_usd
+            .total_cmp(&a.cost_usd)
+            .then(b.tokens.cmp(&a.tokens))
+            .then(a.project.cmp(&b.project))
+    });
+    Ok(rows)
+}
+
+fn project_rows_json(rows: &[ProjectSpend]) -> serde_json::Value {
+    json!(
+        rows.iter()
+            .map(|row| json!({
+                "project": row.project,
+                "tokens": row.tokens,
+                "turns": row.turns,
+                "cost_usd": row.cost_usd,
+            }))
+            .collect::<Vec<_>>()
+    )
+}
+
+/// The project block, appended to the human report. Attribution is visibility,
+/// not savings — the heading says "spend", never "saved".
+fn render_projects(rows: &[ProjectSpend]) -> String {
+    let mut out = vec![String::new(), "projects".to_string()];
+    for row in rows.iter().take(8) {
+        out.push(format!(
+            "  {:<28} {:>4} turn(s)  {:>8}  {}",
+            clip(&row.project, 28),
+            row.turns,
+            compact(row.tokens),
+            money(row.cost_usd)
+        ));
+    }
+    if rows.len() > 8 {
+        out.push(format!("  … {} more", rows.len() - 8));
+    }
+    out.join("\n")
 }
 
 fn count_session_files(ctx: &AppContext) -> usize {
@@ -592,6 +686,35 @@ mod tests {
         let reconciliation = local_only(&local);
         assert_eq!(reconciliation.unmatched_local, 0);
         assert_eq!(reconciliation.matched, 0);
+    }
+
+    #[test]
+    fn project_spend_is_rendered_as_visibility_not_savings() {
+        let rows = vec![
+            ProjectSpend {
+                project: "payments".into(),
+                tokens: 12_500,
+                turns: 3,
+                cost_usd: 0.42,
+            },
+            ProjectSpend {
+                project: "unassigned".into(),
+                tokens: 900,
+                turns: 1,
+                cost_usd: 0.03,
+            },
+        ];
+        let text = render_projects(&rows);
+        assert!(text.contains("projects"), "{text}");
+        assert!(text.contains("payments"), "{text}");
+        assert!(text.contains("12.5k"), "{text}");
+        assert!(
+            !text.contains("saved"),
+            "attribution must not claim savings"
+        );
+        let rows = project_rows_json(&rows);
+        assert_eq!(rows[0]["project"], "payments");
+        assert_eq!(rows[0]["turns"], 3);
     }
 
     #[test]

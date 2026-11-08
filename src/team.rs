@@ -18,12 +18,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::context::AppContext;
 use crate::output::Outcome;
 
-/// Path to the coordination database file.
-const COORD_DB_NAME: &str = "coord.db";
-
 /// Get the coordination database path.
 fn coord_db_path(ctx: &AppContext) -> std::path::PathBuf {
-    ctx.home.join(COORD_DB_NAME)
+    ctx.coord_path()
 }
 
 /// Open or create a Coord instance.
@@ -36,15 +33,44 @@ fn open_coord(ctx: &AppContext) -> Result<Coord> {
     Coord::open(&db_path).context("failed to open coordination database")
 }
 
-/// Get or create a session ID for the current user.
+/// Get or create a durable session ID for the current user on this machine.
+///
+/// A session is a person, not an invocation. The id is derived from the OS
+/// account and the state directory, so two commands share one row and a
+/// colleague can address a live session by the id `presence` printed.
 fn get_session_id(coord: &Coord, ctx: &AppContext) -> Result<String> {
-    // Generate a session ID based on current user/machine
     let name = current_user();
     let pid = std::process::id();
     let project_root = ctx.root.to_string_lossy().to_string();
+    let id = stable_session_id(&name, &ctx.home);
     coord
-        .join(&name, pid, &project_root)
+        .join_stable(&id, &name, pid, &project_root)
         .context("failed to join coordination room")
+}
+
+/// A deterministic id for `user` on the machine whose state lives in `home`.
+///
+/// The hash keeps the id short and filesystem-safe without leaking the home
+/// path; the name stays readable in `presence`. This is a local label, not an
+/// authenticated identity — the cloud verification is a separate step, and
+/// `MEMNOTH_USER` alone must never be treated as proof of who someone is.
+fn stable_session_id(user: &str, home: &std::path::Path) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in home.to_string_lossy().as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let name: String = user
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    format!("u-{name}@{hash:016x}")
 }
 
 /// The local account name, from the environment.
@@ -53,7 +79,9 @@ fn get_session_id(coord: &Coord, ctx: &AppContext) -> Result<String> {
 /// label on the coordination board, and an unset variable degrades to a stable
 /// default rather than failing a `team` command.
 fn current_user() -> String {
-    ["MEMNOTH_USER", "USER", "LOGNAME", "USERNAME"]
+    // OS identity first: `MEMNOTH_USER` is unverified and trivial to set, so
+    // preferring it turned presence into an impersonation surface.
+    ["USER", "LOGNAME", "USERNAME", "MEMNOTH_USER"]
         .iter()
         .find_map(|key| std::env::var(key).ok())
         .filter(|name| !name.trim().is_empty())
@@ -137,13 +165,30 @@ pub fn claim(ctx: &AppContext, args: &crate::cli::TeamClaimArgs) -> Result<Outco
 pub fn release(ctx: &AppContext, args: &crate::cli::TeamReleaseArgs) -> Result<Outcome> {
     let coord = open_coord(ctx)?;
     let session_id = get_session_id(&coord, ctx)?;
+    let conn = coord_connection(ctx)?;
+
+    // Ownership first: the status update below used to run before anyone asked
+    // who held the task, so any teammate could unblock someone else's work.
+    let claimed_by: Option<String> = conn
+        .query_row(
+            "SELECT claimed_by FROM coord_tasks WHERE id = ?1",
+            rusqlite::params![&args.task_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(None);
+    if let Some(owner) = claimed_by.as_deref()
+        && owner != session_id
+    {
+        anyhow::bail!(
+            "task {} is claimed by {owner}; only its owner may release it",
+            args.task_id
+        );
+    }
 
     // Update task status back to pending and clear claimed_by
     coord
         .task_update_status(&args.task_id, TaskStatus::Pending)
         .with_context(|| format!("failed to release task {}", args.task_id))?;
-    // Also clear the claimed_by field
-    let conn = coord_connection(ctx)?;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)

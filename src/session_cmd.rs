@@ -30,6 +30,10 @@ pub fn start(
     } else {
         let mut session = Session::new(model_label);
         session.id = validated.clone();
+        // Spend is attributed at the moment the session starts: the project
+        // can change later, and a receipt must keep the project it was spent
+        // under rather than being re-attributed by today's config.
+        session.project_id = crate::report::project_id(ctx);
         (session, false)
     };
 

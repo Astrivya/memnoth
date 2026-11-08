@@ -607,9 +607,9 @@ fn privacy_status(ctx: &AppContext) -> Result<Outcome> {
     let mode = privacy_config
         .and_then(|p| p.mode.as_deref())
         .unwrap_or("metadata-only");
-    let telemetry_enabled = privacy_config
-        .and_then(|p| p.telemetry_enabled)
-        .unwrap_or(true);
+    // One gate, defined in `Config::telemetry_enabled`: a fresh install reports
+    // and behaves as DISABLED, which is what the docs promise.
+    let telemetry_enabled = config.telemetry_enabled();
     let sync_enabled = config
         .sync
         .as_ref()
@@ -727,6 +727,98 @@ fn privacy_set_mode(ctx: &AppContext, args: &crate::cli::PrivacyModeArgs) -> Res
     ))
 }
 
+/// One outbound path this binary owns, and the switch that gates it.
+///
+/// `OPEN_CORE.md` requires every path to be visible in `mn privacy show-data`
+/// before it merges, with no exceptions. Keeping the inventory in one place is
+/// what makes that checkable: a sender that is not in this list is a bug, not a
+/// documentation gap.
+struct OutboundPath {
+    name: &'static str,
+    endpoint: &'static str,
+    when: &'static str,
+    gate: &'static str,
+    fields: &'static [&'static str],
+}
+
+const OUTBOUND_PATHS: &[OutboundPath] = &[
+    OutboundPath {
+        name: "session report",
+        endpoint: "POST /api/v1/sessions",
+        when: "TUI session lifecycle and `mn report`",
+        gate: "privacy.telemetry_enabled (off by default)",
+        fields: &[
+            "id",
+            "workspace (absolute path)",
+            "model",
+            "tokens",
+            "files",
+            "cost_micros",
+            "status",
+            "started_at",
+            "ended_at",
+            "project_id",
+            "events (open mode only)",
+        ],
+    },
+    OutboundPath {
+        name: "sync",
+        endpoint: "POST /api/v1/sessions",
+        when: "`mn sync now`, or the daemon while sync.enabled",
+        gate: "sync.enabled (off by default); an explicit `mn sync now` is the user's instruction",
+        fields: &[
+            "id",
+            "workspace (absolute path)",
+            "model",
+            "tokens",
+            "files",
+            "cost_micros",
+            "status",
+            "started_at",
+            "ended_at",
+            "project_id",
+            "events (privacy mode)",
+        ],
+    },
+    OutboundPath {
+        name: "heartbeat",
+        endpoint: "POST /api/v1/instances/heartbeat",
+        when: "beside every session report, and every 30s under `mn sync --watch`",
+        gate: "privacy.telemetry_enabled (off by default)",
+        fields: &[
+            "instance_id (hostname)",
+            "surface",
+            "version",
+            "sessions_live",
+        ],
+    },
+    OutboundPath {
+        name: "feedback",
+        endpoint: "POST /api/v1/feedback",
+        when: "only when the user runs `mn feedback` or `/feedback`",
+        gate: "explicit user action",
+        fields: &["message", "surface", "version", "os", "session_id", "repo"],
+    },
+    OutboundPath {
+        name: "MCP cloud ingest",
+        endpoint: "POST /api/v1/sessions",
+        when: "MCP server session lifecycle",
+        gate: "MEMNOTH_TELEMETRY=1 in the MCP host environment (unset is off)",
+        fields: &[
+            "id",
+            "workspace (absolute path)",
+            "model",
+            "status",
+            "started_at",
+            "ended_at",
+            "tokens",
+            "files",
+            "cost_micros",
+            "project_id",
+        ],
+    },
+];
+
 /// Show what data would be sent in a sync
 fn privacy_show_data(ctx: &AppContext) -> Result<Outcome> {
     let mode = get_sync_privacy_mode(ctx);
@@ -756,6 +848,18 @@ fn privacy_show_data(ctx: &AppContext) -> Result<Outcome> {
         text.push_str("  No sessions to sync.\n");
     }
 
+    text.push_str("\nEvery outbound path, and the switch that gates it:\n\n");
+    for path in OUTBOUND_PATHS {
+        text.push_str(&format!(
+            "  {} — {}\n  When: {}\n  Gate: {}\n  Fields: {}\n\n",
+            path.name,
+            path.endpoint,
+            path.when,
+            path.gate,
+            path.fields.join(", "),
+        ));
+    }
+
     Ok(Outcome::new(
         "privacy.show_data",
         text,
@@ -763,6 +867,16 @@ fn privacy_show_data(ctx: &AppContext) -> Result<Outcome> {
             "item_count": items.len(),
             "privacy_mode": format!("{:?}", mode),
             "items": items,
+            "outbound_paths": OUTBOUND_PATHS
+                .iter()
+                .map(|path| json!({
+                    "name": path.name,
+                    "endpoint": path.endpoint,
+                    "when": path.when,
+                    "gate": path.gate,
+                    "fields": path.fields,
+                }))
+                .collect::<Vec<_>>(),
         }),
     ))
 }
@@ -845,5 +959,28 @@ mod tests {
         assert_eq!(backoff_delay(1), Duration::from_secs(4));
         assert_eq!(backoff_delay(2), Duration::from_secs(8));
         assert_eq!(backoff_delay(10), Duration::from_secs(300)); // capped
+    }
+
+    #[test]
+    fn show_data_names_every_outbound_path_and_its_gate() {
+        // The gate in `OPEN_CORE.md` is that a new sender is visible here before
+        // it merges. A path with no fields or no gate would be a path nobody
+        // can consent to.
+        for required in [
+            "session report",
+            "sync",
+            "heartbeat",
+            "feedback",
+            "MCP cloud ingest",
+        ] {
+            assert!(
+                OUTBOUND_PATHS.iter().any(|path| path.name == required),
+                "`{required}` must be listed in show-data"
+            );
+        }
+        for path in OUTBOUND_PATHS {
+            assert!(!path.fields.is_empty(), "{} lists no fields", path.name);
+            assert!(!path.gate.is_empty(), "{} names no gate", path.name);
+        }
     }
 }

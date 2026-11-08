@@ -18,13 +18,10 @@ pub fn run(ctx: &AppContext, args: &crate::cli::TelemetryArgs) -> Result<Outcome
 
 /// `mn telemetry status` — show what telemetry is collected and current state.
 fn telemetry_status(ctx: &AppContext) -> Result<Outcome> {
-    // Get local config
+    // Get local config. The default (off) lives in `Config::telemetry_enabled`
+    // so this display and every egress path cannot disagree about it.
     let config = ctx.config();
-    let telemetry_enabled = config
-        .privacy
-        .as_ref()
-        .and_then(|p| p.telemetry_enabled)
-        .unwrap_or(true); // default: enabled
+    let telemetry_enabled = config.telemetry_enabled();
 
     let text = if telemetry_enabled {
         render_telemetry_enabled()

@@ -106,6 +106,10 @@ pub enum Verb {
     Completion(CompletionArgs),
     /// Report what is wired: paths, versions, profiles, clients.
     Doctor(DoctorArgs),
+    /// Record, show and verify what an authorised agent changed.
+    Receipt(ReceiptArgs),
+    /// Show, verify and export the hash-chained memory audit trail.
+    Audit(AuditArgs),
     /// Show telemetry status and toggle collection.
     Telemetry(TelemetryArgs),
     /// Privacy: show what leaves machine, toggle telemetry, set metadata-only default.
@@ -231,6 +235,112 @@ pub struct DoctorArgs {
     /// Non-interactive: apply all fixes without prompting.
     #[arg(long, requires = "fix")]
     pub yes: bool,
+
+    /// Write a redacted support bundle to this path.
+    ///
+    /// The bundle carries counts and versions, never a path, a credential, a
+    /// prompt or vault content. It is safe to attach to a bug report.
+    #[arg(long, value_name = "PATH")]
+    pub bundle: Option<String>,
+}
+
+/// `mn audit …` — the governance trail.
+#[derive(Debug, Args)]
+pub struct AuditArgs {
+    #[command(subcommand)]
+    pub action: AuditCommand,
+}
+
+/// Audit subcommands.
+#[derive(Debug, Subcommand)]
+pub enum AuditCommand {
+    /// List the most recent events.
+    Show(AuditShowArgs),
+    /// Verify the hash chain and exit non-zero on the first break.
+    Verify(AuditVerifyArgs),
+    /// Write the trail unchanged as JSONL.
+    Export(AuditExportArgs),
+}
+
+/// Arguments for `mn audit show`.
+#[derive(Debug, Args)]
+pub struct AuditShowArgs {
+    /// Maximum events to print; 0 prints all.
+    #[arg(long, default_value_t = 50)]
+    pub limit: usize,
+    /// Print the events as JSON.
+    #[arg(long, global = true)]
+    pub json: bool,
+}
+
+/// Arguments for `mn audit verify`.
+#[derive(Debug, Args)]
+pub struct AuditVerifyArgs {
+    /// Print the verdict as JSON.
+    #[arg(long, global = true)]
+    pub json: bool,
+}
+
+/// Arguments for `mn audit export`.
+#[derive(Debug, Args)]
+pub struct AuditExportArgs {
+    /// Destination file; without it the JSONL goes to stdout.
+    #[arg(long, value_name = "PATH")]
+    pub out: Option<String>,
+    /// Print the export summary as JSON.
+    #[arg(long, global = true)]
+    pub json: bool,
+}
+
+/// `mn receipt …` — the change receipt.
+#[derive(Debug, Args)]
+pub struct ReceiptArgs {
+    #[command(subcommand)]
+    pub action: ReceiptCommand,
+}
+
+/// Receipt subcommands.
+#[derive(Debug, Subcommand)]
+pub enum ReceiptCommand {
+    /// Measure `HEAD` (or --commit) and write its receipt.
+    Write(ReceiptWriteArgs),
+    /// Print the receipt for a commit.
+    Show(ReceiptShowArgs),
+    /// Verify a receipt against the commit it describes.
+    Verify(ReceiptVerifyArgs),
+}
+
+/// Arguments for `mn receipt write`.
+#[derive(Debug, Args)]
+pub struct ReceiptWriteArgs {
+    /// Revision to measure; defaults to HEAD.
+    #[arg(long, value_name = "REV")]
+    pub commit: Option<String>,
+    /// Print the receipt as JSON.
+    #[arg(long, global = true)]
+    pub json: bool,
+}
+
+/// Arguments for `mn receipt show`.
+#[derive(Debug, Args)]
+pub struct ReceiptShowArgs {
+    /// Revision to show; defaults to HEAD.
+    #[arg(long, value_name = "REV")]
+    pub commit: Option<String>,
+    /// Print the receipt as JSON.
+    #[arg(long, global = true)]
+    pub json: bool,
+}
+
+/// Arguments for `mn receipt verify`.
+#[derive(Debug, Args)]
+pub struct ReceiptVerifyArgs {
+    /// Revision to verify; defaults to HEAD.
+    #[arg(long, value_name = "REV")]
+    pub commit: Option<String>,
+    /// Print the verification as JSON.
+    #[arg(long, global = true)]
+    pub json: bool,
 }
 /// `memnoth session`.
 #[derive(Debug, Args)]
@@ -485,42 +595,6 @@ pub struct SessionBatchArgs {
     pub format: String,
 }
 
-/// `memnoth session export` — export session to Markdown/JSON/HTML.
-#[derive(Debug, Args)]
-pub struct ExportArgs {
-    /// Session name (defaults to current session).
-    #[arg(long, value_name = "NAME")]
-    pub name: Option<String>,
-    /// Output format: markdown, json, html.
-    #[arg(long, value_name = "FORMAT", default_value = "markdown")]
-    pub format: String,
-    /// Output file (defaults to stdout).
-    #[arg(long, value_name = "PATH")]
-    pub output: Option<String>,
-    /// Include turn receipts (cost, tokens).
-    #[arg(long)]
-    pub include_receipts: bool,
-    /// Include file edits.
-    #[arg(long)]
-    pub include_edits: bool,
-}
-
-/// `memnoth session share` — share session (redacted) or file bug.
-#[derive(Debug, Args)]
-pub struct ShareArgs {
-    /// Session name (defaults to current session).
-    #[arg(long, value_name = "NAME")]
-    pub name: Option<String>,
-    /// Create a bug report with context.
-    #[arg(long)]
-    pub bug: bool,
-    /// Redaction level: none, secrets, pii, all.
-    #[arg(long, value_name = "LEVEL", default_value = "secrets")]
-    pub redact: String,
-    /// Output file (defaults to stdout).
-    #[arg(long, value_name = "PATH")]
-    pub output: Option<String>,
-}
 /// `memnoth session effort` — set reasoning effort budget.
 #[derive(Debug, Args)]
 pub struct EffortArgs {
@@ -1791,6 +1865,10 @@ pub enum VaultCommand {
         name: String,
     },
     /// Beliefs that were explicitly contradicted, both sources kept.
+    ///
+    /// `disputed` is the same verb under the name the team docs use; both
+    /// spellings are supported so a script never has to discover the alias.
+    #[command(visible_alias = "disputed")]
     Contradictions {
         /// Restrict to one entity. Without it, the vault-wide audit.
         #[arg(long, value_name = "NAME")]
@@ -1812,6 +1890,65 @@ pub enum VaultCommand {
         /// The fact itself.
         #[arg(required = true, num_args = 1..)]
         text: Vec<String>,
+        /// Who is recording this. Defaults to `MEMNOTH_USER`, then the OS user.
+        ///
+        /// Stored as provenance `{"user":…,"agent":"cli"}` so a shared vault
+        /// can answer "who decided this" rather than only "an agent did".
+        #[arg(long, value_name = "USER")]
+        author: Option<String>,
+    },
+    /// Propose a belief without asserting it (the unattended write path).
+    ///
+    /// A proposal is visible in `vault proposals` and to the team, but it is
+    /// **not** a belief: recall, search and asof cannot see it, and nothing
+    /// accepts it on your behalf. It expires after 14 days.
+    Propose {
+        /// Entity the belief is about (created when the proposal is accepted).
+        name: String,
+        /// Observation kind: `fact`, `decision`, `lesson`, `gotcha`, `correction`.
+        #[arg(long, default_value = "fact")]
+        kind: String,
+        /// Confidence, 0.0–1.0.
+        #[arg(long)]
+        confidence: Option<f64>,
+        /// Entity kind used if acceptance has to create the entity.
+        #[arg(long, default_value = "concept")]
+        entity_kind: String,
+        /// The belief itself.
+        #[arg(required = true, num_args = 1..)]
+        text: Vec<String>,
+        /// Who is proposing this. Defaults to `MEMNOTH_USER`, then the OS user.
+        #[arg(long, value_name = "USER")]
+        author: Option<String>,
+    },
+    /// Beliefs waiting for a decision; expired ones are shown, never accepted.
+    Proposals {
+        /// Only this status: `proposed`, `accepted`, `rejected` or `expired`.
+        #[arg(long, value_name = "STATUS")]
+        status: Option<String>,
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Accept a proposal: it becomes a belief with its proposer's attribution.
+    Approve {
+        /// Proposal id from `vault proposals`.
+        id: i64,
+        /// Who is accepting it. Defaults to `MEMNOTH_USER`, then the OS user.
+        #[arg(long, value_name = "USER")]
+        by: Option<String>,
+    },
+    /// Reject a proposal, keeping the reason.
+    Reject {
+        /// Proposal id from `vault proposals`.
+        id: i64,
+        /// Why it is rejected; required, because "no" without a reason is
+        /// exactly the context a team loses.
+        #[arg(long, required = true)]
+        reason: String,
+        /// Who is rejecting it. Defaults to `MEMNOTH_USER`, then the OS user.
+        #[arg(long, value_name = "USER")]
+        by: Option<String>,
     },
     /// Search the vault (FTS + graph, temporal windows understood).
     Recall {

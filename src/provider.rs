@@ -32,10 +32,12 @@
 //! something the model can talk its way around: the gate lives in the tool, not
 //! in the instructions.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use memnoth_context::assemble::{Assembly, Layer, Piece, assemble};
+use memnoth_context::budget::{Budget, Slot};
 use memnoth_session::{Role, WriteReceipt, now_ms as session_now_ms};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -739,6 +741,14 @@ pub trait Tools {
     fn take_writes(&mut self) -> Vec<memnoth_session::WriteReceipt> {
         Vec::new()
     }
+
+    /// Retrieve approval decisions made during tool calls.
+    ///
+    /// A write whose consent is not recorded is a write nobody can audit, so
+    /// the decision travels beside the write it authorised.
+    fn take_approvals(&mut self) -> Vec<memnoth_session::ApprovalRecord> {
+        Vec::new()
+    }
 }
 /// A change the model wants to make, shown to the person before it happens.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -772,6 +782,8 @@ pub struct Toolbox<'a> {
     approver: Option<Box<dyn Approver + 'a>>,
     /// Write receipts collected during this turn.
     writes: Vec<WriteReceipt>,
+    /// Approval decisions collected during this turn.
+    approvals: Vec<memnoth_session::ApprovalRecord>,
     /// Current turn index for correlating writes with receipts.
     turn_id: Option<usize>,
 }
@@ -782,6 +794,7 @@ impl<'a> Toolbox<'a> {
             ctx,
             approver: None,
             writes: Vec::new(),
+            approvals: Vec::new(),
             turn_id: None,
         }
     }
@@ -799,20 +812,53 @@ impl<'a> Toolbox<'a> {
     }
 
     /// Ask, and turn a refusal into an error the model can read and respect.
+    ///
+    /// Every outcome is recorded, including the refusal: "nothing was written"
+    /// and "the agent never asked" are different facts, and only one of them is
+    /// visible from the file system afterwards.
     fn confirm(&mut self, request: &ApprovalRequest) -> Result<()> {
         let Some(approver) = self.approver.as_mut() else {
+            // No approver is a refusal by policy, not by absence of evidence.
+            self.approvals
+                .push(self.approval_record(request, false, "no-approver"));
             bail!(
                 "this change needs the user's confirmation, and this session has no one to ask, \
                  so nothing was written"
             );
         };
-        if approver.approve(request) {
+        let approved = approver.approve(request);
+        self.approvals
+            .push(self.approval_record(request, approved, "user"));
+        if approved {
             return Ok(());
         }
         bail!(
             "the user declined this change. Do not retry it; say what you would have changed and \
              ask how they want to proceed."
         )
+    }
+
+    /// The row written for one decision.
+    fn approval_record(
+        &self,
+        request: &ApprovalRequest,
+        approved: bool,
+        rule: &str,
+    ) -> memnoth_session::ApprovalRecord {
+        let mut record = memnoth_session::ApprovalRecord {
+            approved_by: approver_identity(),
+            ..memnoth_session::ApprovalRecord::user(
+                request.tool,
+                &request.title,
+                approved,
+                &approver_identity(),
+            )
+        };
+        record.rule = rule.to_string();
+        if let Some(turn_id) = self.turn_id {
+            record = record.at_turn(turn_id);
+        }
+        record
     }
 
     fn kg_index(&mut self, input: &Value) -> Result<String> {
@@ -869,9 +915,14 @@ impl<'a> Toolbox<'a> {
         let config = crate::context::Config::load(&self.ctx.config_path).ok()?;
         let denied = config.tools.map(|tools| tools.denied).unwrap_or_default();
         denied.contains(&name.to_string()).then(|| {
+            // A denial names the rule that would allow the call, so the model
+            // can ask for the smallest widening instead of retrying the same
+            // request or inventing a workaround. `tools.denied` is the exact
+            // config key; removing this one name from it is the exact change.
             format!(
-                "{name} is denied on this machine — /permissions can lift it, and the chat agent \
-                 cannot change it itself"
+                "{name} is denied by the rule `tools.denied` on this machine. The smallest rule \
+                 that would allow it is the same list without `{name}` — `/permissions` can make \
+                 that change, and the chat agent cannot make it itself."
             )
         })
     }
@@ -941,6 +992,29 @@ impl Tools for Toolbox<'_> {
     fn take_writes(&mut self) -> Vec<memnoth_session::WriteReceipt> {
         std::mem::take(&mut self.writes)
     }
+
+    fn take_approvals(&mut self) -> Vec<memnoth_session::ApprovalRecord> {
+        std::mem::take(&mut self.approvals)
+    }
+}
+
+/// The person at the keyboard, as recorded on an approval.
+///
+/// `MEMNOTH_USER` first so a shared workstation or a scripted run can name the
+/// accountable person; the OS identity is the fallback because the common case
+/// is one person on their own machine. `"unknown"` is stated rather than
+/// guessed: an approval attributed to a fabricated name is worse than one that
+/// admits it has no author.
+fn approver_identity() -> String {
+    for key in ["MEMNOTH_USER", "USERNAME", "USER"] {
+        if let Ok(value) = std::env::var(key) {
+            let value = value.trim();
+            if !value.is_empty() {
+                return value.to_string();
+            }
+        }
+    }
+    "unknown".to_string()
 }
 
 /// The confirmation text for a verb-backed write.
@@ -1089,6 +1163,7 @@ pub fn verb_for(name: &str, input: &Value) -> Result<Verb> {
                     .unwrap_or("concept")
                     .to_string(),
                 text: words(&text("text")?),
+                author: input["author"].as_str().map(str::to_owned),
             },
         })),
         other => bail!(
@@ -1334,7 +1409,7 @@ fn wire_tools(kind: Kind) -> Value {
 
 /// The instructions the model runs under. Paths are absolute so a citation can
 /// be opened by the person reading it.
-fn system_prompt(root: &Path) -> String {
+fn identity_prompt(root: &Path) -> String {
     format!(
         "You are memnoth, the agent inside the user's terminal session, working in the workspace \
          `{}`.\n\n\
@@ -1360,6 +1435,118 @@ fn system_prompt(root: &Path) -> String {
          changes the answer, ask one specific question.",
         root.display()
     )
+}
+
+/// The prompt slots. Larger than `budget::default_slots` because these are the
+/// authored layers, not retrieved context: the identity contract is ~450 tokens
+/// and truncating it would drop the approval rule the agent depends on.
+const PROMPT_SLOTS: [(&str, usize); 3] = [("identity", 800), ("policy", 800), ("session", 400)];
+
+/// The effective instruction text from the files this workspace actually has.
+///
+/// One discovery path, shared with `mn doctor`: the assembler decides precedence
+/// and reports lint leakage, so the prompt cannot disagree with the audit.
+fn project_policy(root: &Path) -> Option<String> {
+    let mut files: Vec<(memnoth_context::Scope, PathBuf)> = vec![
+        (memnoth_context::Scope::Project, root.join("AGENTS.md")),
+        (memnoth_context::Scope::Project, root.join("CLAUDE.md")),
+    ];
+    if let Some(home) = dirs::home_dir() {
+        files.push((
+            memnoth_context::Scope::User,
+            home.join(".memnoth").join("AGENTS.md"),
+        ));
+    }
+    let set = memnoth_context::load_from(&files).ok()?;
+    let rendered = set.render();
+    if rendered.is_empty() {
+        None
+    } else {
+        Some(rendered)
+    }
+}
+
+/// Installed skills, rendered as a list the model can choose from.
+///
+/// The registry used to be reachable only through `/skill`: the model could not
+/// see that a skill existed, so it never asked to run one. The block names the
+/// skill and its purpose; it does not inline the instructions, which would cost
+/// the whole prefix budget for skills the turn will not use.
+fn skills_block_from(dir: &Path) -> Option<String> {
+    if !dir.is_dir() {
+        return None;
+    }
+    let registry = memnoth_skills::SkillRegistry::with_dir(dir).ok()?;
+    let skills = registry.list();
+    if skills.is_empty() {
+        return None;
+    }
+    let mut text = String::from(
+        "Installed skills, available through `mn skill run <name>`. Run one only when it fits \
+         the request, and say why:",
+    );
+    for entry in skills {
+        text.push_str(&format!(
+            "\n- {}: {}",
+            entry.frontmatter.metadata.name, entry.frontmatter.metadata.description
+        ));
+    }
+    Some(text)
+}
+
+fn skills_block() -> Option<String> {
+    let dir = memnoth_skills::default_skills_dir().ok()?;
+    skills_block_from(&dir)
+}
+
+fn prompt_pieces(root: &Path) -> Vec<Piece> {
+    let mut pieces = vec![Piece {
+        layer: Layer::Global,
+        slot: "identity",
+        text: identity_prompt(root),
+    }];
+    if let Some(policy) = project_policy(root) {
+        pieces.push(Piece {
+            layer: Layer::Project,
+            slot: "policy",
+            text: policy,
+        });
+    }
+    if let Some(skills) = skills_block() {
+        pieces.push(Piece {
+            layer: Layer::Session,
+            slot: "session",
+            text: skills,
+        });
+    }
+    pieces
+}
+
+/// Assemble the system prompt and keep the receipt.
+///
+/// `system_prompt` is the rendering; this is the auditable object behind it.
+/// Both requests and `mn doctor` go through here, so "what the model saw" has
+/// one answer.
+pub fn assemble_system_prompt(root: &Path) -> Assembly {
+    let slots: Vec<Slot> = PROMPT_SLOTS
+        .iter()
+        .map(|(name, max_tokens)| Slot {
+            name,
+            max_tokens: *max_tokens,
+        })
+        .collect();
+    let total = slots.iter().map(|slot| slot.max_tokens).sum();
+    assemble(prompt_pieces(root), &slots, &Budget { total })
+}
+
+/// The system prompt as the provider receives it.
+fn system_prompt(root: &Path) -> String {
+    let assembly = assemble_system_prompt(root);
+    if assembly.tail.is_empty() {
+        assembly.prefix
+    } else {
+        format!("{}\n\n{}", assembly.prefix, assembly.tail)
+    }
 }
 
 /// Run one turn: the prompt, the tools, and whatever the model asks for in
@@ -1456,11 +1643,12 @@ struct Step {
 /// The provider-neutral state one turn keeps between rounds.
 struct Conversation<'a> {
     settings: &'a Settings,
-    root: &'a Path,
     history: &'a [Exchange],
     prompt: &'a str,
     /// Anthropic messages, or OpenAI messages.
     messages: Vec<Value>,
+    /// Assembled once per turn: the prefix must not change between rounds.
+    system: String,
     input_tokens: u64,
     output_tokens: u64,
 }
@@ -1474,10 +1662,10 @@ impl<'a> Conversation<'a> {
     ) -> Self {
         let mut conversation = Self {
             settings,
-            root,
             history,
             prompt,
             messages: Vec::new(),
+            system: system_prompt(root),
             input_tokens: 0,
             output_tokens: 0,
         };
@@ -1509,7 +1697,7 @@ impl<'a> Conversation<'a> {
             Kind::OpenAi | Kind::Memnoth | Kind::Kilo => {
                 self.messages.push(json!({
                     "role": "system",
-                    "content": system_prompt(self.root)
+                    "content": self.system
                 }));
                 for exchange in self.history {
                     let role = match exchange.role {
@@ -1556,7 +1744,7 @@ impl<'a> Conversation<'a> {
                 let body = self.sampled(json!({
                     "model": self.settings.model,
                     "max_tokens": self.settings.max_tokens,
-                    "system": system_prompt(self.root),
+                    "system": self.system,
                     "messages": self.messages,
                     "tools": wire_tools(Kind::Anthropic),
                 }));
@@ -2412,6 +2600,53 @@ mod tests {
         assert!(prompt.contains("/work/thing"));
         assert!(prompt.contains("must approve it first"));
         assert!(prompt.contains("Never claim a change"));
+    }
+
+    #[test]
+    fn the_assembled_prompt_is_byte_identical_between_calls() {
+        let first = assemble_system_prompt(Path::new("/work/thing"));
+        let second = assemble_system_prompt(Path::new("/work/thing"));
+        assert_eq!(first.prefix, second.prefix);
+        assert_eq!(first.receipt, second.receipt);
+        assert_eq!(
+            first.receipt.total_tokens,
+            first
+                .receipt
+                .pieces
+                .iter()
+                .map(|piece| piece.tokens)
+                .sum::<usize>(),
+            "the receipt accounts for every admitted piece exactly once"
+        );
+        assert!(!first.prefix.is_empty(), "identity is always in the prefix");
+    }
+
+    #[test]
+    fn a_projects_agents_file_becomes_the_policy_layer() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("AGENTS.md"),
+            "- Never force-push to main\n- Cite the file you read\n",
+        )
+        .unwrap();
+        let policy = project_policy(root.path()).expect("rules were discovered");
+        assert!(policy.contains("Never force-push to main"));
+        assert!(policy.contains("Cite the file you read"));
+    }
+
+    #[test]
+    fn installed_skills_are_visible_to_the_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill = dir.path().join("release");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname = \"release\"\ndescription = \"Cut a release\"\n---\n\nSteps.\n",
+        )
+        .unwrap();
+        let block = skills_block_from(dir.path()).expect("the skill was discovered");
+        assert!(block.contains("release: Cut a release"));
+        assert!(block.contains("mn skill run"));
     }
 
     #[test]

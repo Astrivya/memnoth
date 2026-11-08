@@ -1374,6 +1374,7 @@ pub fn parse_line(raw: &str) -> Parsed {
         "permissions" => Parsed::PermissionsOverlay,
         "feedback" => Parsed::FeedbackOverlay,
         "doctor" => Parsed::Run(Verb::Doctor(DoctorArgs {
+            bundle: None,
             fix: false,
             yes: false,
         })),
@@ -2083,6 +2084,9 @@ fn parse_remember(rest: &[String]) -> Parsed {
             confidence,
             entity_kind,
             text,
+            // The TUI has no authored identity of its own; the write path
+            // falls back to MEMNOTH_USER, then the OS user.
+            author: None,
         },
     }))
 }
@@ -3367,6 +3371,7 @@ mod tests {
                     confidence,
                     entity_kind,
                     text,
+                    ..
                 },
         })) = parse_line("/vault remember auth --decision use httpOnly cookies")
         else {

@@ -23,6 +23,7 @@
 //! the verb says so by name instead of returning an empty list that reads as
 //! "nothing found".
 
+pub mod audit_cmd;
 pub mod auth;
 pub mod automation;
 pub mod cli;
@@ -48,6 +49,7 @@ pub mod org;
 pub mod output;
 pub mod projects;
 pub mod provider;
+pub mod receipt;
 pub mod report;
 pub mod serve;
 pub mod session;

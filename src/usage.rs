@@ -103,8 +103,10 @@ fn load_session(path: &PathBuf) -> Result<Session> {
         receipts: Vec::new(),
         writes: Vec::new(),
         checkpoints: Vec::new(),
+        approvals: Vec::new(),
         input_tokens: 0,
         output_tokens: 0,
+        project_id: header.project_id.clone(),
     };
 
     // Parse messages and receipts

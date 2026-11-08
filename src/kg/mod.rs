@@ -1859,15 +1859,45 @@ fn review_git_args(staged: bool, base: Option<&str>) -> Result<Vec<String>> {
         Some("") => bail!("--base needs a revision, e.g. `memnoth kg review --base main`"),
         Some(rev) => Ok(vec![
             "diff".to_string(),
-            "--name-only".to_string(),
+            "--name-status".to_string(),
             format!("{rev}...HEAD"),
         ]),
         None if staged => Ok(vec![
             "diff".to_string(),
             "--cached".to_string(),
-            "--name-only".to_string(),
+            "--name-status".to_string(),
         ]),
-        None => Ok(vec!["diff".to_string(), "--name-only".to_string()]),
+        None => Ok(vec!["diff".to_string(), "--name-status".to_string()]),
+    }
+}
+
+/// One `git diff --name-status` line as `(status letter, path)`.
+///
+/// A rename is two paths; the new one is the file a reviewer opens, so that is
+/// the one returned.
+fn parse_name_status(line: &str) -> Option<(String, String)> {
+    let mut parts = line.split('\t');
+    let status = parts.next()?.trim();
+    let first = parts.next()?.trim();
+    if status.is_empty() || first.is_empty() {
+        return None;
+    }
+    let path = if status.starts_with('R') {
+        parts.next().unwrap_or(first).trim()
+    } else {
+        first
+    };
+    (!path.is_empty()).then(|| (status.to_string(), path.to_string()))
+}
+
+/// The word a review report uses for a `--name-status` letter.
+fn change_type(status: &str) -> &'static str {
+    match status.chars().next() {
+        Some('A') => "added",
+        Some('D') => "deleted",
+        Some('R') => "renamed",
+        Some('C') => "copied",
+        _ => "modified",
     }
 }
 
@@ -1891,14 +1921,15 @@ pub fn review(ctx: &AppContext, staged: bool, base: Option<&str>) -> Result<Revi
         return Err(git_diff_error(&ctx.root, &output.stderr));
     }
 
-    let changed_files: Vec<String> = String::from_utf8(output.stdout)
+    // `--name-status`, not `--name-only`: a deleted file is still a change a
+    // reviewer must see, and the status is the only place it is recorded.
+    let changed: Vec<(String, String)> = String::from_utf8(output.stdout)
         .unwrap_or_default()
         .lines()
-        .map(|s| s.to_string())
-        .filter(|s| !s.is_empty())
+        .filter_map(parse_name_status)
         .collect();
 
-    if changed_files.is_empty() {
+    if changed.is_empty() {
         return Ok(ReviewReport {
             staged,
             base,
@@ -1917,7 +1948,7 @@ pub fn review(ctx: &AppContext, staged: bool, base: Option<&str>) -> Result<Revi
     let mut total_symbols = 0;
     let mut total_refs = 0;
 
-    for file in &changed_files {
+    for (status, file) in &changed {
         // By path: `file` is a path, and `definitions_for` looks names up, so
         // this answered "0 symbols" for every file that had any.
         let symbols = graph
@@ -1939,11 +1970,29 @@ pub fn review(ctx: &AppContext, staged: bool, base: Option<&str>) -> Result<Revi
 
         total_symbols += symbol_changes.len();
 
+        // Reuse the `tests-for` path: the graph already knows which test files
+        // mention these names. An empty list used to be written unconditionally,
+        // which reads as "no tests affected" rather than "not computed" — a
+        // false negative in the reassuring direction.
+        let names: Vec<String> = symbols.iter().map(|symbol| symbol.name.clone()).collect();
+        let mut impacted_tests = Vec::new();
+        if !names.is_empty() {
+            let mut seen = HashSet::new();
+            for path in graph
+                .ref_paths_for(&names, MAX_TEST_REFS)
+                .unwrap_or_default()
+            {
+                if is_test_path(&path) && seen.insert(path.clone()) {
+                    impacted_tests.push(path);
+                }
+            }
+        }
+
         changes.push(ReviewChange {
             file: file.clone(),
-            change_type: "modified".to_string(),
+            change_type: change_type(status).to_string(),
             symbols: symbol_changes,
-            impacted_tests: Vec::new(),
+            impacted_tests,
         });
     }
 
@@ -1952,7 +2001,7 @@ pub fn review(ctx: &AppContext, staged: bool, base: Option<&str>) -> Result<Revi
         base,
         changes,
         summary: ReviewSummary {
-            files_changed: changed_files.len(),
+            files_changed: changed.len(),
             symbols_changed: total_symbols,
             references_affected: total_refs,
             // The graph knows which tests mention a symbol, not whether they
@@ -3196,7 +3245,7 @@ mod tests {
         // Three dots: what this branch adds, not the base branch's own changes.
         assert_eq!(
             review_git_args(false, Some("main")).unwrap().join(" "),
-            "diff --name-only main...HEAD"
+            "diff --name-status main...HEAD"
         );
         assert!(
             review_git_args(false, Some("  ")).is_err(),
@@ -3204,11 +3253,103 @@ mod tests {
         );
         assert_eq!(
             review_git_args(true, None).unwrap().join(" "),
-            "diff --cached --name-only"
+            "diff --cached --name-status"
         );
         assert_eq!(
             review_git_args(false, None).unwrap().join(" "),
-            "diff --name-only"
+            "diff --name-status"
+        );
+    }
+
+    #[test]
+    fn name_status_keeps_deletions_and_opens_renames_at_the_new_path() {
+        assert_eq!(
+            parse_name_status("M\tsrc/lib.rs"),
+            Some(("M".into(), "src/lib.rs".into()))
+        );
+        assert_eq!(
+            parse_name_status("D\tsrc/gone.rs"),
+            Some(("D".into(), "src/gone.rs".into()))
+        );
+        // A rename is two paths; the reviewer opens the destination.
+        assert_eq!(
+            parse_name_status("R100\tsrc/old.rs\tsrc/new.rs"),
+            Some(("R100".into(), "src/new.rs".into()))
+        );
+        assert_eq!(parse_name_status(""), None);
+        assert_eq!(change_type("D"), "deleted");
+        assert_eq!(change_type("A"), "added");
+        assert_eq!(change_type("R100"), "renamed");
+        assert_eq!(change_type("M"), "modified");
+    }
+
+    /// Run git, failing the test with the command on a non-zero status.
+    fn git(root: &std::path::Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .status()
+            .expect("git is installed");
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    /// The T2 gate: a deletion must not read as "nothing affected".
+    ///
+    /// The symbol rows live in the graph, which still has them after the file
+    /// is gone — so the review can name the symbol and the test that mentions
+    /// it. This is the case `--name-only` made invisible and an empty
+    /// `impacted_tests` used to contradict.
+    #[test]
+    fn a_deleted_symbol_still_shows_the_tests_that_mention_it() {
+        let (dir, ctx) = fixture();
+        let root = dir.path();
+        git(root, &["init", "-q"]);
+        git(root, &["add", "--", "src", "tests"]);
+        git(
+            root,
+            &[
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "user.name=T",
+                "commit",
+                "-qm",
+                "base",
+            ],
+        );
+        index(&ctx, false, true, &mut |_| {}).unwrap();
+
+        std::fs::remove_file(root.join("src/lib.rs")).unwrap();
+        git(root, &["add", "-A", "--", "src", "tests"]);
+        git(
+            root,
+            &[
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "user.name=T",
+                "commit",
+                "-qm",
+                "delete",
+            ],
+        );
+
+        let report = review(&ctx, false, Some("HEAD~1")).expect("review runs");
+        let change = report
+            .changes
+            .iter()
+            .find(|change| change.file == "src/lib.rs")
+            .expect("a deleted file is still a change");
+        assert_eq!(change.change_type, "deleted");
+        assert!(
+            change.symbols.iter().any(|symbol| symbol.name == "callee"),
+            "deleted symbols stay visible: {:?}",
+            change.symbols
+        );
+        assert!(
+            change.impacted_tests.contains(&"tests/it.rs".to_string()),
+            "the test that mentions the symbol is named: {:?}",
+            change.impacted_tests
         );
     }
 
