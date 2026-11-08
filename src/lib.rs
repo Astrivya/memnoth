@@ -39,6 +39,7 @@ pub mod context;
 pub mod docs;
 pub mod doctor;
 pub mod edit;
+pub mod env_file;
 pub mod feedback;
 pub mod keys;
 pub mod kg;
@@ -78,6 +79,9 @@ use std::process::ExitCode;
 /// all live here so the TUI and the CLI cannot disagree about what a failure
 /// looks like.
 pub fn run() -> ExitCode {
+    // Before anything reads the environment: a repository-local `.env` fills in
+    // only the variables the shell has not already set, and never prints a value.
+    env_file::load();
     let cli = Cli::parse();
     let json = cli.json;
     let ctx = match AppContext::new(&cli) {
