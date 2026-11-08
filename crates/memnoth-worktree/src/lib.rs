@@ -244,8 +244,15 @@ pub struct BatchResult {
 ///
 /// Spawns `config.workers` workers in isolated worktrees, each running the
 /// configured command. Workers coordinate via the shared coordination room.
-pub async fn execute_batch(repo_root: &Path, config: BatchConfig) -> Result<Vec<BatchResult>> {
-    let mut pool = join_workspace(repo_root)?;
+pub async fn execute_batch(
+    repo_root: &Path,
+    config: BatchConfig,
+    room_db: Option<&Path>,
+) -> Result<Vec<BatchResult>> {
+    let mut pool = match room_db {
+        Some(path) => memnoth_coord::join_workspace_at(repo_root, path)?,
+        None => join_workspace(repo_root)?,
+    };
 
     let mut handles = Vec::new();
     let mut worker_ids = Vec::new();

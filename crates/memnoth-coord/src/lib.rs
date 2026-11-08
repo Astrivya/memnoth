@@ -53,7 +53,7 @@ pub mod feed;
 pub use feed::{LockFeed, MissionFeed, PlanNode, TimelineEvent, WorkerFeed};
 pub mod logstream;
 pub mod worker;
-pub use worker::join_workspace;
+pub use worker::{join_workspace, join_workspace_at};
 
 const STALE_HEARTBEAT_MS: i64 = 15 * 60 * 1000;
 const PRUNE_SESSION_MS: i64 = 60 * 60 * 1000;
@@ -359,6 +359,34 @@ impl Coord {
             params![id, name, pid as i64, project_root, now],
         )?;
         Ok(id)
+    }
+
+    /// Join under a caller-chosen identity, resuming the row if it exists.
+    ///
+    /// [`Coord::join`] mints a new id on every call, which is why presence
+    /// accumulated one row per invocation and why a message addressed to a
+    /// colleague's live session could not be delivered. The durable id is the
+    /// caller's: the first call creates the row, later calls refresh the
+    /// heartbeat and pid, and `started_at` is preserved.
+    pub fn join_stable(
+        &self,
+        session_id: &str,
+        name: &str,
+        pid: u32,
+        project_root: &str,
+    ) -> Result<String> {
+        let now = now_ms();
+        self.conn.execute(
+            "INSERT INTO coord_sessions (id, name, pid, project_root, started_at, heartbeat_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+             ON CONFLICT(id) DO UPDATE SET
+               name = excluded.name,
+               pid = excluded.pid,
+               project_root = excluded.project_root,
+               heartbeat_at = excluded.heartbeat_at",
+            params![session_id, name, pid as i64, project_root, now],
+        )?;
+        Ok(session_id.to_string())
     }
 
     /// Send a heartbeat to keep the session alive.
@@ -747,6 +775,18 @@ mod tests {
             }
             other => panic!("expected refused, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn join_stable_resumes_one_row_per_identity() {
+        let db = tmp_db("stable");
+        let c = Coord::open(&db).unwrap();
+        let first = c.join_stable("u-amruth@abc", "amruth", 10, "/p").unwrap();
+        let second = c.join_stable("u-amruth@abc", "amruth", 11, "/p").unwrap();
+        assert_eq!(first, second, "the identity is the caller's, not a new id");
+        let rows = c.status().unwrap();
+        assert_eq!(rows.len(), 1, "two commands are one session, not two rows");
+        assert_eq!(rows[0].pid, 11, "the newer process owns the row");
     }
 
     #[test]

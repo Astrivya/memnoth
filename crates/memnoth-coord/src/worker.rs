@@ -42,13 +42,25 @@ pub struct WorkerPool {
 
 /// Open (or create) a coordination room for `workspace` and return a worker pool.
 ///
-/// The room database lives at `<workspace>/.memnoth/coord.db`. Worker worktrees
-/// are created under `<workspace>/.memnoth/worktrees/<worker-id>/`.
+/// This is the legacy, workspace-local room at
+/// `<workspace>/.memnoth/coord.db`. Callers that have the CLI's state directory
+/// use [`join_workspace_at`] with `AppContext::coord_path()` instead, so worker
+/// claims and `mn team` claims land on one board.
 pub fn join_workspace(workspace: &Path) -> Result<WorkerPool> {
-    let memnoth_dir = workspace.join(".memnoth");
-    std::fs::create_dir_all(&memnoth_dir)?;
-    let db_path = memnoth_dir.join("coord.db");
-    let coord = Coord::open(&db_path)?;
+    let db_path = workspace.join(".memnoth").join("coord.db");
+    join_workspace_at(workspace, &db_path)
+}
+
+/// Open a pool whose claims live in `room_db`.
+///
+/// Worker worktrees are still created under
+/// `<workspace>/.memnoth/worktrees/<worker-id>/`: the code is isolated per
+/// workspace, the coordination is not.
+pub fn join_workspace_at(workspace: &Path, room_db: &Path) -> Result<WorkerPool> {
+    if let Some(parent) = room_db.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let coord = Coord::open(room_db)?;
     Ok(WorkerPool {
         coord,
         workspace: workspace.to_path_buf(),
