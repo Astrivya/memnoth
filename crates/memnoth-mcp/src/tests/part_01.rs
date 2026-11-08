@@ -289,8 +289,40 @@ fn profile_parse_maps_env_values() {
     assert_eq!(Profile::parse(Some("coord")), Profile::Coord);
     assert_eq!(Profile::parse(Some("code")), Profile::Code);
     assert_eq!(Profile::parse(Some("full")), Profile::Full);
-    assert_eq!(Profile::parse(None), Profile::Full);
-    assert_eq!(Profile::parse(Some("bogus")), Profile::Full);
+}
+
+/// The environment is the machine's policy, so an unset variable must take the
+/// **documented** default (`memory`, 21 tools) and an unrecognised value must
+/// stop the process. Both used to fall back to `full` (51 tools): a typo in a
+/// host's launch command silently widened the surface, and the only signal was
+/// a stderr line nothing reads. This is the regression test for that.
+#[test]
+fn profile_env_is_strict_and_never_widens_on_a_typo() {
+    assert_eq!(Profile::parse_strict(None).unwrap(), Profile::Memory);
+    // An empty or all-space value is unset, not a name.
+    assert_eq!(Profile::parse_strict(Some("  ")).unwrap(), Profile::Memory);
+    assert_eq!(
+        Profile::parse_strict(Some(" memory ")).unwrap(),
+        Profile::Memory,
+        "surrounding whitespace is trimmed, not treated as a typo"
+    );
+
+    let error = Profile::parse_strict(Some("bogus"))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("MEMNOTH_MCP_PROFILE") && error.contains("bogus"),
+        "the refusal must name the variable and the offending value: {error}"
+    );
+    assert!(
+        error.contains("micro, memory, coord, code, agent, full"),
+        "the refusal must list the accepted names: {error}"
+    );
+
+    // The lenient parser is for stored values only, and it narrows rather than
+    // widens: an unknown stored profile must never unlock `full`.
+    assert_eq!(Profile::parse(None), Profile::Memory);
+    assert_eq!(Profile::parse(Some("bogus")), Profile::Memory);
 }
 
 #[test]

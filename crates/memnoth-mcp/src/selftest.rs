@@ -42,7 +42,7 @@ pub async fn run(db_path: PathBuf) -> Result<()> {
 pub async fn probe(db_path: PathBuf) -> Result<Probe> {
     use tokio::io::BufReader;
 
-    let profile = Profile::from_env();
+    let profile = Profile::from_env()?;
     if profile == Profile::Agent {
         anyhow::bail!(
             "the agent profile needs the HTTP transport; --selftest covers the stdio surface"

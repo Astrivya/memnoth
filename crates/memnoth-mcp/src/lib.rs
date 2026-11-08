@@ -109,6 +109,7 @@ mod llm;
 mod mrtr;
 mod oauth;
 pub mod plugin_hooks;
+mod policy;
 /// S1 fixed-cost retrieval: per-arm recall budgets, rerank cap, token-budget
 /// packing, exact per-stage accounting (scale lane).
 mod recall_budget;
@@ -387,33 +388,55 @@ impl Profile {
     }
 
     /// Load the profile from the `MEMNOTH_MCP_PROFILE` environment variable.
-    pub fn from_env() -> Self {
-        Self::parse(std::env::var("MEMNOTH_MCP_PROFILE").ok().as_deref())
+    ///
+    /// **Refuses an unrecognised value.** This process decides which tools a host
+    /// is even told about, so a typo must not widen the surface: a machine whose
+    /// operator meant `memory` (21 tools) used to expose `full` (51 tools), and
+    /// the only signal was one stderr line nobody reads.
+    pub fn from_env() -> anyhow::Result<Self> {
+        let raw = std::env::var("MEMNOTH_MCP_PROFILE").ok();
+        Self::parse_strict(raw.as_deref())
     }
 
-    /// Parse a profile name (`micro`, `memory`, `coord`, `code`, `agent`,
-    /// `full`). Unknown names fall back to `Full` and log a warning.
-    pub fn parse(value: Option<&str>) -> Self {
-        match value {
-            Some(name) if Self::is_known_name(name) => match name {
-                "micro" => Profile::Micro,
-                "memory" => Profile::Memory,
-                "coord" => Profile::Coord,
-                "code" => Profile::Code,
-                "agent" => Profile::Agent,
-                // The only remaining known name is `full`, spelled out so a
-                // future profile cannot silently join the fallback arm.
-                _ => Profile::Full,
-            },
-            other => {
-                if other.is_some() {
-                    eprintln!(
-                        "memnoth-mcp: unknown MEMNOTH_MCP_PROFILE value {other:?}; falling back to 'full'"
-                    );
-                }
-                Profile::Full
-            }
+    /// Strict parse: the documented default when unset, an error when unknown.
+    ///
+    /// The default is `memory`, not `full` — `main.rs`'s own help text says
+    /// `(default: memory)`, and an unset variable is a decision to take that
+    /// default rather than to take the widest surface available.
+    pub fn parse_strict(value: Option<&str>) -> anyhow::Result<Self> {
+        match value.map(str::trim).filter(|name| !name.is_empty()) {
+            None => Ok(Profile::Memory),
+            Some(name) => Self::parse_known(name).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unknown MEMNOTH_MCP_PROFILE value {name:?}; expected one of \
+                     micro, memory, coord, code, agent, full. Refusing to start rather \
+                     than falling back to 'full', which would widen the tool surface."
+                )
+            }),
         }
+    }
+
+    /// Lenient parse for values that are already stored (a connection row): an
+    /// unknown name narrows to `memory` and never widens to `full`. The
+    /// environment goes through [`Profile::parse_strict`], where an error is the
+    /// correct answer.
+    pub fn parse(value: Option<&str>) -> Self {
+        Self::parse_strict(value).unwrap_or(Profile::Memory)
+    }
+
+    /// The name map, with no default of any kind.
+    fn parse_known(name: &str) -> Option<Self> {
+        Some(match name {
+            "micro" => Profile::Micro,
+            "memory" => Profile::Memory,
+            "coord" => Profile::Coord,
+            "code" => Profile::Code,
+            "agent" => Profile::Agent,
+            "full" => Profile::Full,
+            // Spelled out so a profile added later must be given an arm here
+            // rather than inheriting one by falling through.
+            _ => return None,
+        })
     }
 
     /// Whether `parse` accepts the name without falling back to `Full`.
@@ -530,7 +553,7 @@ impl Profile {
 pub async fn run_stdio_server(db_path: PathBuf) -> Result<()> {
     use tokio::io::BufReader;
 
-    let profile = Profile::from_env();
+    let profile = Profile::from_env()?;
     if profile == Profile::Agent {
         anyhow::bail!(
             "MEMNOTH_MCP_PROFILE=agent requires the HTTP transport: set MEMNOTH_MCP_PROFILE=agent \
@@ -615,7 +638,7 @@ pub fn call(
 pub async fn doctor(db: &Path) -> Result<DoctorReport> {
     use std::io::{BufRead, BufReader, Write};
 
-    let profile = Profile::from_env();
+    let profile = Profile::from_env()?;
     let promise = visible_tools(profile).len();
 
     let mut command = std::process::Command::new("memnoth-mcp");
@@ -2386,6 +2409,22 @@ tool_def!(
 /// is declared once per tool here so [`Registry::execute`] can apply the
 /// profile gate and mint a receipt without the MCP crate maintaining a second
 /// table.
+/// The one registry every MCP tool call goes through.
+///
+/// Module-level rather than a function-local static so the transport can ask
+/// the same table what a tool requires. A second registry would be a second
+/// answer to "what scope gates this tool".
+static MCP_REGISTRY: LazyLock<Registry> = LazyLock::new(mcp_registry);
+
+/// The scope an authenticated transport must present to call `tool`.
+///
+/// Read-only tools need none; a mutating tool needs `mcp:write`, a destructive
+/// one `mcp:admin`. `None` also means "not a registry tool" — the transport
+/// lets the dispatcher answer that with its own unknown-tool error.
+pub fn required_scope(tool: &str) -> Option<&'static str> {
+    MCP_REGISTRY.required_scope(tool)
+}
+
 fn mcp_registry() -> Registry {
     let mut registry = Registry::empty();
 
@@ -3119,6 +3158,21 @@ fn tools_call(
         );
     }
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
+
+    // Policy gate: blocking and fail-closed for mutating tools, deliberately
+    // separate from the fail-open observability hooks below. A refusal is
+    // synchronous, before any approval flow, and names the file and the exact
+    // entry that produced it — the smallest request that can widen the rule.
+    let policy_path = policy::path_from_env_or_vault(vault);
+    let policy = policy::load(policy_path.as_deref());
+    let mutating = required_scope(name).is_some();
+    if let policy::Decision::Deny { rule } = policy.decide(name, mutating) {
+        anyhow::bail!(
+            "tool `{name}` is denied by {rule}. The smallest change that would allow it is \
+             removing that rule; the agent cannot change the policy itself."
+        );
+    }
+
     // Plugin hook point (fail-open, detached): lets plugin authors observe or
     // audit tool calls without touching the daemon hook engine.
     dispatch_plugin_hook(PluginHookPoint::OnToolCall, name);
@@ -3154,8 +3208,7 @@ fn tools_call(
     let _progress_guard = arm_kg_index_progress(name, progress.as_ref());
     let _ingest_progress_guard = arm_mem_ingest_progress(name, progress.as_ref());
 
-    static REGISTRY: LazyLock<Registry> = LazyLock::new(mcp_registry);
-    run_via_registry(&REGISTRY, name, &args, engine, coord, vault, profile)
+    run_via_registry(&MCP_REGISTRY, name, &args, engine, coord, vault, profile)
 }
 
 #[cfg(test)]

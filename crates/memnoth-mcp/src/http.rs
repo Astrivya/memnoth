@@ -150,7 +150,7 @@ impl TenantVaults {
 /// requires at least one auth mode; any profile refuses a non-loopback
 /// bind when zero modes are configured (never serves open).
 pub async fn run_http_server(db_path: PathBuf) -> Result<()> {
-    let profile = Profile::from_env();
+    let profile = Profile::from_env()?;
     let bind = std::env::var("MEMNOTH_MCP_HTTP_BIND")
         .ok()
         .filter(|v| !v.trim().is_empty())
@@ -421,11 +421,20 @@ async fn handle_connection(
     // trip approval is signed to whoever asked, so another principal cannot
     // redeem it (SEP-2322).
     let mut principal: Option<String> = None;
+    let mut scopes: Vec<String> = Vec::new();
+    // A static bearer is the operator's own service secret, configured on this
+    // server and predating scopes; it is not a narrowed user token. Treating
+    // its empty scope list as "granted nothing" would break every existing
+    // static-bearer deployment. A JWT with no scopes did grant nothing, and is
+    // enforced.
+    let mut static_bearer = false;
     let authorized = open
         || match auth.verify(request.authorization.as_deref()).await {
             Ok(ctx) => {
                 record_verify(ctx.mode, None);
                 principal = ctx.user_id.clone();
+                scopes = ctx.scopes.clone();
+                static_bearer = ctx.mode == memnoth_mcp_auth::AuthMode::StaticBearer;
                 true
             }
             Err(e) => {
@@ -479,6 +488,13 @@ async fn handle_connection(
             }
         };
 
+    // Open loopback and a static bearer have no OAuth boundary, so no scope can
+    // be required of them; a user JWT carries exactly what its token granted.
+    let granted = if open || static_bearer {
+        None
+    } else {
+        Some(scopes.as_slice())
+    };
     dispatch(
         req_engine,
         req_coord,
@@ -489,6 +505,7 @@ async fn handle_connection(
         sessions,
         agent,
         principal.as_deref(),
+        granted,
     )
     .await
 }
@@ -504,11 +521,12 @@ async fn dispatch(
     sessions: &Sessions,
     agent: Option<&crate::AgentBridge>,
     principal: Option<&str>,
+    scopes: Option<&[String]>,
 ) -> Result<()> {
     match (request.method.as_str(), request.path.as_str()) {
         ("POST", "/mcp") => {
             handle_post(
-                engine, coord, profile, vault, reader, request, sessions, agent, principal,
+                engine, coord, profile, vault, reader, request, sessions, agent, principal, scopes,
             )
             .await
         }
@@ -551,6 +569,7 @@ async fn handle_post<W>(
     sessions: &Sessions,
     agent: Option<&crate::AgentBridge>,
     principal: Option<&str>,
+    scopes: Option<&[String]>,
 ) -> Result<()>
 where
     W: tokio::io::AsyncWrite + Unpin,
@@ -567,6 +586,45 @@ where
         .unwrap_or_default()
         .to_string();
     let is_initialize = body_method == "initialize";
+
+    // Scope enforcement sits at the transport boundary, before any dispatcher
+    // or plugin hook can see the call. A refusal is a 403 naming the exact
+    // scope that would allow it, so the model can ask for the smallest grant
+    // instead of retrying the same request.
+    if body_method == "tools/call" {
+        let tool = message
+            .get("params")
+            .and_then(|params| params.get("name"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if let Some(required) = denied_scope(tool, scopes) {
+            let resource = crate::oauth::canonical_resource(
+                std::env::var(crate::oauth::PUBLIC_URL_ENV).ok().as_deref(),
+                request.host.as_deref().unwrap_or("localhost"),
+            );
+            let challenge = crate::oauth::insufficient_scope(
+                &crate::oauth::metadata_url(&resource),
+                &[required.to_string()],
+                &format!("tool `{tool}` requires scope `{required}`"),
+            );
+            let body = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": message.get("id").cloned().unwrap_or(Value::Null),
+                "error": {
+                    "code": -32001,
+                    "message": format!("tool `{tool}` requires scope `{required}`"),
+                },
+            });
+            return respond(
+                writer,
+                403,
+                "Forbidden",
+                &[("WWW-Authenticate", challenge)],
+                body.to_string().as_bytes(),
+            )
+            .await;
+        }
+    }
 
     // Era detection for the HTTP binding: a modern request declares its version
     // on the request itself. Both spellings count, and if a client sends both
@@ -681,6 +739,18 @@ where
         .await;
     }
     respond(writer, 200, "OK", &[], reply.to_string().as_bytes()).await
+}
+
+/// The scope that would allow this call, when the presented token lacks it.
+///
+/// `None` covers two cases that both mean "nothing to enforce": a read-only
+/// tool, and a transport with no OAuth boundary (`scopes == None`, which is
+/// stdio and open loopback). `Some(scope)` is a refusal that names the smallest
+/// grant that fixes it.
+fn denied_scope(tool: &str, scopes: Option<&[String]>) -> Option<&'static str> {
+    let required = crate::required_scope(tool)?;
+    let granted = scopes?;
+    (!granted.iter().any(|scope| scope == required)).then_some(required)
 }
 
 async fn read_request<R>(reader: &mut R) -> Result<Option<HttpRequest>>
@@ -867,6 +937,33 @@ where
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn an_authenticated_transport_requires_the_scope_the_tool_needs() {
+        let none: &[String] = &[];
+        let write = vec!["mcp:write".to_string()];
+        assert_eq!(
+            denied_scope("mem_search", Some(none)),
+            None,
+            "a read needs nothing beyond the profile"
+        );
+        assert_eq!(
+            denied_scope("mem_add_fact", None),
+            None,
+            "stdio has no OAuth boundary to enforce"
+        );
+        assert_eq!(
+            denied_scope("mem_add_fact", Some(none)),
+            Some("mcp:write"),
+            "a write without scope fails closed and names the scope"
+        );
+        assert_eq!(denied_scope("mem_add_fact", Some(&write)), None);
+        assert_eq!(
+            denied_scope("not_a_tool", Some(none)),
+            None,
+            "unknown tools are the dispatcher's error, not a scope refusal"
+        );
+    }
 
     fn setup() -> (MemoryEngine, Coord, PathBuf) {
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

@@ -29,6 +29,8 @@
 //! - `MEMNOTH_CLOUD_INGEST_URL` — explicit base URL. Unset, it is derived from
 //!   `MEMNOTH_API_BASE` (dropping a trailing `/api/v1`), and finally defaults to
 //!   the hosted console.
+//! - `MEMNOTH_TELEMETRY=1` — the opt-in. Unset means no POST leaves this
+//!   process, even when a credential is present.
 //! - `MEMNOTH_PROJECT_ID` — file every session into this cloud project. A
 //!   gateway serves a deployment, not one directory, so its project is a
 //!   setting rather than a repository link. Unset, the control plane falls back
@@ -88,6 +90,25 @@ pub fn ingest_url() -> Option<&'static str> {
         Some(DEFAULT_INGEST_BASE.to_string())
     })
     .as_deref()
+}
+
+/// Whether the user opted in to machine-level reporting.
+///
+/// This process is launched by an MCP host, not by the CLI, so it cannot read
+/// the CLI's `config.toml` without duplicating that resolution. The environment
+/// is the gate it does own: unset (the default an installer writes) is **off**,
+/// matching the published promise, and only an explicit truthy value enables a
+/// POST. A credential alone is not consent.
+fn ingest_enabled() -> bool {
+    for var in ["MEMNOTH_TELEMETRY", "MEMNOTH_MCP_INGEST"] {
+        if let Ok(value) = std::env::var(var) {
+            return matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "on" | "yes"
+            );
+        }
+    }
+    false
 }
 
 /// The bearer used for cloud API auth.
@@ -180,6 +201,9 @@ pub fn session_updated(session_id: &str, tokens: i64, files: i64, cost_micros: i
 /// Every failure path logs, because the whole reason this went unnoticed for so
 /// long is that it used to say nothing at all.
 fn fire_post(body: Value) {
+    if !ingest_enabled() {
+        return;
+    }
     let Some(base) = ingest_url() else {
         return;
     };
