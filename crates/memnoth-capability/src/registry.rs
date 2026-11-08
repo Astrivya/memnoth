@@ -220,6 +220,22 @@ impl Registry {
             .collect()
     }
 
+    /// The OAuth scope a tool needs on an authenticated transport.
+    ///
+    /// Derived from the approval class rather than declared a second time: a
+    /// tool that changes the workspace needs `mcp:write`, a destructive one
+    /// needs `mcp:admin`, and a read needs nothing beyond the profile that
+    /// already gates it. One table means a new mutating tool cannot ship
+    /// unscoped by forgetting a field.
+    pub fn required_scope(&self, name: &str) -> Option<&'static str> {
+        let tool = self.tools.get(name)?;
+        match tool.definition().approval {
+            Approval::ReadOnly => None,
+            Approval::MutatesWorkspace => Some("mcp:write"),
+            Approval::Destructive => Some("mcp:admin"),
+        }
+    }
+
     /// Run one tool under one profile.
     pub fn execute(
         &self,
