@@ -79,6 +79,25 @@ pub struct Me {
     pub roles: Vec<String>,
 }
 
+/// `GET /api/v1/billing/entitlements` — what the org's plan permits.
+///
+/// A `None` ceiling means unlimited; `Some(0)` means the feature is not included.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BillingEntitlements {
+    pub active: bool,
+    pub plan_id: Option<String>,
+    pub plan_name: String,
+    pub status: String,
+    pub seats: i64,
+    pub workspaces: Option<i64>,
+    pub history_days: Option<i64>,
+    pub cloud_sessions: bool,
+    pub console: bool,
+    pub audit_log: bool,
+    pub sso: bool,
+    pub scim: bool,
+}
+
 /// `GET /api/v1/org` — the envelope the control plane wraps the org in.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrgEnvelope {
@@ -846,6 +865,44 @@ pub struct InviteCreated {
     pub email_sent: bool,
     #[serde(default)]
     pub email_error: Option<String>,
+}
+
+/// One encrypted manifest version, without its bytes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncManifestSummary {
+    /// Monotonic manifest version chosen by the client.
+    pub version: i64,
+    /// BLAKE3 digest of the encrypted envelope, 64 lowercase hex characters.
+    pub ciphertext_hash: String,
+    /// Size of the encrypted envelope in bytes.
+    pub size_bytes: i64,
+    /// When the control plane accepted this version (RFC 3339).
+    #[serde(default)]
+    pub created_at: String,
+}
+
+/// `GET /api/v1/sync/manifests?since=…`
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SyncManifestList {
+    #[serde(default)]
+    pub manifests: Vec<SyncManifestSummary>,
+}
+
+/// The acknowledgement for a manifest PUT. The encrypted bytes are not echoed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncManifestAck {
+    pub manifest: SyncManifestSummary,
+}
+
+/// The acknowledgement for an object PUT, including a resumable offset.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncObjectAck {
+    pub content_hash: String,
+    pub size_bytes: i64,
+    /// False when the request stored a prefix and the client should continue.
+    pub complete: bool,
+    /// Bytes accepted so far. Equal to `size_bytes` when `complete` is true.
+    pub offset: i64,
 }
 
 /// Generic error response from the API.

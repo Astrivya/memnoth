@@ -13,11 +13,11 @@
 //! instead of through a glob that would pick the stale one.
 
 use crate::types::{
-    ApiKeyInfo, ApprovedAccountKey, CreateKeyResponse, CreditGrant, CreditLedgerEntry,
-    CreditsResponse, Invite, InviteCreated, InvitesResponse, KeysResponse, McpTokenResponse, Me,
-    Member, MemberAdded, MembersResponse, OrgEnvelope, OrgInfo, OrganizationInfo,
-    OrganizationsResponse, ProjectInfo, ProjectsResponse, Team, TeamDetail, TeamEnvelope,
-    TeamsResponse,
+    ApiKeyInfo, ApprovedAccountKey, BillingEntitlements, CreateKeyResponse, CreditGrant,
+    CreditLedgerEntry, CreditsResponse, Invite, InviteCreated, InvitesResponse, KeysResponse,
+    McpTokenResponse, Me, Member, MemberAdded, MembersResponse, OrgEnvelope, OrgInfo,
+    OrganizationInfo, OrganizationsResponse, ProjectInfo, ProjectsResponse, Team, TeamDetail,
+    TeamEnvelope, TeamsResponse,
 };
 use crate::{CloudClient, ModelRow, UsageResponse};
 
@@ -721,6 +721,38 @@ fn the_ingest_batch_envelope_is_events_not_items() {
         .expect("the plane's ingest result must parse");
     assert_eq!(answer.accepted, 2);
     assert_eq!(answer.duplicates, 1);
+}
+
+/// `GET /api/v1/billing/entitlements` carries the ceilings `auth status` shows.
+///
+/// `workspaces` and `history_days` are nullable because `null` means unlimited;
+/// treating zero or a missing field as unlimited is how a free org silently
+/// looks like a paid one.
+#[test]
+fn billing_entitlements_carry_nullable_ceilings() {
+    let body = r#"{
+        "active": true,
+        "plan_id": "team",
+        "plan_name": "Team",
+        "status": "active",
+        "seats": 5,
+        "workspaces": null,
+        "history_days": 90,
+        "cloud_sessions": true,
+        "console": true,
+        "audit_log": true,
+        "sso": false,
+        "scim": false
+    }"#;
+    let entitlements: BillingEntitlements =
+        serde_json::from_str(body).expect("the entitlements response must parse");
+    assert!(entitlements.active);
+    assert_eq!(entitlements.plan_id.as_deref(), Some("team"));
+    assert_eq!(entitlements.seats, 5);
+    assert_eq!(entitlements.workspaces, None);
+    assert_eq!(entitlements.history_days, Some(90));
+    assert!(entitlements.audit_log);
+    assert!(!entitlements.scim);
 }
 
 /// A deployment root and an API base are both valid `MEMNOTH_CLOUD_URL` values.

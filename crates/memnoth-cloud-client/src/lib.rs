@@ -1,5 +1,5 @@
 use reqwest::blocking::Client;
-use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
+use reqwest::header::{AUTHORIZATION, CONTENT_RANGE, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use url::Url;
 use uuid::Uuid;
@@ -9,14 +9,15 @@ pub use error::{CloudError, CloudResult, RetryExhausted};
 pub mod types;
 pub use types::{
     ApiErrorResponse, ApiKeyInfo, ApprovedAccountKey, BatchIngestRequest, BatchIngestResponse,
-    CreateKeyRequest, CreateKeyResponse, CreditGrant, CreditLedgerEntry, CreditsResponse,
-    DeviceApproveResponse, DeviceAuthResponse, HeartbeatAck, HeartbeatRequest, IngestCounts,
-    IngestEvent, InstanceCounts, Invite, InviteCreated, InvitesResponse, KeysResponse,
-    McpTokenResponse, Me, Member, MemberAdded, MembersResponse, ModelInfo, ModelUsage, OkResponse,
-    OrgEnvelope, OrgInfo, OrgSwitch, OrganizationInfo, OrganizationsResponse, PlaneStatus,
-    ProjectEnvelope, ProjectInfo, ProjectSettings, ProjectUsage, ProjectsResponse,
-    RevokeKeyResponse, SessionReport, Team, TeamDetail, TeamEnvelope, TeamMember, TeamProject,
-    TeamsResponse,
+    BillingEntitlements, CreateKeyRequest, CreateKeyResponse, CreditGrant, CreditLedgerEntry,
+    CreditsResponse, DeviceApproveResponse, DeviceAuthResponse, HeartbeatAck, HeartbeatRequest,
+    IngestCounts, IngestEvent, InstanceCounts, Invite, InviteCreated, InvitesResponse,
+    KeysResponse, McpTokenResponse, Me, Member, MemberAdded, MembersResponse, ModelInfo,
+    ModelUsage, OkResponse, OrgEnvelope, OrgInfo, OrgSwitch, OrganizationInfo,
+    OrganizationsResponse, PlaneStatus, ProjectEnvelope, ProjectInfo, ProjectSettings,
+    ProjectUsage, ProjectsResponse, RevokeKeyResponse, SessionReport, SyncManifestAck,
+    SyncManifestList, SyncManifestSummary, SyncObjectAck, Team, TeamDetail, TeamEnvelope,
+    TeamMember, TeamProject, TeamsResponse,
 };
 
 /// Response from GET /api/v1/models
@@ -376,6 +377,11 @@ impl CloudClient {
         Ok(envelope.org)
     }
 
+    /// GET /api/v1/billing/entitlements — the live plan ceilings.
+    pub fn entitlements(&self) -> CloudResult<BillingEntitlements> {
+        Self::handle_response(self.get("billing/entitlements")?)
+    }
+
     /// GET — one request with the standard headers, no decoding.
     fn get(&self, path: &str) -> CloudResult<reqwest::blocking::Response> {
         let url = self
@@ -598,6 +604,176 @@ impl CloudClient {
     /// second copy of every event.
     pub fn ingest_batch(&self, request: &BatchIngestRequest) -> CloudResult<BatchIngestResponse> {
         Self::handle_response(self.post("ingest/batch", request)?)
+    }
+
+    /// GET /api/v1/sync/manifests?since=… — manifest metadata, never plaintext.
+    pub fn sync_manifests(&self, since: u64) -> CloudResult<SyncManifestList> {
+        let mut url = self
+            .base_url
+            .join("sync/manifests")
+            .map_err(|e| CloudError::InvalidUrl(e.to_string()))?;
+        url.query_pairs_mut()
+            .append_pair("since", &since.to_string());
+        let response = self
+            .client
+            .get(url)
+            .headers(self.headers())
+            .send()
+            .map_err(|e| CloudError::NetworkError(e.to_string()))?;
+        Self::handle_response(response)
+    }
+
+    /// GET /api/v1/sync/manifests/{version} — the encrypted envelope.
+    pub fn sync_manifest(&self, version: u64) -> CloudResult<Vec<u8>> {
+        let response = self.get(&format!("sync/manifests/{version}"))?;
+        Self::handle_bytes(response)
+    }
+
+    /// PUT /api/v1/sync/manifests/{version} — store one encrypted envelope.
+    ///
+    /// The version is the client's generation. The server refuses a second body
+    /// at the same version, which is why a retry must reuse its ciphertext.
+    pub fn put_sync_manifest(
+        &self,
+        version: u64,
+        ciphertext: &[u8],
+        ciphertext_hash: &str,
+    ) -> CloudResult<SyncManifestAck> {
+        let url = self
+            .base_url
+            .join(&format!("sync/manifests/{version}"))
+            .map_err(|e| CloudError::InvalidUrl(e.to_string()))?;
+        let mut headers = self.headers();
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/octet-stream"),
+        );
+        headers.insert(
+            "x-memnoth-ciphertext-hash",
+            HeaderValue::from_str(ciphertext_hash)
+                .map_err(|e| CloudError::ConfigError(e.to_string()))?,
+        );
+        let response = self
+            .client
+            .put(url)
+            .headers(headers)
+            .body(ciphertext.to_vec())
+            .send()
+            .map_err(|e| CloudError::NetworkError(e.to_string()))?;
+        Self::handle_response(response)
+    }
+
+    /// GET /api/v1/sync/objects/{hash} — one encrypted object.
+    pub fn sync_object(&self, hash: &str) -> CloudResult<Vec<u8>> {
+        let response = self.get(&format!("sync/objects/{hash}"))?;
+        Self::handle_bytes(response)
+    }
+
+    /// PUT /api/v1/sync/objects/{hash} — one complete encrypted object.
+    pub fn put_sync_object(&self, hash: &str, ciphertext: &[u8]) -> CloudResult<SyncObjectAck> {
+        let url = self
+            .base_url
+            .join(&format!("sync/objects/{hash}"))
+            .map_err(|e| CloudError::InvalidUrl(e.to_string()))?;
+        let mut headers = self.headers();
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/octet-stream"),
+        );
+        let response = self
+            .client
+            .put(url)
+            .headers(headers)
+            .body(ciphertext.to_vec())
+            .send()
+            .map_err(|e| CloudError::NetworkError(e.to_string()))?;
+        Self::handle_response(response)
+    }
+
+    /// PUT one resumable prefix of an object.
+    ///
+    /// `offset` is the first byte in `chunk`; `total` is the full envelope size.
+    /// The server answers `complete: false` until the last byte lands.
+    pub fn put_sync_object_range(
+        &self,
+        hash: &str,
+        chunk: &[u8],
+        offset: u64,
+        total: u64,
+    ) -> CloudResult<SyncObjectAck> {
+        let url = self
+            .base_url
+            .join(&format!("sync/objects/{hash}"))
+            .map_err(|e| CloudError::InvalidUrl(e.to_string()))?;
+        let end = offset.saturating_add(chunk.len() as u64);
+        let mut headers = self.headers();
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/octet-stream"),
+        );
+        headers.insert(
+            CONTENT_RANGE,
+            HeaderValue::from_str(&format!("bytes {offset}-{}-{total}", end.saturating_sub(1)))
+                .map_err(|e| CloudError::ConfigError(e.to_string()))?,
+        );
+        let response = self
+            .client
+            .put(url)
+            .headers(headers)
+            .body(chunk.to_vec())
+            .send()
+            .map_err(|e| CloudError::NetworkError(e.to_string()))?;
+        Self::handle_response(response)
+    }
+
+    /// HEAD /api/v1/sync/objects/{hash} — how many bytes the server already has.
+    ///
+    /// A completed object reports its size; a partial upload reports the next
+    /// offset. `0` means the object is absent. This is what lets a retry resume
+    /// instead of either restarting or guessing.
+    pub fn sync_object_offset(&self, hash: &str) -> CloudResult<u64> {
+        let url = self
+            .base_url
+            .join(&format!("sync/objects/{hash}"))
+            .map_err(|e| CloudError::InvalidUrl(e.to_string()))?;
+        let response = self
+            .client
+            .head(url)
+            .headers(self.headers())
+            .send()
+            .map_err(|e| CloudError::NetworkError(e.to_string()))?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(0);
+        }
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response
+                .text()
+                .map_err(|e| CloudError::NetworkError(e.to_string()))?;
+            return Err(CloudError::from_response(status.as_u16(), text, None));
+        }
+        Ok(response
+            .headers()
+            .get("x-memnoth-upload-offset")
+            .or_else(|| response.headers().get("x-memnoth-size-bytes"))
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0))
+    }
+
+    /// Read a binary response, mapping an error body through the same table as
+    /// every JSON route.
+    fn handle_bytes(response: reqwest::blocking::Response) -> CloudResult<Vec<u8>> {
+        let status = response.status();
+        let bytes = response
+            .bytes()
+            .map_err(|e| CloudError::NetworkError(e.to_string()))?;
+        if status.is_success() {
+            Ok(bytes.to_vec())
+        } else {
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            Err(CloudError::from_response(status.as_u16(), text, None))
+        }
     }
 
     /// POST /api/v1/sessions - record (or update) one session row.

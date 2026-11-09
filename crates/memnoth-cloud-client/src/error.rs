@@ -17,6 +17,15 @@ pub enum CloudError {
     #[error("credits exhausted: {0}")]
     CreditsExhausted(String),
 
+    /// The encrypted-sync storage quota is exhausted (402, `E_SYNC_QUOTA`).
+    #[error("sync quota exhausted: {message}")]
+    SyncQuota {
+        /// The server's explanation, including the attempted and quota bytes.
+        message: String,
+        /// The plan page the refusal points at.
+        upgrade_url: Option<String>,
+    },
+
     /// Resource not found (404).
     #[error("not found: {0}")]
     NotFound(String),
@@ -65,12 +74,29 @@ pub enum CloudError {
     ConfigError(String),
 }
 
+fn sync_quota_or_credits(body: String) -> CloudError {
+    #[derive(serde::Deserialize)]
+    struct Refusal {
+        code: Option<String>,
+        error: Option<String>,
+        upgrade_url: Option<String>,
+    }
+
+    match serde_json::from_str::<Refusal>(&body) {
+        Ok(refusal) if refusal.code.as_deref() == Some("E_SYNC_QUOTA") => CloudError::SyncQuota {
+            message: refusal.error.unwrap_or(body),
+            upgrade_url: refusal.upgrade_url,
+        },
+        _ => CloudError::CreditsExhausted(body),
+    }
+}
+
 impl CloudError {
     /// Map an HTTP response to a CloudError based on status code.
     pub fn from_response(status: u16, body: String, retry_after: Option<u64>) -> Self {
         match status {
             401 => CloudError::AuthError(body),
-            402 => CloudError::CreditsExhausted(body),
+            402 => sync_quota_or_credits(body),
             404 => CloudError::NotFound(body),
             429 => CloudError::RateLimited {
                 retry_after_secs: retry_after.unwrap_or(60),
