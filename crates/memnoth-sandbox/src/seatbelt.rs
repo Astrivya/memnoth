@@ -224,7 +224,7 @@ mod tests {
     fn plan(workspace: &str) -> BackendPlan {
         BackendPlan {
             backend: OsBackend::MacOs,
-            enforcement: crate::backend::EnforcementKind::Seatbelt,
+            enforcement: crate::backend::EnforcementKind::PlanSeatbelt,
             profile: "workspace".to_string(),
             read_only: vec![PathBuf::from("/")],
             read_write: vec![PathBuf::from(workspace)],

@@ -243,7 +243,7 @@ mod tests {
     fn plan(restrict_network: bool, deny: Vec<PathBuf>) -> BackendPlan {
         BackendPlan {
             backend: OsBackend::Linux,
-            enforcement: crate::backend::EnforcementKind::KernelLandlockBwrap,
+            enforcement: crate::backend::EnforcementKind::PlanLandlockBwrap,
             profile: "workspace".to_string(),
             read_only: vec![],
             read_write: vec![PathBuf::from("/repo")],

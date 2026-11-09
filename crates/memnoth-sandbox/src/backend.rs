@@ -45,9 +45,9 @@ impl OsBackend {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnforcementKind {
     /// Linux: Landlock allow sets + bwrap bind-over for deny paths (phase 2).
-    KernelLandlockBwrap,
+    PlanLandlockBwrap,
     /// macOS: Seatbelt profile with deny-last-match rules (phase 2).
-    Seatbelt,
+    PlanSeatbelt,
     /// Windows + fallback: tool-layer policy decisions via [`decide`].
     /// This is real enforcement at the agent's own file-op boundary today,
     /// not a stub: every tool call checks `decide` before touching disk.
@@ -129,8 +129,8 @@ impl BackendPlan {
         };
 
         let enforcement = match backend {
-            OsBackend::Linux => EnforcementKind::KernelLandlockBwrap,
-            OsBackend::MacOs => EnforcementKind::Seatbelt,
+            OsBackend::Linux => EnforcementKind::PlanLandlockBwrap,
+            OsBackend::MacOs => EnforcementKind::PlanSeatbelt,
             OsBackend::Windows => EnforcementKind::Policy,
         };
 
