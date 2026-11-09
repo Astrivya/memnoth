@@ -41,7 +41,9 @@ pub fn run(ctx: &AppContext, args: &crate::cli::ProjectsArgs) -> Result<Outcome>
         crate::cli::ProjectsCommand::Rename(rename) => {
             rename_project(ctx, &rename.id, &rename.name)
         }
-        crate::cli::ProjectsCommand::Delete(delete) => delete_project(ctx, &delete.id, delete.yes),
+        crate::cli::ProjectsCommand::Delete(delete) => {
+            delete_project(ctx, &delete.id, delete.yes, delete.dry_run)
+        }
         crate::cli::ProjectsCommand::Use(args) => use_project(ctx, args),
         crate::cli::ProjectsCommand::Unassigned(_) => unassigned(ctx),
         crate::cli::ProjectsCommand::File(args) => file_session(ctx, args),
@@ -250,7 +252,7 @@ fn rename_project(ctx: &AppContext, id: &str, name: &str) -> Result<Outcome> {
 }
 
 /// `mn projects delete <id> [--yes]` — destructive, so it asks first.
-fn delete_project(ctx: &AppContext, id: &str, yes: bool) -> Result<Outcome> {
+fn delete_project(ctx: &AppContext, id: &str, yes: bool, dry_run: bool) -> Result<Outcome> {
     let client = signed_in_client(ctx)?;
 
     let label = match client
@@ -262,12 +264,28 @@ fn delete_project(ctx: &AppContext, id: &str, yes: bool) -> Result<Outcome> {
         None => id.to_string(),
     };
 
+    if dry_run {
+        return Ok(Outcome::new(
+            "projects.delete",
+            format!(
+                "Would delete project {label}. Its sessions would be kept, unassigned.\nNothing was deleted.\n"
+            ),
+            json!({
+                "dry_run": true,
+                "would_delete": true,
+                "deleted": false,
+                "id": id,
+                "label": label,
+            }),
+        ));
+    }
+
     // Sessions outlive their project (`project_id` is set to NULL, not deleted),
     // which is the one thing a person about to delete should be told.
     if !confirm(
         &format!("Delete project {label}? Its sessions are kept, unassigned."),
         yes,
-    ) {
+    )? {
         return Ok(cancelled());
     }
 

@@ -79,11 +79,30 @@ fn revoke_key(ctx: &AppContext, args: &crate::cli::KeysRevokeArgs) -> Result<Out
 fn revoke_all(ctx: &AppContext, args: &crate::cli::KeysRevokeAllArgs) -> Result<Outcome> {
     let client = crate::cloud::signed_in_client(ctx)?;
 
+    if args.dry_run {
+        let response = client.api_keys()?;
+        let live = response
+            .keys
+            .iter()
+            .filter(|key| key.revoked_at.is_none())
+            .count();
+        return Ok(Outcome::new(
+            "keys.revoke_all",
+            format!("Would revoke {live} live key(s). Nothing was revoked.\n"),
+            json!({
+                "dry_run": true,
+                "would_revoke": live,
+                "cancelled": false,
+                "revoked": 0,
+            }),
+        ));
+    }
+
     // Asked before the call, not after: the server has no undo, and this ends
     // every CI job and every machine's session in one request.
     let question = "Revoke every live key in this org? Every process using one loses access \
                     immediately, with no undo.";
-    if !confirm(question, args.yes) {
+    if !confirm(question, args.yes)? {
         return Ok(Outcome::new(
             "keys.revoke_all",
             "Cancelled; nothing was revoked.\n",

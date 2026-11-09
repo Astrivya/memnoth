@@ -705,6 +705,20 @@ pub fn auth_status(ctx: &AppContext, _args: &AuthStatusArgs) -> Result<Outcome> 
         .get_sync("token_metadata")?
         .and_then(|s| serde_json::from_str(&s).ok());
 
+    // The plan and seat counts are the server's, not the cached token's: a
+    // status line that reports yesterday's plan is worse than one that says the
+    // live read failed. This is best effort and never makes the command fail.
+    let live = store
+        .get_sync("api_key")
+        .ok()
+        .flatten()
+        .and_then(|api_key| {
+            let mut client = CloudClient::from_env().ok()?;
+            client.set_auth_token(api_key);
+            Some((client.org().ok(), client.entitlements().ok()))
+        });
+    let (live_org, live_limits) = live.unwrap_or((None, None));
+
     let authenticated = whoami.is_some();
     let (expires_at, expired) = expiry_state(token.as_ref());
 
@@ -718,6 +732,18 @@ pub fn auth_status(ctx: &AppContext, _args: &AuthStatusArgs) -> Result<Outcome> 
         "role": whoami.as_ref().map(|w| w.role.clone()),
         "tier": token.as_ref().map(|t| t.tier.clone()),
         "status": token.as_ref().map(|t| t.status.clone()),
+        "plan": live_org.as_ref().map(|org| org.plan.clone()),
+        "seats": live_org.as_ref().map(|org| org.seats),
+        "seats_used": live_org.as_ref().map(|org| org.seats_used),
+        "member_count": live_org.as_ref().map(|org| org.member_count),
+        "limits": live_limits.as_ref().map(|limits| serde_json::json!({
+            "workspaces": limits.workspaces,
+            "history_days": limits.history_days,
+            "cloud_sessions": limits.cloud_sessions,
+            "audit_log": limits.audit_log,
+            "sso": limits.sso,
+            "scim": limits.scim,
+        })),
         "expires_at": expires_at,
         "expired": expired,
         "expires": expiry_text(token.as_ref()),
@@ -736,6 +762,17 @@ pub fn auth_status(ctx: &AppContext, _args: &AuthStatusArgs) -> Result<Outcome> 
                 println!("Tier:          {}", t.tier);
                 println!("Status:        {}", t.status);
             }
+            if let Some(org) = &live_org {
+                println!("Plan:          {}", org.plan);
+                println!("Seats:         {} / {}", org.seats_used, org.seats);
+            }
+            if let Some(limits) = &live_limits {
+                println!(
+                    "Limits:        workspaces {}, history {}",
+                    limit_label(limits.workspaces),
+                    history_label(limits.history_days)
+                );
+            }
             // Printed even when unknown: a person checking a credential needs
             // to know whether the deadline is missing or merely far away, and a
             // missing line reads as "no expiry at all".
@@ -746,6 +783,17 @@ pub fn auth_status(ctx: &AppContext, _args: &AuthStatusArgs) -> Result<Outcome> 
     }
 
     Ok(Outcome::new("auth.status", String::new(), data))
+}
+
+fn limit_label(limit: Option<i64>) -> String {
+    limit
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unlimited".to_string())
+}
+
+fn history_label(days: Option<i64>) -> String {
+    days.map(|value| format!("{value} days"))
+        .unwrap_or_else(|| "unlimited".to_string())
 }
 
 /// Run the `mn auth whoami` command.
