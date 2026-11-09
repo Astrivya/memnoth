@@ -162,6 +162,20 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
     let mut app = App::new(name, resumed);
     app.config = ctx.config.clone();
     app.config_path = ctx.config_path.clone();
+    // The panel is shown once. It is marked here rather than in `home()` so the
+    // brief stays a read, and the save is best-effort: a read-only config must
+    // not stop a session from starting.
+    let onboarded = app
+        .config
+        .ui
+        .as_ref()
+        .and_then(|ui| ui.onboarded)
+        .unwrap_or(false);
+    let first_run = !onboarded;
+    if first_run {
+        app.config.ui.get_or_insert_default().onboarded = Some(true);
+        let _ = app.config.save(&ctx.config_path);
+    }
     // Overlays that talk to the cloud (`/teams members`, `/keys create`,
     // `/org invite`) need the invocation's paths and credentials, and the
     // overlay trait only ever sees the app.
@@ -196,7 +210,7 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
     // same way on a fresh machine and on the fortieth day of a session, while
     // still leaving `esc` with something to show.
     app.home_visible = true;
-    app.home = Some(home(ctx, name, resumed, &graph, &session));
+    app.home = Some(home(ctx, name, resumed, &graph, &session, first_run));
     app.graph_attention = graph.attention.clone();
     app.context = context_pane(ctx, &session);
     // Read before the first frame: the account line is part of what the screen
@@ -658,7 +672,7 @@ fn refresh(ctx: &AppContext, app: &mut App, session: &Session) {
     // recording any more.
     let name = app.name.clone();
     let resumed = app.resumed;
-    app.home = Some(home(ctx, &name, resumed, &graph, session));
+    app.home = Some(home(ctx, &name, resumed, &graph, session, false));
     app.graph_attention = graph.attention.clone();
     app.home_cursor = 0;
     app.context = context_pane(ctx, session);
@@ -1813,6 +1827,7 @@ fn home(
     resumed: bool,
     graph: &GraphStatus,
     session: &Session,
+    first_run: bool,
 ) -> Home {
     let turns = session.turns().len();
     let (model, model_ready) = model_state(ctx);
@@ -1921,6 +1936,28 @@ fn home(
             runnable: true,
         });
     }
+    if first_run {
+        // Prepend rather than replace: a vault or graph that is already set up
+        // keeps its row, and the panel takes the first two slots so the whole
+        // thing is three lines.
+        steps.insert(
+            0,
+            Step {
+                command: "/login".to_string(),
+                description: "connect the cloud (optional)".to_string(),
+                runnable: true,
+            },
+        );
+        steps.insert(
+            0,
+            Step {
+                command: "/doctor".to_string(),
+                description: "check this machine".to_string(),
+                runnable: true,
+            },
+        );
+        steps.truncate(3);
+    }
 
     Home {
         identity: identity_line(identity.as_ref(), name, resumed),
@@ -1929,8 +1966,11 @@ fn home(
         // Turns, not messages: a briefing that says "6 earlier turns" for three
         // questions and three answers is off by the half people count.
         hidden_turns: turns,
-        invitation: model_ready
-            .then_some("a turn with the vault and the graph as tools".to_string()),
+        invitation: if first_run {
+            Some("start working — type a question".to_string())
+        } else {
+            model_ready.then_some("a turn with the vault and the graph as tools".to_string())
+        },
         recent: recent_activity(ctx, name, session),
     }
 }
@@ -2805,7 +2845,7 @@ mod tests {
         let ctx = context(dir.path());
         let graph = graph_state(&ctx);
         let session = Session::new(crate::session::SESSION_MODEL);
-        let home = home(&ctx, "payments", false, &graph, &session);
+        let home = home(&ctx, "payments", false, &graph, &session, false);
 
         // Not the `solo` prefix: whether this machine is signed in is the
         // machine's business, and a test that fails on the developer's account
@@ -2835,6 +2875,32 @@ mod tests {
             home.steps
         );
         assert!(home.recent.is_empty(), "a fresh vault has no history");
+    }
+
+    #[test]
+    fn the_first_run_panel_is_three_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = context(dir.path());
+        let graph = graph_state(&ctx);
+        let session = Session::new(crate::session::SESSION_MODEL);
+
+        let fresh = home(&ctx, "first", false, &graph, &session, true);
+        assert_eq!(fresh.steps.len(), 3, "{:?}", fresh.steps);
+        assert_eq!(fresh.steps[0].command, "/doctor");
+        assert_eq!(fresh.steps[1].command, "/login");
+        assert_eq!(
+            fresh.invitation.as_deref(),
+            Some("start working — type a question")
+        );
+
+        // The same machine after `ui.onboarded = true`: the panel is gone and
+        // the brief is the ordinary one.
+        let later = home(&ctx, "second", false, &graph, &session, false);
+        assert!(
+            later.steps.iter().all(|step| step.command != "/doctor"),
+            "{:?}",
+            later.steps
+        );
     }
 
     fn receipt(input: u64, output: u64, cost: Option<u64>) -> TurnReceipt {

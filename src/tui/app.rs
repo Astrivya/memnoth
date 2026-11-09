@@ -1377,6 +1377,7 @@ pub fn parse_line(raw: &str) -> Parsed {
             bundle: None,
             fix: false,
             yes: false,
+            dry_run: false,
         })),
         "kg" => match args.first().map(String::as_str) {
             // Both run until interrupted. In a session that would freeze the
@@ -1609,7 +1610,7 @@ fn parse_skill(args: &[String]) -> Parsed {
             }
             let path = positional[0].clone();
             let name = flags.get("name").cloned();
-            Parsed::Run(Verb::Skill(SkillArgs {
+            Parsed::Run(Verb::Skills(SkillArgs {
                 action: SkillCommand::Add(SkillAddArgs { path, name }),
             }))
         }
@@ -1618,7 +1619,7 @@ fn parse_skill(args: &[String]) -> Parsed {
             let detail = flags.contains_key("detail") || flags.contains_key("d");
             let tag = flags.get("tag").cloned();
             let json = flags.contains_key("json");
-            Parsed::Run(Verb::Skill(SkillArgs {
+            Parsed::Run(Verb::Skills(SkillArgs {
                 action: SkillCommand::List(SkillListArgs { detail, tag, json }),
             }))
         }
@@ -1629,7 +1630,7 @@ fn parse_skill(args: &[String]) -> Parsed {
             }
             let name = positional[0].clone();
             let force = flags.contains_key("force") || flags.contains_key("f");
-            Parsed::Run(Verb::Skill(SkillArgs {
+            Parsed::Run(Verb::Skills(SkillArgs {
                 action: SkillCommand::Remove(SkillRemoveArgs { name, force }),
             }))
         }
@@ -1641,7 +1642,7 @@ fn parse_skill(args: &[String]) -> Parsed {
             let name = positional[0].clone();
             let skill_args = positional[1..].to_vec();
             let json = flags.contains_key("json");
-            Parsed::Run(Verb::Skill(SkillArgs {
+            Parsed::Run(Verb::Skills(SkillArgs {
                 action: SkillCommand::Run(SkillRunArgs {
                     name,
                     args: skill_args,
@@ -1661,7 +1662,7 @@ fn parse_skill(args: &[String]) -> Parsed {
                 .get("editor")
                 .cloned()
                 .or_else(|| flags.get("e").cloned());
-            Parsed::Run(Verb::Skill(SkillArgs {
+            Parsed::Run(Verb::Skills(SkillArgs {
                 action: SkillCommand::Edit(SkillEditArgs { name, editor }),
             }))
         }
@@ -2506,6 +2507,8 @@ fn parse_docs(args: &[String]) -> Parsed {
             .get("output")
             .or_else(|| flags.get("o"))
             .map(PathBuf::from),
+        man: flags.contains_key("man"),
+        check: flags.contains_key("check"),
     }))
 }
 
@@ -2632,6 +2635,7 @@ fn parse_projects(args: &[String]) -> Parsed {
                 action: ProjectsCommand::Delete(ProjectsDeleteArgs {
                     id: id.clone(),
                     yes: true,
+                    dry_run: false,
                     json: false,
                 }),
             }))
@@ -2738,6 +2742,7 @@ fn parse_keys(args: &[String]) -> Parsed {
             Parsed::Run(Verb::Keys(KeysArgs {
                 action: KeysCommand::RevokeAll(KeysRevokeAllArgs {
                     yes: true,
+                    dry_run: false,
                     json: false,
                 }),
             }))
@@ -2983,106 +2988,6 @@ fn is_subsequence(needle: &str, haystack: &str) -> bool {
     }
     false
 }
-
-/// The `/help` text.
-pub const HELP: &str = "\
-memnoth session — commands
-
-  /help                      this list
-  /quit                      leave (also :q, ctrl-c)
-  /clear                     clear the transcript
-  /home                      the brief: what is here, what is missing, what to do
-  /new [name]                start a fresh conversation in this window
-  /sessions                  every conversation, with a preview (alias: /resume)
-  /models                    browse, search and switch models (alias: /model)
-  /tasks                     show or hide the background-task rail
-  /tasks run <command>       run a command in the background
-  /tasks status              list jobs and their status
-  /tasks logs [id]           print a job's output (Enter on the rail)
-  /tasks cancel <id>         stop a running job (ctrl-x on the rail)
-  /connect                   open provider connections overlay
-  /search                    open search overlay
-  /search <query>            ask the vault and the graph (no model)
-  /context                   open context overlay (token budget grid, compact)
-  /diff                      open diff overlay (per-hunk accept/reject)
-  /rewind                    open rewind overlay (checkpoints picker)
-  /permissions               open permissions overlay
-  /feedback                  open feedback overlay (send feedback to memnoth team)
-  /vault status              what the vault holds
-  /vault asof [--at WHEN] [--name N]   what was believed at an instant
-  /vault history <name>      every version, with the reason it changed
-  /vault contradictions [name]         beliefs explicitly contradicted
-  /vault remember <name> [--kind K] <fact…>   record a fact
-  /vault recall <query>      search the vault
-  /kg index [--full] [--no-embed]      build or update the code graph
-  /kg status                 what was built, when, and from where
-  /kg impact <symbol>        definitions, references, tests
-  /kg search <query>         find symbols by name
-  /mcp doctor                what clients are registered, and where
-  /teams join <code>         accept an invite and join an organization
-  /init                      generate AGENTS.md
-  /memory                    edit project memory
-  /theme <theme>             set theme: default, high-contrast, no-color
-  /screen-reader <mode>      set screen reader: off, plain
-  !<cmd>                     shell passthrough (sandbox policy applies)
-
-Global keys:
-  enter                      send message / run command
-  /                          command menu (discovered as you type)
-  ctrl-k / ctrl-p            full command palette
-  ? or F1                    this help
-  ctrl-t                     show / hide the task rail
-  tab / shift+tab            next / previous pane
-  ctrl-1..4                  transcript / context / tasks / diff
-  esc                        close menu · cancel turn · clear input
-  ctrl-c                     cancel a running turn, twice to quit
-  ↑/↓                        history navigation
-  ←/→                        edit cursor movement
-  pgup/pgdn                  scroll transcript
-  end                        jump to newest
-
-Overlay keys (context, rewind, diff, etc.):
-  tab / shift+tab            switch tabs
-  ↑/↓                        navigate entries
-  enter                      view detail / select / resume
-  esc                        close overlay / back from detail
-  ctrl+c                     copy entry
-  p                          pin entry
-  r                          refresh
-
-Diff overlay:
-  a / r                      accept / reject current hunk
-  A / R                      accept / reject all hunks
-  n / N                      next / previous conflict
-  s                          toggle side-by-side view
-  w                          toggle whitespace
-  l                          toggle line numbers
-  ?                          show help
-
-Rewind overlay:
-  enter                      resume session / view turn / view checkpoint
-  b                          branch from selected turn
-  d                          delete session
-
-Context overlay:
-  ctrl+x                     compact context
-
-Tasks overlay:
-  ctrl+r                     retry failed task
-  ctrl+x                     cancel running task
-  ctrl+c                     clear completed tasks
-  a                          toggle auto-refresh
-
-Accessibility:
-  NO_COLOR env var           disable colors (same as /theme no-color)
-  /theme high-contrast       high contrast black/white theme
-  /screen-reader plain       plain text output for mn ask
-Anything else is a question. With a model configured it runs a turn that can call
-the vault and the code graph as tools; without one the same question is answered
-by searching both stores, and the transcript says which happened.
-
-A turn may ask to record a belief or edit a file. Nothing is written until you
-answer the box: y approve · n or esc reject (a rejection is final for that turn).";
 
 const VAULT_USAGE: &str = "usage: /vault init|status|asof|history|contradictions|remember|recall|forget|correct|link|unlink|search|export|import|gc|prune|reindex|stats|backup|restore|audit|merge|duplicates|top|timeline|explain|graph";
 const SKILL_USAGE: &str = "usage: /skill add|list|remove|run|edit";

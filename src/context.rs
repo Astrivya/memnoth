@@ -188,6 +188,14 @@ pub struct UiConfig {
     /// `off` or `plain`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub screen_reader: Option<String>,
+    /// Whether the first-run panel has been shown on this machine.
+    ///
+    /// `None` means it has not: the next session opens on the three lines that
+    /// name the commands worth running first. `mn config set ui.onboarded
+    /// false` brings it back, which is why the absence and the `false` case are
+    /// the same answer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub onboarded: Option<bool>,
     /// Model ids pinned in `/models`, so the Favorites tab survives a restart.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub favorite_models: Vec<String>,
