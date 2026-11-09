@@ -30,7 +30,14 @@ use serde_json::Value;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PluginHookPoint {
     /// Before/after an MCP `tools/call` (`name` = tool name).
+    ///
+    /// The original name, kept because plugin manifests already declare it. It
+    /// fires at the same moment as [`Self::PreToolUse`].
     OnToolCall,
+    /// Immediately before the tool runs (`name` = tool name).
+    PreToolUse,
+    /// When the tool call returns, on every path (`name` = tool name).
+    PostToolUse,
     /// On a server command (`name` = `serve`, `prompts/get`, …).
     OnCommand,
     /// On an MCP event (`name` = `session_start`, `tool_done`, …).
@@ -44,6 +51,8 @@ impl PluginHookPoint {
     pub fn parse(raw: &str) -> Option<Self> {
         match raw.trim().to_ascii_lowercase().as_str() {
             "on_tool_call" => Some(Self::OnToolCall),
+            "pre_tool_use" => Some(Self::PreToolUse),
+            "post_tool_use" => Some(Self::PostToolUse),
             "on_command" => Some(Self::OnCommand),
             "on_event" => Some(Self::OnEvent),
             "on_session" => Some(Self::OnSession),
@@ -55,6 +64,8 @@ impl PluginHookPoint {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::OnToolCall => "on_tool_call",
+            Self::PreToolUse => "pre_tool_use",
+            Self::PostToolUse => "post_tool_use",
             Self::OnCommand => "on_command",
             Self::OnEvent => "on_event",
             Self::OnSession => "on_session",
@@ -172,6 +183,24 @@ pub fn dispatch_plugin_hook(point: PluginHookPoint, name: &str) -> usize {
     fired
 }
 
+/// Fires [`PluginHookPoint::PostToolUse`] when it leaves scope.
+///
+/// A `Drop` guard rather than a call after the tool: the dispatch below has
+/// early returns for a denial, an approval request and a task handle, and a
+/// post-hook that only ran on the happy path would lie about which calls
+/// finished. For a task handle this fires when the handle is returned, not when
+/// the task completes — the hook observes the request, not the work.
+pub struct PostToolHook<'a> {
+    /// The tool that ran, as the caller received it.
+    pub name: &'a str,
+}
+
+impl Drop for PostToolHook<'_> {
+    fn drop(&mut self) {
+        dispatch_plugin_hook(PluginHookPoint::PostToolUse, self.name);
+    }
+}
+
 /// Minimal shell-style splitter (single/double quotes + backslash escapes).
 /// Pure: the same convention the daemon hook engine documents.
 fn shell_split(command: &str) -> Vec<String> {
@@ -228,6 +257,14 @@ mod tests {
         assert_eq!(
             PluginHookPoint::parse("ON_EVENT"),
             Some(PluginHookPoint::OnEvent)
+        );
+        assert_eq!(
+            PluginHookPoint::parse("pre_tool_use"),
+            Some(PluginHookPoint::PreToolUse)
+        );
+        assert_eq!(
+            PluginHookPoint::parse("post_tool_use"),
+            Some(PluginHookPoint::PostToolUse)
         );
         assert_eq!(PluginHookPoint::parse("bogus"), None);
     }

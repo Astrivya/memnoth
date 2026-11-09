@@ -1908,6 +1908,11 @@ where
 /// that refuses the write, every ranking still looked correct and the access
 /// counts simply stopped moving.
 fn note_access(engine: &MemoryEngine, entity_id: i64, at: i64) {
+    // Access accounting is still a write. A read-only server must leave the
+    // vault byte-for-byte unchanged, including its ranking counters.
+    if read_only() {
+        return;
+    }
     if let Err(error) = engine.record_access(entity_id, at) {
         eprintln!("memnoth-mcp: access not recorded for entity {entity_id}: {error}");
     }
@@ -2423,6 +2428,37 @@ static MCP_REGISTRY: LazyLock<Registry> = LazyLock::new(mcp_registry);
 /// lets the dispatcher answer that with its own unknown-tool error.
 pub fn required_scope(tool: &str) -> Option<&'static str> {
     MCP_REGISTRY.required_scope(tool)
+}
+
+/// Environment switch for a memory reader that must not mutate the vault.
+///
+/// This is intentionally a process switch rather than a per-call argument:
+/// the host chooses whether to launch a reader or a writer, and a model cannot
+/// widen its own surface by passing a parameter.
+pub const READ_ONLY_ENV: &str = "MEMNOTH_MCP_READ_ONLY";
+
+/// Whether this server was launched as a read-only memory surface.
+pub fn read_only() -> bool {
+    matches!(
+        std::env::var(READ_ONLY_ENV).as_deref(),
+        Ok("1") | Ok("true") | Ok("yes") | Ok("on")
+    )
+}
+
+/// The refusal for a mutating tool on a read-only server, if it needs one.
+///
+/// Split out from the dispatcher so the rule can be tested without mutating a
+/// process-wide environment variable.
+fn read_only_refusal(tool: &str, read_only: bool) -> Option<String> {
+    if read_only && required_scope(tool).is_some() {
+        Some(format!(
+            "tool `{tool}` changes the vault or workspace, and this MCP server was started \
+             read-only. Re-register with `memnoth mcp add --local --allow-writes`, or unset \
+             {READ_ONLY_ENV}, to permit writes."
+        ))
+    } else {
+        None
+    }
 }
 
 fn mcp_registry() -> Registry {
@@ -3159,6 +3195,13 @@ fn tools_call(
     }
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
 
+    // Read-only is a launch mode, not a hint. Enforce it before the policy and
+    // approval paths so no write can be reached by a host that ignores the
+    // tool annotations.
+    if let Some(refusal) = read_only_refusal(name, read_only()) {
+        anyhow::bail!(refusal);
+    }
+
     // Policy gate: blocking and fail-closed for mutating tools, deliberately
     // separate from the fail-open observability hooks below. A refusal is
     // synchronous, before any approval flow, and names the file and the exact
@@ -3175,7 +3218,14 @@ fn tools_call(
 
     // Plugin hook point (fail-open, detached): lets plugin authors observe or
     // audit tool calls without touching the daemon hook engine.
+    // Two names for the same moment: `on_tool_call` predates the lifecycle
+    // vocabulary and stays for manifests already in use; `pre_tool_use` is the
+    // name new ones should declare.
     dispatch_plugin_hook(PluginHookPoint::OnToolCall, name);
+    dispatch_plugin_hook(PluginHookPoint::PreToolUse, name);
+    // Fires on the way out of this function by `Drop`, so an error, an approval
+    // request and a task handle all reach it.
+    let _post_tool_hook = crate::plugin_hooks::PostToolHook { name };
 
     // Multi-round-trip confirmation for bulk writes (SEP-2322). Sits ahead of
     // dispatch so no code path can reach a bulk write without passing it, and

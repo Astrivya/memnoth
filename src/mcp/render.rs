@@ -87,18 +87,32 @@ pub fn render_doctor(report: &DoctorReport) -> String {
 
 /// `memnoth mcp add`.
 pub fn render_add(report: &AddReport) -> String {
+    let endpoint = if report.local {
+        "local stdio"
+    } else {
+        &report.url
+    };
     let mut text = format!(
-        "mcp add\n  endpoint   {}\n  profile    {}\n  dry-run    {}\n  token      {}\n",
-        report.url,
+        "mcp add\n  endpoint   {endpoint}\n  profile    {}\n  dry-run    {}\n  token      {}\n",
         report.profile,
         if report.dry_run { "yes" } else { "no" },
         if report.token_used {
             "provided"
+        } else if report.local {
+            "not needed (local)"
         } else {
             "none"
         }
     );
-    if !report.token_used {
+    if report.local {
+        if let Some(vault) = &report.vault {
+            text.push_str(&format!("  vault      {vault}\n"));
+        }
+        if let Some(command) = &report.command {
+            text.push_str(&format!("  command    {command} mcp serve\n"));
+        }
+        text.push_str("  writes     read-only (pass --allow-writes to opt in)\n");
+    } else if !report.token_used {
         text.push_str("           (set MEMNOTH_MCP_TOKEN or pass --token)\n");
     }
     if report.results.is_empty() {
@@ -112,6 +126,33 @@ pub fn render_add(report: &AddReport) -> String {
                 text.push_str(&format!("           {}\n", status.path));
             }
             text.push_str(&format!("           {}\n", status.detail));
+        }
+    }
+    if let Some(verification) = &report.verification {
+        text.push_str("\nverification\n");
+        text.push_str(&format!(
+            "  result     {}\n",
+            if verification.ok { "passed" } else { "FAILED" }
+        ));
+        if let Some(server) = &verification.server {
+            text.push_str(&format!("  server     {server}\n"));
+        }
+        text.push_str(&format!(
+            "  initialize {}\n",
+            if verification.initialized {
+                "answered"
+            } else {
+                "FAILED"
+            }
+        ));
+        text.push_str(&format!("  detail     {}\n", verification.detail));
+        for client in &verification.clients {
+            text.push_str(&format!(
+                "  {:<8} config {} · initialize {}\n",
+                client.client,
+                if client.config_ok { "ok" } else { "FAILED" },
+                if client.initialized { "ok" } else { "FAILED" }
+            ));
         }
     }
     if !report.snippets.is_empty() {

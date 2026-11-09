@@ -11,14 +11,29 @@ pub(crate) async fn spawn_fake_api() -> std::path::PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, Ordering::SeqCst);
-    let path = std::env::temp_dir().join(format!(
-        "memnoth-agent-api-{}-{}-{seq}.sock",
-        std::process::id(),
-        memnoth_engine::now_ms()
-    ));
-    let listener = memnoth_transport::Listener::bind(&path)
-        .await
-        .expect("bind fake api");
+    // Without Unix sockets the path is hashed to a loopback port, and Windows
+    // reserves ranges of them (`netsh interface ipv4 show excludedportrange`).
+    // A bind inside one fails with os error 10013, and the address is fixed by
+    // the path, so a different path is the only retry that can land outside the
+    // reservation. Retrying the same path would fail identically.
+    let mut bound = None;
+    let mut path = std::path::PathBuf::new();
+    for attempt in 0..32 {
+        path = std::env::temp_dir().join(format!(
+            "memnoth-agent-api-{}-{}-{seq}-{attempt}.sock",
+            std::process::id(),
+            memnoth_engine::now_ms()
+        ));
+        match memnoth_transport::Listener::bind(&path).await {
+            Ok(listener) => {
+                bound = Some(listener);
+                break;
+            }
+            Err(error) if attempt == 31 => panic!("bind fake api after 32 paths: {error}"),
+            Err(_) => continue,
+        }
+    }
+    let listener = bound.expect("a bindable path");
     tokio::spawn(async move {
         loop {
             if let Ok((stream, _)) = listener.accept().await {

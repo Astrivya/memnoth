@@ -1,5 +1,15 @@
 use super::*;
 
+#[test]
+fn read_only_refuses_writes_but_not_reads() {
+    assert!(read_only_refusal("mem_search", true).is_none());
+    assert!(read_only_refusal("vault_asof", true).is_none());
+    let refusal = read_only_refusal("mem_add_fact", true).expect("a write must be refused");
+    assert!(refusal.contains("read-only"), "{refusal}");
+    assert!(refusal.contains("--allow-writes"), "{refusal}");
+    assert!(read_only_refusal("mem_add_fact", false).is_none());
+}
+
 /// Every arm added for the optimisation waves must be **nameable and
 /// parseable**, because an arm the arena cannot address is an arm that cannot
 /// be measured — which is the failure the `Fusion::ALL` list exists to prevent.

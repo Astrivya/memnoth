@@ -162,16 +162,57 @@ fn zed_settings_path(home: &Path) -> PathBuf {
     xdg
 }
 
-/// The registration to write: endpoint, and the token if there is one.
+/// The registration to write: either an HTTP endpoint or a local stdio
+/// command. One struct rather than two so every client writer reads the same
+/// shape and a local entry cannot be mistaken for a cloud one.
 #[derive(Debug, Clone)]
 pub struct Entry {
-    /// The MCP endpoint.
+    /// The MCP endpoint. Empty for a stdio registration.
     pub url: String,
     /// Bearer token. Written into the client's config only.
     pub token: Option<String>,
+    /// Local command to launch. `Some` means stdio, and `url` is ignored.
+    pub command: Option<String>,
+    /// Arguments passed to `command`.
+    pub args: Vec<String>,
+    /// Environment variables set for `command`.
+    pub env: BTreeMap<String, String>,
 }
 
 impl Entry {
+    /// An HTTP registration for a hosted or loopback MCP endpoint.
+    pub fn http(url: impl Into<String>, token: Option<String>) -> Self {
+        Self {
+            url: url.into(),
+            token,
+            command: None,
+            args: Vec::new(),
+            env: BTreeMap::new(),
+        }
+    }
+
+    /// A local stdio registration. The command is launched by the host, so the
+    /// vault path and the read-only switch travel in `env`/`args`, not in
+    /// memnoth's own config.
+    pub fn stdio(
+        command: impl Into<String>,
+        args: Vec<String>,
+        env: BTreeMap<String, String>,
+    ) -> Self {
+        Self {
+            url: String::new(),
+            token: None,
+            command: Some(command.into()),
+            args,
+            env,
+        }
+    }
+
+    /// Whether this entry launches a process instead of dialing a URL.
+    pub fn is_stdio(&self) -> bool {
+        self.command.is_some()
+    }
+
     fn authorization(&self) -> Option<String> {
         self.token.as_ref().map(|token| format!("Bearer {token}"))
     }
@@ -179,6 +220,14 @@ impl Entry {
     /// The entry the JSON-shaped clients hold.
     fn json(&self) -> Value {
         let mut object = Map::new();
+        if let Some(command) = &self.command {
+            object.insert("command".into(), json!(command));
+            object.insert("args".into(), json!(self.args));
+            if !self.env.is_empty() {
+                object.insert("env".into(), json!(self.env));
+            }
+            return Value::Object(object);
+        }
         object.insert("url".into(), json!(self.url));
         if let Some(authorization) = self.authorization() {
             let mut headers = Map::new();
@@ -268,19 +317,23 @@ pub fn status(kind: ClientKind, home: &Path, expected_url: &str) -> ClientStatus
         },
         Some(entry) => {
             let registered = true;
-            let url = entry.get("url").and_then(Value::as_str);
-            let headers = match kind {
-                ClientKind::Codex => entry.get("http_headers"),
-                _ => entry.get("headers"),
-            };
-            let detail = match url {
-                Some(url) if url != expected_url => {
-                    format!("registered, but url is {url}{note}")
+            let detail = if entry.get("command").and_then(Value::as_str).is_some() {
+                format!("registered (local stdio){note}")
+            } else {
+                let url = entry.get("url").and_then(Value::as_str);
+                let headers = match kind {
+                    ClientKind::Codex => entry.get("http_headers"),
+                    _ => entry.get("headers"),
+                };
+                match url {
+                    Some(url) if url != expected_url => {
+                        format!("registered, but url is {url}{note}")
+                    }
+                    _ => match headers.and_then(|headers| headers.get("Authorization")) {
+                        Some(_) => format!("registered{note}"),
+                        None => format!("registered without an Authorization header{note}"),
+                    },
                 }
-                _ => match headers.and_then(|headers| headers.get("Authorization")) {
-                    Some(_) => format!("registered{note}"),
-                    None => format!("registered without an Authorization header{note}"),
-                },
             };
             ClientStatus {
                 client: kind.name().to_string(),
@@ -490,14 +543,22 @@ pub fn write(kind: ClientKind, home: &Path, entry: &Entry, dry_run: bool) -> Res
         ClientKind::Zed => write_json(&path, "context_servers", entry, dry_run)?,
     }
 
-    let detail = match (dry_run, entry.token.is_some()) {
-        (true, true) => format!("would write {path_text}"),
-        (true, false) => {
-            format!("would write {path_text} (no token: registration cannot authenticate)")
+    let detail = if entry.is_stdio() {
+        if dry_run {
+            format!("would write {path_text} (local stdio)")
+        } else {
+            format!("wrote {path_text} (local stdio)")
         }
-        (false, true) => format!("wrote {path_text}"),
-        (false, false) => {
-            format!("wrote {path_text} (no token: registration cannot authenticate)")
+    } else {
+        match (dry_run, entry.token.is_some()) {
+            (true, true) => format!("would write {path_text}"),
+            (true, false) => {
+                format!("would write {path_text} (no token: registration cannot authenticate)")
+            }
+            (false, true) => format!("wrote {path_text}"),
+            (false, false) => {
+                format!("wrote {path_text} (no token: registration cannot authenticate)")
+            }
         }
     };
 
@@ -540,7 +601,8 @@ fn write_json(path: &Path, container: &str, entry: &Entry, dry_run: bool) -> Res
         .with_context(|| format!("`{container}` in {} is not an object", path.display()))?;
 
     // Merge into the existing entry so a header or a field we do not own
-    // survives, then set the two fields we do own.
+    // survives, then set the fields we do own. A transport switch must remove
+    // the fields of the old transport, or Cursor reads both and picks one.
     let mut merged = match servers.get(SERVER_NAME) {
         Some(Value::Object(existing)) => existing.clone(),
         _ => Map::new(),
@@ -564,6 +626,14 @@ fn write_json(path: &Path, container: &str, entry: &Entry, dry_run: bool) -> Res
                 merged.insert(key, value);
             }
         }
+    }
+    if entry.is_stdio() {
+        merged.remove("url");
+        merged.remove("headers");
+    } else {
+        merged.remove("command");
+        merged.remove("args");
+        merged.remove("env");
     }
     servers.insert(SERVER_NAME.to_string(), Value::Object(merged));
 
@@ -617,22 +687,49 @@ fn write_codex(path: &Path, entry: &Entry, dry_run: bool) -> Result<()> {
                 path.display()
             )
         })?;
-    server.insert("url".to_string(), toml::Value::String(entry.url.clone()));
-    if let Some(authorization) = entry.authorization() {
-        let headers = server
-            .entry("http_headers".to_string())
-            .or_insert_with(|| toml::Value::Table(Default::default()))
-            .as_table_mut()
-            .with_context(|| {
-                format!(
-                    "`mcp_servers.{SERVER_NAME}.http_headers` in {} is not a table",
-                    path.display()
-                )
-            })?;
-        headers.insert(
-            "Authorization".to_string(),
-            toml::Value::String(authorization),
+    if let Some(command) = &entry.command {
+        server.insert("command".to_string(), toml::Value::String(command.clone()));
+        server.insert(
+            "args".to_string(),
+            toml::Value::Array(
+                entry
+                    .args
+                    .iter()
+                    .cloned()
+                    .map(toml::Value::String)
+                    .collect(),
+            ),
         );
+        if !entry.env.is_empty() {
+            let mut env = toml::map::Map::new();
+            for (key, value) in &entry.env {
+                env.insert(key.clone(), toml::Value::String(value.clone()));
+            }
+            server.insert("env".to_string(), toml::Value::Table(env));
+        }
+        server.remove("url");
+        server.remove("http_headers");
+    } else {
+        server.insert("url".to_string(), toml::Value::String(entry.url.clone()));
+        server.remove("command");
+        server.remove("args");
+        server.remove("env");
+        if let Some(authorization) = entry.authorization() {
+            let headers = server
+                .entry("http_headers".to_string())
+                .or_insert_with(|| toml::Value::Table(Default::default()))
+                .as_table_mut()
+                .with_context(|| {
+                    format!(
+                        "`mcp_servers.{SERVER_NAME}.http_headers` in {} is not a table",
+                        path.display()
+                    )
+                })?;
+            headers.insert(
+                "Authorization".to_string(),
+                toml::Value::String(authorization),
+            );
+        }
     }
 
     if dry_run {
@@ -712,6 +809,66 @@ pub fn run_host_cli(binary: &Path, args: &[String]) -> std::io::Result<std::proc
 /// is never rendered: a snippet goes into a transcript, a shell history and
 /// sometimes an issue.
 pub fn snippet(kind: ClientKind, entry: &Entry) -> String {
+    if entry.is_stdio() {
+        let command = entry.command.as_deref().unwrap_or_default();
+        let args = entry.args.join(" ");
+        let env: Vec<String> = entry
+            .env
+            .iter()
+            .map(|(key, value)| format!("--env {key}={value}"))
+            .collect();
+        let env = if env.is_empty() {
+            String::new()
+        } else {
+            format!(" {} ", env.join(" "))
+        };
+        return match kind {
+            ClientKind::Claude => format!(
+                "claude mcp add {SERVER_NAME} --scope user --transport stdio{env}-- {command} {args}"
+            ),
+            ClientKind::Cursor => format!(
+                "// ~/.cursor/mcp.json\n\"{SERVER_NAME}\": {}",
+                serde_json::to_string_pretty(&entry.json()).unwrap_or_default()
+            ),
+            ClientKind::Codex => {
+                let mut table = toml::map::Map::new();
+                table.insert(
+                    "command".to_string(),
+                    toml::Value::String(command.to_string()),
+                );
+                table.insert(
+                    "args".to_string(),
+                    toml::Value::Array(
+                        entry
+                            .args
+                            .iter()
+                            .cloned()
+                            .map(toml::Value::String)
+                            .collect(),
+                    ),
+                );
+                if !entry.env.is_empty() {
+                    let mut env = toml::map::Map::new();
+                    for (key, value) in &entry.env {
+                        env.insert(key.clone(), toml::Value::String(value.clone()));
+                    }
+                    table.insert("env".to_string(), toml::Value::Table(env));
+                }
+                let mut server = toml::map::Map::new();
+                server.insert(SERVER_NAME.to_string(), toml::Value::Table(table));
+                let mut root = toml::map::Map::new();
+                root.insert("mcp_servers".to_string(), toml::Value::Table(server));
+                format!(
+                    "# ~/.codex/config.toml\n{}",
+                    toml::to_string_pretty(&toml::Value::Table(root)).unwrap_or_default()
+                )
+            }
+            ClientKind::Zed => format!(
+                "Zed: Command Palette -> `agent: add context server`, then paste:\n{{\n  \"{SERVER_NAME}\": {}\n}}",
+                serde_json::to_string_pretty(&entry.json()).unwrap_or_default()
+            ),
+        };
+    }
     match kind {
         ClientKind::Claude => format!(
             "claude mcp add {SERVER_NAME} --scope user --transport http \\\n  --header \"Authorization: Bearer $MEMNOTH_MCP_TOKEN\" \\\n  {}",
@@ -763,10 +920,25 @@ mod tests {
     use super::*;
 
     fn entry() -> Entry {
-        Entry {
-            url: "https://memnoth.astrivya.ai/mcp".into(),
-            token: Some("secret-token".into()),
-        }
+        Entry::http(
+            "https://memnoth.astrivya.ai/mcp",
+            Some("secret-token".into()),
+        )
+    }
+
+    fn local_entry() -> Entry {
+        let mut env = BTreeMap::new();
+        env.insert("MEMNOTH_MCP_READ_ONLY".into(), "1".into());
+        Entry::stdio(
+            "/usr/local/bin/memnoth",
+            vec![
+                "mcp".into(),
+                "serve".into(),
+                "--db".into(),
+                "/home/me/.memnoth/vault.db".into(),
+            ],
+            env,
+        )
     }
 
     #[test]
@@ -819,10 +991,7 @@ mod tests {
         )
         .unwrap();
 
-        let entry = Entry {
-            url: "http://new".into(),
-            token: None,
-        };
+        let entry = Entry::http("http://new", None);
         write_json(&path, "mcpServers", &entry, false).unwrap();
         let root: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(root["mcpServers"][SERVER_NAME]["url"], "http://new");
@@ -831,6 +1000,73 @@ mod tests {
             "Bearer kept"
         );
         assert_eq!(root["mcpServers"][SERVER_NAME]["headers"]["X-Trace"], "1");
+    }
+
+    #[test]
+    fn a_local_entry_switches_a_client_to_stdio_and_removes_stale_http_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".cursor").join("mcp.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"mcpServers":{"memnoth":{"url":"http://old","headers":{"Authorization":"Bearer old"}}}}"#,
+        )
+        .unwrap();
+
+        write_json(&path, "mcpServers", &local_entry(), false).unwrap();
+        let root: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let entry = &root["mcpServers"][SERVER_NAME];
+        assert_eq!(entry["command"], "/usr/local/bin/memnoth");
+        assert_eq!(entry["args"][0], "mcp");
+        assert_eq!(entry["env"]["MEMNOTH_MCP_READ_ONLY"], "1");
+        assert!(entry.get("url").is_none(), "{entry}");
+        assert!(entry.get("headers").is_none(), "{entry}");
+    }
+
+    #[test]
+    fn a_local_entry_in_codex_is_a_command_not_a_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".codex").join("config.toml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "[mcp_servers.memnoth]\nurl = \"http://old\"\nhttp_headers = { Authorization = \"Bearer old\" }\n",
+        )
+        .unwrap();
+
+        write_codex(&path, &local_entry(), false).unwrap();
+        let root: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let entry = root
+            .get("mcp_servers")
+            .and_then(|servers| servers.get(SERVER_NAME))
+            .expect("memnoth entry");
+        assert_eq!(
+            entry.get("command").and_then(toml::Value::as_str),
+            Some("/usr/local/bin/memnoth")
+        );
+        assert!(entry.get("url").is_none(), "{entry:?}");
+        assert!(entry.get("http_headers").is_none(), "{entry:?}");
+    }
+
+    #[test]
+    fn a_local_codex_snippet_is_valid_toml() {
+        let text = snippet(ClientKind::Codex, &local_entry());
+        let root: toml::Value = toml::from_str(&text).expect("snippet must parse as TOML");
+        let entry = root
+            .get("mcp_servers")
+            .and_then(|servers| servers.get(SERVER_NAME))
+            .expect("memnoth entry");
+        assert_eq!(
+            entry.get("command").and_then(toml::Value::as_str),
+            Some("/usr/local/bin/memnoth")
+        );
+        assert_eq!(
+            entry
+                .get("env")
+                .and_then(|env| env.get("MEMNOTH_MCP_READ_ONLY"))
+                .and_then(toml::Value::as_str),
+            Some("1")
+        );
     }
 
     #[test]

@@ -20,7 +20,7 @@ mod clients;
 mod render;
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -71,10 +71,17 @@ pub struct DoctorReport {
 /// What `mcp add` wrote.
 #[derive(Debug, Clone, Serialize)]
 pub struct AddReport {
-    /// Endpoint written.
+    /// Endpoint written. Empty for a local stdio registration.
     pub url: String,
     /// Profile the registration asks for.
     pub profile: String,
+    /// Whether this registration launches a local process instead of dialing
+    /// the cloud endpoint.
+    pub local: bool,
+    /// The command a local registration launches.
+    pub command: Option<String>,
+    /// The vault a local registration serves.
+    pub vault: Option<String>,
     /// Whether anything was actually written.
     pub dry_run: bool,
     /// Whether a token was available.
@@ -83,6 +90,38 @@ pub struct AddReport {
     pub results: Vec<ClientStatus>,
     /// Manual registrations for clients this build does not write.
     pub snippets: Vec<String>,
+    /// Read-back and initialize proof for what was written. `None` on a dry run.
+    pub verification: Option<VerificationReport>,
+}
+
+/// One written client config, read back after `mcp add`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ClientVerification {
+    /// Client name.
+    pub client: String,
+    /// The config file that was read.
+    pub path: String,
+    /// Whether the `memnoth` entry is present and points at the requested URL.
+    pub config_ok: bool,
+    /// Whether the server answered `initialize` for this run.
+    pub initialized: bool,
+    /// The status detail from the read-back.
+    pub detail: String,
+}
+
+/// Proof that `mcp add` wrote something a server actually answers.
+#[derive(Debug, Clone, Serialize)]
+pub struct VerificationReport {
+    /// Config read-back and initialize both succeeded.
+    pub ok: bool,
+    /// Whether the server completed the handshake.
+    pub initialized: bool,
+    /// The server binary used, when one was found.
+    pub server: Option<String>,
+    /// One line explaining the verdict.
+    pub detail: String,
+    /// One row per client written.
+    pub clients: Vec<ClientVerification>,
 }
 
 /// What `mcp remove` wrote.
@@ -316,24 +355,87 @@ pub fn doctor(ctx: &AppContext) -> Result<DoctorReport> {
     })
 }
 
+/// Everything one `mcp add` invocation carries.
+pub struct AddOptions<'a> {
+    pub client_names: &'a [String],
+    pub profile: Option<Profile>,
+    pub url: Option<&'a str>,
+    pub token: Option<&'a str>,
+    pub local: bool,
+    pub allow_writes: bool,
+    pub dry_run: bool,
+}
+
 /// `memnoth mcp add`.
-pub fn add(
-    ctx: &AppContext,
-    client_names: &[String],
-    profile: Option<Profile>,
-    url: Option<&str>,
-    token: Option<&str>,
-    dry_run: bool,
-) -> Result<AddReport> {
-    let url = match url {
-        Some(url) => url.to_string(),
-        None => ctx.mcp_url(),
-    };
-    let token = token.map(str::to_string).or_else(|| ctx.mcp_token());
-    let profile = profile.unwrap_or(Profile::Full);
-    let entry = Entry {
-        url: url.clone(),
-        token: token.clone(),
+pub fn add(ctx: &AppContext, options: AddOptions<'_>) -> Result<AddReport> {
+    let AddOptions {
+        client_names,
+        profile,
+        url,
+        token,
+        local,
+        allow_writes,
+        dry_run,
+    } = options;
+    let profile = profile.unwrap_or(if local {
+        Profile::Memory
+    } else {
+        Profile::Full
+    });
+    let (url, token, entry, command, vault) = if local {
+        if url.is_some() || token.is_some() {
+            bail!("--url/--token are for the cloud endpoint; drop them with --local");
+        }
+        let command = std::env::current_exe().context(
+            "cannot locate this `memnoth` binary; a local MCP registration needs its path",
+        )?;
+        let vault = std::path::absolute(&ctx.vault_path).unwrap_or_else(|_| ctx.vault_path.clone());
+        let mut env = BTreeMap::new();
+        env.insert(
+            "MEMNOTH_MCP_WORKSPACE".to_string(),
+            ctx.root.display().to_string(),
+        );
+        env.insert(
+            "MEMNOTH_MCP_PROFILE".to_string(),
+            profile.name().to_string(),
+        );
+        // The default is a memory reader, not a memory writer. A host that
+        // wants to propose beliefs has to say so at registration time.
+        env.insert(
+            "MEMNOTH_MCP_READ_ONLY".to_string(),
+            if allow_writes { "0" } else { "1" }.to_string(),
+        );
+        let entry = Entry::stdio(
+            command.display().to_string(),
+            vec![
+                "mcp".to_string(),
+                "serve".to_string(),
+                "--profile".to_string(),
+                profile.name().to_string(),
+                "--db".to_string(),
+                vault.display().to_string(),
+            ],
+            env,
+        );
+        (
+            String::new(),
+            None,
+            entry,
+            Some(command.display().to_string()),
+            Some(vault.display().to_string()),
+        )
+    } else {
+        let url = match url {
+            Some(url) => url.to_string(),
+            None => ctx.mcp_url(),
+        };
+        // This string is written into another program's config and fetched by
+        // it, so it gets the same policy as a provider endpoint.
+        crate::net_guard::validate_configured_url(&url)
+            .map_err(|error| anyhow::anyhow!("refusing to register an unsafe MCP URL: {error}"))?;
+        let token = token.map(str::to_string).or_else(|| ctx.mcp_token());
+        let entry = Entry::http(url.clone(), token.clone());
+        (url, token, entry, None, None)
     };
     let home = clients::home_dir().context(
         "cannot find a home directory (set HOME or USERPROFILE); no client config can be written",
@@ -359,7 +461,7 @@ pub fn add(
         {
             // Claude Code owns its config shape; asking its CLI is the only way
             // this cannot drift from what Claude Code actually reads.
-            results.push(add_with_host_cli(&binary, &url, token.as_deref(), dry_run));
+            results.push(add_with_host_cli(&binary, &entry, dry_run));
             continue;
         }
         match clients::write(*kind, &home, &entry, dry_run) {
@@ -390,13 +492,34 @@ pub fn add(
     if !dry_run && wrote_any {
         let mut config = ctx.config.clone();
         config.profile = Some(profile.name().to_string());
-        config.mcp_url = Some(url.clone());
+        // A local registration must not overwrite the cloud endpoint the user
+        // may still use for `mcp doctor` or a later HTTP registration.
+        if !local {
+            config.mcp_url = Some(url.clone());
+        }
         config.save(&ctx.config_path)?;
     }
 
     if explicit && !failures.is_empty() && !wrote_any {
         anyhow::bail!("no client config was written:\n  {}", failures.join("\n  "));
     }
+
+    // Writing a config is not proof that a client can use it. Read every entry
+    // back and ask the server to complete the same initialize handshake a host
+    // performs, so `add` cannot end on a green line over a broken binary.
+    let verification = if !dry_run && wrote_any {
+        Some(verify_written(
+            ctx,
+            &home,
+            &kinds,
+            &url,
+            profile,
+            token.as_deref(),
+            local && !allow_writes,
+        ))
+    } else {
+        None
+    };
 
     // The documented path for Zed is its Command Palette, and a snippet is the
     // only thing that survives being copied into a chat. Every client gets one
@@ -413,40 +536,183 @@ pub fn add(
     Ok(AddReport {
         url,
         profile: profile.name().to_string(),
+        local,
+        command,
+        vault,
         dry_run,
         token_used: token.is_some(),
         results,
         snippets,
+        verification,
     })
 }
 
-fn add_with_host_cli(
-    binary: &std::path::Path,
+/// The paths and binary one registration probe needs.
+struct ProbeTarget<'a> {
+    home: &'a Path,
+    url: &'a str,
+    binary: Option<&'a Path>,
+    root: &'a Path,
+    vault: &'a Path,
+    read_only: bool,
+}
+
+/// Read back what was written and prove the server answers `initialize`.
+fn verify_written(
+    ctx: &AppContext,
+    home: &Path,
+    kinds: &[ClientKind],
     url: &str,
+    profile: Profile,
     token: Option<&str>,
-    dry_run: bool,
-) -> ClientStatus {
+    read_only: bool,
+) -> VerificationReport {
+    let binary = ctx.mcp_binary();
+    let target = ProbeTarget {
+        home,
+        url,
+        binary: binary.as_deref(),
+        root: &ctx.root,
+        vault: &ctx.vault_path,
+        read_only,
+    };
+    verify_written_at(&target, kinds, profile, token)
+}
+
+fn verify_written_at(
+    target: &ProbeTarget<'_>,
+    kinds: &[ClientKind],
+    profile: Profile,
+    token: Option<&str>,
+) -> VerificationReport {
+    let mut clients = Vec::new();
+    let mut configs_ok = true;
+    for kind in kinds {
+        let status = clients::status(*kind, target.home, target.url);
+        let config_ok = status.registered && !status.detail.contains("but url is");
+        configs_ok &= config_ok;
+        clients.push(ClientVerification {
+            client: kind.name().to_string(),
+            path: status.path,
+            config_ok,
+            initialized: false,
+            detail: status.detail,
+        });
+    }
+
+    let (initialized, server, detail) = match target.binary {
+        None => (
+            false,
+            None,
+            "no `memnoth-mcp` binary found; build `crates/memnoth-mcp` or set MEMNOTH_MCP_BIN"
+                .to_string(),
+        ),
+        Some(binary) => match connect_binary(
+            binary,
+            target.root,
+            target.vault,
+            profile,
+            token,
+            target.read_only,
+        ) {
+            Ok(_) => (
+                true,
+                Some(binary.display().to_string()),
+                "initialize answered".to_string(),
+            ),
+            Err(error) => (
+                false,
+                Some(binary.display().to_string()),
+                format!("{error:#}"),
+            ),
+        },
+    };
+
+    if initialized {
+        for client in &mut clients {
+            client.initialized = true;
+        }
+    }
+
+    VerificationReport {
+        ok: configs_ok && initialized,
+        initialized,
+        server,
+        detail,
+        clients,
+    }
+}
+
+/// The same stdio handshake `mcp test` uses, with the binary and paths named.
+fn connect_binary(
+    binary: &Path,
+    root: &Path,
+    vault: &Path,
+    profile: Profile,
+    token: Option<&str>,
+    read_only: bool,
+) -> Result<Client> {
+    let mut env = BTreeMap::new();
+    env.insert(
+        "MEMNOTH_MCP_PROFILE".to_string(),
+        profile.name().to_string(),
+    );
+    env.insert(
+        "MEMNOTH_MCP_WORKSPACE".to_string(),
+        root.display().to_string(),
+    );
+    if read_only {
+        env.insert("MEMNOTH_MCP_READ_ONLY".to_string(), "1".to_string());
+    }
+    if let Some(token) = token {
+        env.insert("MEMNOTH_MCP_TOKEN".to_string(), token.to_string());
+    }
+    let args = vec!["--db".to_string(), vault.display().to_string()];
+    let transport = StdioTransport::spawn(&binary.display().to_string(), &args, &env)
+        .with_context(|| format!("cannot start the MCP server at {}", binary.display()))?;
+    Client::connect(Box::new(transport), CALL_TIMEOUT).context("initialize failed")
+}
+
+fn add_with_host_cli(binary: &std::path::Path, entry: &Entry, dry_run: bool) -> ClientStatus {
     let mut args: Vec<String> = vec![
         "mcp".into(),
         "add".into(),
         clients::SERVER_NAME.into(),
         "--scope".into(),
         "user".into(),
-        "--transport".into(),
-        "http".into(),
     ];
-    if let Some(token) = token {
-        args.push("--header".into());
-        args.push(format!("Authorization: Bearer {token}"));
-    }
-    args.push(url.to_string());
-
-    let displayed = format!(
-        "{} mcp add {} --scope user --transport http --header \"Authorization: {}\" {url}",
-        binary.display(),
-        clients::SERVER_NAME,
-        clients::mask_token(token),
-    );
+    let displayed = if let Some(command) = &entry.command {
+        args.push("--transport".into());
+        args.push("stdio".into());
+        for (key, value) in &entry.env {
+            args.push("--env".into());
+            args.push(format!("{key}={value}"));
+        }
+        args.push("--".into());
+        args.push(command.clone());
+        args.extend(entry.args.iter().cloned());
+        format!(
+            "{} mcp add {} --scope user --transport stdio -- {command} {}",
+            binary.display(),
+            clients::SERVER_NAME,
+            entry.args.join(" ")
+        )
+    } else {
+        args.push("--transport".into());
+        args.push("http".into());
+        if let Some(token) = &entry.token {
+            args.push("--header".into());
+            args.push(format!("Authorization: Bearer {token}"));
+        }
+        args.push(entry.url.clone());
+        format!(
+            "{} mcp add {} --scope user --transport http --header \"Authorization: {}\" {}",
+            binary.display(),
+            clients::SERVER_NAME,
+            clients::mask_token(entry.token.as_deref()),
+            entry.url
+        )
+    };
 
     if dry_run {
         return ClientStatus {
@@ -633,10 +899,7 @@ pub fn remove(
         None
     };
     let _profile = Profile::Full;
-    let entry = Entry {
-        url: url.clone(),
-        token,
-    };
+    let entry = Entry::http(url.clone(), token);
     let home = clients::home_dir().context(
         "cannot find a home directory (set HOME or USERPROFILE); no client config can be written",
     )?;
@@ -1004,17 +1267,23 @@ pub fn add_client(ctx: &AppContext, args: &crate::cli::McpCommand) -> Result<Add
         profile,
         url,
         token,
+        local,
+        allow_writes,
         dry_run,
     } = args
     {
         let profile_opt = profile.as_ref().and_then(|p| Profile::from_name(p));
         add(
             ctx,
-            clients,
-            profile_opt,
-            url.as_deref(),
-            token.as_deref(),
-            *dry_run,
+            AddOptions {
+                client_names: clients,
+                profile: profile_opt,
+                url: url.as_deref(),
+                token: token.as_deref(),
+                local: *local,
+                allow_writes: *allow_writes,
+                dry_run: *dry_run,
+            },
         )
     } else {
         bail!("add_client called with non-Add command")
@@ -1259,6 +1528,40 @@ mod tests {
         );
         assert_eq!(value["text"], "no such symbol");
         assert_eq!(value["content"][0]["text"], "no such symbol");
+    }
+
+    #[test]
+    fn add_verification_reads_the_config_and_reports_a_bad_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let url = "https://memnoth.astrivya.ai/mcp";
+        let config = home.join(".cursor").join("mcp.json");
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(
+            &config,
+            format!(r#"{{"mcpServers":{{"memnoth":{{"url":"{url}"}}}}}}"#),
+        )
+        .unwrap();
+
+        let bad = home.join("memnoth-mcp");
+        std::fs::write(&bad, b"not an executable").unwrap();
+
+        let target = ProbeTarget {
+            home,
+            url,
+            binary: Some(&bad),
+            root: home,
+            vault: home,
+            read_only: false,
+        };
+        let report = verify_written_at(&target, &[ClientKind::Cursor], Profile::Full, None);
+
+        assert!(!report.ok, "a bad binary must not be reported as verified");
+        assert_eq!(report.clients.len(), 1);
+        assert!(report.clients[0].config_ok);
+        assert!(!report.clients[0].initialized);
+        assert!(!report.initialized);
+        assert!(!report.detail.is_empty());
     }
 
     #[test]

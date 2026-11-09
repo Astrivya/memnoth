@@ -39,6 +39,7 @@ OPTIONS:
 
 ENVIRONMENT:
     MEMNOTH_MCP_PROFILE       micro | memory | coord | code | full | agent  (default: memory)
+    MEMNOTH_MCP_READ_ONLY    1 refuses every mutating tool; the local `mcp add` default
     MEMNOTH_MCP_HTTP_BIND     loopback bind address for --http
     MEMNOTH_MCP_HTTP_TOKEN    bearer token; required for the agent profile
 ";
