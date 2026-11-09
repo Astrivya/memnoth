@@ -29,7 +29,7 @@ path = "src/main.rs"
 
 [[bin]]
 name = "mn"
-path = "src/main.rs"
+path = "src/bin/mn.rs"
 
 [lib]
 name = "memnoth"
@@ -41,8 +41,17 @@ anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 sha2 = "0.10"
 hex = "0.4"
+# Client-side encrypted sync (C-03): recovery-phrase KDF, authenticated
+# ciphertext, and content addressing. The server never receives the phrase or
+# the key; it stores only the envelope and its BLAKE3 digest.
+argon2 = "0.5"
+blake3 = "1"
+chacha20poly1305 = "0.10"
+getrandom = "0.3"
+zeroize = "1"
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
+clap_mangen = "0.2"
 crossterm = "0.28"
 dirs = "6"
 memnoth-command = { path = "crates/memnoth-command" }

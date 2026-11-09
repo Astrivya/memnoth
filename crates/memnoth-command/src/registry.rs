@@ -83,6 +83,10 @@ impl CommandRegistry {
 
         let mut root = ClapCommand::new("memnoth")
             .version(env!("CARGO_PKG_VERSION"))
+            // `help` is a registered command, not clap's builtin: leaving the
+            // builtin in place duplicates the name and panics in debug builds
+            // (and would give the projection a command the binary lacks).
+            .disable_help_subcommand(true)
             .about("Terminal agent, bi-temporal vault, code graph and MCP server")
             .long_about("One binary for the whole local product.")
             .after_help("Run `memnoth doctor` when something is not wired.");
@@ -652,6 +656,24 @@ impl CommandRegistry {
     }
 }
 
+/// The twelve verbs D7 makes public. Everything else is hidden from `--help`
+/// but still parses, so a script written against an older surface keeps its
+/// command and `help --all` still documents it.
+pub const PUBLIC_VERBS: &[&str] = &[
+    "session",
+    "ask",
+    "vault",
+    "kg",
+    "mcp",
+    "skills",
+    "config",
+    "auth",
+    "doctor",
+    "update",
+    "completion",
+    "version",
+];
+
 /// Builder for CommandRegistry with fluent API.
 pub struct RegistryBuilder {
     registry: CommandRegistry,
@@ -677,6 +699,28 @@ impl RegistryBuilder {
             self.registry.register(spec)?;
         }
         Ok(self)
+    }
+
+    /// Apply D7 to the rows that were just registered.
+    ///
+    /// This is the one place the public surface is decided: the CLI hides the
+    /// same set, and `help --all` reads `hidden` from here. `skill` is the old
+    /// spelling of `skills`, so it is renamed once here rather than in every
+    /// row; the binary still accepts `mn skill` as an alias.
+    pub fn apply_public_surface(mut self) -> Self {
+        for spec in self.registry.commands.values_mut() {
+            if spec.cli_path.first().is_some_and(|verb| verb == "skill") {
+                spec.cli_path[0] = "skills".into();
+            }
+            let public = spec
+                .cli_path
+                .first()
+                .is_some_and(|verb| PUBLIC_VERBS.contains(&verb.as_str()));
+            if !public {
+                spec.slash.hidden = true;
+            }
+        }
+        self
     }
 
     /// Build the registry.

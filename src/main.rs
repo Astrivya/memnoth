@@ -1,4 +1,6 @@
-//! `memnoth` — see `lib.rs` for the whole product. This file is the door.
+// `memnoth` — see `lib.rs` for the whole product. This file is the door.
+// A plain comment, not `//!`: `src/bin/mn.rs` `include!`s this file, and an
+// inner doc comment is only legal at the crate root it was written for.
 
 fn main() -> std::process::ExitCode {
     // clap builds the whole verb tree recursively, and a debug build's frames are

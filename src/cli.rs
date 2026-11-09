@@ -29,6 +29,7 @@ use clap::{Args, Parser, Subcommand};
 #[command(
     name = "memnoth",
     version,
+    disable_help_subcommand = true,
     about = "Terminal agent, bi-temporal vault, code graph and MCP server",
     long_about = "One binary for the whole local product.\n\n\
                   With no verb it opens the session against the current directory: the \
@@ -74,6 +75,8 @@ pub struct Cli {
 pub enum Verb {
     /// Open the session (the default when no verb is given).
     Session(SessionArgs),
+    /// Ask one question and print the answer; no TUI.
+    Ask(AskArgs),
     /// Create, read, and correct the temporal vault.
     Vault(VaultArgs),
     /// Build and query the code graph.
@@ -81,72 +84,112 @@ pub enum Verb {
     /// Serve the graph over MCP, and register clients for it.
     Mcp(McpArgs),
     /// List available models from the cloud.
+    #[command(hide = true)]
     Models(ModelsArgs),
     /// Show usage and costs, with local reconciliation.
+    #[command(hide = true)]
     Usage(UsageArgs),
     /// Show usage statistics with local reconciliation.
+    #[command(hide = true)]
     Stats(StatsArgs),
     /// Authentication: login, logout, status, whoami.
     Auth(AuthArgs),
+    /// Encrypted vault sync: status, now, pause, restore (beta).
+    #[command(hide = true)]
+    Sync(SyncTopArgs),
     /// Team operations: join an organization via invite code.
+    #[command(hide = true)]
     Teams(TeamsArgs),
     /// Configuration: get, set, list, edit.
     Config(ConfigArgs),
     /// Cloud operations: sync, profile, billing, credits.
+    #[command(hide = true)]
     Cloud(CloudArgs),
     /// Check for and apply updates.
     Update(UpdateArgs),
     /// Install memnoth (shows installer instructions).
+    #[command(hide = true)]
     Install(InstallArgs),
     /// Uninstall memnoth.
+    #[command(hide = true)]
     Uninstall(UninstallArgs),
     /// First-run setup: vault, code graph, auth, MCP, provider, config.
+    #[command(hide = true)]
     Setup(SetupArgs),
     /// Shell completion: generate or install completions.
     Completion(CompletionArgs),
     /// Report what is wired: paths, versions, profiles, clients.
     Doctor(DoctorArgs),
+    /// Print the version, build target and commit.
+    Version(VersionArgs),
+    /// Print help, including hidden verbs with `--all`.
+    #[command(hide = true)]
+    Help(HelpArgs),
+    /// Print the command registry as JSON, with a drift check.
+    #[command(hide = true)]
+    Schema(SchemaArgs),
     /// Record, show and verify what an authorised agent changed.
+    #[command(hide = true)]
     Receipt(ReceiptArgs),
     /// Show, verify and export the hash-chained memory audit trail.
+    #[command(hide = true)]
     Audit(AuditArgs),
     /// Show telemetry status and toggle collection.
+    #[command(hide = true)]
     Telemetry(TelemetryArgs),
     /// Privacy: show what leaves machine, toggle telemetry, set metadata-only default.
+    #[command(hide = true)]
     Privacy(PrivacyArgs),
     /// Billing: invoices, plan, limits.
+    #[command(hide = true)]
     Billing(BillingCommands),
     /// Cloud projects: list, create, rename, delete.
+    #[command(hide = true)]
     Projects(ProjectsArgs),
     /// API keys for this org: list, create, revoke.
+    #[command(hide = true)]
     Keys(KeysArgs),
     /// The organization: show, rename, members, invites.
+    #[command(hide = true)]
     Org(OrgArgs),
     /// Open a deep-link to the memnoth cloud console.
+    #[command(hide = true)]
     Open(OpenArgs),
     /// Skill management: add, list, remove, run, edit.
-    Skill(SkillArgs),
+    #[command(name = "skills", alias = "skill")]
+    Skills(SkillArgs),
     /// Set UI theme.
+    #[command(hide = true)]
     SetTheme(crate::tui::app::Theme),
     /// Set screen reader mode.
+    #[command(hide = true)]
     SetScreenReader(crate::tui::app::ScreenReaderMode),
     /// Send feedback to memnoth cloud.
+    #[command(hide = true)]
     Feedback(FeedbackArgs),
     /// Configure model provider: add, list, remove, test connection.
+    #[command(hide = true)]
     Connect(ConnectArgs),
     /// Automation: git hooks, GitHub Actions and CI indexing.
+    #[command(hide = true)]
     Automation(AutomationArgs),
     /// Git worktrees: create, list, clean and diff.
+    #[command(hide = true)]
     Worktree(WorktreeArgs),
     /// Fan a task out across isolated worktrees.
+    #[command(hide = true)]
     Batch(BatchCmdArgs),
     /// Run one command in parallel across worktrees.
+    #[command(hide = true)]
     Parallel(ParallelArgs),
     /// Generate command documentation from the registry.
+    #[command(hide = true)]
     Docs(DocsArgs),
     /// Serve the graph and vault over a local HTTP API.
+    #[command(hide = true)]
     Serve(ServeArgs),
     /// Watch files and reindex incrementally.
+    #[command(hide = true)]
     Watch(WatchArgs),
 }
 /// `mn connect` — configure model provider with API key.
@@ -235,6 +278,10 @@ pub struct DoctorArgs {
     /// Non-interactive: apply all fixes without prompting.
     #[arg(long, requires = "fix")]
     pub yes: bool,
+
+    /// Print the fixes without applying any of them.
+    #[arg(long, requires = "fix")]
+    pub dry_run: bool,
 
     /// Write a redacted support bundle to this path.
     ///
@@ -342,6 +389,27 @@ pub struct ReceiptVerifyArgs {
     #[arg(long, global = true)]
     pub json: bool,
 }
+/// `memnoth ask` — one prompt, one answer, scriptable.
+#[derive(Debug, Args)]
+pub struct AskArgs {
+    /// Prompt words. Quote them, or leave empty and pipe the prompt on stdin.
+    #[arg(value_name = "PROMPT", num_args = 0..)]
+    pub words: Vec<String>,
+
+    /// The prompt as one argument; with no positional words, stdin is read.
+    #[arg(short = 'p', long = "prompt", value_name = "TEXT")]
+    pub prompt: Option<String>,
+
+    /// Output shape: text, json (one envelope), or jsonl (one event per line).
+    #[arg(
+        long,
+        value_name = "FORMAT",
+        default_value = "text",
+        value_parser = ["text", "json", "jsonl"]
+    )]
+    pub output_format: String,
+}
+
 /// `memnoth session`.
 #[derive(Debug, Args)]
 pub struct SessionArgs {
@@ -932,6 +1000,8 @@ pub enum ConfigCommand {
     List(ConfigListArgs),
     /// Open the configuration file in $EDITOR.
     Edit(ConfigEditArgs),
+    /// Explain where a configuration value comes from and what would override it.
+    Explain(ConfigExplainArgs),
 }
 
 /// Arguments for `mn config get`.
@@ -974,6 +1044,18 @@ pub struct ConfigListArgs {
 #[derive(Debug, Args)]
 pub struct ConfigEditArgs {
     /// Output as JSON (prints path instead of opening editor).
+    #[arg(long, global = true)]
+    pub json: bool,
+}
+
+/// Arguments for `mn config explain`.
+#[derive(Debug, Args)]
+pub struct ConfigExplainArgs {
+    /// Configuration key to explain.
+    #[arg(value_name = "KEY")]
+    pub key: String,
+
+    /// Output as JSON.
     #[arg(long, global = true)]
     pub json: bool,
 }
@@ -1277,6 +1359,10 @@ pub struct ProjectsDeleteArgs {
     #[arg(long)]
     pub yes: bool,
 
+    /// Resolve the project and report what would be deleted; write nothing.
+    #[arg(long)]
+    pub dry_run: bool,
+
     /// Output as JSON.
     #[arg(long, global = true)]
     pub json: bool,
@@ -1397,6 +1483,10 @@ pub struct KeysRevokeAllArgs {
     /// Revoke every key without asking for confirmation.
     #[arg(long)]
     pub yes: bool,
+
+    /// Count the live keys and report what would be revoked; revoke nothing.
+    #[arg(long)]
+    pub dry_run: bool,
 
     /// Output as JSON.
     #[arg(long, global = true)]
@@ -1615,6 +1705,14 @@ pub struct CompletionShowArgs {
     #[arg(long, short = 's', value_name = "SHELL", default_value = "bash")]
     pub shell: String,
 
+    /// Write the generated script to this file instead of stdout.
+    #[arg(long, short, value_name = "FILE")]
+    pub output: Option<PathBuf>,
+
+    /// Compare --output against the generated script; exit non-zero when stale.
+    #[arg(long, requires = "output")]
+    pub check: bool,
+
     /// Output as JSON.
     #[arg(long, global = true)]
     pub json: bool,
@@ -1671,6 +1769,53 @@ pub struct SyncArgs {
     /// Output as JSON.
     #[arg(long, global = true)]
     pub json: bool,
+}
+
+/// `mn sync …` — the encrypted vault sync surface (beta).
+#[derive(Debug, Args)]
+pub struct SyncTopArgs {
+    #[command(subcommand)]
+    pub action: SyncTopCommand,
+}
+
+/// Encrypted sync subcommands.
+#[derive(Debug, Subcommand)]
+pub enum SyncTopCommand {
+    /// Show the local cursor and whether sync is paused.
+    Status(SyncStatusArgs),
+    /// Pull the newest manifest, then push this vault.
+    Now(SyncNowArgs),
+    /// Stop automatic sync; an explicit `now` still works.
+    Pause(SyncPauseArgs),
+    /// Restore this vault from the newest manifest.
+    Restore(SyncRestoreArgs),
+}
+
+/// Arguments for `mn sync status`.
+#[derive(Debug, Args)]
+pub struct SyncStatusArgs {}
+
+/// Arguments for `mn sync now`.
+#[derive(Debug, Args)]
+pub struct SyncNowArgs {
+    /// Recovery phrase. Falls back to MEMNOTH_SYNC_PHRASE.
+    #[arg(long, value_name = "PHRASE")]
+    pub phrase: Option<String>,
+}
+
+/// Arguments for `mn sync pause`.
+#[derive(Debug, Args)]
+pub struct SyncPauseArgs {}
+
+/// Arguments for `mn sync restore`.
+#[derive(Debug, Args)]
+pub struct SyncRestoreArgs {
+    /// Recovery phrase. Falls back to MEMNOTH_SYNC_PHRASE.
+    #[arg(long, value_name = "PHRASE")]
+    pub phrase: Option<String>,
+    /// Replace a vault that exists locally.
+    #[arg(long)]
+    pub force: bool,
 }
 
 /// Arguments for `mn cloud profile`.
@@ -2393,6 +2538,14 @@ pub enum McpCommand {
         /// Never written to memnoth's own config.
         #[arg(long, value_name = "TOKEN")]
         token: Option<String>,
+        /// Register a local stdio server against this vault instead of the
+        /// cloud endpoint. No account or token is needed.
+        #[arg(long)]
+        local: bool,
+        /// Allow a local server to write beliefs. Without this flag the
+        /// registration is read-only; `--local` is required.
+        #[arg(long, requires = "local")]
+        allow_writes: bool,
         /// Show what would be written without touching a file.
         #[arg(long)]
         dry_run: bool,
@@ -2424,6 +2577,7 @@ pub enum McpCommand {
         dry_run: bool,
     },
     /// List all registered MCP clients.
+    #[command(alias = "clients")]
     List,
     /// Run tools/list and a real call to verify the server works.
     Test {
@@ -2930,6 +3084,48 @@ pub struct DocsArgs {
     /// Output file path. If not provided, writes to stdout.
     #[arg(long, short, value_name = "FILE")]
     pub output: Option<PathBuf>,
+
+    /// Render a man page instead of the Markdown reference.
+    #[arg(long)]
+    pub man: bool,
+
+    /// Compare the file against the registry instead of writing it. Exits
+    /// non-zero when they disagree, so a CI step can hold the generated
+    /// reference still.
+    #[arg(long)]
+    pub check: bool,
+}
+
+/// Arguments for `mn version`.
+#[derive(Debug, Args)]
+pub struct VersionArgs {
+    /// Output as JSON.
+    #[arg(long, global = true)]
+    pub json: bool,
+}
+
+/// Arguments for `mn help`.
+#[derive(Debug, Args)]
+pub struct HelpArgs {
+    /// Verb to describe; omit for the summary.
+    #[arg(value_name = "VERB")]
+    pub verb: Option<String>,
+
+    /// Include hidden verbs: everything this build still accepts.
+    #[arg(long)]
+    pub all: bool,
+}
+
+/// Arguments for `mn schema`.
+#[derive(Debug, Args)]
+pub struct SchemaArgs {
+    /// Write the registry JSON to this file instead of stdout.
+    #[arg(long, short, value_name = "FILE")]
+    pub output: Option<PathBuf>,
+
+    /// Compare --output against the registry; exit non-zero when stale.
+    #[arg(long)]
+    pub check: bool,
 }
 
 /// `mn feedback ...` — send feedback to memnoth cloud.

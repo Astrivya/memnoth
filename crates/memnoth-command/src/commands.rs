@@ -1,4 +1,4 @@
-//! All 34 P0 command specifications — the single source of truth.
+//! The command specifications — the single source of truth.
 //!
 //! Each [`CommandSpec`] defines one command row. Handlers are not implemented
 //! here; this crate is the spec layer only. Implementation happens in the
@@ -19,7 +19,7 @@ use crate::spec::{
     AuthLevel, CommandSpec, DangerLevel, OverlayType, ParamSpec, ParamType, SlashSpec,
 };
 
-/// Build the P0 command registry with all 34 command specs.
+/// Build the P0 command registry.
 pub fn build_p0_registry() -> RegistryBuilder {
     let mut builder = RegistryBuilder::new();
 
@@ -670,9 +670,11 @@ pub fn build_p0_registry() -> RegistryBuilder {
                         "Clients to write: claude, cursor, codex, zed. Comma-separated.",
                         ParamType::Enum { choices: vec!["claude".into(), "cursor".into(), "codex".into(), "zed".into()] },
                     ).short('c'),
-                    ParamSpec::enum_opt("profile", "Tool profile to register. Defaults to full.", vec!["micro".into(), "memory".into(), "coord".into(), "code".into(), "full".into(), "agent".into()], "full"),
+                    ParamSpec::enum_opt("profile", "Tool profile to register. Defaults to memory for --local, full otherwise.", vec!["micro".into(), "memory".into(), "coord".into(), "code".into(), "full".into(), "agent".into()], ""),
                     ParamSpec::string_opt("url", "Server endpoint. Defaults to the configured URL", ""),
                     ParamSpec::string_opt("token", "Bearer token for the client's header. Defaults to $MEMNOTH_MCP_TOKEN. Never written to memnoth's own config.", ""),
+                    ParamSpec::bool("local", "Register a local stdio server against this vault instead of the cloud endpoint"),
+                    ParamSpec::bool("allow_writes", "Allow a local server to write beliefs; read-only otherwise"),
                     ParamSpec::bool("dry_run", "Show what would be written without touching a file"),
                 ],
                 overlay: OverlayType::None,
@@ -683,7 +685,10 @@ pub fn build_p0_registry() -> RegistryBuilder {
                 aliases: vec![],
                 hidden: false,
                 deprecated: None,
-                examples: vec!["mcp add --clients claude,cursor,codex --profile code".into()],
+                examples: vec![
+                    "mcp add --local --clients claude,cursor,codex".into(),
+                    "mcp add --clients claude,cursor,codex --profile code".into(),
+                ],
             },
             handler: "mcp_add".into(),
             json_output: true,
@@ -1023,6 +1028,139 @@ pub fn build_p0_registry() -> RegistryBuilder {
         })
         .unwrap();
 
+    // ── Encrypted vault sync (beta) ─────────────────────────────────
+
+    builder = builder
+        .command(CommandSpec {
+            id: "sync.status".into(),
+            cli_path: vec!["sync".into(), "status".into()],
+            slash: SlashSpec {
+                name: "status".into(),
+                palette: None,
+                description: "Show the encrypted-sync cursor".into(),
+                long_description: None,
+                params: vec![],
+                overlay: OverlayType::None,
+                danger: DangerLevel::Safe,
+                auth: AuthLevel::Cloud,
+                profile: None,
+                categories: vec!["sync".into()],
+                aliases: vec![],
+                hidden: true,
+                deprecated: None,
+                examples: vec!["sync status".into()],
+            },
+            handler: "sync_status".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["sync".into()],
+            related: vec!["sync.now".into(), "sync.pause".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "sync.now".into(),
+            cli_path: vec!["sync".into(), "now".into()],
+            slash: SlashSpec {
+                name: "now".into(),
+                palette: None,
+                description: "Pull the newest manifest, then push this vault".into(),
+                long_description: None,
+                params: vec![ParamSpec::string_opt(
+                    "phrase",
+                    "Recovery phrase; falls back to MEMNOTH_SYNC_PHRASE",
+                    "",
+                )],
+                overlay: OverlayType::None,
+                danger: DangerLevel::CloudWrite,
+                auth: AuthLevel::Cloud,
+                profile: None,
+                categories: vec!["sync".into()],
+                aliases: vec![],
+                hidden: true,
+                deprecated: None,
+                examples: vec!["sync now --phrase '…'".into()],
+            },
+            handler: "sync_now".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["sync".into()],
+            related: vec!["sync.status".into(), "sync.restore".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "sync.pause".into(),
+            cli_path: vec!["sync".into(), "pause".into()],
+            slash: SlashSpec {
+                name: "pause".into(),
+                palette: None,
+                description: "Stop automatic sync; explicit now still works".into(),
+                long_description: None,
+                params: vec![],
+                overlay: OverlayType::Confirm,
+                danger: DangerLevel::LocalWrite,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["sync".into()],
+                aliases: vec![],
+                hidden: true,
+                deprecated: None,
+                examples: vec!["sync pause".into()],
+            },
+            handler: "sync_pause".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["sync".into()],
+            related: vec!["sync.status".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "sync.restore".into(),
+            cli_path: vec!["sync".into(), "restore".into()],
+            slash: SlashSpec {
+                name: "restore".into(),
+                palette: None,
+                description: "Restore this vault from the newest manifest".into(),
+                long_description: None,
+                params: vec![
+                    ParamSpec::string_opt(
+                        "phrase",
+                        "Recovery phrase; falls back to MEMNOTH_SYNC_PHRASE",
+                        "",
+                    ),
+                    ParamSpec::bool("force", "Replace a vault that exists locally"),
+                ],
+                overlay: OverlayType::None,
+                danger: DangerLevel::CloudWrite,
+                auth: AuthLevel::Cloud,
+                profile: None,
+                categories: vec!["sync".into()],
+                aliases: vec![],
+                hidden: true,
+                deprecated: None,
+                examples: vec!["sync restore --phrase '…' --force".into()],
+            },
+            handler: "sync_restore".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["sync".into()],
+            related: vec!["sync.status".into(), "sync.now".into()],
+        })
+        .unwrap();
+
     // ── Config commands ─────────────────────────────────────────────
 
     builder = builder
@@ -1117,6 +1255,196 @@ pub fn build_p0_registry() -> RegistryBuilder {
             min_version: None,
             tags: vec!["config".into()],
             related: vec!["config.get".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "config.explain".into(),
+            cli_path: vec!["config".into(), "explain".into()],
+            slash: SlashSpec {
+                name: "explain".into(),
+                palette: None,
+                description: "Explain where a configuration value comes from".into(),
+                long_description: Some(
+                    "Names the layer that supplies a key's effective value (config file, environment, or default), whether another layer overrides the file, and the command that would change it.".into(),
+                ),
+                params: vec![
+                    ParamSpec::string("key", "Configuration key (dot-notation)").positional(0),
+                ],
+                overlay: OverlayType::None,
+                danger: DangerLevel::Safe,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["config".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["config explain provider.model".into()],
+            },
+            handler: "config_explain".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["config".into()],
+            related: vec![
+                "config.get".into(),
+                "config.set".into(),
+                "config.list".into(),
+            ],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "ask".into(),
+            cli_path: vec!["ask".into()],
+            slash: SlashSpec {
+                name: "ask".into(),
+                palette: None,
+                description: "Ask one question and print the answer".into(),
+                long_description: Some(
+                    "One provider turn without the screen: the prompt comes from the argument, `-p`, or stdin; output is text, one JSON envelope, or one event per line.".into(),
+                ),
+                params: vec![
+                    ParamSpec::string_opt("prompt", "Prompt; stdin when omitted", "").short('p'),
+                    ParamSpec::enum_opt(
+                        "output-format",
+                        "Output shape: text, json, jsonl",
+                        vec!["text".into(), "json".into(), "jsonl".into()],
+                        "text",
+                    ),
+                ],
+                overlay: OverlayType::None,
+                danger: DangerLevel::Safe,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["session".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec![
+                    "ask \"what changed in this repo?\"".into(),
+                    "printf 'hello\\n' | ask --output-format json".into(),
+                ],
+            },
+            handler: "ask".into(),
+            json_output: true,
+            streaming: true,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["session".into()],
+            related: vec!["session.start".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "version".into(),
+            cli_path: vec!["version".into()],
+            slash: SlashSpec {
+                name: "version".into(),
+                palette: None,
+                description: "Print the version, build target and commit".into(),
+                long_description: Some(
+                    "The same version `--version` prints, with the build target and commit in `--json` so a bug report can name the exact artifact.".into(),
+                ),
+                params: vec![ParamSpec::bool("json", "Output as JSON")],
+                overlay: OverlayType::None,
+                danger: DangerLevel::Safe,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["config".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["version".into(), "version --json".into()],
+            },
+            handler: "version".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["config".into()],
+            related: vec!["doctor".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "help".into(),
+            cli_path: vec!["help".into()],
+            slash: SlashSpec {
+                name: "help".into(),
+                palette: None,
+                description: "Print help, including hidden verbs with --all".into(),
+                long_description: Some(
+                    "`help` renders the visible surface, `help <verb>` renders one verb, and `help --all` lists every verb the build accepts, marking the hidden ones.".into(),
+                ),
+                params: vec![
+                    ParamSpec::string_opt("verb", "Verb to describe", ""),
+                    ParamSpec::bool("all", "Include hidden verbs"),
+                ],
+                overlay: OverlayType::None,
+                danger: DangerLevel::Safe,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["config".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec![
+                    "help".into(),
+                    "help vault".into(),
+                    "help --all".into(),
+                ],
+            },
+            handler: "help".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["config".into()],
+            related: vec!["version".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "schema".into(),
+            cli_path: vec!["schema".into()],
+            slash: SlashSpec {
+                name: "schema".into(),
+                palette: None,
+                description: "Print the command registry as JSON".into(),
+                long_description: Some(
+                    "The machine-readable form of every command specification, for generated clients and drift checks. `--check --output <file>` fails when the committed file disagrees with the registry.".into(),
+                ),
+                params: vec![
+                    ParamSpec::string_opt("output", "Write to this file instead of stdout", ""),
+                    ParamSpec::bool("check", "Compare --output against the registry"),
+                ],
+                overlay: OverlayType::None,
+                danger: DangerLevel::Safe,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["config".into()],
+                aliases: vec![],
+                hidden: true,
+                deprecated: None,
+                examples: vec![
+                    "schema".into(),
+                    "schema --check --output docs/cli/schema.json".into(),
+                ],
+            },
+            handler: "schema".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["config".into()],
+            related: vec!["docs".into(), "help".into()],
         })
         .unwrap();
 
@@ -1215,9 +1543,13 @@ pub fn build_p0_registry() -> RegistryBuilder {
                 name: "docs".into(),
                 palette: Some("docs".into()),
                 description: "Generate Markdown documentation from command registry".into(),
-                long_description: Some("Outputs all command specifications as Markdown. Use --output to write to a file, otherwise prints to stdout.".into()),
+                long_description: Some("Outputs all command specifications as Markdown. Use --output to write to a file, otherwise prints to stdout. `--check` compares the file against the registry and exits non-zero when they disagree.".into()),
                 params: vec![
                     ParamSpec::string_opt("output", "Output file path (default: stdout)", "").short('o'),
+                    ParamSpec::bool(
+                        "check",
+                        "Compare --output against the registry; exit non-zero when stale",
+                    ),
                 ],
                 overlay: OverlayType::None,
                 danger: DangerLevel::Safe,
@@ -1227,7 +1559,11 @@ pub fn build_p0_registry() -> RegistryBuilder {
                 aliases: vec![],
                 hidden: false,
                 deprecated: None,
-                examples: vec!["docs --output docs/commands.md".into(), "docs".into()],
+                examples: vec![
+                    "docs --output docs/cli/command-surface.md".into(),
+                    "docs --check --output docs/cli/command-surface.md".into(),
+                    "docs".into(),
+                ],
             },
             handler: "docs".into(),
             json_output: false,
@@ -1239,7 +1575,2300 @@ pub fn build_p0_registry() -> RegistryBuilder {
         })
         .unwrap();
 
-    builder
+    // ── Product verbs with no subcommand ───────────────────────────
+    //
+    // Transcribed from `src/cli.rs`: one spec per leaf verb, with the flags
+    // clap actually accepts. A verb missing here is a verb `mn docs` and the
+    // completions cannot describe, which is why the gaps were visible as
+    // silence rather than as errors.
+
+    builder = builder
+        .command(CommandSpec {
+            id: "usage.show".into(),
+            cli_path: vec!["usage".into()],
+            slash: SlashSpec {
+                name: "usage".into(),
+                palette: None,
+                description: "Show usage and costs, with local reconciliation".into(),
+                long_description: None,
+                params: vec![
+                    ParamSpec::string_opt("by", "Group by: day, model, project", ""),
+                    ParamSpec::string_opt("since", "Since date (YYYY-MM-DD)", ""),
+                    ParamSpec::string_opt("range", "Time range: 7d, 30d, 90d, 365d", "30d"),
+                ],
+                overlay: OverlayType::None,
+                danger: DangerLevel::Safe,
+                auth: AuthLevel::Cloud,
+                profile: None,
+                categories: vec!["product".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["usage --range 7d".into()],
+            },
+            handler: "usage_show".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["usage".into()],
+            related: vec!["stats.show".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "stats.show".into(),
+            cli_path: vec!["stats".into()],
+            slash: SlashSpec {
+                name: "stats".into(),
+                palette: None,
+                description: "Show usage statistics with local reconciliation".into(),
+                long_description: None,
+                params: vec![
+                    ParamSpec::string_opt("by", "Group by: day, model, project", ""),
+                    ParamSpec::string_opt("since", "Since date (YYYY-MM-DD)", ""),
+                    ParamSpec::string_opt("range", "Time range: 7d, 30d, 90d, 365d", "30d"),
+                ],
+                overlay: OverlayType::None,
+                danger: DangerLevel::Safe,
+                auth: AuthLevel::Cloud,
+                profile: None,
+                categories: vec!["product".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["stats --by model".into()],
+            },
+            handler: "stats_show".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["usage".into()],
+            related: vec!["usage.show".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "update".into(),
+            cli_path: vec!["update".into()],
+            slash: SlashSpec {
+                name: "update".into(),
+                palette: None,
+                description: "Check for and apply updates".into(),
+                long_description: None,
+                params: vec![
+                    ParamSpec::bool("check", "Only check for updates, don't apply"),
+                    ParamSpec::string_opt("channel", "Release channel to check/use", ""),
+                    ParamSpec::string_opt(
+                        "version",
+                        "Specific version to install (e.g. 0.2.0)",
+                        "",
+                    ),
+                    ParamSpec::bool(
+                        "no-verify",
+                        "Install without verifying the release signature",
+                    ),
+                ],
+                overlay: OverlayType::None,
+                danger: DangerLevel::LocalWrite,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["product".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["update --check".into()],
+            },
+            handler: "update".into(),
+            json_output: false,
+            streaming: false,
+            timeout_secs: Some(600),
+            min_version: None,
+            tags: vec!["product".into()],
+            related: vec![],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "install".into(),
+            cli_path: vec!["install".into()],
+            slash: SlashSpec {
+                name: "install".into(),
+                palette: None,
+                description: "Install memnoth (shows installer instructions)".into(),
+                long_description: None,
+                params: vec![ParamSpec::bool(
+                    "force",
+                    "Force reinstall even if already installed",
+                )],
+                overlay: OverlayType::None,
+                danger: DangerLevel::LocalWrite,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["product".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["install".into()],
+            },
+            handler: "install".into(),
+            json_output: false,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["product".into()],
+            related: vec!["uninstall".into(), "update".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "uninstall".into(),
+            cli_path: vec!["uninstall".into()],
+            slash: SlashSpec {
+                name: "uninstall".into(),
+                palette: None,
+                description: "Uninstall memnoth".into(),
+                long_description: None,
+                params: vec![ParamSpec::bool(
+                    "keep-state",
+                    "Keep configuration and state files",
+                )],
+                overlay: OverlayType::Confirm,
+                danger: DangerLevel::Destructive,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["product".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["uninstall --keep-state".into()],
+            },
+            handler: "uninstall".into(),
+            json_output: false,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["product".into()],
+            related: vec!["install".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "setup".into(),
+            cli_path: vec!["setup".into()],
+            slash: SlashSpec {
+                name: "setup".into(),
+                palette: None,
+                description: "First-run setup: vault, code graph, auth, MCP, provider, config"
+                    .into(),
+                long_description: None,
+                params: vec![
+                    ParamSpec::string_opt(
+                        "skip",
+                        "Skip steps (comma-separated: vault,graph,auth,mcp,provider,config)",
+                        "",
+                    ),
+                    ParamSpec::bool("yes", "Accept defaults, don't prompt"),
+                ],
+                overlay: OverlayType::Wizard,
+                danger: DangerLevel::LocalWrite,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["product".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["setup --yes".into()],
+            },
+            handler: "setup".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["product".into()],
+            related: vec!["doctor".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "open".into(),
+            cli_path: vec!["open".into()],
+            slash: SlashSpec {
+                name: "open".into(),
+                palette: None,
+                description: "Open a deep-link to the memnoth cloud console".into(),
+                long_description: None,
+                params: vec![
+                    ParamSpec::string_opt(
+                        "page",
+                        "Console page: dashboard, projects, sessions, settings, usage, org, teams, api-keys, workspaces",
+                        "dashboard",
+                    )
+                    .positional(0),
+                    ParamSpec::string_opt("project-id", "Project ID (for projects page)", ""),
+                    ParamSpec::string_opt("session-id", "Session ID (for sessions page)", ""),
+                    ParamSpec::bool("no-browser", "Don't open the browser automatically"),
+                ],
+                overlay: OverlayType::None,
+                danger: DangerLevel::Safe,
+                auth: AuthLevel::Cloud,
+                profile: None,
+                categories: vec!["product".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["open usage".into()],
+            },
+            handler: "open".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["product".into()],
+            related: vec![],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "serve".into(),
+            cli_path: vec!["serve".into()],
+            slash: SlashSpec {
+                name: "serve".into(),
+                palette: None,
+                description: "Serve the graph and vault over a local HTTP API".into(),
+                long_description: None,
+                params: vec![
+                    ParamSpec::integer_opt("port", "Port to listen on", 3030).short('p'),
+                    ParamSpec::string_opt("host", "Host to bind to", "127.0.0.1"),
+                    ParamSpec::bool("cors", "Enable CORS for all origins"),
+                    ParamSpec::string_opt("token", "Bearer token every request must present", ""),
+                    ParamSpec::string_opt("graph-path", "Path to serve the kg index from", ""),
+                ],
+                overlay: OverlayType::None,
+                danger: DangerLevel::LocalWrite,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["product".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["serve --port 3030".into()],
+            },
+            handler: "serve".into(),
+            json_output: true,
+            streaming: true,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["product".into()],
+            related: vec!["watch".into(), "mcp.serve".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "batch".into(),
+            cli_path: vec!["batch".into()],
+            slash: SlashSpec {
+                name: "batch".into(),
+                palette: None,
+                description: "Fan a task out across isolated worktrees".into(),
+                long_description: None,
+                params: vec![
+                    ParamSpec::string("task", "Task description").positional(0),
+                    ParamSpec::integer_opt("workers", "Number of workers to spawn", 4).short('w'),
+                    ParamSpec::string_opt(
+                        "command",
+                        "Command to run in each worker (e.g. cargo test)",
+                        "",
+                    ),
+                    ParamSpec::string_opt("claim-glob", "Path glob for claims", ""),
+                    ParamSpec::integer_opt("claim-ttl", "Claim TTL in seconds", 1800),
+                    ParamSpec::string_opt(
+                        "workdir",
+                        "Working directory relative to worktree root",
+                        "",
+                    ),
+                    ParamSpec::enum_opt(
+                        "format",
+                        "Output format",
+                        vec!["text".into(), "json".into()],
+                        "text",
+                    ),
+                ],
+                overlay: OverlayType::None,
+                danger: DangerLevel::LocalWrite,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["product".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["batch \"split the migration\" --workers 4".into()],
+            },
+            handler: "batch".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["product".into(), "worktree".into()],
+            related: vec!["parallel".into(), "worktree".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "parallel".into(),
+            cli_path: vec!["parallel".into()],
+            slash: SlashSpec {
+                name: "parallel".into(),
+                palette: None,
+                description: "Run one command in parallel across worktrees".into(),
+                long_description: None,
+                params: vec![
+                    ParamSpec::string("command", "Command to execute").positional(0),
+                    ParamSpec::string_opt(
+                        "targets",
+                        "Target worktree names or branches (empty = all non-main worktrees)",
+                        "",
+                    ),
+                    ParamSpec::string_opt("args", "Arguments to pass to the command", ""),
+                    ParamSpec::integer_opt("max-concurrent", "Maximum concurrent executions", 4)
+                        .short('j'),
+                ],
+                overlay: OverlayType::None,
+                danger: DangerLevel::LocalWrite,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["product".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["parallel cargo test".into()],
+            },
+            handler: "parallel".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["product".into(), "worktree".into()],
+            related: vec!["batch".into(), "worktree".into()],
+        })
+        .unwrap();
+
+    // ── Auth, privacy, audit, receipt, UI prefs ───────────────────
+
+    builder = builder
+        .command(CommandSpec {
+            id: "auth.login".into(),
+            cli_path: vec!["auth".into(), "login".into()],
+            slash: SlashSpec {
+                name: "login".into(),
+                palette: None,
+                description: "Start device authorization flow (RFC 8628)".into(),
+                long_description: None,
+                params: vec![
+                    ParamSpec::bool(
+                        "no-browser",
+                        "Never offer to open a browser: print the link and wait for approval",
+                    ),
+                    ParamSpec::string_opt(
+                        "with-token",
+                        "Use a pre-existing API token (CI/paste path), skipping device flow",
+                        "",
+                    ),
+                    ParamSpec::string_opt(
+                        "client-name",
+                        "Client name to register (default: hostname-based)",
+                        "",
+                    ),
+                    ParamSpec::string_opt("tier", "Requested tier (optional)", ""),
+                ],
+                overlay: OverlayType::None,
+                danger: DangerLevel::CloudWrite,
+                auth: AuthLevel::Cloud,
+                profile: None,
+                categories: vec!["auth".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["auth login".into(), "auth login --no-browser".into()],
+            },
+            handler: "auth_login".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["auth".into()],
+            related: vec!["auth.logout".into(), "auth.status".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "auth.logout".into(),
+            cli_path: vec!["auth".into(), "logout".into()],
+            slash: SlashSpec {
+                name: "logout".into(),
+                palette: None,
+                description: "Revoke current token and clear local credentials".into(),
+                long_description: None,
+                params: vec![],
+                overlay: OverlayType::None,
+                danger: DangerLevel::CloudWrite,
+                auth: AuthLevel::Cloud,
+                profile: None,
+                categories: vec!["auth".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["auth logout".into()],
+            },
+            handler: "auth_logout".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["auth".into()],
+            related: vec!["auth.login".into(), "auth.status".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "auth.status".into(),
+            cli_path: vec!["auth".into(), "status".into()],
+            slash: SlashSpec {
+                name: "status".into(),
+                // No palette entry: the TUI cannot run `/auth status`, and the
+                // palette test refuses an entry the session cannot resolve.
+                palette: None,
+                description: "Show authentication status: who, org, scopes, expiry".into(),
+                long_description: None,
+                params: vec![],
+                overlay: OverlayType::None,
+                danger: DangerLevel::Safe,
+                auth: AuthLevel::Cloud,
+                profile: None,
+                categories: vec!["auth".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["auth status".into()],
+            },
+            handler: "auth_status".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["auth".into()],
+            related: vec!["auth.whoami".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "auth.whoami".into(),
+            cli_path: vec!["auth".into(), "whoami".into()],
+            slash: SlashSpec {
+                name: "whoami".into(),
+                palette: None,
+                description: "Print identity one-liner".into(),
+                long_description: None,
+                params: vec![],
+                overlay: OverlayType::None,
+                danger: DangerLevel::Safe,
+                auth: AuthLevel::Cloud,
+                profile: None,
+                categories: vec!["auth".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["auth whoami".into()],
+            },
+            handler: "auth_whoami".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["auth".into()],
+            related: vec!["auth.status".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "telemetry.status".into(),
+            cli_path: vec!["telemetry".into(), "status".into()],
+            slash: SlashSpec {
+                name: "status".into(),
+                palette: None,
+                description: "Show telemetry status (what's collected, current state)".into(),
+                long_description: None,
+                params: vec![],
+                overlay: OverlayType::None,
+                danger: DangerLevel::Safe,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["privacy".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["telemetry status".into()],
+            },
+            handler: "telemetry_status".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["privacy".into()],
+            related: vec!["telemetry.on".into(), "telemetry.off".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "telemetry.on".into(),
+            cli_path: vec!["telemetry".into(), "on".into()],
+            slash: SlashSpec {
+                name: "on".into(),
+                palette: None,
+                description: "Enable telemetry collection".into(),
+                long_description: None,
+                params: vec![],
+                overlay: OverlayType::None,
+                danger: DangerLevel::LocalWrite,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["privacy".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["telemetry on".into()],
+            },
+            handler: "telemetry_on".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["privacy".into()],
+            related: vec!["telemetry.off".into(), "telemetry.status".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "telemetry.off".into(),
+            cli_path: vec!["telemetry".into(), "off".into()],
+            slash: SlashSpec {
+                name: "off".into(),
+                palette: None,
+                description: "Disable telemetry collection".into(),
+                long_description: None,
+                params: vec![],
+                overlay: OverlayType::None,
+                danger: DangerLevel::LocalWrite,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["privacy".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["telemetry off".into()],
+            },
+            handler: "telemetry_off".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["privacy".into()],
+            related: vec!["telemetry.on".into(), "telemetry.status".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "privacy.status".into(),
+            cli_path: vec!["privacy".into(), "status".into()],
+            slash: SlashSpec {
+                name: "status".into(),
+                palette: None,
+                description: "Show privacy status and what data leaves the machine".into(),
+                long_description: None,
+                params: vec![],
+                overlay: OverlayType::None,
+                danger: DangerLevel::Safe,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["privacy".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["privacy status".into()],
+            },
+            handler: "privacy_status".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["privacy".into()],
+            related: vec!["privacy.mode".into(), "privacy.show-data".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "privacy.on".into(),
+            cli_path: vec!["privacy".into(), "on".into()],
+            slash: SlashSpec {
+                name: "on".into(),
+                palette: None,
+                description: "Enable telemetry collection (default: on)".into(),
+                long_description: None,
+                params: vec![],
+                overlay: OverlayType::None,
+                danger: DangerLevel::LocalWrite,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["privacy".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["privacy on".into()],
+            },
+            handler: "privacy_on".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["privacy".into()],
+            related: vec!["privacy.off".into(), "telemetry.on".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "privacy.off".into(),
+            cli_path: vec!["privacy".into(), "off".into()],
+            slash: SlashSpec {
+                name: "off".into(),
+                palette: None,
+                description: "Disable telemetry collection (no telemetry data leaves machine)"
+                    .into(),
+                long_description: None,
+                params: vec![],
+                overlay: OverlayType::None,
+                danger: DangerLevel::LocalWrite,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["privacy".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["privacy off".into()],
+            },
+            handler: "privacy_off".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["privacy".into()],
+            related: vec!["privacy.on".into(), "telemetry.off".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "privacy.mode".into(),
+            cli_path: vec!["privacy".into(), "mode".into()],
+            slash: SlashSpec {
+                name: "mode".into(),
+                palette: None,
+                description: "Set privacy mode: metadata-only, balanced, open".into(),
+                long_description: None,
+                params: vec![
+                    ParamSpec::enum_param(
+                        "mode",
+                        "Privacy mode: metadata-only, balanced, open",
+                        vec!["metadata-only".into(), "balanced".into(), "open".into()],
+                    )
+                    .positional(0),
+                ],
+                overlay: OverlayType::None,
+                danger: DangerLevel::LocalWrite,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["privacy".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["privacy mode metadata-only".into()],
+            },
+            handler: "privacy_mode".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["privacy".into()],
+            related: vec!["privacy.status".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "privacy.show-data".into(),
+            cli_path: vec!["privacy".into(), "show-data".into()],
+            slash: SlashSpec {
+                name: "show-data".into(),
+                palette: None,
+                description: "Show what data would be sent in a sync".into(),
+                long_description: None,
+                params: vec![],
+                overlay: OverlayType::None,
+                danger: DangerLevel::Safe,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["privacy".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["privacy show-data".into()],
+            },
+            handler: "privacy_show_data".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["privacy".into()],
+            related: vec!["privacy.status".into(), "cloud.sync".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "audit.show".into(),
+            cli_path: vec!["audit".into(), "show".into()],
+            slash: SlashSpec {
+                name: "show".into(),
+                palette: None,
+                description: "List the most recent events".into(),
+                long_description: None,
+                params: vec![ParamSpec::integer_opt(
+                    "limit",
+                    "Maximum events to print; 0 prints all",
+                    50,
+                )],
+                overlay: OverlayType::None,
+                danger: DangerLevel::Safe,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["audit".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["audit show --limit 20".into()],
+            },
+            handler: "audit_show".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["audit".into()],
+            related: vec!["audit.verify".into(), "audit.export".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "audit.verify".into(),
+            cli_path: vec!["audit".into(), "verify".into()],
+            slash: SlashSpec {
+                name: "verify".into(),
+                palette: None,
+                description: "Verify the hash chain and exit non-zero on the first break".into(),
+                long_description: None,
+                params: vec![],
+                overlay: OverlayType::None,
+                danger: DangerLevel::Safe,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["audit".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["audit verify".into()],
+            },
+            handler: "audit_verify".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["audit".into()],
+            related: vec!["audit.show".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "audit.export".into(),
+            cli_path: vec!["audit".into(), "export".into()],
+            slash: SlashSpec {
+                name: "export".into(),
+                palette: None,
+                description: "Write the trail unchanged as JSONL".into(),
+                long_description: None,
+                params: vec![ParamSpec::string_opt(
+                    "out",
+                    "Destination file; without it the JSONL goes to stdout",
+                    "",
+                )],
+                overlay: OverlayType::None,
+                danger: DangerLevel::LocalWrite,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["audit".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["audit export --out audit.jsonl".into()],
+            },
+            handler: "audit_export".into(),
+            json_output: true,
+            streaming: true,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["audit".into()],
+            related: vec!["audit.show".into()],
+        })
+        .unwrap();
+
+    for (id, description, example) in [
+        (
+            "receipt.write",
+            "Measure `HEAD` (or --commit) and write its receipt",
+            "receipt write",
+        ),
+        (
+            "receipt.show",
+            "Print the receipt for a commit",
+            "receipt show --commit HEAD~1",
+        ),
+        (
+            "receipt.verify",
+            "Verify a receipt against the commit it describes",
+            "receipt verify",
+        ),
+    ] {
+        builder = builder
+            .command(CommandSpec {
+                id: id.into(),
+                cli_path: vec!["receipt".into(), id.rsplit('.').next().unwrap().into()],
+                slash: SlashSpec {
+                    name: id.rsplit('.').next().unwrap().into(),
+                    palette: None,
+                    description: description.into(),
+                    long_description: None,
+                    params: vec![ParamSpec::string_opt(
+                        "commit",
+                        "Revision to measure, show or verify; defaults to HEAD",
+                        "",
+                    )],
+                    overlay: OverlayType::None,
+                    danger: if id.ends_with("write") {
+                        DangerLevel::LocalWrite
+                    } else {
+                        DangerLevel::Safe
+                    },
+                    auth: AuthLevel::None,
+                    profile: None,
+                    categories: vec!["receipt".into()],
+                    aliases: vec![],
+                    hidden: false,
+                    deprecated: None,
+                    examples: vec![example.into()],
+                },
+                handler: id.replace('.', "_"),
+                json_output: true,
+                streaming: false,
+                timeout_secs: None,
+                min_version: None,
+                tags: vec!["receipt".into()],
+                related: vec!["receipt.write".into(), "receipt.verify".into()],
+            })
+            .unwrap();
+    }
+
+    builder = builder
+        .command(CommandSpec {
+            id: "set-theme".into(),
+            cli_path: vec!["set-theme".into()],
+            slash: SlashSpec {
+                name: "set-theme".into(),
+                palette: None,
+                description: "Set UI theme".into(),
+                long_description: None,
+                params: vec![
+                    ParamSpec::enum_param(
+                        "theme",
+                        "Theme: default, high-contrast or no-color",
+                        vec!["default".into(), "high-contrast".into(), "no-color".into()],
+                    )
+                    .positional(0),
+                ],
+                overlay: OverlayType::None,
+                danger: DangerLevel::LocalWrite,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["ui".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["set-theme high-contrast".into()],
+            },
+            handler: "set_theme".into(),
+            json_output: false,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["ui".into()],
+            related: vec!["set-screen-reader".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "set-screen-reader".into(),
+            cli_path: vec!["set-screen-reader".into()],
+            slash: SlashSpec {
+                name: "set-screen-reader".into(),
+                palette: None,
+                description: "Set screen reader mode".into(),
+                long_description: None,
+                params: vec![
+                    ParamSpec::enum_param(
+                        "mode",
+                        "Mode: off or plain",
+                        vec!["off".into(), "plain".into()],
+                    )
+                    .positional(0),
+                ],
+                overlay: OverlayType::None,
+                danger: DangerLevel::LocalWrite,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["ui".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["set-screen-reader plain".into()],
+            },
+            handler: "set_screen_reader".into(),
+            json_output: false,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["ui".into()],
+            related: vec!["set-theme".into()],
+        })
+        .unwrap();
+
+    // ── Worktrees and skills ─────────────────────────────────────
+
+    builder = builder
+        .command(CommandSpec {
+            id: "worktree.create".into(),
+            cli_path: vec!["worktree".into(), "create".into()],
+            slash: SlashSpec {
+                name: "create".into(),
+                palette: None,
+                description: "Create a new worktree".into(),
+                long_description: None,
+                params: vec![
+                    ParamSpec::string(
+                        "name",
+                        "Worktree name (directory name under .memnoth/worktrees/)",
+                    )
+                    .positional(0),
+                    ParamSpec::string_opt(
+                        "branch",
+                        "Branch to create/check out in the worktree",
+                        "",
+                    )
+                    .short('b'),
+                    ParamSpec::string_opt("base", "Base branch/commit to create from", "HEAD"),
+                ],
+                overlay: OverlayType::None,
+                danger: DangerLevel::LocalWrite,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["worktree".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["worktree create spike --branch spike".into()],
+            },
+            handler: "worktree_create".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["worktree".into()],
+            related: vec!["worktree.list".into(), "worktree.clean".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "worktree.list".into(),
+            cli_path: vec!["worktree".into(), "list".into()],
+            slash: SlashSpec {
+                name: "list".into(),
+                palette: None,
+                description: "List all worktrees".into(),
+                long_description: None,
+                params: vec![],
+                overlay: OverlayType::None,
+                danger: DangerLevel::Safe,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["worktree".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["worktree list".into()],
+            },
+            handler: "worktree_list".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["worktree".into()],
+            related: vec!["worktree.create".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "worktree.clean".into(),
+            cli_path: vec!["worktree".into(), "clean".into()],
+            slash: SlashSpec {
+                name: "clean".into(),
+                palette: None,
+                description: "Remove a worktree".into(),
+                long_description: None,
+                params: vec![
+                    ParamSpec::string("name", "Worktree name to remove").positional(0),
+                    ParamSpec::bool("force", "Force removal even with uncommitted changes")
+                        .short('f'),
+                ],
+                overlay: OverlayType::Confirm,
+                danger: DangerLevel::Destructive,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["worktree".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["worktree clean spike".into()],
+            },
+            handler: "worktree_clean".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["worktree".into()],
+            related: vec!["worktree.list".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "worktree.diff".into(),
+            cli_path: vec!["worktree".into(), "diff".into()],
+            slash: SlashSpec {
+                name: "diff".into(),
+                palette: None,
+                description: "Diff between worktrees".into(),
+                long_description: None,
+                params: vec![
+                    ParamSpec::string("from", "Source worktree/branch name").positional(0),
+                    ParamSpec::string_opt("to", "Target worktree/branch name", "").positional(1),
+                    ParamSpec::string_opt("paths", "Paths to limit the diff to", "").positional(2),
+                ],
+                overlay: OverlayType::None,
+                danger: DangerLevel::Safe,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["worktree".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["worktree diff main spike".into()],
+            },
+            handler: "worktree_diff".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["worktree".into()],
+            related: vec!["worktree.list".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "skill.add".into(),
+            cli_path: vec!["skill".into(), "add".into()],
+            slash: SlashSpec {
+                name: "add".into(),
+                palette: None,
+                description: "Add a new skill from a SKILL.md file".into(),
+                long_description: None,
+                params: vec![
+                    ParamSpec::string("path", "Path to the SKILL.md file to add").positional(0),
+                    ParamSpec::string_opt(
+                        "name",
+                        "Override the skill name (uses frontmatter name by default)",
+                        "",
+                    ),
+                ],
+                overlay: OverlayType::None,
+                danger: DangerLevel::LocalWrite,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["skill".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["skill add ./SKILL.md".into()],
+            },
+            handler: "skill_add".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["skill".into()],
+            related: vec!["skill.list".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "skill.list".into(),
+            cli_path: vec!["skill".into(), "list".into()],
+            slash: SlashSpec {
+                name: "list".into(),
+                palette: None,
+                description: "List all installed skills".into(),
+                long_description: None,
+                params: vec![
+                    ParamSpec::bool("detail", "Show detailed information for each skill")
+                        .short('d'),
+                    ParamSpec::string_opt("tag", "Filter by tag", ""),
+                ],
+                overlay: OverlayType::Picker,
+                danger: DangerLevel::Safe,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["skill".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["skill list".into()],
+            },
+            handler: "skill_list".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["skill".into()],
+            related: vec!["skill.add".into(), "skill.run".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "skill.remove".into(),
+            cli_path: vec!["skill".into(), "remove".into()],
+            slash: SlashSpec {
+                name: "remove".into(),
+                palette: None,
+                description: "Remove a skill by name".into(),
+                long_description: None,
+                params: vec![
+                    ParamSpec::string("name", "Name of the skill to remove").positional(0),
+                    ParamSpec::bool("force", "Force removal without confirmation").short('f'),
+                ],
+                overlay: OverlayType::Confirm,
+                danger: DangerLevel::Destructive,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["skill".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["skill remove deploy-check".into()],
+            },
+            handler: "skill_remove".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["skill".into()],
+            related: vec!["skill.list".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "skill.run".into(),
+            cli_path: vec!["skill".into(), "run".into()],
+            slash: SlashSpec {
+                name: "run".into(),
+                palette: None,
+                description: "Run a skill with arguments".into(),
+                long_description: None,
+                params: vec![
+                    ParamSpec::string("name", "Name of the skill to run").positional(0),
+                    ParamSpec::string_opt("args", "KEY=VALUE arguments for the skill", "")
+                        .positional(1),
+                ],
+                overlay: OverlayType::None,
+                danger: DangerLevel::LocalWrite,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["skill".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["skill run deploy-check ENV=staging".into()],
+            },
+            handler: "skill_run".into(),
+            json_output: true,
+            streaming: true,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["skill".into()],
+            related: vec!["skill.list".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "skill.edit".into(),
+            cli_path: vec!["skill".into(), "edit".into()],
+            slash: SlashSpec {
+                name: "edit".into(),
+                palette: None,
+                description: "Edit a skill's SKILL.md file".into(),
+                long_description: None,
+                params: vec![
+                    ParamSpec::string("name", "Name of the skill to edit").positional(0),
+                    ParamSpec::string_opt(
+                        "editor",
+                        "Editor to use (defaults to $EDITOR or vi)",
+                        "",
+                    )
+                    .short('e'),
+                ],
+                overlay: OverlayType::None,
+                danger: DangerLevel::LocalWrite,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["skill".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["skill edit deploy-check".into()],
+            },
+            handler: "skill_edit".into(),
+            json_output: false,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["skill".into()],
+            related: vec!["skill.add".into()],
+        })
+        .unwrap();
+
+    // ── Billing, provider config, feedback ────────────────────────
+
+    for (id, description, example) in [
+        (
+            "billing.invoices",
+            "Show billing history / invoices link",
+            "billing invoices",
+        ),
+        (
+            "billing.plan",
+            "Show current plan and quotas",
+            "billing plan",
+        ),
+        (
+            "billing.limits",
+            "Show rate limits and quotas",
+            "billing limits",
+        ),
+    ] {
+        builder = builder
+            .command(CommandSpec {
+                id: id.into(),
+                cli_path: vec!["billing".into(), id.rsplit('.').next().unwrap().into()],
+                slash: SlashSpec {
+                    name: id.rsplit('.').next().unwrap().into(),
+                    palette: None,
+                    description: description.into(),
+                    long_description: None,
+                    params: vec![],
+                    overlay: OverlayType::None,
+                    danger: DangerLevel::Safe,
+                    auth: AuthLevel::Cloud,
+                    profile: None,
+                    categories: vec!["billing".into()],
+                    aliases: vec![],
+                    hidden: false,
+                    deprecated: None,
+                    examples: vec![example.into()],
+                },
+                handler: id.replace('.', "_"),
+                json_output: true,
+                streaming: false,
+                timeout_secs: None,
+                min_version: None,
+                tags: vec!["billing".into()],
+                related: vec!["billing.plan".into(), "billing.limits".into()],
+            })
+            .unwrap();
+    }
+
+    builder = builder
+        .command(CommandSpec {
+            id: "connect.add".into(),
+            cli_path: vec!["connect".into(), "add".into()],
+            slash: SlashSpec {
+                name: "add".into(),
+                palette: None,
+                description: "Add or update a provider configuration".into(),
+                long_description: None,
+                params: vec![
+                    ParamSpec::string_opt(
+                        "provider",
+                        "Provider name (e.g. anthropic, openai, openrouter)",
+                        "",
+                    ),
+                    ParamSpec::string_opt("api-key", "API key for the provider", ""),
+                    ParamSpec::string_opt(
+                        "base-url",
+                        "Base URL for the provider (custom endpoints/gateways)",
+                        "",
+                    ),
+                    ParamSpec::string_opt("model", "Model ID to use with this provider", ""),
+                    ParamSpec::bool(
+                        "non-interactive",
+                        "Run in non-interactive mode (requires --provider and --api-key)",
+                    ),
+                ],
+                overlay: OverlayType::None,
+                danger: DangerLevel::LocalWrite,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["provider".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["connect add --provider anthropic --model claude-sonnet-4-5".into()],
+            },
+            handler: "connect_add".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["provider".into()],
+            related: vec!["connect.list".into(), "connect.test".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "connect.list".into(),
+            cli_path: vec!["connect".into(), "list".into()],
+            slash: SlashSpec {
+                name: "list".into(),
+                palette: None,
+                description: "List configured providers".into(),
+                long_description: None,
+                params: vec![],
+                overlay: OverlayType::None,
+                danger: DangerLevel::Safe,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["provider".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["connect list".into()],
+            },
+            handler: "connect_list".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["provider".into()],
+            related: vec!["connect.add".into(), "connect.remove".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "connect.remove".into(),
+            cli_path: vec!["connect".into(), "remove".into()],
+            slash: SlashSpec {
+                name: "remove".into(),
+                palette: None,
+                description: "Remove a provider configuration".into(),
+                long_description: None,
+                params: vec![ParamSpec::string("name", "Provider name to remove").positional(0)],
+                overlay: OverlayType::Confirm,
+                danger: DangerLevel::Destructive,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["provider".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["connect remove openrouter".into()],
+            },
+            handler: "connect_remove".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["provider".into()],
+            related: vec!["connect.list".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "connect.test".into(),
+            cli_path: vec!["connect".into(), "test".into()],
+            slash: SlashSpec {
+                name: "test".into(),
+                palette: None,
+                description: "Test connection to a provider".into(),
+                long_description: None,
+                params: vec![ParamSpec::string_opt(
+                    "provider",
+                    "Provider name to test (defaults to the configured provider)",
+                    "",
+                )],
+                overlay: OverlayType::None,
+                danger: DangerLevel::Safe,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["provider".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["connect test".into()],
+            },
+            handler: "connect_test".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: Some(120),
+            min_version: None,
+            tags: vec!["provider".into()],
+            related: vec!["connect.list".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "feedback.send".into(),
+            cli_path: vec!["feedback".into(), "send".into()],
+            slash: SlashSpec {
+                name: "send".into(),
+                palette: None,
+                description: "Send feedback to the memnoth team".into(),
+                long_description: None,
+                params: vec![
+                    ParamSpec::string("message", "Feedback message").positional(0),
+                    ParamSpec::string_opt("category", "Feedback category", "general"),
+                    ParamSpec::bool(
+                        "include-context",
+                        "Include session/vault context with feedback",
+                    ),
+                ],
+                overlay: OverlayType::None,
+                danger: DangerLevel::CloudWrite,
+                auth: AuthLevel::Cloud,
+                profile: None,
+                categories: vec!["product".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["feedback send \"the palette is hard to reach\"".into()],
+            },
+            handler: "feedback_send".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: Some(60),
+            min_version: None,
+            tags: vec!["product".into()],
+            related: vec![],
+        })
+        .unwrap();
+
+    // ── Automation (three levels deep) ────────────────────────────
+
+    builder = builder
+        .command(CommandSpec {
+            id: "automation.hooks.install".into(),
+            cli_path: vec!["automation".into(), "hooks".into(), "install".into()],
+            slash: SlashSpec {
+                name: "install".into(),
+                palette: None,
+                description: "Install pre-commit hook for kg index".into(),
+                long_description: None,
+                params: vec![ParamSpec::bool("force", "Overwrite existing hook")],
+                overlay: OverlayType::None,
+                danger: DangerLevel::LocalWrite,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["automation".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["automation hooks install".into()],
+            },
+            handler: "automation_hooks_install".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["automation".into()],
+            related: vec!["automation.action.init".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "automation.action.init".into(),
+            cli_path: vec!["automation".into(), "action".into(), "init".into()],
+            slash: SlashSpec {
+                name: "init".into(),
+                palette: None,
+                description: "Generate GitHub Actions workflow for CI".into(),
+                long_description: None,
+                params: vec![
+                    ParamSpec::string_opt("name", "Project name (defaults to directory name)", ""),
+                    ParamSpec::bool("kg-index", "Include kg index step in workflow"),
+                    ParamSpec::bool("sync", "Include cloud sync step in workflow"),
+                    ParamSpec::bool("force", "Overwrite existing workflow"),
+                ],
+                overlay: OverlayType::None,
+                danger: DangerLevel::LocalWrite,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["automation".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["automation action init --kg-index".into()],
+            },
+            handler: "automation_action_init".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["automation".into()],
+            related: vec!["automation.ci.index".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "automation.ci.detect".into(),
+            cli_path: vec!["automation".into(), "ci".into(), "detect".into()],
+            slash: SlashSpec {
+                name: "detect".into(),
+                palette: None,
+                description: "Detect CI environment".into(),
+                long_description: None,
+                params: vec![],
+                overlay: OverlayType::None,
+                danger: DangerLevel::Safe,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["automation".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["automation ci detect".into()],
+            },
+            handler: "automation_ci_detect".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["automation".into()],
+            related: vec!["automation.ci.index".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "automation.ci.index".into(),
+            cli_path: vec!["automation".into(), "ci".into(), "index".into()],
+            slash: SlashSpec {
+                name: "index".into(),
+                palette: None,
+                description: "Index code graph in CI".into(),
+                long_description: None,
+                params: vec![
+                    ParamSpec::bool("full", "Full re-index (ignore incremental)"),
+                    ParamSpec::bool("no-embed", "Skip embedding generation"),
+                    ParamSpec::bool("sync", "Also sync to cloud after indexing"),
+                    ParamSpec::bool("force", "Force run even outside CI"),
+                ],
+                overlay: OverlayType::None,
+                danger: DangerLevel::LocalWrite,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["automation".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["automation ci index --full".into()],
+            },
+            handler: "automation_ci_index".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["automation".into()],
+            related: vec!["automation.ci.detect".into(), "kg.index".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "watch".into(),
+            cli_path: vec!["watch".into()],
+            slash: SlashSpec {
+                name: "watch".into(),
+                palette: None,
+                description: "Watch files and reindex incrementally".into(),
+                long_description: None,
+                params: vec![
+                    // `--port` is an `Option<u16>`: absent means "no event
+                    // server", which is not the same as 0. A default would
+                    // have to invent a port, so this spec carries none.
+                    ParamSpec {
+                        name: "port".into(),
+                        description:
+                            "Port to serve file watch events (optional, for editor integration)"
+                                .into(),
+                        param_type: ParamType::Integer {
+                            min: Some(1),
+                            max: Some(65535),
+                        },
+                        required: false,
+                        default: None,
+                        short: None,
+                        long: None,
+                        env: None,
+                        positional: false,
+                        position: None,
+                        hidden: false,
+                        deprecated: None,
+                    },
+                    ParamSpec::integer_opt("debounce", "Debounce interval in milliseconds", 500),
+                    ParamSpec::bool("vault-changes", "Also watch vault files for changes"),
+                    ParamSpec::bool("once", "Run once and exit (no continuous watch)"),
+                ],
+                overlay: OverlayType::None,
+                danger: DangerLevel::LocalWrite,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["product".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["watch --once".into()],
+            },
+            handler: "watch".into(),
+            json_output: true,
+            streaming: true,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["product".into()],
+            related: vec!["serve".into(), "kg.index".into()],
+        })
+        .unwrap();
+
+    // ── Cloud admin surface: models, keys, projects, org, teams ───
+    //
+    // These are one row per subcommand and share every field except the four
+    // that differ, so they go through `cloud_spec`. Names, flags and defaults
+    // come from the verbs' own `-h` output; a spec here that accepted a flag
+    // the binary does not would be worse than no spec.
+    let cloud = vec![
+        cloud_spec(
+            "models.list",
+            &["models", "list"],
+            "List available models from the cloud",
+            vec![
+                ParamSpec::string_opt("provider", "Filter by provider name", ""),
+                ParamSpec::bool("connected", "Only show models from configured providers"),
+                ParamSpec::enum_opt(
+                    "format",
+                    "Output format: table, wide, json",
+                    vec!["table".into(), "wide".into(), "json".into()],
+                    "table",
+                ),
+                ParamSpec::string_opt(
+                    "compare",
+                    "Compare two models side-by-side (comma-separated IDs)",
+                    "",
+                ),
+            ],
+            DangerLevel::Safe,
+            AuthLevel::Cloud,
+            "models list --connected",
+            &["models.use"],
+        ),
+        cloud_spec(
+            "models.use",
+            &["models", "use"],
+            "Set default model (persisted to config)",
+            vec![ParamSpec::string("id", "Model ID to set as default").positional(0)],
+            DangerLevel::LocalWrite,
+            AuthLevel::None,
+            "models use claude-sonnet-4-5",
+            &["models.list"],
+        ),
+        cloud_spec(
+            "keys.list",
+            &["keys", "list"],
+            "List keys in this org, including revoked ones",
+            vec![],
+            DangerLevel::Safe,
+            AuthLevel::Cloud,
+            "keys list",
+            &["keys.create", "keys.revoke"],
+        ),
+        cloud_spec(
+            "keys.create",
+            &["keys", "create"],
+            "Mint a key. The secret is printed once and never stored",
+            vec![
+                ParamSpec::string_opt("name", "A label so the key can be recognised later", ""),
+                ParamSpec::enum_opt(
+                    "scope",
+                    "The key's authority; the server decides the default",
+                    vec!["read".into(), "write".into(), "admin".into()],
+                    "read",
+                ),
+                ParamSpec::string_opt(
+                    "project",
+                    "Bind the key to one project id instead of the whole org",
+                    "",
+                ),
+                integer_flag("expires-in-days", "Stop working after this many days"),
+            ],
+            DangerLevel::CloudWrite,
+            AuthLevel::Cloud,
+            "keys create --name ci --scope write",
+            &["keys.list", "keys.revoke"],
+        ),
+        cloud_spec(
+            "keys.revoke",
+            &["keys", "revoke"],
+            "Revoke one key by id",
+            vec![ParamSpec::string("id", "Key id, as `mn keys list` reports it").positional(0)],
+            DangerLevel::Destructive,
+            AuthLevel::Cloud,
+            "keys revoke key_123",
+            &["keys.list"],
+        ),
+        cloud_spec(
+            "keys.revoke-all",
+            &["keys", "revoke-all"],
+            "Revoke every live key in the org (owner or admin)",
+            vec![ParamSpec::bool(
+                "yes",
+                "Revoke every key without asking for confirmation",
+            )],
+            DangerLevel::Destructive,
+            AuthLevel::Cloud,
+            "keys revoke-all --yes",
+            &["keys.list"],
+        ),
+        cloud_spec(
+            "projects.list",
+            &["projects", "list"],
+            "List the projects this credential can see",
+            vec![],
+            DangerLevel::Safe,
+            AuthLevel::Cloud,
+            "projects list",
+            &["projects.create"],
+        ),
+        cloud_spec(
+            "projects.create",
+            &["projects", "create"],
+            "Create a project",
+            vec![
+                ParamSpec::string("name", "Project name").positional(0),
+                ParamSpec::enum_opt(
+                    "visibility",
+                    "Who can see it without a grant: org or restricted",
+                    vec!["org".into(), "restricted".into()],
+                    "org",
+                ),
+            ],
+            DangerLevel::CloudWrite,
+            AuthLevel::Cloud,
+            "projects create payments",
+            &["projects.list", "projects.rename"],
+        ),
+        cloud_spec(
+            "projects.rename",
+            &["projects", "rename"],
+            "Rename a project",
+            vec![
+                ParamSpec::string("id", "Project id").positional(0),
+                ParamSpec::string("name", "The new name").positional(1),
+            ],
+            DangerLevel::CloudWrite,
+            AuthLevel::Cloud,
+            "projects rename prj_123 payments-api",
+            &["projects.list"],
+        ),
+        cloud_spec(
+            "projects.delete",
+            &["projects", "delete"],
+            "Delete a project. Its sessions are kept, unassigned",
+            vec![
+                ParamSpec::string("id", "Project id").positional(0),
+                ParamSpec::bool("yes", "Delete without asking for confirmation"),
+            ],
+            DangerLevel::Destructive,
+            AuthLevel::Cloud,
+            "projects delete prj_123 --yes",
+            &["projects.list"],
+        ),
+        cloud_spec(
+            "projects.use",
+            &["projects", "use"],
+            "File every session from this machine under a project",
+            vec![
+                ParamSpec::string_opt("id", "Project id to file sessions under", "").positional(0),
+                ParamSpec::bool(
+                    "clear",
+                    "Stop filing sessions under a project; they report as unassigned again",
+                ),
+            ],
+            DangerLevel::LocalWrite,
+            AuthLevel::Cloud,
+            "projects use prj_123",
+            &["projects.unassigned"],
+        ),
+        cloud_spec(
+            "projects.unassigned",
+            &["projects", "unassigned"],
+            "List the sessions no project has claimed yet",
+            vec![],
+            DangerLevel::Safe,
+            AuthLevel::Cloud,
+            "projects unassigned",
+            &["projects.file"],
+        ),
+        cloud_spec(
+            "projects.file",
+            &["projects", "file"],
+            "File one already-recorded session under the current project",
+            vec![
+                ParamSpec::string(
+                    "session",
+                    "Session id, as `mn projects unassigned` prints it",
+                )
+                .positional(0),
+                ParamSpec::string_opt(
+                    "project",
+                    "File into this project instead of the one `mn projects use` stored",
+                    "",
+                ),
+            ],
+            DangerLevel::CloudWrite,
+            AuthLevel::Cloud,
+            "projects file sess_123",
+            &["projects.unassigned"],
+        ),
+        cloud_spec(
+            "org.show",
+            &["org", "show"],
+            "Show the org: name, plan, your role, and its counts",
+            vec![],
+            DangerLevel::Safe,
+            AuthLevel::Cloud,
+            "org show",
+            &["org.members"],
+        ),
+        cloud_spec(
+            "org.rename",
+            &["org", "rename"],
+            "Rename the org (owner or admin)",
+            vec![ParamSpec::string("name", "The new display name").positional(0)],
+            DangerLevel::CloudWrite,
+            AuthLevel::Cloud,
+            "org rename Astrivya",
+            &["org.show"],
+        ),
+        cloud_spec(
+            "org.members",
+            &["org", "members"],
+            "List the org's members",
+            vec![],
+            DangerLevel::Safe,
+            AuthLevel::Cloud,
+            "org members",
+            &["org.add-member"],
+        ),
+        cloud_spec(
+            "org.add-member",
+            &["org", "add-member"],
+            "Add an existing account to the org by email",
+            vec![
+                ParamSpec::string("email", "The address of an account that already exists")
+                    .positional(0),
+                ParamSpec::enum_opt(
+                    "role",
+                    "Role to grant: owner, admin or member",
+                    vec!["owner".into(), "admin".into(), "member".into()],
+                    "member",
+                ),
+            ],
+            DangerLevel::CloudWrite,
+            AuthLevel::Cloud,
+            "org add-member dev@example.com --role admin",
+            &["org.members"],
+        ),
+        cloud_spec(
+            "org.set-role",
+            &["org", "set-role"],
+            "Change a member's role: owner, admin or member",
+            vec![
+                ParamSpec::string(
+                    "user-id",
+                    "The member's user id, as `mn org members` reports it",
+                )
+                .positional(0),
+                ParamSpec::enum_param(
+                    "role",
+                    "The new role: owner, admin or member",
+                    vec!["owner".into(), "admin".into(), "member".into()],
+                )
+                .positional(1),
+            ],
+            DangerLevel::CloudWrite,
+            AuthLevel::Cloud,
+            "org set-role usr_1 admin",
+            &["org.members"],
+        ),
+        cloud_spec(
+            "org.remove-member",
+            &["org", "remove-member"],
+            "Remove a member, their project grants and their keys",
+            vec![ParamSpec::string("user-id", "The member's user id").positional(0)],
+            DangerLevel::Destructive,
+            AuthLevel::Cloud,
+            "org remove-member usr_1",
+            &["org.members"],
+        ),
+        cloud_spec(
+            "org.invites",
+            &["org", "invites"],
+            "List pending invites",
+            vec![],
+            DangerLevel::Safe,
+            AuthLevel::Cloud,
+            "org invites",
+            &["org.invite"],
+        ),
+        cloud_spec(
+            "org.invite",
+            &["org", "invite"],
+            "Invite someone by email; the link and code are shown once",
+            vec![
+                ParamSpec::string("email", "The invitee's email address").positional(0),
+                ParamSpec::enum_opt(
+                    "role",
+                    "Role the invite carries: admin or member",
+                    vec!["admin".into(), "member".into()],
+                    "member",
+                ),
+            ],
+            DangerLevel::CloudWrite,
+            AuthLevel::Cloud,
+            "org invite new@example.com",
+            &["org.invites"],
+        ),
+        cloud_spec(
+            "org.withdraw",
+            &["org", "withdraw"],
+            "Withdraw a pending invite",
+            vec![
+                ParamSpec::string("id", "Invite id, as `mn org invites` reports it").positional(0),
+            ],
+            DangerLevel::CloudWrite,
+            AuthLevel::Cloud,
+            "org withdraw inv_1",
+            &["org.invites"],
+        ),
+        cloud_spec(
+            "teams.join",
+            &["teams", "join"],
+            "Accept an invite code and join an organization",
+            vec![
+                ParamSpec::string(
+                    "code",
+                    "The invite code (XXXX-XXXX format, hyphen optional)",
+                )
+                .positional(0),
+            ],
+            DangerLevel::CloudWrite,
+            AuthLevel::Cloud,
+            "teams join ABCD-EFGH",
+            &["teams.list"],
+        ),
+        cloud_spec(
+            "teams.list",
+            &["teams", "list"],
+            "List the org's teams",
+            vec![],
+            DangerLevel::Safe,
+            AuthLevel::Cloud,
+            "teams list",
+            &["teams.create"],
+        ),
+        cloud_spec(
+            "teams.create",
+            &["teams", "create"],
+            "Create a team inside the org",
+            vec![ParamSpec::string("name", "Team name").positional(0)],
+            DangerLevel::CloudWrite,
+            AuthLevel::Cloud,
+            "teams create platform",
+            &["teams.list"],
+        ),
+        cloud_spec(
+            "teams.members",
+            &["teams", "members"],
+            "Show one team: its people and the projects it reaches",
+            vec![ParamSpec::string("id", "Team id, as `mn teams list` reports it").positional(0)],
+            DangerLevel::Safe,
+            AuthLevel::Cloud,
+            "teams members team_1",
+            &["teams.list"],
+        ),
+        cloud_spec(
+            "teams.claim",
+            &["teams", "claim"],
+            "Claim a task from the shared board",
+            vec![ParamSpec::string("task-id", "The task ID to claim").positional(0)],
+            DangerLevel::CloudWrite,
+            AuthLevel::Cloud,
+            "teams claim task_1",
+            &["teams.release", "teams.tasks"],
+        ),
+        cloud_spec(
+            "teams.release",
+            &["teams", "release"],
+            "Release a claimed task",
+            vec![ParamSpec::string("task-id", "The task ID to release").positional(0)],
+            DangerLevel::CloudWrite,
+            AuthLevel::Cloud,
+            "teams release task_1",
+            &["teams.claim"],
+        ),
+        cloud_spec(
+            "teams.tasks",
+            &["teams", "tasks"],
+            "List tasks on the shared board",
+            vec![
+                ParamSpec::bool("pending", "Show only pending tasks"),
+                ParamSpec::bool("in-progress", "Show only in-progress tasks"),
+                ParamSpec::bool("done", "Show only done tasks"),
+            ],
+            DangerLevel::Safe,
+            AuthLevel::Cloud,
+            "teams tasks --pending",
+            &["teams.claim"],
+        ),
+        cloud_spec(
+            "teams.inbox",
+            &["teams", "inbox"],
+            "Show messages in your inbox",
+            vec![
+                ParamSpec::bool("broadcast", "Include broadcast messages"),
+                ParamSpec::bool("ack", "Acknowledge all messages after reading"),
+            ],
+            DangerLevel::Safe,
+            AuthLevel::Cloud,
+            "teams inbox",
+            &["teams.handoff"],
+        ),
+        cloud_spec(
+            "teams.presence",
+            &["teams", "presence"],
+            "Show team presence (active sessions)",
+            vec![
+                ParamSpec::bool("stale", "Show stale sessions only"),
+                ParamSpec::bool("sync", "Sync presence with cloud"),
+            ],
+            DangerLevel::Safe,
+            AuthLevel::Cloud,
+            "teams presence",
+            &["teams.members"],
+        ),
+        cloud_spec(
+            "teams.lock",
+            &["teams", "lock"],
+            "Lock a file path for exclusive editing",
+            vec![
+                ParamSpec::string("path", "The file path glob to lock").positional(0),
+                ParamSpec::integer_opt("ttl", "TTL in seconds (default: 1800 = 30 min)", 1800),
+            ],
+            DangerLevel::CloudWrite,
+            AuthLevel::Cloud,
+            "teams lock src/pay/**",
+            &["teams.presence"],
+        ),
+        cloud_spec(
+            "teams.handoff",
+            &["teams", "handoff"],
+            "Hand off a task to another team member",
+            vec![
+                ParamSpec::string("task-id", "The task ID to hand off").positional(0),
+                ParamSpec::string("target", "The target session/user to hand off to").positional(1),
+                ParamSpec::string_opt("message", "Message to include with handoff", ""),
+            ],
+            DangerLevel::CloudWrite,
+            AuthLevel::Cloud,
+            "teams handoff task_1 sam",
+            &["teams.inbox"],
+        ),
+        cloud_spec(
+            "teams.review",
+            &["teams", "review"],
+            "Request a review for a task",
+            vec![
+                ParamSpec::string("task-id", "The task ID to request review for").positional(0),
+                ParamSpec::string("reviewer", "The reviewer session/user").positional(1),
+                ParamSpec::string_opt("message", "Review message", ""),
+            ],
+            DangerLevel::CloudWrite,
+            AuthLevel::Cloud,
+            "teams review task_1 sam",
+            &["teams.tasks"],
+        ),
+        cloud_spec(
+            "teams.audit",
+            &["teams", "audit"],
+            "Run an audit of team activity",
+            vec![
+                ParamSpec::string_opt("range", "Time range for audit (e.g. 24h, 7d, 30d)", "24h"),
+                ParamSpec::string_opt("session", "Filter by session ID", ""),
+            ],
+            DangerLevel::Safe,
+            AuthLevel::Cloud,
+            "teams audit --range 7d",
+            &["audit.show"],
+        ),
+    ];
+    builder = builder.commands(cloud).unwrap();
+
+    builder.apply_public_surface()
+}
+
+/// One cloud-admin row: every field the surface shares, in one place.
+///
+/// Eight parameters is the shape of the data — id, path, description, params,
+/// danger, auth, one example and its siblings — and a struct here would only
+/// move the same names to a call site. The table below reads better as rows.
+#[allow(clippy::too_many_arguments)]
+fn cloud_spec(
+    id: &str,
+    path: &[&str],
+    description: &str,
+    params: Vec<ParamSpec>,
+    danger: DangerLevel,
+    auth: AuthLevel,
+    example: &str,
+    related: &[&str],
+) -> CommandSpec {
+    let category = path.first().copied().unwrap_or("cloud").to_string();
+    CommandSpec {
+        id: id.into(),
+        cli_path: path.iter().map(|word| (*word).to_string()).collect(),
+        slash: SlashSpec {
+            name: path.last().copied().unwrap_or(id).to_string(),
+            palette: None,
+            description: description.into(),
+            long_description: None,
+            params,
+            overlay: if danger == DangerLevel::Destructive {
+                OverlayType::Confirm
+            } else {
+                OverlayType::None
+            },
+            danger,
+            auth,
+            profile: None,
+            categories: vec![category.clone()],
+            aliases: vec![],
+            hidden: false,
+            deprecated: None,
+            examples: vec![example.into()],
+        },
+        handler: id.replace('.', "_"),
+        json_output: true,
+        streaming: false,
+        timeout_secs: None,
+        min_version: None,
+        tags: vec![category],
+        related: related.iter().map(|word| (*word).to_string()).collect(),
+    }
+}
+
+/// A flag that takes a whole number and has no default: absent is not zero.
+fn integer_flag(name: &str, description: &str) -> ParamSpec {
+    ParamSpec {
+        name: name.into(),
+        description: description.into(),
+        param_type: ParamType::Integer {
+            min: Some(1),
+            max: None,
+        },
+        required: false,
+        default: None,
+        short: None,
+        long: None,
+        env: None,
+        positional: false,
+        position: None,
+        hidden: false,
+        deprecated: None,
+    }
 }
 
 /// Helper: optional integer parameter.

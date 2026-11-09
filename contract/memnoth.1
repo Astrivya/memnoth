@@ -1,0 +1,77 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH memnoth 1  "memnoth 0.1.0-beta.2" 
+.SH NAME
+memnoth \- Terminal agent, bi\-temporal vault, code graph and MCP server
+.SH SYNOPSIS
+\fBmemnoth\fR [\fB\-\-root\fR] [\fB\-\-vault\fR] [\fB\-\-namespace\fR] [\fB\-\-json\fR] [\fB\-\-quiet\fR] [\fB\-\-resume\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fIsubcommands\fR]
+.SH DESCRIPTION
+One binary for the whole local product.
+.PP
+With no verb it opens the session against the current directory: the transcript, the vault and what the graph knows, in one screen. Every verb answers as text for a person, or as JSON with \-\-json for a program — the same shapes the MCP tools return, so a script and an agent read one representation rather than two that can drift.
+.SH OPTIONS
+.TP
+\fB\-\-root\fR \fI<DIR>\fR
+Workspace to read. Defaults to the current directory
+.TP
+\fB\-\-vault\fR \fI<PATH>\fR
+Vault database. Defaults to `~/.memnoth/vault.db`
+.TP
+\fB\-\-namespace\fR \fI<NAME>\fR [default: default]
+Vault namespace (`default`, or a name that selects `vault\-<name>.db`)
+.TP
+\fB\-\-json\fR
+Machine\-readable output: one JSON envelope on stdout
+.TP
+\fB\-\-quiet\fR
+Suppress progress lines; keep the answer
+.TP
+\fB\-\-resume\fR \fI<NAME>\fR
+Resume the named session instead of starting a new one
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.TP
+\fB\-V\fR, \fB\-\-version\fR
+Print version
+.SH SUBCOMMANDS
+.TP
+memnoth\-session(1)
+Open the session (the default when no verb is given)
+.TP
+memnoth\-ask(1)
+Ask one question and print the answer; no TUI
+.TP
+memnoth\-vault(1)
+Create, read, and correct the temporal vault
+.TP
+memnoth\-kg(1)
+Build and query the code graph
+.TP
+memnoth\-mcp(1)
+Serve the graph over MCP, and register clients for it
+.TP
+memnoth\-auth(1)
+Authentication: login, logout, status, whoami
+.TP
+memnoth\-config(1)
+Configuration: get, set, list, edit
+.TP
+memnoth\-update(1)
+Check for and apply updates
+.TP
+memnoth\-completion(1)
+Shell completion: generate or install completions
+.TP
+memnoth\-doctor(1)
+Report what is wired: paths, versions, profiles, clients
+.TP
+memnoth\-version(1)
+Print the version, build target and commit
+.TP
+memnoth\-skills(1)
+Skill management: add, list, remove, run, edit
+.SH EXTRA
+Run `memnoth doctor` when something is not wired: it reports the vault, the graph, the MCP server binary it can find and the clients whose config it can read.
+.SH VERSION
+v0.1.0\-beta.2

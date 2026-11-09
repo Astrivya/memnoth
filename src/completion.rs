@@ -85,10 +85,62 @@ fn completion_filename(shell: Shell) -> &'static str {
     }
 }
 
+/// Where the completion for `shell` lives.
+///
+/// One definition, used by `completion install`, `doctor` and the completion
+/// check, so a file can never be reported installed in one place and missing in
+/// another.
+pub fn completion_path(shell: Shell) -> Result<PathBuf> {
+    Ok(completion_dir(shell)?.join(completion_filename(shell)))
+}
+
+/// Whether the completion for `shell` is already on disk.
+pub fn is_installed(shell: Shell) -> Result<bool> {
+    Ok(completion_path(shell)?.is_file())
+}
+
+/// Copy a file aside before it is overwritten, never clobbering an older backup.
+fn backup_if_exists(path: &std::path::Path) -> Result<Option<PathBuf>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let mut candidate = {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(".bak");
+        PathBuf::from(name)
+    };
+    let mut n = 1;
+    while candidate.exists() {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(format!(".bak.{n}"));
+        candidate = PathBuf::from(name);
+        n += 1;
+        if n > 99 {
+            anyhow::bail!("too many backups beside {}", path.display());
+        }
+    }
+    fs::copy(path, &candidate)
+        .with_context(|| format!("back up {} to {}", path.display(), candidate.display()))?;
+    Ok(Some(candidate))
+}
+
+/// The generated script, in memory.
+///
+/// One renderer feeds stdout, the installed file and `--check`; a check that
+/// generated a second, slightly different script would be worse than none.
+pub fn render_completions(shell: Shell) -> Result<Vec<u8>> {
+    let mut cmd = build_cli();
+    let mut out = Vec::new();
+    generate(shell, &mut cmd, "memnoth", &mut out);
+    Ok(out)
+}
+
 /// Print completions to stdout.
 pub fn print_completions(shell: Shell) -> Result<()> {
-    let mut cmd = build_cli();
-    generate(shell, &mut cmd, "memnoth", &mut io::stdout());
+    use std::io::Write;
+    io::stdout()
+        .write_all(&render_completions(shell)?)
+        .context("cannot write completions to stdout")?;
     Ok(())
 }
 
@@ -102,6 +154,9 @@ pub fn install_completions(shell: Shell) -> Result<PathBuf> {
         .with_context(|| format!("Failed to create completion directory: {}", dir.display()))?;
 
     let file_path = dir.join(completion_filename(shell));
+    if let Some(backup) = backup_if_exists(&file_path)? {
+        eprintln!("Backed up {} to {}", file_path.display(), backup.display());
+    }
     let mut file = fs::File::create(&file_path)
         .with_context(|| format!("Failed to create completion file: {}", file_path.display()))?;
 

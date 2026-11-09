@@ -7,7 +7,7 @@ use crate::cli::{
     AuthCommand, ConnectCommand, KgCommand, McpCommand, McpProfileCommand, SkillCommand,
     TeamsCommand, VaultCommand, Verb,
 };
-use crate::completion::{Shell, install, show_completions};
+use crate::completion::{Shell, install, render_completions};
 use crate::context::AppContext;
 use crate::output::{ErrorOutcome, ExitCode, Outcome};
 use crate::{
@@ -83,6 +83,7 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
             )
             .map_err(|e| ErrorOutcome::from_anyhow(&e)),
         },
+        Verb::Ask(args) => crate::ask::run(ctx, args),
         Verb::Doctor(args) => doctor::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
         Verb::Receipt(args) => receipt::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
         Verb::Audit(args) => audit_cmd::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
@@ -497,16 +498,22 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
                 profile,
                 url,
                 token,
+                local,
+                allow_writes,
                 dry_run,
             } => {
                 let profile_opt = mcp_profile(profile)?;
                 let report = mcp::add(
                     ctx,
-                    clients,
-                    profile_opt,
-                    url.as_deref(),
-                    token.as_deref(),
-                    *dry_run,
+                    mcp::AddOptions {
+                        client_names: clients,
+                        profile: profile_opt,
+                        url: url.as_deref(),
+                        token: token.as_deref(),
+                        local: *local,
+                        allow_writes: *allow_writes,
+                        dry_run: *dry_run,
+                    },
                 )
                 .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
                 let data = serde_json::to_value(&report)
@@ -661,6 +668,9 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
                 whoami(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e))
             }
         },
+        Verb::Sync(args) => {
+            crate::sync::run_sync_top(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e))
+        }
         Verb::Teams(args) => match &args.action {
             TeamsCommand::Join(args) => {
                 teams::join(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e))
@@ -716,6 +726,7 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
             crate::cli::ConfigCommand::Edit(args) => {
                 config_cmd::edit(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e))
             }
+            crate::cli::ConfigCommand::Explain(args) => config_cmd::explain(ctx, args),
         },
         Verb::Update(args) => update_cmd::execute_update(ctx, args),
         Verb::Install(args) => update_cmd::execute_install(ctx, args),
@@ -767,10 +778,81 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
                     "elvish" => Shell::Elvish,
                     _ => Shell::Bash,
                 };
-                show_completions(shell).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                let bytes = render_completions(shell).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+
+                if let Some(path) = &show_args.output {
+                    if show_args.check {
+                        let existing = match std::fs::read(path) {
+                            Ok(existing) => existing,
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                                return Err(ErrorOutcome::not_found(format!(
+                                    "{} does not exist, so there is nothing to compare",
+                                    path.display()
+                                ))
+                                .with_fix(format!(
+                                    "run `mn completion show --shell {} --output {}`",
+                                    show_args.shell,
+                                    path.display()
+                                )));
+                            }
+                            Err(error) => {
+                                return Err(ErrorOutcome::new(
+                                    ExitCode::Unexpected,
+                                    format!("cannot read {}: {error}", path.display()),
+                                ));
+                            }
+                        };
+                        if existing != bytes {
+                            return Err(ErrorOutcome::new(
+                                ExitCode::Unexpected,
+                                format!(
+                                    "{} is stale: the command surface and the completion disagree",
+                                    path.display()
+                                ),
+                            )
+                            .with_fix(format!(
+                                "run `mn completion show --shell {} --output {}` and review the diff",
+                                show_args.shell,
+                                path.display()
+                            )));
+                        }
+                        return Ok(Outcome::new(
+                            "completion.show",
+                            format!(
+                                "{} matches the generated {shell:?} completion",
+                                path.display()
+                            ),
+                            serde_json::json!({
+                                "output": path.display().to_string(),
+                                "shell": format!("{shell:?}"),
+                                "check": true,
+                                "matches": true,
+                            }),
+                        ));
+                    }
+
+                    std::fs::write(path, &bytes).map_err(|error| {
+                        ErrorOutcome::new(
+                            ExitCode::Unexpected,
+                            format!("cannot write {}: {error}", path.display()),
+                        )
+                    })?;
+                    return Ok(Outcome::new(
+                        "completion.show",
+                        format!("Wrote {shell:?} completions to {}", path.display()),
+                        serde_json::json!({
+                            "output": path.display().to_string(),
+                            "shell": format!("{shell:?}"),
+                        }),
+                    ));
+                }
+
+                // The script is the answer. Returning it as the outcome text
+                // keeps `emit` from appending a prose line to a file a shell
+                // will source.
                 Ok(Outcome::new(
                     "completion.show",
-                    format!("Wrote {shell:?} completions to stdout."),
+                    String::from_utf8_lossy(&bytes).into_owned(),
                     serde_json::json!({ "shell": format!("{shell:?}") }),
                 ))
             }
@@ -806,7 +888,7 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
         Verb::Projects(args) => projects::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
         Verb::Keys(args) => keys::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
         Verb::Org(args) => org::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
-        Verb::Skill(args) => {
+        Verb::Skills(args) => {
             // Which verb answered is part of the answer: `skill list --json`
             // and `skill run --json` both return a document, and a script has
             // to be able to tell them apart without re-reading the command.
@@ -887,6 +969,143 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
         Verb::Batch(args) => worktree::run_batch_cmd(ctx, args),
         Verb::Parallel(args) => worktree::run_parallel(ctx, args),
         Verb::Docs(args) => docs::run(ctx, args),
+        Verb::Version(args) => {
+            let data = serde_json::json!({
+                "version": env!("CARGO_PKG_VERSION"),
+                "target": format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
+                "commit": option_env!("MEMNOTH_BUILD_COMMIT").unwrap_or("unknown"),
+            });
+            let text = if args.json {
+                serde_json::to_string_pretty(&data)
+                    .map_err(|e| ErrorOutcome::from_anyhow(&anyhow::Error::from(e)))?
+            } else {
+                format!("memnoth {}", env!("CARGO_PKG_VERSION"))
+            };
+            Ok(Outcome::new("version", text, data))
+        }
+        Verb::Help(args) => {
+            use clap::CommandFactory;
+
+            let mut root = crate::cli::Cli::command();
+            let text = if args.all {
+                let registry = memnoth_command::build_p0_registry().build();
+                let mut rows: Vec<(String, bool, String)> = registry
+                    .all()
+                    .map(|spec| {
+                        (
+                            spec.cli_path.join(" "),
+                            spec.slash.hidden,
+                            spec.slash.description.clone(),
+                        )
+                    })
+                    .collect();
+                rows.sort_by(|a, b| a.0.cmp(&b.0));
+                let mut text = format!("Every verb this build accepts ({}):\n\n", registry.len());
+                for (path, hidden, description) in rows {
+                    text.push_str(&format!(
+                        "  memnoth {path}{}\n      {description}\n",
+                        if hidden { "  (hidden)" } else { "" }
+                    ));
+                }
+                text
+            } else if let Some(name) = &args.verb {
+                match root.find_subcommand_mut(name) {
+                    Some(command) => command.render_long_help().to_string(),
+                    None => {
+                        return Err(ErrorOutcome::not_found(format!(
+                            "no verb named {name:?}"
+                        ))
+                        .with_fix("run `memnoth help --all` to list every verb, including hidden ones"));
+                    }
+                }
+            } else {
+                root.render_help().to_string()
+            };
+            Ok(Outcome::new(
+                "help",
+                text,
+                serde_json::json!({ "all": args.all, "verb": args.verb }),
+            ))
+        }
+        Verb::Schema(args) => {
+            let registry = memnoth_command::build_p0_registry().build();
+            let commands: Vec<_> = registry.all().collect();
+            let document = serde_json::json!({
+                "schema": "memnoth.commands/1",
+                "command_count": registry.len(),
+                "commands": commands,
+            });
+            let text = serde_json::to_string_pretty(&document)
+                .map_err(|e| ErrorOutcome::from_anyhow(&anyhow::Error::from(e)))?;
+
+            if args.check {
+                let Some(path) = &args.output else {
+                    return Err(ErrorOutcome::usage(
+                        "`schema --check` needs --output: there is no file to compare against",
+                    )
+                    .with_fix("run `mn schema --check --output docs/cli/schema.json`"));
+                };
+                let existing = match std::fs::read_to_string(path) {
+                    Ok(existing) => existing,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        return Err(ErrorOutcome::not_found(format!(
+                            "{} does not exist, so there is nothing to compare",
+                            path.display()
+                        ))
+                        .with_fix(format!("run `mn schema --output {}`", path.display())));
+                    }
+                    Err(error) => {
+                        return Err(ErrorOutcome::new(
+                            ExitCode::Unexpected,
+                            format!("cannot read {}: {error}", path.display()),
+                        ));
+                    }
+                };
+                if existing != text {
+                    return Err(ErrorOutcome::new(
+                        ExitCode::Unexpected,
+                        format!(
+                            "{} is stale: the registry and the file disagree",
+                            path.display()
+                        ),
+                    )
+                    .with_fix(format!(
+                        "run `mn schema --output {}` and review the diff",
+                        path.display()
+                    )));
+                }
+                return Ok(Outcome::new(
+                    "schema",
+                    format!("{} matches the registry", path.display()),
+                    serde_json::json!({
+                        "output": path.display().to_string(),
+                        "check": true,
+                        "matches": true,
+                    }),
+                ));
+            }
+
+            match &args.output {
+                Some(path) => {
+                    std::fs::write(path, &text).map_err(|error| {
+                        ErrorOutcome::new(
+                            ExitCode::Unexpected,
+                            format!("cannot write {}: {error}", path.display()),
+                        )
+                    })?;
+                    Ok(Outcome::new(
+                        "schema",
+                        format!("Registry schema written to {}", path.display()),
+                        serde_json::json!({ "output": path.display().to_string() }),
+                    ))
+                }
+                None => Ok(Outcome::new(
+                    "schema",
+                    text,
+                    serde_json::json!({ "command_count": registry.len() }),
+                )),
+            }
+        }
         Verb::Watch(args) => watch::run(ctx, args),
         Verb::Serve(args) => {
             let runtime = tokio::runtime::Runtime::new()
