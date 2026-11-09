@@ -130,6 +130,7 @@ esac
 
 ARCHIVE_URL="$ARTIFACT_BASE/$ARTIFACT"
 CHECKSUM_URL="$ARCHIVE_URL.sha256"
+MANIFEST_URL="$ARTIFACT_BASE/manifest.json"
 WORK="${TMPDIR:-/tmp}/memnoth-install.$$"
 rm -rf "$WORK"
 mkdir -p "$WORK"
@@ -174,6 +175,29 @@ EOF
     exit 1
 }
 
+# The manifest is the release's own description of its targets. Prefer it over
+# the filename this script guessed: the two must agree, and when they do the
+# digest comes from the same document `mn update` reads.
+MANIFEST_ARTIFACT=""
+MANIFEST_SHA=""
+set +e
+fetch "$MANIFEST_URL" "$WORK/manifest.json"
+MANIFEST_STATUS=$?
+set -e
+if [ "$MANIFEST_STATUS" -eq 0 ] && [ -s "$WORK/manifest.json" ]; then
+    MANIFEST_LINE=$(grep -F "\"triple\": \"$TARGET\"" "$WORK/manifest.json" | head -n 1 || true)
+    if [ -n "$MANIFEST_LINE" ]; then
+        MANIFEST_ARTIFACT=$(printf '%s\n' "$MANIFEST_LINE" | sed -n 's/.*"filename": "\([^"]*\)".*/\1/p')
+        MANIFEST_SHA=$(printf '%s\n' "$MANIFEST_LINE" | sed -n 's/.*"sha256": "\([^"]*\)".*/\1/p')
+        if [ -n "$MANIFEST_ARTIFACT" ]; then
+            ARTIFACT="$MANIFEST_ARTIFACT"
+            ARCHIVE_URL="$ARTIFACT_BASE/$ARTIFACT"
+            CHECKSUM_URL="$ARCHIVE_URL.sha256"
+            printf 'memnoth: using manifest target %s\n' "$TARGET"
+        fi
+    fi
+fi
+
 printf 'memnoth: downloading %s\n' "$ARCHIVE_URL"
 set +e
 fetch "$ARCHIVE_URL" "$WORK/$ARTIFACT"
@@ -203,16 +227,22 @@ sha256_file() {
     fi
 }
 
-set +e
-fetch "$CHECKSUM_URL" "$WORK/$ARTIFACT.sha256"
-CHECKSUM_STATUS=$?
-set -e
+EXPECTED=""
+if [ -n "$MANIFEST_SHA" ]; then
+    EXPECTED=$(printf '%s' "$MANIFEST_SHA" | tr 'A-Z' 'a-z')
+    printf 'memnoth: checksum from manifest\n'
+else
+    set +e
+    fetch "$CHECKSUM_URL" "$WORK/$ARTIFACT.sha256"
+    CHECKSUM_STATUS=$?
+    set -e
 
-if [ "$CHECKSUM_STATUS" -ne 0 ] || [ ! -s "$WORK/$ARTIFACT.sha256" ]; then
-    fail "the release has no checksum at $CHECKSUM_URL; refusing to install an unverified binary"
+    if [ "$CHECKSUM_STATUS" -ne 0 ] || [ ! -s "$WORK/$ARTIFACT.sha256" ]; then
+        fail "the release has no checksum at $CHECKSUM_URL; refusing to install an unverified binary"
+    fi
+
+    EXPECTED=$(awk '{print $1}' "$WORK/$ARTIFACT.sha256" | tr 'A-Z' 'a-z')
 fi
-
-EXPECTED=$(awk '{print $1}' "$WORK/$ARTIFACT.sha256" | tr 'A-Z' 'a-z')
 ACTUAL=$(sha256_file "$WORK/$ARTIFACT" | tr 'A-Z' 'a-z') || fail "no sha256 tool found (sha256sum, shasum or openssl); refusing to install an unverified binary"
 
 if [ -z "$EXPECTED" ] || [ -z "$ACTUAL" ]; then

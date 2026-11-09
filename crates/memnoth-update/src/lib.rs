@@ -472,6 +472,21 @@ pub fn atomic_swap(current_exe: &Path, new_exe: &Path) -> Result<()> {
     }
 }
 
+/// Verify a downloaded binary and only then replace the installed one.
+///
+/// The installed binary is not moved until the new one has answered
+/// `--version`, so a broken, mislabelled, or non-executable artifact leaves the
+/// previous build exactly where it was. On Windows a post-swap rollback is not
+/// possible for the running executable, which is why the order matters.
+pub fn install_verified_binary(
+    current_exe: &Path,
+    new_exe: &Path,
+    expected_version: &str,
+) -> Result<()> {
+    verify_new_binary(new_exe, expected_version)?;
+    atomic_swap(current_exe, new_exe)
+}
+
 /// Detect if current installation is managed by a package manager.
 pub fn detect_managed_install() -> Option<String> {
     let current_exe = std::env::current_exe().ok()?;
@@ -733,14 +748,11 @@ pub fn apply_update(
     // Prove the artifact runs and is the version it claims, before it replaces
     // anything. On Windows there is no way back after the swap: the running
     // executable cannot be renamed.
-    if let Err(error) = verify_new_binary(&binary, &manifest.version) {
+    if let Err(error) = install_verified_binary(&current_exe, &binary, &manifest.version) {
         let _ = fs::remove_file(&archive);
         let _ = fs::remove_dir_all(&unpack_dir);
         return Err(error);
     }
-
-    // Atomic swap
-    atomic_swap(&current_exe, &binary)?;
     let _ = fs::remove_file(&archive);
     let _ = fs::remove_dir_all(&unpack_dir);
 
@@ -1155,6 +1167,24 @@ mod tests {
         let dir = tempdir().unwrap();
         let missing = dir.path().join("not-a-binary");
         assert!(verify_new_binary(&missing, "1.0.0").is_err());
+    }
+
+    #[test]
+    fn a_broken_binary_never_replaces_the_installed_one() {
+        let dir = tempdir().unwrap();
+        let installed = dir.path().join("memnoth-installed");
+        let broken = dir.path().join("memnoth-downloaded");
+        fs::write(&installed, b"previous build").unwrap();
+        fs::write(&broken, b"this is not an executable").unwrap();
+
+        let error = install_verified_binary(&installed, &broken, "1.0.0")
+            .expect_err("a download that does not run must not be installed");
+        assert!(!error.to_string().is_empty());
+
+        // The previous build is untouched, and the rejected download is still
+        // available for the caller to remove.
+        assert_eq!(fs::read(&installed).unwrap(), b"previous build");
+        assert!(broken.exists());
     }
 
     #[test]

@@ -72,6 +72,7 @@
 .EXAMPLE
     # Preview winget installation
     .\install.ps1 -UseWinget -Preview
+#>
 
 [CmdletBinding()]
 param(
@@ -265,6 +266,19 @@ Write-Log "Resolved version: $resolvedVersion"
 # Platform detection (Windows x64 only for now)
 $target = 'x86_64-pc-windows-msvc'
 $artifact = "memnoth-$target.zip"
+$expectedFromManifest = $null
+$manifestUrl = "$BaseUrl/$resolvedVersion/manifest.json"
+try {
+    $releaseManifest = Invoke-RestMethod -Uri $manifestUrl -UseBasicParsing -ErrorAction Stop
+    $manifestTarget = $releaseManifest.targets | Where-Object { $_.triple -eq $target } | Select-Object -First 1
+    if ($manifestTarget -and $manifestTarget.filename) {
+        $artifact = $manifestTarget.filename
+        if ($manifestTarget.sha256) { $expectedFromManifest = [string]$manifestTarget.sha256 }
+        Write-Log "Using manifest target $target ($artifact)"
+    }
+} catch {
+    Write-Log "No manifest at $manifestUrl; using sidecar checksum" 'Debug'
+}
 $archiveUrl = "$BaseUrl/$resolvedVersion/$artifact"
 $checksumUrl = "$archiveUrl.sha256"
 
@@ -284,12 +298,18 @@ try {
 
     # -------------------------------------------------------- verify checksum
     if (-not $NoVerify) {
-        $checksumPath = Join-Path $workDir "$artifact.sha256"
-        $csStatus = Invoke-Download -Url $checksumUrl -OutFile $checksumPath -Proxy $Proxy
-        if ($csStatus -ne 0 -or -not (Test-Path $checksumPath) -or (Get-Item $checksumPath).Length -eq 0) {
-            Fail "Checksum not found at $checksumUrl; refusing to install unverified binary. Use -NoVerify to skip."
+        $expected = $null
+        if ($expectedFromManifest) {
+            $expected = $expectedFromManifest.ToLowerInvariant()
+            Write-Log "Checksum from manifest"
+        } else {
+            $checksumPath = Join-Path $workDir "$artifact.sha256"
+            $csStatus = Invoke-Download -Url $checksumUrl -OutFile $checksumPath -Proxy $Proxy
+            if ($csStatus -ne 0 -or -not (Test-Path $checksumPath) -or (Get-Item $checksumPath).Length -eq 0) {
+                Fail "Checksum not found at $checksumUrl; refusing to install unverified binary. Use -NoVerify to skip."
+            }
+            $expected = (Get-Content $checksumPath -Raw).Split(' ')[0].ToLowerInvariant()
         }
-        $expected = (Get-Content $checksumPath -Raw).Split(' ')[0].ToLowerInvariant()
         if (-not $expected) { Fail "Could not read expected checksum" }
         $actual = Get-Sha256 $archivePath
         if ($expected -ne $actual) {
@@ -317,7 +337,7 @@ try {
     Write-Log "Installing to $installDir"
 
     if (-not $Preview) {
-        if (Test-Path $installDir -and -not $Force) {
+        if ((Test-Path $installDir) -and -not $Force) {
             $confirm = Read-Host "Directory $installDir exists. Overwrite? [y/N]"
             if ($confirm -notin 'y', 'Y') { Fail "Installation cancelled" }
         }
@@ -331,22 +351,24 @@ try {
     # -------------------------------------------------------- create mn alias
     if (-not $NoAlias) {
         $aliasPath = Join-Path $installDir 'mn.ps1'
-        $aliasContent = @"
-<#
-.SYNOPSIS
-    mn - memnoth short alias
-
-.DESCRIPTION
-    This is a generated alias script that forwards all arguments to memnoth.exe.
-    It is created by the memnoth installer and updated on each install.
-#>
-`$memnoth = Join-Path `$PSScriptRoot 'memnoth.exe'
-if (-not (Test-Path `$memnoth)) {
-    Write-Error "memnoth.exe not found at `$memnoth"
-    exit 1
-}
-& `$memnoth @args
-"@
+        $aliasLines = @(
+            '<#',
+            '.SYNOPSIS',
+            '    mn - memnoth short alias',
+            '',
+            '.DESCRIPTION',
+            '    This is a generated alias script that forwards all arguments to memnoth.exe.',
+            '    It is created by the memnoth installer and updated on each install.',
+            '#>',
+            '$memnoth = Join-Path $PSScriptRoot ''memnoth.exe''',
+            'if (-not (Test-Path $memnoth)) {',
+            '    Write-Error "memnoth.exe not found at $memnoth"',
+            '    exit 1',
+            '}',
+            '& $memnoth @args',
+            ''
+        )
+        $aliasContent = $aliasLines -join [Environment]::NewLine
         if (-not $Preview) {
             Set-Content -Path $aliasPath -Value $aliasContent -Encoding UTF8
             Write-Log "Created mn.ps1 alias"

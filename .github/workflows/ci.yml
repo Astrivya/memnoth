@@ -51,6 +51,28 @@ jobs:
       # review here instead of accumulating in a library nobody reads.
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
+  generated:
+    name: generated surfaces
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Every artifact is generated from the one command registry. A stale file
+      # fails here instead of shipping a reference, man page, schema or
+      # completion list that describes a different binary.
+      - name: Markdown reference
+        run: cargo run --quiet -- docs --output contract/command-surface.md --check
+      - name: Man page
+        run: cargo run --quiet -- docs --man --output contract/memnoth.1 --check
+      - name: Registry schema
+        run: cargo run --quiet -- schema --output contract/commands.json --check
+      - name: Bash completion
+        run: cargo run --quiet -- completion show --shell bash --output completions/memnoth.bash --check
+
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -64,6 +86,21 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+
+      # The Windows installer is shipped and run as PowerShell 5.1, but no
+      # Rust test executes it. Parse it on the Windows leg so an indentation or
+      # quoting mistake in a here-string fails here instead of at install time.
+      - name: Windows installer parses
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Join-Path $PWD 'scripts/install.ps1'), [ref]$null, [ref]$errors)
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Error $_.Message }
+            exit 1
+          }
 
       # The whole workspace, not just the binary: the vault, graph and session
       # behaviour the CLI is a thin shell over is tested in those crates.

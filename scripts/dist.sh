@@ -52,8 +52,8 @@ dist.sh — build the installer's dist bundle
   --force             replace a non-empty --out directory
   --help              this text
 
-The bundle is: install.sh, <version>/<artifact> (+ .sha256), latest/ (the same
-files), and SHA256SUMS. Serve it at the installer's base URL.
+The bundle is: install.sh, install.ps1, <version>/<artifact> (+ .sha256),
+latest/ (the same files), and SHA256SUMS. Serve it at the installer's base URL.
 USAGE
 }
 
@@ -97,6 +97,7 @@ done
 
 # ---------------------------------------------------------------- preflight
 [ -f "$SCRIPT_DIR/install.sh" ] || fail "install.sh is not next to $0; the bundle would have nothing for /install to fetch"
+[ -f "$SCRIPT_DIR/install.ps1" ] || fail "install.ps1 is not next to $0; the Windows one-liner would 404"
 [ -d "$FROM" ] || fail "$FROM is not a directory"
 
 if [ -z "$VERSION" ]; then
@@ -158,6 +159,7 @@ mkdir -p "$OUT/$VERSION" "$OUT/latest"
 
 cp "$SCRIPT_DIR/install.sh" "$OUT/install.sh"
 chmod 755 "$OUT/install.sh"
+cp "$SCRIPT_DIR/install.ps1" "$OUT/install.ps1"
 
 : > "$SUMS"
 : > "$REPORT"
