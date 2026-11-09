@@ -23,6 +23,7 @@
 //! the verb says so by name instead of returning an empty list that reads as
 //! "nothing found".
 
+pub mod ask;
 pub mod audit_cmd;
 pub mod auth;
 pub mod automation;
@@ -45,6 +46,7 @@ pub mod keys;
 pub mod kg;
 pub mod mcp;
 pub mod models;
+pub mod net_guard;
 pub mod open;
 pub mod org;
 pub mod output;
@@ -58,6 +60,8 @@ pub mod session_cmd;
 pub mod setup;
 pub mod stats;
 pub mod sync;
+pub mod sync_crypto;
+pub mod sync_engine;
 pub mod team;
 pub mod teams;
 pub mod telemetry;

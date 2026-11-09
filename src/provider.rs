@@ -433,6 +433,10 @@ impl Settings {
         let base_url = env_string("MEMNOTH_PROVIDER_BASE_URL")
             .or(section.base_url)
             .unwrap_or_else(|| kind.default_base_url().to_string());
+        // The endpoint receives the prompt. Refuse an unsafe shape or literal
+        // address here; a domain is re-checked immediately before a request.
+        crate::net_guard::validate_configured_url(&base_url)
+            .map_err(|error| anyhow::anyhow!("provider.base_url is not allowed: {error}"))?;
         let model = env_string("MEMNOTH_MODEL")
             .or(section.model)
             .unwrap_or_else(|| kind.default_model().to_string());
@@ -583,10 +587,14 @@ pub fn fetch_memnoth_models(base_url: &str, api_key: Option<&str>) -> Result<Vec
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(30))
         .user_agent(concat!("memnoth/", env!("CARGO_PKG_VERSION")))
+        .redirect(crate::net_guard::redirect_policy())
+        .no_proxy()
         .build()
         .context("cannot build the HTTP client")?;
 
     let url = format!("{}/models", base_url.trim_end_matches('/'));
+    crate::net_guard::validate_configured_url(&url)
+        .map_err(|error| anyhow::anyhow!("refusing the model request: {error}"))?;
     let mut request = client.get(&url);
     if let Some(key) = api_key
         && !key.trim().is_empty()
@@ -653,6 +661,8 @@ pub fn fetch_provider_models(
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(8))
         .user_agent(concat!("memnoth/", env!("CARGO_PKG_VERSION")))
+        .redirect(crate::net_guard::redirect_policy())
+        .no_proxy()
         .build()
         .context("cannot build the HTTP client")?;
 
@@ -663,6 +673,8 @@ pub fn fetch_provider_models(
         _ => format!("{}/models", base_url.trim_end_matches('/')),
     };
 
+    crate::net_guard::validate_configured_url(&url)
+        .map_err(|error| anyhow::anyhow!("refusing the model request: {error}"))?;
     let mut request = client.get(&url);
     if let Some(key) = api_key.filter(|key| !key.trim().is_empty()) {
         request = match kind {
@@ -1578,12 +1590,18 @@ pub fn run_turn(
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(TIMEOUT_SECONDS))
         .user_agent(concat!("memnoth/", env!("CARGO_PKG_VERSION")))
+        .redirect(crate::net_guard::redirect_policy())
+        .no_proxy()
         .build()
         .context("cannot build the HTTP client")?;
 
     let mut conversation = Conversation::new(settings, root, history, prompt);
     for round in 0..MAX_ROUNDS {
         let (body, url, headers) = conversation.request();
+        // The URL can carry a model-supplied endpoint; resolve it now, with the
+        // network about to be used, and refuse a private answer.
+        crate::net_guard::validate_before_request(&url)
+            .map_err(|error| anyhow::anyhow!("refusing the provider request: {error}"))?;
         let reply = post_json(
             &client,
             &url,
