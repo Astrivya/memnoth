@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::cli::{PrivacyArgs, PrivacyCommand, SyncArgs};
+use crate::cli::{PrivacyArgs, PrivacyCommand, SyncArgs, SyncTopArgs, SyncTopCommand};
 use crate::context::AppContext;
 use crate::output::Outcome;
 use memnoth_cloud_client::{CloudClient, HeartbeatRequest, SessionReport};
@@ -413,6 +413,136 @@ fn send_heartbeat(client: &CloudClient) -> Result<()> {
         })
         .map(|_| ())
         .map_err(|error| anyhow::anyhow!("{error}"))
+}
+
+/// Run the encrypted-sync surface. The dashboard session sync stays in
+/// [`run_sync`], which `mn cloud sync` still uses.
+pub fn run_sync_top(ctx: &AppContext, args: &SyncTopArgs) -> Result<Outcome> {
+    match &args.action {
+        SyncTopCommand::Status(_) => sync_status(ctx),
+        SyncTopCommand::Now(args) => sync_now(ctx, args.phrase.as_deref()),
+        SyncTopCommand::Pause(_) => sync_pause(ctx),
+        SyncTopCommand::Restore(args) => sync_restore(ctx, args.phrase.as_deref(), args.force),
+    }
+}
+
+fn sync_phrase(flag: Option<&str>) -> Result<String> {
+    flag.map(str::to_string)
+        .or_else(|| std::env::var("MEMNOTH_SYNC_PHRASE").ok())
+        .filter(|phrase| !phrase.trim().is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "a recovery phrase is required: pass --phrase or set MEMNOTH_SYNC_PHRASE"
+            )
+        })
+}
+
+fn sync_identity(ctx: &AppContext) -> Result<(CloudClient, String)> {
+    let client = get_cloud_client(ctx)?;
+    let org = client.org().context("failed to read the organization")?;
+    if org.slug.trim().is_empty() {
+        anyhow::bail!("this credential is not bound to an organization");
+    }
+    Ok((client, org.slug))
+}
+
+fn sync_status(ctx: &AppContext) -> Result<Outcome> {
+    let paths = crate::sync_engine::SyncPaths::from_context(ctx);
+    let state = crate::sync_engine::SyncState::load(&paths)?;
+    let enabled = ctx
+        .config()
+        .sync
+        .as_ref()
+        .and_then(|sync| sync.enabled)
+        .unwrap_or(false);
+    let text = format!(
+        "sync {}\n  generation  {}\n  manifest    {}\n  vault hash  {}\n  pending     {}",
+        if enabled { "enabled" } else { "paused" },
+        state.generation,
+        state.manifest_hash.as_deref().unwrap_or("none"),
+        state.vault_hash.as_deref().unwrap_or("none"),
+        if state.pending.is_some() { "yes" } else { "no" },
+    );
+    Ok(Outcome::new(
+        "sync.status",
+        text,
+        json!({
+            "enabled": enabled,
+            "org": state.org,
+            "device": state.device,
+            "generation": state.generation,
+            "manifest_hash": state.manifest_hash,
+            "vault_hash": state.vault_hash,
+            "object_hash": state.object_hash,
+            "pending": state.pending.is_some(),
+        }),
+    ))
+}
+
+fn sync_pause(ctx: &AppContext) -> Result<Outcome> {
+    let mut config = ctx.config_mut();
+    let mut sync = config.sync.take().unwrap_or_default();
+    sync.enabled = Some(false);
+    config.sync = Some(sync);
+    config.save(&ctx.config_path)?;
+    Ok(Outcome::new(
+        "sync.pause",
+        "sync paused; `mn sync now` still runs when asked".to_string(),
+        json!({ "enabled": false }),
+    ))
+}
+
+fn sync_now(ctx: &AppContext, phrase: Option<&str>) -> Result<Outcome> {
+    let phrase = sync_phrase(phrase)?;
+    let (client, org) = sync_identity(ctx)?;
+    let paths = crate::sync_engine::SyncPaths::from_context(ctx);
+    let device = crate::report::instance_id();
+
+    // Pull first: on a second machine the remote manifest is newer than the
+    // local cursor, and pushing first would offer an empty or stale vault. A
+    // local edit is merged additively, never overwritten without `restore --force`.
+    let pulled = crate::sync_engine::pull(&paths, &client, &phrase, &org, false)?;
+    let pushed = crate::sync_engine::push(&paths, &client, &phrase, &org, &device)?;
+
+    Ok(Outcome::new(
+        "sync.now",
+        format!(
+            "sync complete: pulled generation {} ({} merged, {} conflicts), pushed generation {}",
+            pulled.generation, pulled.merged_events, pulled.conflicts, pushed.generation
+        ),
+        json!({
+            "pulled": pulled.changed,
+            "merged_events": pulled.merged_events,
+            "conflicts": pulled.conflicts,
+            "pushed": pushed.changed,
+            "generation": pushed.generation,
+            "manifest_hash": pushed.manifest_hash,
+            "object_hash": pushed.object_hash,
+            "bytes_uploaded": pushed.bytes_uploaded,
+        }),
+    ))
+}
+
+fn sync_restore(ctx: &AppContext, phrase: Option<&str>, force: bool) -> Result<Outcome> {
+    let phrase = sync_phrase(phrase)?;
+    let (client, org) = sync_identity(ctx)?;
+    let paths = crate::sync_engine::SyncPaths::from_context(ctx);
+    let pulled = crate::sync_engine::pull(&paths, &client, &phrase, &org, force)?;
+    Ok(Outcome::new(
+        "sync.restore",
+        if pulled.changed {
+            format!("restored generation {} into the vault", pulled.generation)
+        } else {
+            "already at the newest generation".to_string()
+        },
+        json!({
+            "changed": pulled.changed,
+            "generation": pulled.generation,
+            "bytes_written": pulled.bytes_written,
+            "merged_events": pulled.merged_events,
+            "conflicts": pulled.conflicts,
+        }),
+    ))
 }
 
 /// Run sync command (enhanced)

@@ -1,0 +1,16 @@
+{
+  "phrase": "abandon ability able about above absent absorb abstract absurd abuse access accident",
+  "salt_hex": "000102030405060708090a0b0c0d0e0f",
+  "argon2": {
+    "algorithm": "Argon2id",
+    "version": 19,
+    "m_cost_kib": 19456,
+    "t_cost": 2,
+    "p_cost": 1,
+    "key_bytes": 32
+  },
+  "nonce_hex": "101112131415161718191a1b1c1d1e1f2021222324252627",
+  "plaintext_hex": "6d656d6e6f74682073796e6320766563746f72",
+  "envelope_hex": "101112131415161718191a1b1c1d1e1f20212223242526279aac732395e5e217469d2b281c018673f50f8e3604c2db985f634e268824a006ecca1f",
+  "envelope_blake3": "cc0b47aad425046bab1f078390641c339b87c7bfa48962ca460b2baedd697dfe"
+}
