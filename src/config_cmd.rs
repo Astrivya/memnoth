@@ -61,6 +61,11 @@ const CONFIG_KEYS: &[ConfigKey] = &[
         description: "Output cost per million tokens (USD)",
         value_type: "float",
     },
+    ConfigKey {
+        key: "ui.onboarded",
+        description: "Whether the first-run panel has been shown (set false to show it again)",
+        value_type: "boolean",
+    },
 ];
 
 /// Validate that a key is known.
@@ -75,6 +80,17 @@ fn validate_key(key: &str) -> Result<&ConfigKey> {
 /// Get the effective value of a config key, considering env vars and defaults.
 fn get_effective_value(config: &Config, key: &str) -> (Value, &'static str) {
     match key {
+        "ui.onboarded" => {
+            let stored = config.ui.as_ref().and_then(|ui| ui.onboarded);
+            (
+                json!(stored.unwrap_or(false)),
+                if stored.is_some() {
+                    "config"
+                } else {
+                    "default"
+                },
+            )
+        }
         "mcp_url" => (
             json!(
                 config
@@ -187,6 +203,97 @@ fn get_config_file_value(config: &Config, key: &str) -> Option<Value> {
     }
 }
 
+/// The environment variable that beats the file for this key, if any.
+fn env_var_for(key: &str) -> Option<&'static str> {
+    match key {
+        "vault" => Some("MEMNOTH_VAULT"),
+        _ => None,
+    }
+}
+
+/// Print a JSON value the way a person reads it.
+fn render(value: &Value) -> String {
+    match value {
+        Value::Null => "(unset)".to_string(),
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// `mn config explain <key>` — where the value comes from and what beats it.
+///
+/// `config get` answers "what is it". The question a user actually asks after
+/// that is "why is it that", usually because they edited the file and the
+/// program disagreed. So the answer names the layer that won, whether the file
+/// holds a different value, and the command that would change it.
+pub fn explain(
+    ctx: &crate::context::AppContext,
+    args: &crate::cli::ConfigExplainArgs,
+) -> Result<Outcome, crate::output::ErrorOutcome> {
+    use crate::output::ErrorOutcome;
+
+    let key_info = CONFIG_KEYS
+        .iter()
+        .find(|k| k.key == args.key)
+        .ok_or_else(|| {
+            ErrorOutcome::not_found(format!("{} is not a configuration key", args.key))
+                .with_fix("run `mn config list` to see the keys this build knows")
+        })?;
+
+    let (value, source) = get_effective_value(&ctx.config, key_info.key);
+    let file_value = get_config_file_value(&ctx.config, key_info.key);
+    let env_var = env_var_for(key_info.key);
+    let config_path = ctx.config_path.to_string_lossy().to_string();
+
+    // The interesting case: the file sets it, and something else won anyway.
+    let overridden = source == "env" && file_value.is_some();
+
+    let data = json!({
+        "key": key_info.key,
+        "value": value,
+        "source": source,
+        "type": key_info.value_type,
+        "description": key_info.description,
+        "config_path": config_path,
+        "config_file_value": file_value,
+        "env_var": env_var,
+        "overrides_file": overridden,
+    });
+
+    let text = if args.json {
+        serde_json::to_string_pretty(&data).context("serialize explanation")?
+    } else {
+        let mut lines = vec![
+            format!("key:    {}", key_info.key),
+            format!("value:  {}", render(&value)),
+            format!("source: {source}"),
+            format!("type:   {}", key_info.value_type),
+            format!("about:  {}", key_info.description),
+            format!("file:   {config_path}"),
+            format!(
+                "        {}",
+                match &file_value {
+                    Some(stored) => format!("holds {}", render(stored)),
+                    None => "does not set this key".to_string(),
+                }
+            ),
+        ];
+        if let Some(name) = env_var {
+            lines.push(format!("env:    {name}"));
+        }
+        if overridden {
+            lines.push(
+                "note:   the environment wins over the file here; unset it to use the file value"
+                    .to_string(),
+            );
+        }
+        lines.push(format!("change: mn config set {} <value>", key_info.key));
+        lines.join("\n")
+    };
+
+    Ok(Outcome::new("config.explain", text, data))
+}
+
 /// `mn config get <key>`
 pub fn get(ctx: &crate::context::AppContext, args: &crate::cli::ConfigGetArgs) -> Result<Outcome> {
     let key_info = validate_key(&args.key)?;
@@ -224,7 +331,12 @@ pub fn set(ctx: &crate::context::AppContext, args: &crate::cli::ConfigSetArgs) -
     let key_info = validate_key(&args.key)?;
 
     // Parse the value based on the expected type
-    let parsed_value: Value = if key_info.key.contains("max_tokens") {
+    let parsed_value: Value = if key_info.key == "ui.onboarded" {
+        json!(matches!(
+            args.value.to_ascii_lowercase().as_str(),
+            "true" | "yes" | "1" | "on"
+        ))
+    } else if key_info.key.contains("max_tokens") {
         json!(
             args.value
                 .parse::<u32>()
@@ -296,6 +408,14 @@ pub fn set(ctx: &crate::context::AppContext, args: &crate::cli::ConfigSetArgs) -
                 .parse::<f64>()
                 .context("output_per_mtok must be a number")?;
             config.provider.get_or_insert_default().output_per_mtok = Some(val);
+        }
+        "ui.onboarded" => {
+            let shown = match args.value.to_ascii_lowercase().as_str() {
+                "true" | "yes" | "1" | "on" => true,
+                "false" | "no" | "0" | "off" => false,
+                _ => bail!("ui.onboarded must be true or false"),
+            };
+            config.ui.get_or_insert_default().onboarded = Some(shown);
         }
         _ => bail!("unknown configuration key: {}", args.key),
     }

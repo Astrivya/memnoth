@@ -12,13 +12,11 @@
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
-use std::io::{self, Write};
 
-use memnoth_command::{CommandRegistry, build_p0_registry};
 use memnoth_context::Scope;
 
-use crate::auth::login;
-use crate::cli::{AuthLoginArgs, DoctorArgs};
+use crate::cli::DoctorArgs;
+use crate::completion;
 use crate::context::AppContext;
 use crate::kg;
 use crate::output::{Outcome, human_bytes};
@@ -32,6 +30,7 @@ pub fn report(ctx: &AppContext) -> Result<Outcome> {
     let profiles = profile_section();
     let instructions = instruction_section(ctx);
     let sandbox = sandbox_section(ctx);
+    let rows = checks(ctx, false)?;
 
     let mut text = String::new();
     text.push_str(&format!(
@@ -56,6 +55,8 @@ pub fn report(ctx: &AppContext) -> Result<Outcome> {
         text.push_str(section.text.trim_end());
         text.push_str("\n\n");
     }
+    text.push_str(&checks_text(&rows));
+    text.push('\n');
 
     let next = next_step(&vault, &graph, &provider, &mcp);
     if !next.is_empty() {
@@ -80,6 +81,7 @@ pub fn report(ctx: &AppContext) -> Result<Outcome> {
             "profiles": profiles.data,
             "instructions": instructions.data,
             "sandbox": sandbox.data,
+            "checks": checks_json(&rows),
         }),
     ))
 }
@@ -88,7 +90,7 @@ pub fn run(ctx: &AppContext, args: &DoctorArgs) -> Result<Outcome> {
     if let Some(path) = &args.bundle {
         bundle(ctx, path, ctx.json)
     } else if args.fix {
-        fix(ctx, args.yes)
+        fix(ctx, args)
     } else {
         report(ctx)
     }
@@ -195,137 +197,495 @@ fn bundle_document(ctx: &AppContext) -> Result<Value> {
 fn file_len(path: &std::path::Path) -> Option<u64> {
     std::fs::metadata(path).ok().map(|meta| meta.len())
 }
-/// Apply fixes for detected issues.
-fn fix(ctx: &AppContext, yes: bool) -> Result<Outcome> {
+/// One diagnostic check, in the shape `doctor --fix` needs: a state, and whether
+/// a fix exists for it.
+///
+/// `Ok` is a fact, not a pass mark: it says the thing was observed. `Warn` is
+/// something the tool can live without, `Fail` something it cannot answer past.
+/// Both carry `fixable`, because "broken" and "broken and unfixable here" need
+/// different next steps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckState {
+    Ok,
+    Warn,
+    Fail,
+}
+
+impl CheckState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Warn => "warn",
+            Self::Fail => "fail",
+        }
+    }
+}
+
+/// One line of diagnosis, and whether `--fix` can act on it.
+#[derive(Debug, Clone)]
+pub struct Check {
+    pub name: &'static str,
+    pub state: CheckState,
+    pub fixable: bool,
+    pub detail: String,
+}
+
+fn observed(name: &'static str, detail: impl Into<String>) -> Check {
+    Check {
+        name,
+        state: CheckState::Ok,
+        fixable: false,
+        detail: detail.into(),
+    }
+}
+
+fn warn(name: &'static str, detail: impl Into<String>, fixable: bool) -> Check {
+    Check {
+        name,
+        state: CheckState::Warn,
+        fixable,
+        detail: detail.into(),
+    }
+}
+
+fn failed(name: &'static str, detail: impl Into<String>) -> Check {
+    Check {
+        name,
+        state: CheckState::Fail,
+        fixable: false,
+        detail: detail.into(),
+    }
+}
+
+/// Every check, without applying anything.
+///
+/// `auth` is passed rather than always computed: a plain `mn doctor` reads files
+/// and paths, and a diagnostic should not touch the keyring to print a path.
+fn checks(ctx: &AppContext, auth: bool) -> Result<Vec<Check>> {
+    let mut rows = Vec::new();
+
+    rows.push(if ctx.home.is_dir() {
+        observed("state", ctx.home.display().to_string())
+    } else {
+        warn("state", format!("{} missing", ctx.home.display()), true)
+    });
+
+    rows.push(if ctx.config_path.is_file() {
+        observed("config", ctx.config_path.display().to_string())
+    } else {
+        warn(
+            "config",
+            "no config file; built-in defaults are in use".to_string(),
+            true,
+        )
+    });
+
+    rows.push(if ctx.vault_path.is_file() {
+        observed("vault", "initialised".to_string())
+    } else {
+        warn(
+            "vault",
+            format!("{} missing", ctx.vault_path.display()),
+            true,
+        )
+    });
+
+    rows.push(match crate::kg::status(ctx) {
+        Ok(status) if status.indexed => observed(
+            "graph",
+            format!("{} files · {} symbols", status.files, status.symbols),
+        ),
+        Ok(_) => warn("graph", "not indexed", true),
+        Err(error) => failed("graph", format!("{error:#}")),
+    });
+
+    let shell = completion::detect_shell();
+    rows.push(path_check(ctx, shell));
+    rows.push(completions_check(shell)?);
+
+    if auth {
+        rows.push(
+            match crate::auth::auth_status(ctx, &crate::cli::AuthStatusArgs {}) {
+                Ok(status) if status.data["authenticated"].as_bool().unwrap_or(false) => {
+                    observed("auth", "signed in".to_string())
+                }
+                Ok(_) => warn(
+                    "auth",
+                    "not signed in — run `mn auth login` (never run automatically by --fix)"
+                        .to_string(),
+                    false,
+                ),
+                Err(error) => warn("auth", format!("{error}"), false),
+            },
+        );
+    }
+
+    Ok(rows)
+}
+
+fn path_check(ctx: &AppContext, shell: Option<completion::Shell>) -> Check {
+    let dir = ctx.exe_path.parent().unwrap_or(std::path::Path::new(""));
+    if in_path(&ctx.exe_path) {
+        return observed("path", format!("{} is on PATH", dir.display()));
+    }
+    if let Some(rc) = shell_rc(shell)
+        && let Ok(content) = std::fs::read_to_string(&rc)
+        && content.contains(&dir.display().to_string())
+    {
+        return warn(
+            "path",
+            format!(
+                "the PATH line is already in {}; open a new shell",
+                rc.display()
+            ),
+            false,
+        );
+    }
+    warn(
+        "path",
+        format!(
+            "{} is not on PATH — `mn doctor --fix` prints the line, `--fix --yes` adds it",
+            dir.display()
+        ),
+        true,
+    )
+}
+
+fn completions_check(shell: Option<completion::Shell>) -> Result<Check> {
+    match shell {
+        Some(shell) => {
+            let path = completion::completion_path(shell)?;
+            if completion::is_installed(shell)? {
+                Ok(observed("completions", path.display().to_string()))
+            } else {
+                Ok(warn(
+                    "completions",
+                    format!("none for {shell:?} — `mn completion install`"),
+                    true,
+                ))
+            }
+        }
+        None => Ok(warn(
+            "completions",
+            "shell not detected; set SHELL or run `mn completion install --shell <shell>`"
+                .to_string(),
+            false,
+        )),
+    }
+}
+
+/// The automatic fixes, one per fixable check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fix {
+    StateDir,
+    Config,
+    Vault,
+    Graph,
+    PathLine,
+    Completions,
+}
+
+impl Fix {
+    fn from_check(name: &str) -> Option<Self> {
+        Some(match name {
+            "state" => Self::StateDir,
+            "config" => Self::Config,
+            "vault" => Self::Vault,
+            "graph" => Self::Graph,
+            "path" => Self::PathLine,
+            "completions" => Self::Completions,
+            _ => return None,
+        })
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::StateDir => "create state directory",
+            Self::Config => "write default config",
+            Self::Vault => "initialise vault",
+            Self::Graph => "build code graph",
+            Self::PathLine => "PATH line",
+            Self::Completions => "install shell completions",
+        }
+    }
+}
+
+/// What one fix did. `Manual` is not a failure: a line the user has to paste is
+/// the correct outcome for a dotfile we must not edit.
+enum Applied {
+    Done(String),
+    Manual(String),
+    Skipped(String),
+}
+
+/// `doctor --fix`: run each fix once, then re-check and say what changed.
+///
+/// Three properties matter more than the list of fixes. It is **idempotent** — a
+/// second run finds nothing to do. It is **dry-runnable** — `--dry-run` prints
+/// the plan and touches nothing. And it **never edits a dotfile or signs anyone
+/// in** without `--yes`: a diagnostic that rewrites `.zshrc` or opens a browser
+/// has become a side effect.
+fn fix(ctx: &AppContext, args: &DoctorArgs) -> Result<Outcome> {
+    let before = checks(ctx, true)?;
+    let plan: Vec<Fix> = before
+        .iter()
+        .filter(|check| check.fixable && check.state != CheckState::Ok)
+        .filter_map(|check| Fix::from_check(check.name))
+        .collect();
+
     let mut fixed = Vec::new();
+    let mut manual = Vec::new();
     let mut skipped = Vec::new();
 
-    // 1. Fix vault: initialize if missing
-    if !ctx.vault_path.exists() {
-        if confirm_or_yes("Initialize vault?", yes) {
-            // `vault::init` speaks the CLI's error envelope; this function speaks
-            // `anyhow`, so the message is carried across without losing it.
-            vault::init(ctx).map_err(|error| anyhow::anyhow!("{}", error.message))?;
-            fixed.push("vault init".to_string());
-        } else {
-            skipped.push("vault init (skipped)".to_string());
+    if !args.dry_run {
+        for fix in &plan {
+            match apply(ctx, *fix, args.yes)? {
+                Applied::Done(detail) => fixed.push(format!("{}: {detail}", fix.label())),
+                Applied::Manual(line) => manual.push(format!("{}: {line}", fix.label())),
+                Applied::Skipped(reason) => skipped.push(format!("{}: {reason}", fix.label())),
+            }
         }
     }
 
-    // 2. Fix code graph: index if not indexed
-    let graph_status = kg::status(ctx)?;
-    if !graph_status.indexed {
-        if confirm_or_yes("Index code graph?", yes) {
-            let mut progress = |msg: &str| eprintln!("{msg}");
-            kg::index(ctx, false, false, &mut progress)?;
-            fixed.push("kg index".to_string());
-        } else {
-            skipped.push("kg index (skipped)".to_string());
-        }
-    }
+    let after = checks(ctx, true)?;
 
-    // 3. Fix config: write defaults if missing
-    if !ctx.config_path.exists() {
-        if confirm_or_yes("Write default config?", yes) {
-            let config = crate::context::Config::default();
-            config.save(&ctx.config_path)?;
-            fixed.push("config write defaults".to_string());
-        } else {
-            skipped.push("config write defaults (skipped)".to_string());
-        }
-    }
-
-    // 4. Fix PATH: add memnoth to shell rc if not in PATH
-    if !in_path(&ctx.exe_path) {
-        if confirm_or_yes("Add memnoth to shell PATH?", yes) {
-            add_to_shell_rc(&ctx.exe_path)?;
-            fixed.push("PATH add to shell rc".to_string());
-        } else {
-            skipped.push("PATH add to shell rc (skipped)".to_string());
-        }
-    }
-
-    // 5. Fix completions: install shell completions if not installed
-    if !completions_installed()? {
-        if confirm_or_yes("Install shell completions?", yes) {
-            install_completions()?;
-            fixed.push("completions install".to_string());
-        } else {
-            skipped.push("completions install (skipped)".to_string());
-        }
-    }
-
-    // 6. Fix auth: prompt login if no token
-    let auth_status = crate::auth::auth_status(ctx, &crate::cli::AuthStatusArgs {})?;
-    if !auth_status.data["authenticated"].as_bool().unwrap_or(false) {
-        if confirm_or_yes("Run auth login?", yes) {
-            let login_args = AuthLoginArgs {
-                no_browser: false,
-                with_token: None,
-                client_name: None,
-                tier: None,
-            };
-            login(ctx, &login_args)?;
-            fixed.push("auth login".to_string());
-        } else {
-            skipped.push("auth login (skipped)".to_string());
-        }
-    }
-
-    // Build report
-    let mut text = String::new();
-    text.push_str(&format!(
+    let mut text = format!(
         "memnoth {} · {} · {}\n\n",
         env!("CARGO_PKG_VERSION"),
         std::env::consts::OS,
         std::env::consts::ARCH
-    ));
+    );
 
-    if !fixed.is_empty() {
-        text.push_str("fixed\n");
-        for item in &fixed {
-            text.push_str(&format!("  ✓ {item}\n"));
+    if args.dry_run {
+        text.push_str("would fix (nothing applied)\n");
+        if plan.is_empty() {
+            text.push_str("  none\n");
+        }
+        for fix in &plan {
+            text.push_str(&format!("  → {}\n", fix.label()));
         }
         text.push('\n');
-    }
-
-    if !skipped.is_empty() {
-        text.push_str("skipped\n");
-        for item in &skipped {
-            text.push_str(&format!("  ○ {item}\n"));
+    } else {
+        if !fixed.is_empty() {
+            text.push_str("fixed\n");
+            for item in &fixed {
+                text.push_str(&format!("  ✓ {item}\n"));
+            }
+            text.push('\n');
         }
-        text.push('\n');
+        if !manual.is_empty() {
+            text.push_str("needs you\n");
+            for item in &manual {
+                text.push_str(&format!("  ! {item}\n"));
+            }
+            text.push('\n');
+        }
+        if !skipped.is_empty() {
+            text.push_str("skipped\n");
+            for item in &skipped {
+                text.push_str(&format!("  ○ {item}\n"));
+            }
+            text.push('\n');
+        }
     }
 
-    if fixed.is_empty() && skipped.is_empty() {
-        text.push_str("nothing to fix — all checks passed\n");
+    text.push_str(&checks_text(&after));
+    text.push('\n');
+    if after.iter().all(|check| check.state == CheckState::Ok) {
+        text.push_str("nothing to fix — every check is green\n");
+    } else if !args.dry_run && fixed.is_empty() && manual.is_empty() {
+        text.push_str("no automatic fixes left; the warn and fail lines above need you\n");
     }
 
-    // Also run the regular report to show current state
     let report = report(ctx)?;
-    text.push_str(&report.text);
-
     Ok(Outcome::new(
         "doctor.fix",
         text,
         json!({
+            "dry_run": args.dry_run,
+            "would_fix": plan.iter().map(|fix| fix.label()).collect::<Vec<_>>(),
             "fixed": fixed,
+            "manual": manual,
             "skipped": skipped,
+            "checks": checks_json(&after),
+            "before": checks_json(&before),
             "report": report.data,
         }),
     ))
 }
 
-/// Confirm an action, or auto-confirm if `yes` is true.
-fn confirm_or_yes(prompt: &str, yes: bool) -> bool {
-    if yes {
-        return true;
+fn apply(ctx: &AppContext, fix: Fix, yes: bool) -> Result<Applied> {
+    match fix {
+        Fix::StateDir => {
+            std::fs::create_dir_all(&ctx.home)
+                .with_context(|| format!("create {}", ctx.home.display()))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&ctx.home, std::fs::Permissions::from_mode(0o700));
+            }
+            Ok(Applied::Done(format!("created {}", ctx.home.display())))
+        }
+        Fix::Config => {
+            std::fs::create_dir_all(&ctx.home)?;
+            if let Some(backup) = backup_if_exists(&ctx.config_path)? {
+                eprintln!(
+                    "Backed up {} to {}",
+                    ctx.config_path.display(),
+                    backup.display()
+                );
+            }
+            crate::context::Config::default().save(&ctx.config_path)?;
+            Ok(Applied::Done(format!(
+                "wrote {}",
+                ctx.config_path.display()
+            )))
+        }
+        Fix::Vault => {
+            // `vault::init` speaks the CLI's error envelope; this function speaks
+            // `anyhow`, so the message is carried across without losing it.
+            vault::init(ctx).map_err(|error| anyhow::anyhow!("{}", error.message))?;
+            Ok(Applied::Done(format!(
+                "initialised {}",
+                ctx.vault_path.display()
+            )))
+        }
+        Fix::Graph => {
+            let mut progress = |msg: &str| eprintln!("{msg}");
+            kg::index(ctx, false, false, &mut progress)?;
+            Ok(Applied::Done("indexed the code graph".to_string()))
+        }
+        Fix::PathLine => path_fix(ctx, yes),
+        Fix::Completions => match completion::detect_shell() {
+            Some(shell) => {
+                let path = completion::install_completions(shell)?;
+                Ok(Applied::Done(format!("wrote {}", path.display())))
+            }
+            None => Ok(Applied::Skipped("no shell detected".to_string())),
+        },
     }
-    print!("{prompt} [y/N] ");
-    io::stdout().flush().unwrap();
-    let mut input = String::new();
-    io::stdin().read_line(&mut input).unwrap();
-    matches!(input.trim().to_lowercase().as_str(), "y" | "yes")
+}
+
+/// The PATH fix prints by default and edits only when told twice: `--fix --yes`.
+///
+/// A diagnostic that silently appends to a shell rc has changed the user's
+/// environment in a way `mn doctor` cannot undo, so the default is a line they
+/// paste and the opt-in is explicit.
+fn path_fix(ctx: &AppContext, yes: bool) -> Result<Applied> {
+    let dir = ctx.exe_path.parent().unwrap_or(std::path::Path::new(""));
+    let line = path_line(dir, completion::detect_shell());
+    #[cfg(unix)]
+    {
+        if yes && let Some(rc) = shell_rc(completion::detect_shell()) {
+            if let Some(backup) = backup_if_exists(&rc)? {
+                eprintln!("Backed up {} to {}", rc.display(), backup.display());
+            }
+            let mut content = std::fs::read_to_string(&rc).unwrap_or_default();
+            if !content.is_empty() && !content.ends_with('\n') {
+                content.push('\n');
+            }
+            content.push_str(&line);
+            content.push('\n');
+            std::fs::write(&rc, content).with_context(|| format!("write {}", rc.display()))?;
+            return Ok(Applied::Done(format!("added to {}", rc.display())));
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = yes;
+    }
+    Ok(Applied::Manual(line))
+}
+
+fn path_line(dir: &std::path::Path, shell: Option<completion::Shell>) -> String {
+    #[cfg(windows)]
+    {
+        let _ = shell;
+        format!("setx PATH \"{};%PATH%\"", dir.display())
+    }
+    #[cfg(not(windows))]
+    {
+        match shell {
+            Some(completion::Shell::Fish) => format!("fish_add_path {}", dir.display()),
+            _ => format!("export PATH=\"{}:$PATH\"", dir.display()),
+        }
+    }
+}
+
+fn shell_rc(shell: Option<completion::Shell>) -> Option<std::path::PathBuf> {
+    #[cfg(windows)]
+    {
+        let _ = shell;
+        None
+    }
+    #[cfg(not(windows))]
+    {
+        let home = dirs::home_dir()?;
+        Some(match shell {
+            Some(completion::Shell::Fish) => home.join(".config/fish/config.fish"),
+            Some(completion::Shell::Zsh) => home.join(".zshrc"),
+            _ => home.join(".bashrc"),
+        })
+    }
+}
+
+/// Copy a file aside before it is overwritten, never clobbering an older backup.
+fn backup_if_exists(path: &std::path::Path) -> Result<Option<std::path::PathBuf>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let mut candidate = {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(".bak");
+        std::path::PathBuf::from(name)
+    };
+    let mut n = 1;
+    while candidate.exists() {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(format!(".bak.{n}"));
+        candidate = std::path::PathBuf::from(name);
+        n += 1;
+        if n > 99 {
+            anyhow::bail!("too many backups beside {}", path.display());
+        }
+    }
+    std::fs::copy(path, &candidate)
+        .with_context(|| format!("back up {} to {}", path.display(), candidate.display()))?;
+    Ok(Some(candidate))
+}
+
+fn checks_json(rows: &[Check]) -> Value {
+    Value::Array(
+        rows.iter()
+            .map(|check| {
+                json!({
+                    "name": check.name,
+                    "state": check.state.as_str(),
+                    "fixable": check.fixable,
+                    "detail": check.detail,
+                })
+            })
+            .collect(),
+    )
+}
+
+fn checks_text(rows: &[Check]) -> String {
+    let mut text = String::from("checks\n");
+    for check in rows {
+        let suffix = if check.fixable && check.state != CheckState::Ok {
+            " — fixable"
+        } else {
+            ""
+        };
+        text.push_str(&format!(
+            "  {:<4} {:<12} {}{}\n",
+            check.state.as_str(),
+            check.name,
+            check.detail,
+            suffix
+        ));
+    }
+    text
 }
 
 /// Check if a path is in PATH environment variable.
@@ -338,107 +698,6 @@ fn in_path(exe_path: &std::path::Path) -> bool {
         }
     }
     false
-}
-
-/// Add memnoth to shell rc file.
-fn add_to_shell_rc(exe_path: &std::path::Path) -> Result<()> {
-    let home = dirs::home_dir().context("cannot find home directory")?;
-    let bin_dir = exe_path.parent().context("cannot get exe parent")?;
-    let export_line = format!("\nexport PATH=\"{}:$PATH\"\n", bin_dir.display());
-
-    // Try to detect shell
-    let shell = std::env::var("SHELL").unwrap_or_default();
-    let rc_file = if shell.contains("fish") {
-        home.join(".config/fish/config.fish")
-    } else if shell.contains("zsh") {
-        home.join(".zshrc")
-    } else {
-        home.join(".bashrc")
-    };
-
-    // Read existing content
-    let mut content = std::fs::read_to_string(&rc_file).unwrap_or_default();
-
-    // Check if already present
-    if content.contains(&format!("{}", bin_dir.display())) {
-        return Ok(());
-    }
-
-    content.push_str(&export_line);
-    std::fs::write(&rc_file, content)
-        .with_context(|| format!("cannot write {}", rc_file.display()))?;
-
-    eprintln!("Added to {}: {}", rc_file.display(), export_line.trim());
-    Ok(())
-}
-
-/// Check if completions are already installed.
-fn completions_installed() -> Result<bool> {
-    let home = dirs::home_dir().context("cannot find home directory")?;
-    let shell = std::env::var("SHELL").unwrap_or_default();
-
-    let completion_files = if shell.contains("fish") {
-        vec![home.join(".config/fish/completions/memnoth.fish")]
-    } else if shell.contains("zsh") {
-        vec![home.join(".zsh/completions/_memnoth"), home.join(".zshrc")]
-    } else {
-        vec![home.join(".bash_completion"), home.join(".bashrc")]
-    };
-
-    for file in &completion_files {
-        if file.exists()
-            && let Ok(content) = std::fs::read_to_string(file)
-            && content.contains("memnoth")
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-/// Install shell completions.
-fn install_completions() -> Result<()> {
-    let home = dirs::home_dir().context("cannot find home directory")?;
-    let shell = std::env::var("SHELL").unwrap_or_default();
-
-    let registry: CommandRegistry = build_p0_registry().build();
-    let shell_type = if shell.contains("fish") {
-        clap_complete::Shell::Fish
-    } else if shell.contains("zsh") {
-        clap_complete::Shell::Zsh
-    } else {
-        clap_complete::Shell::Bash
-    };
-
-    let completion = registry.build_completions(shell_type);
-
-    let (dir, filename) = if shell.contains("fish") {
-        let dir = home.join(".config/fish/completions");
-        std::fs::create_dir_all(&dir)?;
-        (dir, "memnoth.fish".to_string())
-    } else if shell.contains("zsh") {
-        let dir = home.join(".zsh/completions");
-        std::fs::create_dir_all(&dir)?;
-        (dir, "_memnoth".to_string())
-    } else {
-        // Bash: we just append to .bashrc
-        let rc_file = home.join(".bashrc");
-        let mut content = std::fs::read_to_string(&rc_file).unwrap_or_default();
-        if !content.contains("memnoth") {
-            content.push_str(&format!("\n# memnoth completions\n{}\n", completion));
-            std::fs::write(&rc_file, content)
-                .with_context(|| format!("cannot write {}", rc_file.display()))?;
-            eprintln!("Added completions to {}", rc_file.display());
-        }
-        return Ok(());
-    };
-
-    let file_path = dir.join(filename);
-    std::fs::write(&file_path, completion)
-        .with_context(|| format!("cannot write {}", file_path.display()))?;
-    eprintln!("Installed completions to {}", file_path.display());
-
-    Ok(())
 }
 
 struct Section {
@@ -820,5 +1079,19 @@ mod bundle_tests {
             !body.contains(&ctx.home.display().to_string()),
             "the state path leaked: {body}"
         );
+    }
+
+    #[test]
+    fn backups_never_overwrite_an_earlier_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("config.toml");
+        std::fs::write(&file, "first").unwrap();
+        let first = backup_if_exists(&file).unwrap().expect("a backup");
+        std::fs::write(&file, "second").unwrap();
+        let second = backup_if_exists(&file).unwrap().expect("a backup");
+        assert_ne!(first, second);
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "first");
+        assert_eq!(std::fs::read_to_string(&second).unwrap(), "second");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "second");
     }
 }
