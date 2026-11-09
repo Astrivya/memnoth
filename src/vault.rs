@@ -2106,8 +2106,9 @@ pub fn backup(
     compress: bool,
 ) -> Result<Outcome, ErrorOutcome> {
     if compress {
+        // Parsed and advertised, but not compiled in: exit 8, not a usage error.
         return Err(
-            ErrorOutcome::usage("gzip compression is not available in this build")
+            ErrorOutcome::unsupported("gzip compression is not available in this build")
                 .with_fix("re-run without --compress; the backup is a byte-for-byte SQLite copy"),
         );
     }
@@ -2189,7 +2190,10 @@ pub fn restore(
         )));
     }
     if ctx.vault_path.exists() && !force {
-        return Err(ErrorOutcome::usage(format!(
+        // The request is valid; the state is in the way. Retrying the same
+        // command against the same vault will keep failing, while `--force`
+        // (after checking the backup) succeeds, which is exit 6, not 2.
+        return Err(ErrorOutcome::conflict(format!(
             "a vault already exists at {}; restore would replace it",
             ctx.vault_path.display()
         ))

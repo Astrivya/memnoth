@@ -72,24 +72,51 @@ impl Outcome {
 /// The default is **no**: an unread question (a pipe, a closed stdin) must not
 /// revoke a key or delete a project. `--yes` exists for scripts, where there is
 /// nobody to ask and the caller has already decided.
-pub fn confirm(prompt: &str, yes: bool) -> bool {
+pub fn confirm(prompt: &str, yes: bool) -> std::result::Result<bool, ErrorOutcome> {
+    use std::io::IsTerminal;
+
+    confirm_with(prompt, yes, std::io::stdin().is_terminal(), || {
+        let mut input = String::new();
+        match std::io::stdin().read_line(&mut input) {
+            Ok(0) | Err(_) => None,
+            Ok(_) => Some(input),
+        }
+    })
+}
+
+/// The decision behind [`confirm`], with the terminal and the read injected so
+/// the no-TTY refusal is testable without touching the harness's stdin.
+fn confirm_with(
+    prompt: &str,
+    yes: bool,
+    interactive: bool,
+    read: impl FnOnce() -> Option<String>,
+) -> std::result::Result<bool, ErrorOutcome> {
     use std::io::Write;
 
     if yes {
-        return true;
+        return Ok(true);
+    }
+    if !interactive {
+        return Err(
+            ErrorOutcome::usage("cannot ask for confirmation: stdin is not a terminal")
+                .with_fix("re-run with --yes if this is deliberate"),
+        );
     }
     print!("{prompt} [y/N] ");
     let _ = std::io::stdout().flush();
-    let mut input = String::new();
-    if std::io::stdin().read_line(&mut input).is_err() {
-        return false;
-    }
-    matches!(input.trim().to_lowercase().as_str(), "y" | "yes")
+    Ok(read().is_some_and(|input| matches!(input.trim().to_lowercase().as_str(), "y" | "yes")))
 }
 
 /// Exit codes for the CLI.
 /// 0 = ok, 1 = unexpected, 2 = usage/bad flag, 3 = auth/credits,
-/// 4 = not found, 5 = transient/network, 130 = cancelled.
+/// 4 = not found, 5 = transient/network, 6 = conflict, 7 = rate-limited,
+/// 8 = this build lacks the feature, 130 = cancelled.
+///
+/// 8 is separate from 2 on purpose: a script that gets 2 passed the wrong flag
+/// and should retry differently, while 8 means the request was well-formed and
+/// this binary simply cannot do it — the same input works on a build that has
+/// the feature compiled in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ExitCode {
@@ -99,6 +126,9 @@ pub enum ExitCode {
     Auth = 3,
     NotFound = 4,
     Transient = 5,
+    Conflict = 6,
+    RateLimited = 7,
+    Unsupported = 8,
     Cancelled = 130,
 }
 
@@ -117,6 +147,9 @@ impl ExitCode {
             3 => ExitCode::Auth,
             4 => ExitCode::NotFound,
             5 => ExitCode::Transient,
+            6 => ExitCode::Conflict,
+            7 => ExitCode::RateLimited,
+            8 => ExitCode::Unsupported,
             130 => ExitCode::Cancelled,
             _ => ExitCode::Unexpected,
         }
@@ -244,6 +277,26 @@ impl ErrorOutcome {
         Self::new(ExitCode::Transient, message)
     }
 
+    /// Create a "this build lacks it" error (exit 8).
+    ///
+    /// For a verb or flag that is advertised and parsed but not compiled into
+    /// this binary. Never use it for a bad argument: that is [`Self::usage`].
+    pub fn unsupported(message: impl Into<String>) -> Self {
+        Self::new(ExitCode::Unsupported, message)
+    }
+
+    /// Create a conflict error (exit 6): the request is valid but the state
+    /// moved underneath it, so re-reading and retrying can succeed.
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self::new(ExitCode::Conflict, message)
+    }
+
+    /// Create a rate-limited error (exit 7): retry after a delay, not
+    /// immediately. Distinct from 5, where the network itself failed.
+    pub fn rate_limited(message: impl Into<String>) -> Self {
+        Self::new(ExitCode::RateLimited, message)
+    }
+
     /// Create cancelled error.
     pub fn cancelled(message: impl Into<String>) -> Self {
         Self::new(ExitCode::Cancelled, message)
@@ -294,6 +347,9 @@ impl From<u8> for ExitCode {
             3 => ExitCode::Auth,
             4 => ExitCode::NotFound,
             5 => ExitCode::Transient,
+            6 => ExitCode::Conflict,
+            7 => ExitCode::RateLimited,
+            8 => ExitCode::Unsupported,
             130 => ExitCode::Cancelled,
             _ => ExitCode::Unexpected,
         }
@@ -311,7 +367,7 @@ pub fn emit(json: bool, outcome: &Outcome) {
     if json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&envelope(outcome.command, &outcome.data))
+            serde_json::to_string_pretty(&success_envelope(outcome.command, &outcome.data))
                 .unwrap_or_else(|_| "{\"ok\":false,\"error\":\"unserializable answer\"}".into())
         );
     } else {
@@ -355,7 +411,9 @@ pub fn emit_error(json: bool, error: &ErrorOutcome) {
             "fix": error.fix,
             "docs": error.docs_url,
         });
-        println!(
+        // A machine reads stdout; a failure belongs on stderr, as the exit-code
+        // contract documents, so `cmd > answer.json` never swallows an error.
+        eprintln!(
             "{}",
             serde_json::to_string_pretty(&body).unwrap_or_else(|_| "{}".into())
         );
@@ -373,7 +431,9 @@ pub fn emit_error(json: bool, error: &ErrorOutcome) {
     }
 }
 
-fn envelope(command: &'static str, data: &Value) -> Value {
+/// The success envelope, in one place so `ask --output-format json` and
+/// `--json` cannot describe success differently.
+pub fn success_envelope(command: &'static str, data: &Value) -> Value {
     json!({
         "ok": true,
         "command": command,
@@ -539,7 +599,50 @@ mod tests {
         assert_eq!(ExitCode::Auth as u8, 3);
         assert_eq!(ExitCode::NotFound as u8, 4);
         assert_eq!(ExitCode::Transient as u8, 5);
+        assert_eq!(ExitCode::Conflict as u8, 6);
+        assert_eq!(ExitCode::RateLimited as u8, 7);
+        assert_eq!(ExitCode::Unsupported as u8, 8);
         assert_eq!(ExitCode::Cancelled as u8, 130);
+        // The inverse mapping must agree, or a script that reads a code back
+        // gets a different answer than the one that produced it.
+        for code in [
+            ExitCode::Ok,
+            ExitCode::Unexpected,
+            ExitCode::Usage,
+            ExitCode::Auth,
+            ExitCode::NotFound,
+            ExitCode::Transient,
+            ExitCode::Conflict,
+            ExitCode::RateLimited,
+            ExitCode::Unsupported,
+            ExitCode::Cancelled,
+        ] {
+            assert_eq!(ExitCode::from_u8(code as u8), code);
+        }
+    }
+
+    #[test]
+    fn confirmation_without_a_terminal_refuses_instead_of_waiting() {
+        let error = confirm_with("Delete everything?", false, false, || {
+            panic!("a non-interactive confirmation must not read stdin")
+        })
+        .unwrap_err();
+        assert_eq!(error.code, 2);
+        assert!(
+            error
+                .fix
+                .as_deref()
+                .is_some_and(|fix| fix.contains("--yes")),
+            "the refusal must name the flag that resolves it"
+        );
+
+        // `--yes` is the script's answer and does not read anything either.
+        assert!(
+            confirm_with("Delete everything?", true, false, || {
+                panic!("an explicit yes must not read stdin")
+            })
+            .unwrap()
+        );
     }
 
     #[test]

@@ -44,6 +44,18 @@ impl Run {
     fn text(&self) -> String {
         String::from_utf8_lossy(&self.output.stdout).into_owned()
     }
+
+    /// Failures are one JSON envelope on stderr; stdout stays empty so a
+    /// caller redirecting the answer never captures an error in its place.
+    fn error_json(&self) -> Value {
+        serde_json::from_slice(&self.output.stderr).unwrap_or_else(|error| {
+            panic!(
+                "stderr was not JSON ({error}):\n{}\nstdout:\n{}",
+                String::from_utf8_lossy(&self.output.stderr),
+                String::from_utf8_lossy(&self.output.stdout)
+            )
+        })
+    }
 }
 
 impl Sandbox {
@@ -199,7 +211,7 @@ fn an_unknown_time_is_a_usage_failure_with_a_json_error() {
     sandbox.init();
     let run = sandbox.run(&["vault", "asof", "--at", "last tuesday", "--json"]);
     assert_eq!(run.code(), 1);
-    let value = run.json();
+    let value = run.error_json();
     assert_eq!(value["ok"], false);
     assert!(
         value["error"].as_str().unwrap().contains("RFC 3339"),
