@@ -125,3 +125,35 @@ pub trait Authenticator: Send + Sync {
 
 /// Convenience: shared, cheap-to-clone handle.
 pub type SharedAuthenticator = Arc<dyn Authenticator>;
+/* ---------------------------------- team scopes ----------------------------- */
+
+/// The scope required to read or write a team's shared vault via MCP.
+///
+/// Every MCP tool call that touches the shared vault namespace must present
+/// a token carrying this scope, otherwise the call is refused fail-closed.
+pub const TEAM_VAULT_SCOPE: &str = "mcp:team-vault";
+
+/// Check that an authenticated context carries the team vault scope.
+///
+/// Returns `Ok(())` when the scope is present, or an `AuthError` naming the
+/// missing scope when it is not. MCP handlers call this before any shared
+/// vault read or write.
+pub fn require_team_vault_scope(ctx: &AuthContext) -> Result<(), AuthError> {
+    if ctx.scopes.iter().any(|s| s == TEAM_VAULT_SCOPE) {
+        Ok(())
+    } else {
+        Err(AuthError::new(
+            ctx.mode,
+            crate::error::AuthFailureReason::Internal,
+        ))
+    }
+}
+
+/// Whether an auth context may access the team vault.
+///
+/// A context without a user id (static bearer) may not access the team
+/// vault: team vault access requires a per-user identity so attribution
+/// is never ambiguous.
+pub fn may_access_team_vault(ctx: &AuthContext) -> bool {
+    ctx.is_per_user() && ctx.scopes.iter().any(|s| s == TEAM_VAULT_SCOPE)
+}
