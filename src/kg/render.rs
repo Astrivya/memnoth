@@ -136,6 +136,12 @@ pub fn render_impact(report: &ImpactReport) -> String {
         ));
     }
 
+    if let Some(risk) = &report.risk {
+        out.push_str(&format!("  risk  {:.1} · {}\n", risk.score, risk.explain()));
+    } else {
+        out.push_str("  risk  unknown: git cannot count churn for these files\n");
+    }
+
     if report.definitions.is_empty() {
         out.push_str("\n  (no declaration row: only mentions were found)\n");
     } else {

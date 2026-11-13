@@ -1,18 +1,20 @@
 //! Worktree commands: create, list, clean, diff, batch, parallel.
 
 use anyhow::{Context, Result};
+use memnoth_worktree::hygiene::prune_by_run;
 use memnoth_worktree::{
     BatchConfig, BatchResult, ParallelConfig, ParallelResult, WorktreeInfo, clean_worktree,
     create_worktree, diff_worktrees, execute_batch, execute_parallel, list_worktrees,
+    prune_worktrees,
 };
 use std::path::{Path, PathBuf};
 
 use crate::cli::{
     BatchCmdArgs, ParallelArgs, WorktreeArgs, WorktreeCleanArgs, WorktreeCommand,
-    WorktreeCreateArgs, WorktreeDiffArgs, WorktreeListArgs,
+    WorktreeCreateArgs, WorktreeDiffArgs, WorktreeFinishArgs, WorktreeListArgs, WorktreePruneArgs,
 };
 use crate::context::AppContext;
-use crate::output::{ErrorOutcome, Outcome};
+use crate::output::{ErrorOutcome, Outcome, confirm};
 
 /// Execute worktree commands.
 pub fn run(ctx: &AppContext, args: &WorktreeArgs) -> Result<Outcome, ErrorOutcome> {
@@ -22,7 +24,9 @@ pub fn run(ctx: &AppContext, args: &WorktreeArgs) -> Result<Outcome, ErrorOutcom
         WorktreeCommand::Create(create_args) => run_create(&repo_root, create_args, ctx.json),
         WorktreeCommand::List(list_args) => run_list(&repo_root, list_args, ctx.json),
         WorktreeCommand::Clean(clean_args) => run_clean(&repo_root, clean_args, ctx.json),
+        WorktreeCommand::Prune(prune_args) => run_prune(&repo_root, prune_args, ctx.json),
         WorktreeCommand::Diff(diff_args) => run_diff(&repo_root, diff_args, ctx.json),
+        WorktreeCommand::Finish(finish_args) => run_finish(&repo_root, finish_args, ctx.json),
     }
 }
 
@@ -148,6 +152,29 @@ fn run_clean(
     args: &WorktreeCleanArgs,
     _json: bool,
 ) -> Result<Outcome, ErrorOutcome> {
+    if args.dry_run {
+        return Ok(Outcome::new(
+            "worktree.clean",
+            format!(
+                "Would remove worktree '{}'. Nothing was removed.\n",
+                args.name
+            ),
+            serde_json::json!({"name": args.name, "dry_run": true}),
+        ));
+    }
+
+    let question = format!(
+        "Remove worktree '{}'? This deletes the worktree directory.",
+        args.name
+    );
+    if !confirm(&question, args.yes)? {
+        return Ok(Outcome::new(
+            "worktree.clean",
+            "Cancelled; nothing was removed.\n",
+            serde_json::json!({"name": args.name, "cancelled": true}),
+        ));
+    }
+
     clean_worktree(repo_root, &args.name, args.force).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
 
     let text = format!("Removed worktree '{}'", args.name);
@@ -177,6 +204,128 @@ fn run_diff(
         "diff": diff
     });
     Ok(Outcome::new("worktree.diff", diff.clone(), data))
+}
+
+fn run_prune(
+    repo_root: &Path,
+    args: &WorktreePruneArgs,
+    _json: bool,
+) -> Result<Outcome, ErrorOutcome> {
+    if args.dry_run {
+        let known = list_worktrees(repo_root).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+        let mut stale = Vec::new();
+        let worktrees_dir = repo_root.join(".memnoth").join("worktrees");
+        if worktrees_dir.exists() {
+            for entry in
+                std::fs::read_dir(&worktrees_dir).context("failed to read worktrees directory")?
+            {
+                let entry = entry.context("failed to read worktree directory entry")?;
+                let path = entry.path();
+                if path.is_dir() && !known.iter().any(|w| w.path == path) {
+                    stale.push(
+                        path.file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        let text = if stale.is_empty() {
+            "No stale worktrees to prune.\n".to_string()
+        } else {
+            format!(
+                "Would prune {} stale worktree(s): {}\n",
+                stale.len(),
+                stale.join(", ")
+            )
+        };
+        let data = serde_json::json!({"stale": stale, "dry_run": true});
+        return Ok(Outcome::new("worktree.prune", text, data));
+    }
+
+    let report = prune_worktrees(repo_root).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+
+    let text = if report.removed.is_empty() && report.errors.is_empty() {
+        "No stale worktrees to prune.\n".to_string()
+    } else {
+        let mut lines: Vec<String> = Vec::new();
+        for name in &report.removed {
+            lines.push(format!("  pruned {}", name));
+        }
+        for err in &report.errors {
+            lines.push(format!("  error: {}", err));
+        }
+        format!("Pruned stale worktrees:\n{}\n", lines.join("\n"))
+    };
+
+    let data = serde_json::json!({
+        "removed": report.removed,
+        "kept": report.kept,
+        "errors": report.errors,
+    });
+    Ok(Outcome::new("worktree.prune", text, data))
+}
+
+/// What `--outcome` means, in one place.
+///
+/// Two spellings each, because the plan, the docs and the run records have used
+/// both; an unknown word is an error rather than a silent `failed`, since
+/// guessing wrong either leaks a worktree or deletes one that was evidence.
+fn parse_outcome(value: &str) -> Result<bool, ErrorOutcome> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "success" | "succeeded" => Ok(true),
+        "failed" | "failure" => Ok(false),
+        other => Err(ErrorOutcome::from_anyhow(&anyhow::anyhow!(
+            "unknown outcome {other:?} — use success or failed"
+        ))),
+    }
+}
+
+/// `mn worktree finish <run-id> --outcome success|failed`.
+///
+/// The success path removes `.memnoth/worktrees/<run-id>` and the
+/// `memnoth/<run-id>` branch; the failure path keeps both and says so, so a
+/// caller can find the scene of the failure without re-running it.
+fn run_finish(
+    repo_root: &Path,
+    args: &WorktreeFinishArgs,
+    _json: bool,
+) -> Result<Outcome, ErrorOutcome> {
+    let succeeded = parse_outcome(&args.outcome)?;
+    let report = prune_by_run(repo_root, &args.run_id, succeeded)
+        .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+
+    let text = if succeeded {
+        if report.removed.iter().any(|name| name == &args.run_id) {
+            format!(
+                "Cleaned worktree {} and branch memnoth/{} after a successful run.
+",
+                args.run_id, args.run_id
+            )
+        } else {
+            format!(
+                "No worktree named {} to clean; nothing was removed.
+",
+                args.run_id
+            )
+        }
+    } else {
+        format!(
+            "Kept worktree {} and branch memnoth/{} because the run failed — inspect it, then run `mn worktree clean {}` to discard it.
+",
+            args.run_id, args.run_id, args.run_id
+        )
+    };
+
+    let data = serde_json::json!({
+        "run_id": args.run_id,
+        "succeeded": succeeded,
+        "removed": report.removed,
+        "kept": report.kept,
+        "errors": report.errors,
+    });
+    Ok(Outcome::new("worktree.finish", text, data))
 }
 
 fn render_worktree_list(worktrees: &[WorktreeInfo]) -> String {

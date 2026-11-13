@@ -43,6 +43,8 @@ use serde::Serialize;
 
 use crate::context::AppContext;
 use extract::{ExtractedSymbol, KEYWORDS};
+use memnoth_codegraph::impact::{RiskInputs, RiskScore};
+use memnoth_codegraph::precision::{Precision, best_available};
 use memnoth_search::workspace::{SearchScope, collect_file_entries, read_text_file};
 use store::{FileRow, Graph, SymbolRow};
 
@@ -183,6 +185,8 @@ pub struct ImpactReport {
     pub symbol: String,
     /// Whether any declaration matched it.
     pub resolved: bool,
+    /// How the edges behind this answer were produced.
+    pub precision: Precision,
     /// Declarations for the resolved name(s).
     pub definitions: Vec<ImpactHit>,
     /// Mentions outside the declaration line.
@@ -200,6 +204,11 @@ pub struct ImpactReport {
     pub tests: Vec<String>,
     /// Whether the reference list hit its cap.
     pub truncated: bool,
+    /// `fan_in × churn(90d) × (1 − coverage)`, with every input beside it.
+    ///
+    /// `None` when git cannot count the churn (no repository, no git): a score
+    /// with a guessed input would be a number nobody could check.
+    pub risk: Option<RiskScore>,
 }
 
 /// One symbol match.
@@ -447,6 +456,8 @@ pub struct TestsForReport {
     pub symbol: String,
     /// Whether any declaration matched it.
     pub resolved: bool,
+    /// How the edges behind this answer were produced.
+    pub precision: Precision,
     /// Tests that mention the symbol.
     pub tests: Vec<TestCoverage>,
     /// How many test files were found.
@@ -593,7 +604,8 @@ struct SourceFile {
     language: &'static str,
     bytes: i64,
     mtime_ms: i64,
-    text: String,
+    /// Where to read it from, when a decision says the text is needed.
+    path: PathBuf,
 }
 
 /// `memnoth kg index`.
@@ -609,7 +621,12 @@ pub fn index(
 
     progress(&format!("walking {}", ctx.root.display()));
     let files = walk(&ctx.root);
-    progress(&format!("walked {} file(s)", files.len()));
+    progress(&format!(
+        "walked {} file(s) in {:.2}s",
+        files.len(),
+        started.elapsed().as_secs_f64()
+    ));
+    let mut phase = Instant::now();
 
     // Detect an unusable existing graph *before* opening it for writing: opening
     // initialises the schema, which would otherwise erase the evidence that the
@@ -671,12 +688,26 @@ pub fn index(
         changed.len()
     ));
     let mut extracted: HashMap<String, Vec<ExtractedSymbol>> = HashMap::new();
+    let mut texts: HashMap<String, String> = HashMap::new();
     for file in &changed {
+        // A file that is not valid UTF-8 is skipped exactly as the old eager
+        // read skipped it: it simply never becomes a row.
+        let Some(text) = read_text_file(&file.path) else {
+            continue;
+        };
         extracted.insert(
             file.relative.clone(),
-            extract::extract(file.language, &file.text),
+            extract::extract(file.language, &text),
         );
+        texts.insert(file.relative.clone(), text);
     }
+
+    progress(&format!(
+        "parsed {} file(s) in {:.2}s",
+        extracted.len(),
+        phase.elapsed().as_secs_f64()
+    ));
+    phase = Instant::now();
 
     // A symbol that did not exist before may be mentioned by a file whose bytes
     // did not change, so the reference scan has to run over everything in that
@@ -688,14 +719,28 @@ pub fn index(
         .flatten()
         .map(|symbol| symbol.name.clone())
         .collect();
-    let names_added = introduced.difference(&existing_names).next().is_some();
-    let scan_all = rebuild || names_added;
+    let added_names: Vec<String> = introduced.difference(&existing_names).cloned().collect();
+    let scan_all = rebuild || !added_names.is_empty();
 
     if scan_all {
         for file in &files {
-            extracted
-                .entry(file.relative.clone())
-                .or_insert_with(|| extract::extract(file.language, &file.text));
+            if extracted.contains_key(&file.relative) {
+                continue;
+            }
+            let Some(text) = read_text_file(&file.path) else {
+                continue;
+            };
+            // An unchanged file can only carry a mention of a name this run
+            // introduced if it already spelled that word. Skipping the rest is
+            // what keeps a one-symbol edit from re-parsing a monorepo.
+            if !added_names.iter().any(|name| text.contains(name.as_str())) {
+                continue;
+            }
+            extracted.insert(
+                file.relative.clone(),
+                extract::extract(file.language, &text),
+            );
+            texts.insert(file.relative.clone(), text);
         }
     }
 
@@ -759,7 +804,10 @@ pub fn index(
                 .map(Vec::as_slice)
                 .unwrap_or(&[]);
             let budget = MAX_REFS - references_written;
-            let refs = scan_refs(&file.text, symbols, &names, budget);
+            let Some(text) = texts.get(&file.relative) else {
+                continue;
+            };
+            let refs = scan_refs(text, symbols, &names, budget);
             if refs.len() >= budget {
                 truncated = true;
             }
@@ -773,6 +821,10 @@ pub fn index(
         Ok(())
     })?;
 
+    progress(&format!(
+        "wrote the graph in {:.2}s",
+        phase.elapsed().as_secs_f64()
+    ));
     let counts = graph.counts()?;
     Ok(IndexReport {
         root: root_label,
@@ -868,6 +920,7 @@ pub fn impact(ctx: &AppContext, symbol: &str, depth: u32) -> Result<ImpactReport
         return Ok(ImpactReport {
             symbol: symbol.to_string(),
             resolved: false,
+            precision: Precision::Lexical,
             definitions: Vec::new(),
             references: Vec::new(),
             references_direct: 0,
@@ -875,6 +928,7 @@ pub fn impact(ctx: &AppContext, symbol: &str, depth: u32) -> Result<ImpactReport
             files: 0,
             tests: Vec::new(),
             truncated: false,
+            risk: None,
         });
     }
 
@@ -999,9 +1053,13 @@ pub fn impact(ctx: &AppContext, symbol: &str, depth: u32) -> Result<ImpactReport
         .filter(|path| is_test_path(path))
         .collect();
 
+    let definition_paths: Vec<String> = definitions.iter().map(|hit| hit.path.clone()).collect();
+    let risk = risk_for(&ctx.root, &definition_paths, direct);
+
     Ok(ImpactReport {
         symbol: symbol.to_string(),
         resolved: true,
+        precision: best_available(),
         definitions,
         references_direct: direct,
         references_transitive: references.len().saturating_sub(direct),
@@ -1009,7 +1067,69 @@ pub fn impact(ctx: &AppContext, symbol: &str, depth: u32) -> Result<ImpactReport
         files: files.len(),
         tests,
         truncated,
+        risk,
     })
+}
+
+/// Commits touching `paths` in the last 90 days.
+///
+/// `None` when git cannot answer: a workspace outside a repository, or a
+/// machine without git. An unmeasurable input is left out rather than counted
+/// as zero, which would report a busy file as stable.
+fn churn_90d(root: &Path, paths: &[String]) -> Option<u32> {
+    if paths.is_empty() {
+        return Some(0);
+    }
+    let mut command = std::process::Command::new("git");
+    command
+        .arg("-C")
+        .arg(root)
+        .args(["log", "--since=90.days", "--format=%H", "--"]);
+    for path in paths {
+        command.arg(path);
+    }
+    let output = command.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    Some(text.lines().filter(|line| !line.trim().is_empty()).count() as u32)
+}
+
+/// Coverage per file from `.memnoth/coverage.json`.
+///
+/// The document is `{"files": {"src/a.rs": 0.83}}`, the shape coverage tools
+/// already emit after a path rewrite. A file missing from it counts as zero, so
+/// the score errs toward caution rather than silence.
+fn coverage_for(root: &Path, paths: &[String]) -> f64 {
+    let path = root.join(".memnoth").join("coverage.json");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return 0.0;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return 0.0;
+    };
+    let Some(files) = value.get("files").and_then(|files| files.as_object()) else {
+        return 0.0;
+    };
+    let mut worst = 1.0_f64;
+    for file in paths {
+        let fraction = files
+            .get(file)
+            .and_then(|value| value.as_f64())
+            .unwrap_or(0.0);
+        worst = worst.min(fraction.clamp(0.0, 1.0));
+    }
+    worst
+}
+
+fn risk_for(root: &Path, definitions: &[String], fan_in: usize) -> Option<RiskScore> {
+    let churn_90d = churn_90d(root, definitions)?;
+    Some(RiskScore::compute(RiskInputs {
+        fan_in,
+        churn_90d,
+        test_coverage: coverage_for(root, definitions),
+    }))
 }
 
 /// `memnoth kg search`.
@@ -2025,6 +2145,7 @@ pub fn tests_for(ctx: &AppContext, symbol: &str) -> Result<TestsForReport> {
         return Ok(TestsForReport {
             symbol: symbol.to_string(),
             resolved: false,
+            precision: Precision::Lexical,
             total_coverage: 0,
             tests: Vec::new(),
         });
@@ -2081,6 +2202,7 @@ pub fn tests_for(ctx: &AppContext, symbol: &str) -> Result<TestsForReport> {
     Ok(TestsForReport {
         symbol: symbol.to_string(),
         resolved: true,
+        precision: best_available(),
         total_coverage: tests.len(),
         tests,
     })
@@ -2979,15 +3101,12 @@ fn walk(root: &Path) -> Vec<SourceFile> {
         if !metadata.is_file() || metadata.len() > MAX_FILE_BYTES {
             continue;
         }
-        let Some(text) = read_text_file(&entry.path) else {
-            continue;
-        };
         files.push(SourceFile {
             language: extract::language_for(&entry.relative_path),
             relative: entry.relative_path,
             bytes: metadata.len() as i64,
             mtime_ms: mtime_ms(&metadata),
-            text,
+            path: entry.path,
         });
     }
     files.sort_by(|a, b| a.relative.cmp(&b.relative));
@@ -3715,6 +3834,67 @@ mod tests {
             !names.contains(&"add"),
             "a referenced export is not dead: {names:?}"
         );
+    }
+
+    #[test]
+    fn coverage_reads_the_worst_listed_file_and_counts_a_missing_one_as_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(coverage_for(dir.path(), &["src/a.rs".to_string()]), 0.0);
+        std::fs::create_dir_all(dir.path().join(".memnoth")).unwrap();
+        std::fs::write(
+            dir.path().join(".memnoth/coverage.json"),
+            r#"{"files":{"src/a.rs":0.5,"src/b.rs":0.9}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            coverage_for(
+                dir.path(),
+                &["src/a.rs".to_string(), "src/b.rs".to_string()]
+            ),
+            0.5
+        );
+        assert_eq!(
+            coverage_for(dir.path(), &["src/missing.rs".to_string()]),
+            0.0
+        );
+    }
+
+    #[test]
+    fn churn_is_unknown_outside_a_git_checkout_so_the_risk_score_is_not_faked() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(churn_90d(dir.path(), &["src/a.rs".to_string()]).is_none());
+        assert!(
+            risk_for(dir.path(), &["src/a.rs".to_string()], 9).is_none(),
+            "a score with a guessed input is worse than no score"
+        );
+    }
+
+    #[test]
+    fn churn_counts_the_commits_touching_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        if !git(&["--version"]).status.success() {
+            return;
+        }
+        assert!(git(&["init", "-q"]).status.success());
+        std::fs::write(dir.path().join("a.rs"), "pub fn a() {}\n").unwrap();
+        assert!(git(&["add", "a.rs"]).status.success());
+        let commit = std::process::Command::new("git")
+            .args(["-c", "user.name=test", "-c", "user.email=test@example.com"])
+            .arg("-C")
+            .arg(dir.path())
+            .args(["commit", "-q", "-m", "add a"])
+            .output()
+            .unwrap();
+        assert!(commit.status.success(), "{commit:?}");
+        assert_eq!(churn_90d(dir.path(), &["a.rs".to_string()]), Some(1));
     }
 
     #[test]
