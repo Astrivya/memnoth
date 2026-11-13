@@ -26,14 +26,19 @@
 //! Nothing redraws on a timer while idle: the screen changes when a key is
 //! pressed, a command finishes, or a turn reports. A TUI that re-queries SQLite
 //! four times a second would be the most expensive thing in the process.
+pub mod agents;
 pub mod app;
+pub mod commands;
 pub mod home;
 pub mod jobs;
+pub mod keymap;
 pub mod login;
 pub mod markdown;
 pub mod overlays;
 pub mod panes;
+pub mod rail;
 pub mod slash;
+pub mod surface;
 pub mod theme;
 pub mod ui;
 use anyhow::{Context, Result};
@@ -96,6 +101,10 @@ enum TurnEvent {
     },
     /// The turn finished, successfully or not, with what it wrote.
     Done(Box<TurnOutcome>),
+    /// One lifecycle event from the turn, already in the harness API's shape.
+    /// The screen does not need it today; the socket harness and the benchmark
+    /// runner are the consumers, and they must see the same stream.
+    Api(memnoth_harness_api::ApiEvent),
 }
 
 /// A model turn that is currently in flight.
@@ -162,9 +171,9 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
     let mut app = App::new(name, resumed);
     app.config = ctx.config.clone();
     app.config_path = ctx.config_path.clone();
-    // The panel is shown once. It is marked here rather than in `home()` so the
-    // brief stays a read, and the save is best-effort: a read-only config must
-    // not stop a session from starting.
+    // The four-move card is shown once. Showing it is not dismissing it: the
+    // flag is written by the overlay on skip or completion, so a crash before
+    // either brings the card back. `/onboarding` replays it without writing.
     let onboarded = app
         .config
         .ui
@@ -172,14 +181,21 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
         .and_then(|ui| ui.onboarded)
         .unwrap_or(false);
     let first_run = !onboarded;
-    if first_run {
-        app.config.ui.get_or_insert_default().onboarded = Some(true);
-        let _ = app.config.save(&ctx.config_path);
-    }
     // Overlays that talk to the cloud (`/teams members`, `/keys create`,
     // `/org invite`) need the invocation's paths and credentials, and the
     // overlay trait only ever sees the app.
     app.ctx = Some(ctx.clone());
+    // The Deck and the Trace read this tree; child logs live beside the
+    // session files, under the same home.
+    app.delegator = Some(memnoth_agent::Delegator::new(ctx.home.join("agents")));
+    // First run: the capability card sits above the brief. `present` calls
+    // `on_open`, which reads this machine's real state for the four rows.
+    if first_run {
+        crate::tui::overlays::present(
+            &mut app,
+            Box::new(crate::tui::overlays::OnboardingOverlay::first_run()),
+        );
+    }
     // The ranking and the run counts are what this machine actually does, so
     // they outlive the terminal: `/` after a restart already leads with the
     // commands the person uses. A missing or unreadable file reads as no
@@ -225,6 +241,17 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
     // cannot be reached costs a log line and never a launch.
     crate::report::started(ctx, name, &session);
 
+    // A newer release is worth knowing about and never worth waiting for: the
+    // check runs on its own thread behind a day-long cache, and its answer
+    // arrives through a channel this loop already polls. Nothing here can stop
+    // a launch — an unreachable host is one silent `None`.
+    let (update_tx, update_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = update_tx.send(crate::update_cmd::passive_notice(
+            memnoth_update::Channel::Stable,
+        ));
+    });
+
     enable_raw_mode().context("cannot put the terminal in raw mode")?;
     let mut stdout = io::stdout();
     // Bracketed paste turns a paste into one event instead of a stream of
@@ -268,6 +295,22 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
                     // outcome, and it changes on the same line when the result
                     // lands. That is the whole difference between a live record
                     // and a scroll of past tense.
+                    Ok(TurnEvent::Api(event)) => {
+                        // The wire contract, read by the screen: streamed text
+                        // appends to the live answer, streamed reasoning to the
+                        // thinking block. Everything else is lifecycle for other
+                        // consumers and not transcript content.
+                        match event {
+                            memnoth_harness_api::ApiEvent::TextDelta { text, .. } => {
+                                app.collapse_thinking();
+                                app.append_stream_delta(&text);
+                            }
+                            memnoth_harness_api::ApiEvent::ReasoningDelta { delta, .. } => {
+                                app.append_reasoning_delta(&delta);
+                            }
+                            _ => {}
+                        }
+                    }
                     Ok(TurnEvent::Note(note)) => {
                         tools_from.get_or_insert(app.entries.len());
                         app.push_tool(note);
@@ -426,9 +469,18 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
             refresh(ctx, &mut app, &session);
         }
 
+        // The release check answers once, on the first frame after it lands.
+        // One entry, filed as information: it is not an error, and it must not
+        // look like the answer to anything the person asked.
+        if let Ok(Some(notice)) = update_rx.try_recv() {
+            app.push(EntryRole::Info, notice);
+        }
+
         terminal
             .draw(|frame| {
+                let area = frame.area();
                 ui::draw(frame, &mut app);
+                crate::tui::rail::Rail::default().render(frame, area);
                 if app.theme == crate::tui::app::Theme::NoColor {
                     crate::tui::theme::strip_colors(frame.buffer_mut());
                 }
@@ -459,13 +511,33 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
                     match mouse.kind {
                         MouseEventKind::ScrollUp => app.wheel(WHEEL_LINES, true),
                         MouseEventKind::ScrollDown => app.wheel(WHEEL_LINES, false),
+                        // Pointer motion is tracked for one thing only: the
+                        // thinking header's expand hint appears while the
+                        // pointer rests on it, and nowhere else.
+                        MouseEventKind::Moved => app.mouse_row = Some(mouse.row),
                         // Clicks, drags and horizontal scroll: nothing on this
                         // screen is clickable, and a selectable row that a click
                         // did not select would be worse than no pointer at all.
                         _ => {}
                     }
                 }
-                Event::Mouse(_) => {}
+                // An open overlay owns the mouse: the wheel scrolls its list
+                // and clicks land on its rows, because a gesture that moves
+                // the transcript behind a modal is a gesture that lies.
+                Event::Mouse(mouse) => {
+                    let mut stack = std::mem::take(&mut app.overlay_stack);
+                    let action = stack.handle_mouse(mouse, &mut app);
+                    app.overlay_stack = stack;
+                    match action {
+                        Some(crate::tui::overlays::OverlayAction::Close) => {
+                            app.overlay_stack.pop();
+                        }
+                        Some(crate::tui::overlays::OverlayAction::CloseAll) => {
+                            while app.overlay_stack.pop().is_some() {}
+                        }
+                        _ => {}
+                    }
+                }
                 // Windows reports press and release; acting on both would type
                 // every character twice. Every other `Event::Key` arm below
                 // this one is unreachable, so this must stay the only one.
@@ -794,6 +866,45 @@ fn handle_key(app: &mut App, key: KeyEvent, workspace_root: &Path) {
         // "insert a g" on one screen and "run the header's fix" on the next.
         return;
     }
+    // Ctrl+1..8 switch surfaces: chat, review, agents, memory, context,
+    // tasks, sessions, brief. Global keys: work whether a prompt is being
+    // typed or not.
+    if ctrl && matches!(key.code, KeyCode::Char('1'..='8')) {
+        let index = match key.code {
+            KeyCode::Char(d) => d.to_digit(10).unwrap_or(0) as u8,
+            _ => 0,
+        };
+        app.surface.switch(index);
+        app.surface_focus = match app.surface {
+            crate::tui::surface::Surface::Chat => crate::tui::surface::FocusOwner::Chat,
+            crate::tui::surface::Surface::Review => crate::tui::surface::FocusOwner::Review,
+            crate::tui::surface::Surface::Agents => crate::tui::surface::FocusOwner::Agents,
+            crate::tui::surface::Surface::Memory => crate::tui::surface::FocusOwner::Memory,
+            crate::tui::surface::Surface::Context => crate::tui::surface::FocusOwner::Context,
+            crate::tui::surface::Surface::Tasks => crate::tui::surface::FocusOwner::Tasks,
+            crate::tui::surface::Surface::Sessions => crate::tui::surface::FocusOwner::Sessions,
+            crate::tui::surface::Surface::Brief => crate::tui::surface::FocusOwner::Chat,
+        };
+        app.focus_owner = app.surface_focus.label().to_string();
+        return;
+    }
+
+    // Alt+A opens the live Agent Deck and Alt+T the trace tree. Global keys,
+    // consumed even when there is nothing running: a key that sometimes opens
+    // a roster and sometimes inserts a letter is two meanings for one press.
+    if key.modifiers.contains(KeyModifiers::ALT) {
+        match key.code {
+            KeyCode::Char('a' | 'A') => {
+                open_overlay(app, crate::tui::overlays::OverlayKind::Deck);
+                return;
+            }
+            KeyCode::Char('t' | 'T') => {
+                open_overlay(app, crate::tui::overlays::OverlayKind::Trace);
+                return;
+            }
+            _ => {}
+        }
+    }
 
     let is_ctrl_c = ctrl && matches!(key.code, KeyCode::Char('c'));
     // The second ctrl-c only quits when it follows the first without another
@@ -897,6 +1008,8 @@ fn handle_key(app: &mut App, key: KeyEvent, workspace_root: &Path) {
         KeyCode::Char('l') if ctrl => app.clear(),
         KeyCode::Char('a') if ctrl => app.move_home(),
         KeyCode::Char('e') if ctrl => app.move_end(),
+        // The newest thinking block, opened or tucked away.
+        KeyCode::Char('r') if ctrl => app.toggle_thinking(),
         KeyCode::F(1) => {
             app.overlay_stack.push(crate::tui::overlays::create_overlay(
                 crate::tui::overlays::OverlayKind::Help,
@@ -1034,6 +1147,372 @@ fn prompt_wants_fresh_chat(app: &App) -> bool {
     app.home_showing() && !app.entries.is_empty()
 }
 
+/// `/merge <run>`: name the child and say what a merge actually needs.
+///
+/// A merge needs a diff, and a diff needs a child that ran. The tree is
+/// consulted first so the answer is about the run the person named, not a
+/// generic refusal.
+fn merge_child(app: &mut App, branch: &str) {
+    let Some(delegator) = app.delegator.as_ref() else {
+        app.push(
+            EntryRole::Info,
+            "no delegation tree in this session — /delegate <agent> <task> spawns a run first"
+                .to_string(),
+        );
+        return;
+    };
+    let nodes = delegator.nodes();
+    let target = nodes
+        .iter()
+        .find(|node| node.agent_id == branch || node.agent == branch);
+    match target {
+        None => app.push(
+            EntryRole::Error,
+            format!(
+                "/merge {branch}: no child run with that id or agent — {} run(s) in the tree",
+                nodes.len()
+            ),
+        ),
+        Some(node) => {
+            let status = delegator
+                .registry()
+                .get(&node.agent_id)
+                .map(|entry| entry.status.as_str())
+                .unwrap_or("unknown");
+            let where_it_lives = node
+                .worktree
+                .as_ref()
+                .map(|path| format!("worktree: {path}"))
+                .unwrap_or_else(|| "no worktree — the child ran read-only".to_string());
+            app.push(
+                EntryRole::Info,
+                format!(
+                    "/merge {} — run is {status}\n  {where_it_lives}\n  git -C <worktree> diff HEAD --stat, then git merge, then /vault conflicts",
+                    node.agent_id
+                ),
+            );
+        }
+    }
+}
+
+/// Files changed in a child worktree, relative to the worktree root. This is
+/// evidence gathered from git, not a claim copied from the child result.
+fn worktree_changed_files(path: &Path) -> Vec<String> {
+    let mut files = Vec::new();
+    for args in [
+        vec!["diff", "--name-only", "HEAD"],
+        vec!["ls-files", "--others", "--exclude-standard"],
+    ] {
+        let Ok(output) = std::process::Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(&args)
+            .output()
+        else {
+            continue;
+        };
+        if !output.status.success() {
+            continue;
+        }
+        for file in String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|file| !file.is_empty())
+        {
+            if !files.iter().any(|existing| existing == file) {
+                files.push(file.to_string());
+            }
+        }
+    }
+    files
+}
+
+/// Contradictions in the vault that name a belief proposed by this child.
+fn belief_conflicts_for_proposals(
+    engine: &memnoth_engine::MemoryEngine,
+    proposals: &[memnoth_engine::ProposedBelief],
+) -> Vec<String> {
+    let Ok(audit) = memnoth_engine::vault_contradictions_all(engine) else {
+        return Vec::new();
+    };
+    let Some(rows) = audit
+        .get("contradictions")
+        .and_then(|value| value.as_array())
+    else {
+        return Vec::new();
+    };
+    let mut conflicts = Vec::new();
+    for row in rows {
+        let source = row.get("source").and_then(|value| value.as_str());
+        let target = row.get("target").and_then(|value| value.as_str());
+        let mut names = source.into_iter().chain(target);
+        if !names.any(|name| proposals.iter().any(|proposal| proposal.entity == name)) {
+            continue;
+        }
+        let kind = row
+            .get("kind")
+            .and_then(|value| value.as_str())
+            .unwrap_or("relation");
+        let reason = row
+            .get("reason")
+            .and_then(|value| value.as_str())
+            .unwrap_or("contradicted");
+        conflicts.push(format!(
+            "{} {} {}: {}",
+            source.unwrap_or("?"),
+            kind,
+            target.unwrap_or("?"),
+            reason
+        ));
+    }
+    conflicts
+}
+
+/// Create a child run under this session's root and put it on the Deck.
+///
+/// The run is real: it is in the registry, it has its own JSONL, and it is a
+/// child of this session's root at depth 1. The card it pushes is the same node
+/// the Deck draws, so the timeline and the deck cannot describe two fleets.
+///
+/// Spawning also drives the child: it gets its own worktree (W8-06), the
+/// executor runs its read-only plan against a scoped vault slice, and the
+/// parent accepts that slice into vault proposals with one episode per run
+/// (W8-09). The delegator is taken out and put back because the executor
+/// borrows it mutably for the whole run.
+fn spawn_delegate(app: &mut App, ctx: &AppContext, session: &Session, name: &str, task: &str) {
+    if name.trim().is_empty() || task.trim().is_empty() {
+        app.push(
+            EntryRole::Error,
+            "usage: /delegate <agent> <task>".to_string(),
+        );
+        return;
+    }
+    if app.delegator.is_none() {
+        app.delegator = Some(memnoth_agent::Delegator::new(ctx.home.join("agents")));
+    }
+
+    let root = match app.delegation_root.clone() {
+        Some(id) => id,
+        None => {
+            let created = app
+                .delegator
+                .as_mut()
+                .expect("delegator was just ensured")
+                .root(Some(&session.id), "memnoth", "session");
+            match created {
+                Ok(root) => {
+                    app.delegation_root = Some(root.agent_id.clone());
+                    root.agent_id
+                }
+                Err(error) => {
+                    app.push(EntryRole::Error, format!("{error}"));
+                    return;
+                }
+            }
+        }
+    };
+
+    let mut delegator = app.delegator.take().expect("delegator was just ensured");
+    let spawned = delegator.spawn(Some(&root), Some(&session.id), name, task);
+    let child = match spawned {
+        Ok(child) => child,
+        Err(error) => {
+            app.delegator = Some(delegator);
+            app.push(EntryRole::Error, format!("{error}"));
+            return;
+        }
+    };
+
+    // A child that may touch files gets its own checkout, so a bad edit cannot
+    // land in the workspace it shares with the parent (W8-06). Best effort:
+    // a workspace that is not a git repo runs read-only in place, and the run
+    // says so on its card instead of refusing to spawn.
+    let worktree = memnoth_worktree::create_worktree(&ctx.root, &child.agent_id, None, None).ok();
+    if let Some(info) = &worktree {
+        let _ = delegator.set_worktree(&child.agent_id, info.path.to_string_lossy().to_string());
+    }
+
+    // Read-only by default (D10): the child's plan reads, never writes. The
+    // slice stages one scoped belief per step — the instruction it inspected —
+    // and the closure does nothing else, because there is no model behind this
+    // build yet and a plan that pretended otherwise would lie on the card.
+    let steps = vec![
+        memnoth_agent::Step::with_detail("read_file", task),
+        memnoth_agent::Step::with_detail("grep", task),
+    ];
+    let agent_name = name.to_string();
+    let task_owned = task.to_string();
+    let started_at = memnoth_engine::now_ms();
+    let mut executor = memnoth_agent::Executor::without_hooks(&mut delegator);
+    let run_result = executor.run(&child.agent_id, &steps, |step, slice| {
+        slice.propose(
+            &agent_name,
+            &format!("delegated task: {task_owned}"),
+            "fact",
+            0.5,
+            &step.detail,
+            1,
+        );
+        Ok(())
+    });
+    let proposals: Vec<memnoth_engine::ProposedBelief> = executor
+        .slice(&child.agent_id)
+        .map(|slice| slice.proposals().to_vec())
+        .unwrap_or_default();
+    drop(executor);
+    app.delegator = Some(delegator);
+
+    // The parent accepts the scoped slice through the ordinary vault path:
+    // these become proposal rows (`vault proposals`), not beliefs, so nothing
+    // the child staged is a fact until a person approves it (W8-09). One
+    // episode covers the whole run, opened and closed here.
+    let mut accepted = 0;
+    let mut belief_conflicts = Vec::new();
+    if let Ok(engine) = ctx.open_vault() {
+        belief_conflicts = belief_conflicts_for_proposals(&engine, &proposals);
+        let now = memnoth_engine::now_ms();
+        for proposal in &proposals {
+            let provenance = proposal.provenance.to_json();
+            if engine
+                .propose_belief(
+                    &proposal.entity,
+                    memnoth_engine::EntityKind::Concept,
+                    &proposal.content,
+                    &proposal.kind,
+                    proposal.confidence,
+                    &provenance,
+                    now,
+                )
+                .is_ok()
+            {
+                accepted += 1;
+            }
+        }
+        let summary = run_result
+            .as_ref()
+            .map(|result| result.summary.clone())
+            .unwrap_or_else(|error| format!("failed: {error}"));
+        if let Ok(episode) =
+            engine.append_episode("delegate", Some(&agent_name), Some(&summary), started_at)
+        {
+            let _ = engine.close_episode(episode, memnoth_engine::now_ms());
+        }
+    }
+
+    // The card is the timeline row: the same node the Deck draws, put
+    // where the work was asked for (W13-18). It is projected from the child
+    // result and the worktree/vault evidence gathered above, so the parent
+    // sees what was done, where it lives, and what tests/conflicts it left.
+    let worktree_files = worktree
+        .as_ref()
+        .map(|info| worktree_changed_files(&info.path))
+        .unwrap_or_default();
+    let info = crate::tui::agents::roster(app)
+        .into_iter()
+        .find(|candidate| candidate.agent_id == child.agent_id);
+    if let Some(mut info) = info {
+        let card = match &run_result {
+            Ok(result) => {
+                let card = crate::tui::agents::cards::AgentCard::from_result(
+                    info.clone(),
+                    result,
+                    &worktree_files,
+                    belief_conflicts,
+                );
+                app.push(
+                    EntryRole::Info,
+                    format!(
+                        "delegated to {} — run {} (depth {}) — {} accepted proposal(s) into the vault",
+                        child.agent, child.agent_id, child.depth, accepted
+                    ),
+                );
+                card
+            }
+            Err(error) => {
+                info.status = crate::tui::agents::AgentStatus::Failed;
+                let mut card = crate::tui::agents::cards::AgentCard::new(info);
+                card.activity = format!("failed: {error}");
+                app.push(
+                    EntryRole::Error,
+                    format!("child {} failed: {error}", child.agent_id),
+                );
+                card
+            }
+        };
+        app.push_card(&card);
+    }
+    app.push(EntryRole::Info, format!("log: {}", child.log.display()));
+    if let Some(info) = &worktree {
+        app.push(
+            EntryRole::Info,
+            format!(
+                "worktree: {} on branch {}",
+                info.path.display(),
+                info.branch
+            ),
+        );
+    } else {
+        app.push(
+            EntryRole::Info,
+            "no worktree (not a git repo) — the child ran read-only in place".to_string(),
+        );
+    }
+}
+
+/// Set (or clear) the goal and open the overlay on the stored row.
+fn open_goal(app: &mut App, ctx: &AppContext, condition: Option<&str>) {
+    match crate::tui::commands::goal::run(ctx, condition) {
+        Ok(outcome) => {
+            let current = outcome.data["condition"].as_str().map(str::to_string);
+            crate::tui::overlays::present(
+                app,
+                Box::new(crate::tui::agents::goal::GoalOverlay::new().with_condition(current)),
+            );
+            app.push(EntryRole::Info, outcome.text);
+        }
+        Err(error) => app.push(EntryRole::Error, error.message),
+    }
+}
+
+/// Enter plan mode and open the overlay on the stored plan.
+fn open_plan(app: &mut App, ctx: &AppContext, name: Option<&str>, step: Option<&str>) {
+    match crate::tui::commands::plan::run(ctx, name, step) {
+        Ok(outcome) => {
+            let task = outcome.data["task"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            let steps: Vec<String> = outcome.data["steps"]
+                .as_array()
+                .map(|rows| {
+                    rows.iter()
+                        .filter_map(|row| row.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            crate::tui::overlays::present(
+                app,
+                Box::new(crate::tui::agents::plan::PlanOverlay::new().with_task(task, steps)),
+            );
+            app.push(EntryRole::Info, outcome.text);
+        }
+        Err(error) => app.push(EntryRole::Error, error.message),
+    }
+}
+
+/// Rename the conversation and keep writing to the new file.
+fn rename_session(app: &mut App, ctx: &AppContext, session: &mut Session, name: &str) {
+    match crate::tui::commands::rename::run(ctx, name) {
+        Ok(outcome) => {
+            let renamed = outcome.data["to"].as_str().unwrap_or_default().to_string();
+            session.id = renamed.clone();
+            app.name = renamed;
+            app.push(EntryRole::Info, outcome.text);
+        }
+        Err(error) => app.push(EntryRole::Error, error.message),
+    }
+}
+
 /// Run one submitted line, returning a turn that is now in flight.
 fn submit(
     app: &mut App,
@@ -1046,6 +1525,22 @@ fn submit(
         return None;
     }
     app.remember_history(&line);
+
+    // `/ext:<extension>:<command>` expands to the prompt the extension ships
+    // and then takes the ordinary Ask path. An extension command is a prompt,
+    // not a second execution model inside the TUI.
+    let line = if line.trim_start().starts_with("/ext:") {
+        match crate::extension_commands::expand(&ctx.home, &line) {
+            Ok(Some(body)) => body,
+            Ok(None) => line,
+            Err(error) => {
+                app.push(EntryRole::Error, format!("{error}"));
+                return None;
+            }
+        }
+    } else {
+        line
+    };
 
     match parse_line(&line) {
         Parsed::Empty => None,
@@ -1069,6 +1564,39 @@ fn submit(
         }
         Parsed::Sessions => {
             open_overlay(app, crate::tui::overlays::OverlayKind::Sessions);
+            None
+        }
+        // `/delegate` and `/rename` change state the handler cannot see: the
+        // live session's spawn tree, and the name the session is written under.
+        Parsed::Run(Verb::Delegate(args)) => {
+            spawn_delegate(app, ctx, session, &args.name, &args.task);
+            None
+        }
+        Parsed::Run(Verb::Rename(args)) => {
+            rename_session(app, ctx, session, &args.name);
+            None
+        }
+        Parsed::CheckpointsOverlay => {
+            open_overlay(app, crate::tui::overlays::OverlayKind::Checkpoints);
+            None
+        }
+        Parsed::Run(Verb::Onboarding) => {
+            open_overlay(app, crate::tui::overlays::OverlayKind::Onboarding);
+            None
+        }
+        Parsed::Run(Verb::Merge(args)) => {
+            merge_child(app, &args.branch);
+            None
+        }
+        // `/goal` and `/plan` write the session's goal file and then open the
+        // overlay on the row they just wrote, so the screen and the store
+        // cannot describe two different states.
+        Parsed::Run(Verb::Goal(args)) => {
+            open_goal(app, ctx, args.condition.as_deref());
+            None
+        }
+        Parsed::Run(Verb::Plan(args)) => {
+            open_plan(app, ctx, args.name.as_deref(), args.step.as_deref());
             None
         }
         Parsed::Run(verb) => {
@@ -1187,11 +1715,21 @@ fn submit(
             open_overlay(app, crate::tui::overlays::OverlayKind::Palette);
             None
         }
+        Parsed::Onboarding => {
+            open_overlay(app, crate::tui::overlays::OverlayKind::Onboarding);
+            None
+        }
         Parsed::CommandsOverlay => {
             open_overlay(app, crate::tui::overlays::OverlayKind::Commands);
             None
         }
         Parsed::Info(message) => {
+            app.push(EntryRole::Info, message);
+            None
+        }
+        Parsed::Usage(message) => {
+            // A known command with the wrong arguments: the usage line is the
+            // answer, and the session stays open so it can be retyped.
             app.push(EntryRole::Info, message);
             None
         }
@@ -1412,14 +1950,40 @@ fn run_verb(app: &mut App, ctx: &AppContext, prompt: &str, verb: Verb) {
     match &verb {
         Verb::SetTheme(theme) => {
             app.theme = *theme;
-            app.push(EntryRole::Info, format!("Theme set to {:?}", theme));
+            // The preference outlives the session: a theme chosen in the TUI is
+            // the same `[ui] theme` a plain `mn` start reads. A read-only config
+            // leaves the choice in force for this session and says so.
+            app.config.ui.get_or_insert_default().theme = Some(theme.as_str().to_string());
+            let saved = app.config.save(&app.config_path).is_ok();
+            app.push(
+                EntryRole::Info,
+                format!(
+                    "Theme set to {:?}{}",
+                    theme,
+                    if saved {
+                        " · saved"
+                    } else {
+                        " · this session only"
+                    }
+                ),
+            );
             return;
         }
         Verb::SetScreenReader(mode) => {
             app.screen_reader = *mode;
+            app.config.ui.get_or_insert_default().screen_reader = Some(mode.as_str().to_string());
+            let saved = app.config.save(&app.config_path).is_ok();
             app.push(
                 EntryRole::Info,
-                format!("Screen reader mode set to {:?}", mode),
+                format!(
+                    "Screen reader mode set to {:?}{}",
+                    mode,
+                    if saved {
+                        " · saved"
+                    } else {
+                        " · this session only"
+                    }
+                ),
             );
             return;
         }
@@ -1603,10 +2167,12 @@ fn start_turn(
     settings: provider::Settings,
 ) -> Option<Busy> {
     app.push(EntryRole::User, prompt);
-    app.push(
-        EntryRole::Info,
-        format!("{} · {} · thinking…", settings.kind.name(), settings.model),
-    );
+    app.turn_started_ms = crate::session::now_ms();
+    // A failed turn may have left its stream indices pointing at entries
+    // that are never going to finish; a new turn starts its own segments.
+    app.stream_answer = None;
+    app.stream_answer_first = None;
+    app.stream_think = None;
     app.busy = true;
 
     // A window of the conversation, not all of it: eight exchanges are enough
@@ -1635,6 +2201,9 @@ fn start_turn(
     let asker = tx.clone();
 
     // Counted before the worker starts: the transcript is read on this thread.
+    // The id travels with the events so a socket consumer can file them under
+    // the same session the screen is writing.
+    let session_id = session.id.clone();
     let turn_id = session
         .messages
         .iter()
@@ -1648,16 +2217,22 @@ fn start_turn(
             .with_approver(Box::new(AskOnScreen { tx: asker }))
             .with_turn_id(turn_id);
         let notes = tx.clone();
+        let events = tx.clone();
+        let mut emit = move |event: memnoth_harness_api::ApiEvent| {
+            let _ = events.send(TurnEvent::Api(event));
+        };
         let mut on_note = |line: &str| {
             let _ = notes.send(TurnEvent::Note(line.to_string()));
         };
-        let result = provider::run_turn(
+        let result = provider::run_turn_with(
             &settings,
             &root,
             &history,
             &asked_on_worker,
             &mut tools,
             &mut on_note,
+            &session_id,
+            &mut emit,
         );
         // The screen needs the answer and what was written, not the toolbox:
         // the toolbox borrows this worker's context and cannot outlive it.
@@ -1687,11 +2262,48 @@ fn settle(
 ) {
     match result {
         Ok((answer, writes, approvals)) => {
-            app.push(EntryRole::Answer, answer.text.clone());
+            let (input, output) = answer.usage();
+            let elapsed = crate::session::now_ms() - app.turn_started_ms;
+            let cost = busy
+                .pricing
+                .map(|pricing| pricing.cost_micros(input, output));
+            let stats = crate::tui::app::turn_stats(elapsed, input, output, cost, tools);
+            // What was read is what was streamed: the finished turn replaces
+            // the first segment's text with the authoritative answer, so the
+            // screen and the session file hold the same words. Later segments
+            // — the text that arrived after the tool rows — fold back into
+            // that first block: one answer, read as one answer, with the pace
+            // line under it, instead of the same words in two places.
+            if let Some(first) = app.stream_answer_first
+                && let Some(entry) = app.entries.get_mut(first)
+            {
+                entry.text = answer.text.clone();
+                entry.stats = stats;
+                let turn_start = app.turn_started_ms;
+                let extra: Vec<usize> = app
+                    .entries
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, entry)| {
+                        *index > first
+                            && entry.role == crate::tui::app::EntryRole::Answer
+                            && entry.at_ms >= turn_start
+                    })
+                    .map(|(index, _)| index)
+                    .collect();
+                for index in extra.into_iter().rev() {
+                    app.entries.remove(index);
+                }
+            } else {
+                app.push(EntryRole::Answer, answer.text.clone());
+                if let Some(entry) = app.entries.last_mut() {
+                    entry.stats = stats;
+                }
+            }
+            app.finish_stream();
             // The file records the model that actually answered, so a resumed
             // session does not claim a model that never ran.
             session.model = busy.model.clone();
-            let (input, output) = answer.usage();
             session.account(input, output);
 
             // Add checkpoint for this turn
@@ -1719,12 +2331,12 @@ fn settle(
             // separately, rather than treating an unknown price as free.
             session.record_receipt(TurnReceipt {
                 at_ms: now_ms(),
-                total_tokens: input.saturating_add(output) as usize,
-                // This build assembles no layered context, so there is no
-                // prefix to fingerprint and no pieces to account for.
-                prefix_hash: String::new(),
-                layer_tokens: [0; 4],
-                pieces: 0,
+                total_tokens: answer.context_tokens,
+                // The prefix + tail uniquely identifies the prompt bytes the
+                // model saw, so replay can reproduce them identically.
+                prefix_hash: format!("{:016x}", answer.prefix_hash),
+                layer_tokens: answer.layer_tokens,
+                pieces: answer.pieces,
                 input_tokens: input,
                 output_tokens: output,
                 cache_read_tokens: 0,
@@ -1732,21 +2344,27 @@ fn settle(
                 cost_micros: busy
                     .pricing
                     .map(|pricing| pricing.cost_micros(input, output)),
+                prompt: answer.prompt.clone(),
                 turn_id: Some(turn_id),
             });
             // What it cost and how it was reached, under the answer: the line
             // that separates an answer from a claim. Both numbers are known
-            // here, so neither is guessed.
-            let total = input.saturating_add(output);
-            app.push(
-                EntryRole::Info,
-                format!(
-                    "evidence · {} {} · {} tokens",
-                    tools,
-                    if tools == 1 { "tool" } else { "tools" },
-                    human_count(total.min(usize::MAX as u64) as usize)
-                ),
-            );
+            // here, so neither is guessed. Hidden for now: the row is a
+            // receipt, not a status bar, and the receipt is already in the
+            // session file. One switch brings it back.
+            const SHOW_EVIDENCE: bool = false;
+            if SHOW_EVIDENCE {
+                let total = input.saturating_add(output);
+                app.push(
+                    EntryRole::Info,
+                    format!(
+                        "evidence · {} {} · {} tokens",
+                        tools,
+                        if tools == 1 { "tool" } else { "tools" },
+                        human_count(total.min(usize::MAX as u64) as usize)
+                    ),
+                );
+            }
             persist(app, store, session, &busy.prompt, &answer.text);
         }
         Err(error) => {
@@ -1879,6 +2497,34 @@ fn home(
         value: spend_line(ctx, session),
         state: HomeState::Ready,
     });
+    match memnoth_sandbox::profiles::load_sandbox_config(&ctx.root).and_then(|config| {
+        memnoth_sandbox::backend::BackendPlan::build(
+            memnoth_sandbox::backend::OsBackend::host(),
+            &memnoth_sandbox::profiles::ProfileName::Workspace,
+            &ctx.root,
+            &config,
+        )
+    }) {
+        Ok(plan) => {
+            let status = memnoth_sandbox::status::status(&plan);
+            facts.push(Fact {
+                label: "sandbox",
+                value: status.statusline(),
+                state: if status.report.mode == "enforced" {
+                    HomeState::Ready
+                } else {
+                    HomeState::Missing
+                },
+            });
+        }
+        Err(_) => {
+            facts.push(Fact {
+                label: "sandbox",
+                value: "not enforced — policy refused".to_string(),
+                state: HomeState::Missing,
+            });
+        }
+    }
 
     // The team is not a mode: it is the organisation the cached account is
     // already in. Until shared sync ships, the row says where the work is.
@@ -2242,9 +2888,9 @@ fn thousands(value: u64) -> String {
 ///
 /// The value is the whole sentence — model, then `ready` or the key that is
 /// missing — because a fact row may not carry its own fix (§2.1).
-fn model_state(ctx: &AppContext) -> (String, bool) {
+pub(crate) fn model_state(ctx: &AppContext) -> (String, bool) {
     match provider::Settings::load(&ctx.config) {
-        Ok(settings) if settings.ready() => (format!("{} · ready", settings.describe()), true),
+        Ok(settings) if settings.ready() => (format!("{} · ready", settings.label()), true),
         Ok(settings) => (
             format!(
                 "{} · no key — export {}",
@@ -2259,7 +2905,7 @@ fn model_state(ctx: &AppContext) -> (String, bool) {
 
 /// What the graph row says, and whether it is there at all.
 #[derive(Debug, Clone, Default)]
-struct GraphStatus {
+pub(crate) struct GraphStatus {
     /// `1,204 files · 9,830 symbols · 12 stale · 2m old`, or `missing`.
     value: String,
     /// Whether there is a graph to query.
@@ -2277,7 +2923,7 @@ struct GraphStatus {
 ///
 /// The age is the field that makes `/kg index` worth remembering: `12 stale`
 /// with no date is a number, `12 stale · 2m old` is a decision.
-fn graph_state(ctx: &AppContext) -> GraphStatus {
+pub(crate) fn graph_state(ctx: &AppContext) -> GraphStatus {
     let verb = Verb::Kg(KgArgs {
         action: KgCommand::Status,
     });
@@ -2638,7 +3284,6 @@ fn run_shell(app: &mut App, ctx: &AppContext, cmd: &str) {
 /// Actually execute the shell command and capture output.
 fn execute_shell_command(app: &mut App, ctx: &AppContext, cmd: &str) {
     use std::process::Command;
-
     let launch = launch_shell(ctx, cmd);
     say_if_unconfined(app, &launch.confinement);
     let output = Command::new(&launch.program).args(&launch.args).output();
@@ -2701,14 +3346,31 @@ fn run_init(app: &mut App, ctx: &AppContext) {
     }
 }
 
-/// Edit project memory (vault).
-fn run_memory(app: &mut App, _ctx: &AppContext) {
+/// Project memory (the vault) as a hub: its real state, then the three ways to
+/// change it.
+///
+/// It answered "not yet implemented" while the palette advertised it — the
+/// broken promise W13-31 names. The numbers come from `vault::status`, so this
+/// screen and `mn vault status` cannot disagree.
+fn run_memory(app: &mut App, ctx: &AppContext) {
     app.push(EntryRole::User, "/memory".to_string());
-    app.push(
-        EntryRole::Info,
-        "Project memory editing not yet implemented. Use `/vault remember` to record facts."
-            .to_string(),
-    );
+    match crate::vault::status(ctx) {
+        Ok(outcome) => {
+            for line in outcome.text.lines() {
+                app.push(EntryRole::Info, line.to_string());
+            }
+            app.push(
+                EntryRole::Info,
+                "next\n  /vault remember <fact>   /vault status   /vault forget <id>".to_string(),
+            );
+        }
+        Err(err) => {
+            app.push(EntryRole::Error, err.message.clone());
+            if let Some(fix) = err.fix.clone() {
+                app.push(EntryRole::Info, format!("fix: {fix}"));
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2878,6 +3540,53 @@ mod tests {
     }
 
     #[test]
+    fn the_onboarding_card_has_four_state_derived_rows() {
+        // A developer's exported API keys make `Settings::load` report a ready
+        // model, and the card would name an example instead of the unlock. A
+        // fresh machine has no keys in the environment either: strip them.
+        let stripped: Vec<(&str, Option<String>)> = [
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "KILO_API_KEY",
+            "MEMNOTH_PROVIDER",
+            "MEMNOTH_MODEL",
+        ]
+        .iter()
+        .map(|name| (*name, std::env::var(name).ok()))
+        .collect();
+        unsafe {
+            for (name, _) in &stripped {
+                std::env::remove_var(name);
+            }
+        }
+        let rows = {
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = context(dir.path());
+            crate::tui::overlays::onboarding::rows_for(&ctx)
+        };
+        unsafe {
+            for (name, value) in &stripped {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+        assert_eq!(rows.len(), 4, "{rows:?}");
+        assert_eq!(rows[0].label, "Ask");
+        // A fresh machine has no model, so the row names the unlock rather
+        // than an example that cannot run.
+        assert_eq!(rows[0].example, "/model");
+        assert_eq!(rows[1].label, "Remember");
+        assert_eq!(rows[2].label, "Prove");
+        assert_eq!(rows[3].label, "Delegate");
+        assert_eq!(
+            rows[3].action,
+            crate::tui::overlays::onboarding::RowAction::Explain
+        );
+    }
+
+    #[test]
     fn the_first_run_panel_is_three_lines() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = context(dir.path());
@@ -2914,6 +3623,7 @@ mod tests {
             output_tokens: output,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
+            prompt: String::new(),
             cost_micros: cost,
             turn_id: None,
         }
@@ -3097,6 +3807,48 @@ mod tests {
             KeyEvent::new(code, KeyModifiers::NONE),
             std::path::Path::new("."),
         );
+    }
+
+    /// One keystroke with Alt held: the agent key layer.
+    fn press_alt(app: &mut App, code: KeyCode) {
+        handle_key(
+            app,
+            KeyEvent::new(code, KeyModifiers::ALT),
+            std::path::Path::new("."),
+        );
+    }
+
+    #[test]
+    fn alt_a_opens_the_deck_and_alt_t_the_trace_without_typing() {
+        let mut app = App::new("s", false);
+        let empty = format!("{:?}", app.overlay_stack);
+
+        press_alt(&mut app, KeyCode::Char('a'));
+        let after_deck = format!("{:?}", app.overlay_stack);
+        assert_ne!(empty, after_deck, "alt-a opens the agent deck");
+
+        press_alt(&mut app, KeyCode::Char('t'));
+        let after_trace = format!("{:?}", app.overlay_stack);
+        assert_ne!(after_deck, after_trace, "alt-t stacks the trace");
+
+        // Neither key is a letter: the prompt is unchanged, so a chord cannot
+        // half-open a screen and half-type a message.
+        assert!(app.input.is_empty(), "{:?}", app.input);
+    }
+
+    #[test]
+    fn ctrl_digits_switch_surfaces_and_name_the_focus_owner() {
+        let mut app = App::new("s", false);
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('3'), KeyModifiers::CONTROL),
+            std::path::Path::new("."),
+        );
+        assert_eq!(app.surface, crate::tui::surface::Surface::Agents);
+        // The status line names the owner the surface calls itself: "agent",
+        // not the surface's plural title.
+        assert_eq!(app.focus_owner, "agent");
+        assert!(app.input.is_empty(), "a surface key is not a character");
     }
 
     #[test]
