@@ -19,6 +19,7 @@
 //! A token is never stored here. `MEMNOTH_MCP_TOKEN` is the only source, so a
 //! config file can be read, copied or committed without carrying a credential.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -164,6 +165,9 @@ pub struct Config {
     /// person's decision rather than a code path's.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<ToolsConfig>,
+    /// Vault namespace, when `mn org namespace set` selects a shared vault.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
 }
 
 /// `[tools]` — the agent's denials, written by `/permissions`.
@@ -188,14 +192,19 @@ pub struct UiConfig {
     /// `off` or `plain`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub screen_reader: Option<String>,
-    /// Whether the first-run panel has been shown on this machine.
+    /// Whether the first-run card has been dismissed on this machine.
     ///
-    /// `None` means it has not: the next session opens on the three lines that
-    /// name the commands worth running first. `mn config set ui.onboarded
-    /// false` brings it back, which is why the absence and the `false` case are
-    /// the same answer.
+    /// `None` means it has not. Merely showing the card is not dismissal: `s`,
+    /// `esc`, `q`, `Enter`, or `Tab` write the flag, because a crash before one
+    /// of those is supposed to bring the card back next launch.
+    /// `mn config set ui.onboarded false` brings it back, which is why the
+    /// absence and the `false` case are the same answer.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub onboarded: Option<bool>,
+    /// Which card was dismissed. Data for future migrations, not an auto-show
+    /// trigger: a version bump never replays a tour on its own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub onboarding_version: Option<u32>,
     /// Model ids pinned in `/models`, so the Favorites tab survives a restart.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub favorite_models: Vec<String>,
@@ -315,13 +324,24 @@ impl AppContext {
         let config_path = home.join("config.toml");
         let config = Config::load(&config_path)?;
 
-        if cli.namespace.trim().is_empty() {
+        // Namespace resolution: explicit flag wins, then persisted config,
+        // then the `default` namespace. The name reaches a filename, so
+        // `validate_namespace` in the engine guards against traversal.
+        let namespace = if cli.namespace != memnoth_engine::DEFAULT_NAMESPACE {
+            cli.namespace.as_str()
+        } else {
+            config
+                .namespace
+                .as_deref()
+                .unwrap_or(memnoth_engine::DEFAULT_NAMESPACE)
+        };
+        if namespace.trim().is_empty() {
             bail!("--namespace cannot be empty");
         }
 
-        // An explicit vault and a namespace are two answers to one question. The
-        // engine's namespace resolver validates the name (it reaches a filename),
-        // so this is also where traversal is refused.
+        // An explicit vault and a namespace are two answers to one question.
+        // The engine's namespace resolver validates the name (it reaches a
+        // filename), so this is also where traversal is refused.
         let explicit = cli
             .vault
             .clone()
@@ -329,18 +349,22 @@ impl AppContext {
             .or_else(|| config.vault.clone().map(PathBuf::from));
         let vault_path = match explicit {
             Some(path) => {
-                if cli.namespace != memnoth_engine::DEFAULT_NAMESPACE {
+                if namespace != memnoth_engine::DEFAULT_NAMESPACE {
                     bail!("--vault and --namespace name two different vaults; pass one of them");
                 }
                 path
             }
-            None => memnoth_engine::vault_path(&home, &cli.namespace)
+            None => memnoth_engine::vault_path(&home, namespace)
                 .context("cannot resolve the vault path")?,
         };
 
         let graph_path = std::env::var_os("MEMNOTH_GRAPH")
             .map(PathBuf::from)
             .unwrap_or_else(|| root.join(".memnoth").join("graph.db"));
+
+        // Owned before `config` moves: `namespace` is a view into the loaded
+        // config, and the struct build moves that config.
+        let namespace = namespace.to_string();
 
         Ok(Self {
             root,
@@ -349,7 +373,7 @@ impl AppContext {
             config,
             home,
             vault_path,
-            namespace: cli.namespace.clone(),
+            namespace,
             graph_path,
             json: cli.json,
             quiet: cli.quiet,
@@ -465,36 +489,36 @@ impl AppContext {
 
     /// Where the `memnoth-mcp` server binary is, if this machine has one.
     ///
-    /// The server is a separate process in this build because its crate is not
-    /// published here (see the workspace manifest). Looking beside the CLI first
-    /// means an installed bundle can ship both and never depend on `PATH`.
+    /// Looking beside the CLI first means an installed bundle can ship both and
+    /// never depend on `PATH`. A `PATH` hit is a weaker fact: the machine may
+    /// carry a server left by an older install, and an older server advertises an
+    /// older tool surface while answering perfectly well. [`AppContext::mcp_server`]
+    /// reports that mismatch; this method keeps the old path-only shape for the
+    /// callers that only want somewhere to point at.
     pub fn mcp_binary(&self) -> Option<PathBuf> {
-        if let Some(path) = std::env::var_os("MEMNOTH_MCP_BIN").map(PathBuf::from) {
-            // Absolutized before it is returned: the server is spawned with
-            // `current_dir(workspace)`, so a relative `MEMNOTH_MCP_BIN` such as
-            // CI's `target/debug/memnoth-mcp` would be resolved inside the
-            // workspace, where no such file exists.
-            let path = std::path::absolute(&path).unwrap_or(path);
-            return path.is_file().then_some(path);
+        self.mcp_server().map(|server| server.path)
+    }
+
+    /// The server binary plus where it came from and what version it reports.
+    ///
+    /// Resolution order is `MEMNOTH_MCP_BIN`, then the directory holding this
+    /// `memnoth`, then `PATH`. A `PATH` server whose version is not this build's
+    /// gets one stderr line — stderr is safe on a stdio server's descriptors —
+    /// and nothing else: refusing to run would turn a warning into an outage.
+    pub fn mcp_server(&self) -> Option<McpServer> {
+        let exe = std::env::current_exe().ok();
+        let server = resolve_mcp_binary(
+            exe.as_deref().and_then(Path::parent),
+            std::env::var_os("MEMNOTH_MCP_BIN").as_deref(),
+            std::env::var_os("PATH").as_deref(),
+        );
+        if let Some(server) = &server
+            && server.source == McpSource::Path
+            && !server.matches_this_build()
+        {
+            warn_about_path_server(server);
         }
-        let exe = std::env::current_exe().ok()?;
-        let dir = exe.parent()?;
-        for name in binary_names() {
-            let candidate = dir.join(name);
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
-        let path = std::env::var_os("PATH")?;
-        for dir in std::env::split_paths(&path) {
-            for name in binary_names() {
-                let candidate = dir.join(name);
-                if candidate.is_file() {
-                    return Some(candidate);
-                }
-            }
-        }
-        None
+        server
     }
 
     /// Create the per-machine state directory, if it does not exist.
@@ -535,8 +559,154 @@ fn binary_names() -> Vec<String> {
     }
 }
 
+/// Which of the three places a resolved server came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpSource {
+    /// Named by `MEMNOTH_MCP_BIN`.
+    Env,
+    /// In the directory holding the running `memnoth` — what a bundle ships.
+    Beside,
+    /// Somewhere on `PATH`; the CLI cannot vouch for its age.
+    Path,
+}
+
+impl McpSource {
+    /// The word `memnoth doctor` and `memnoth mcp doctor` print.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Env => "MEMNOTH_MCP_BIN",
+            Self::Beside => "beside memnoth",
+            Self::Path => "PATH",
+        }
+    }
+}
+
+/// A resolved `memnoth-mcp` binary.
+pub struct McpServer {
+    /// The executable the CLI would spawn.
+    pub path: PathBuf,
+    /// How it was found.
+    pub source: McpSource,
+    /// Cached answer to `--version`; `OnceLock` so one resolution asks once.
+    version: std::sync::OnceLock<Option<String>>,
+}
+
+impl McpServer {
+    fn new(path: PathBuf, source: McpSource) -> Self {
+        Self {
+            path,
+            source,
+            version: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// The version the binary reports for `--version`, asked once.
+    ///
+    /// `None` means the binary did not answer: a server built before the flag
+    /// existed exits non-zero on it. That is a different fact from "the same
+    /// version", which is why the two are not collapsed into a bool.
+    pub fn version(&self) -> Option<&str> {
+        self.version
+            .get_or_init(|| Self::version_at(&self.path))
+            .as_deref()
+    }
+
+    /// The version a server at `path` reports, without holding a resolution.
+    pub fn version_at(path: &Path) -> Option<String> {
+        let output = std::process::Command::new(path)
+            .arg("--version")
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        text.split_whitespace().last().map(str::to_string)
+    }
+
+    /// Is this the server this CLI was built to talk to?
+    pub fn matches_this_build(&self) -> bool {
+        self.version() == Some(env!("CARGO_PKG_VERSION"))
+    }
+
+    /// One line for a doctor to print: version and whether it is this build's.
+    pub fn version_line(&self) -> String {
+        version_line(self.version())
+    }
+}
+
+/// Render a probed version the way both doctors print it.
+pub fn version_line(version: Option<&str>) -> String {
+    let expected = env!("CARGO_PKG_VERSION");
+    match version {
+        Some(found) if found == expected => format!("{found} (this build)"),
+        Some(found) => {
+            format!("{found} (this CLI is {expected}) — set MEMNOTH_MCP_BIN or rebuild it")
+        }
+        None => {
+            format!("unknown — the binary does not answer --version, so it predates {expected}")
+        }
+    }
+}
+
+/// One stderr line, once per process, for a server this CLI did not build.
+fn warn_about_path_server(server: &McpServer) {
+    use std::sync::Once;
+    static WARNED: Once = Once::new();
+    WARNED.call_once(|| {
+        let found = server
+            .version()
+            .map(|found| format!("reports {found}"))
+            .unwrap_or_else(|| "reports no version (it predates --version)".to_string());
+        eprintln!(
+            "memnoth: the MCP server on PATH {found} at {} but this CLI is {}; \
+             rebuild `crates/memnoth-mcp` or set MEMNOTH_MCP_BIN to a matching server",
+            server.path.display(),
+            env!("CARGO_PKG_VERSION"),
+        );
+    });
+}
+
+/// Resolution itself, parameterised so a test can point it at temp dirs.
+///
+/// `env_override` wins unconditionally (it is a person's explicit answer), then
+/// `exe_dir` — the bundle — then `search_path`. Within a directory the platform's
+/// executable suffix is tried before the bare name.
+fn resolve_mcp_binary(
+    exe_dir: Option<&Path>,
+    env_override: Option<&OsStr>,
+    search_path: Option<&OsStr>,
+) -> Option<McpServer> {
+    if let Some(path) = env_override.map(PathBuf::from) {
+        // Absolutized before it is returned: the server is spawned with
+        // `current_dir(workspace)`, so a relative `MEMNOTH_MCP_BIN` such as
+        // CI's `target/debug/memnoth-mcp` would be resolved inside the
+        // workspace, where no such file exists.
+        let path = std::path::absolute(&path).unwrap_or(path);
+        return path.is_file().then(|| McpServer::new(path, McpSource::Env));
+    }
+    if let Some(dir) = exe_dir {
+        for name in binary_names() {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return Some(McpServer::new(candidate, McpSource::Beside));
+            }
+        }
+    }
+    let path = search_path?;
+    for dir in std::env::split_paths(&path) {
+        for name in binary_names() {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return Some(McpServer::new(candidate, McpSource::Path));
+            }
+        }
+    }
+    None
+}
+
 /// `MEMNOTH_HOME` (the state directory itself), else `$HOME/.memnoth`.
-fn memnoth_home() -> Result<PathBuf> {
+pub(crate) fn memnoth_home() -> Result<PathBuf> {
     if let Some(explicit) = std::env::var_os("MEMNOTH_HOME").map(PathBuf::from) {
         if explicit.as_os_str().is_empty() {
             bail!("MEMNOTH_HOME is set but empty");
@@ -586,6 +756,7 @@ mod tests {
             json: false,
             quiet: false,
             resume: None,
+            trust_folder: false,
             verb: None,
         }
     }
@@ -736,5 +907,46 @@ mod tests {
             ..Default::default()
         };
         assert!(explicit_on.telemetry_enabled());
+    }
+
+    /// The resolver is the one place the "which server" question is answered,
+    /// and the failure it now guards against was measured: with no sibling
+    /// binary, `PATH` supplied a beta.1 server to a beta.2 CLI and every
+    /// `tools/call` went to a surface that no longer matched.
+    ///
+    /// The poison directory holds a file *named* like the server, so a resolver
+    /// that reached `PATH` first would be caught whichever order the test ran in.
+    #[test]
+    fn the_sibling_server_wins_over_path() {
+        let tmp = std::env::temp_dir().join(format!("memnoth-mcp-resolve-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let beside = tmp.join("bin");
+        let poison = tmp.join("poison");
+        std::fs::create_dir_all(&beside).unwrap();
+        std::fs::create_dir_all(&poison).unwrap();
+        let name = binary_names().remove(0);
+        let shipped = beside.join(&name);
+        let stale = poison.join(&name);
+        std::fs::write(&shipped, b"not a real binary").unwrap();
+        std::fs::write(&stale, b"not a real binary").unwrap();
+
+        let path = std::env::join_paths([&poison]).unwrap();
+        let server = resolve_mcp_binary(Some(&beside), None, Some(&path)).expect("a sibling");
+        assert_eq!(server.path, shipped);
+        assert_eq!(server.source, McpSource::Beside);
+
+        // Without a sibling the poison entry is what a plain lookup finds, and it
+        // is labelled as such so a doctor can say where the server came from.
+        let server = resolve_mcp_binary(Some(&tmp), None, Some(&path)).expect("a PATH hit");
+        assert_eq!(server.path, stale);
+        assert_eq!(server.source, McpSource::Path);
+
+        // An explicit answer outranks both, and still wins over the sibling.
+        let server = resolve_mcp_binary(Some(&beside), Some(stale.as_os_str()), Some(&path))
+            .expect("the override");
+        assert_eq!(server.path, stale);
+        assert_eq!(server.source, McpSource::Env);
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

@@ -62,6 +62,10 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub quiet: bool,
 
+    /// Trust this folder without asking first.
+    #[arg(long, global = true)]
+    pub trust_folder: bool,
+
     /// Resume the named session instead of starting a new one.
     #[arg(long, global = true, value_name = "NAME")]
     pub resume: Option<String>,
@@ -83,15 +87,6 @@ pub enum Verb {
     Kg(KgArgs),
     /// Serve the graph over MCP, and register clients for it.
     Mcp(McpArgs),
-    /// List available models from the cloud.
-    #[command(hide = true)]
-    Models(ModelsArgs),
-    /// Show usage and costs, with local reconciliation.
-    #[command(hide = true)]
-    Usage(UsageArgs),
-    /// Show usage statistics with local reconciliation.
-    #[command(hide = true)]
-    Stats(StatsArgs),
     /// Authentication: login, logout, status, whoami.
     Auth(AuthArgs),
     /// Encrypted vault sync: status, now, pause, restore (beta).
@@ -191,7 +186,265 @@ pub enum Verb {
     /// Watch files and reindex incrementally.
     #[command(hide = true)]
     Watch(WatchArgs),
+    /// Run reproducible proof benchmarks (MTS-60, TRS, KG).
+    #[command(hide = true)]
+    Bench(crate::bench::BenchArgs),
+    /// Headless agents: list, run, result, unpack.
+    #[command(hide = true)]
+    Agents(AgentsArgs),
+    /// Offline "why is this code like this?" demo.
+    #[command(hide = true)]
+    Demo,
+    /// Snapshot code, conversation, and vault metadata.
+    #[command(hide = true)]
+    Checkpoint(CheckpointArgs),
+    /// Undo the last turn (conversation only).
+    #[command(hide = true)]
+    Undo,
+    /// Redo the last undone turn.
+    #[command(hide = true)]
+    Redo,
+    /// Delegate a task to a scoped subagent.
+    #[command(hide = true)]
+    Delegate(DelegateArgs),
+    /// Merge a child branch, surfacing belief conflicts.
+    #[command(hide = true)]
+    Merge(MergeArgs),
+    /// Bundle a session for transfer to another machine.
+    #[command(hide = true)]
+    Handoff(HandoffTopArgs),
+    /// Compact context, keeping exact facts.
+    #[command(hide = true)]
+    Compact(CompactArgs),
+    /// Side question; not persisted in the transcript.
+    #[command(hide = true)]
+    Btw(BtwArgs),
+    /// One-line session summary.
+    #[command(hide = true)]
+    Recap,
+    /// Export session transcript with tool calls and receipts.
+    #[command(hide = true)]
+    Export(ExportArgs),
+    /// Rename the current session, keeping its id and path.
+    #[command(hide = true)]
+    Rename(RenameArgs),
+    /// View and remap key bindings.
+    #[command(hide = true)]
+    Keymap(KeymapArgs),
+    /// Replayable first-run onboarding card.
+    #[command(hide = true)]
+    Onboarding,
+    /// Session brief: one primary action, three-fact pulse, quickstart.
+    #[command(hide = true)]
+    Brief,
+    /// Agent Communication Protocol server mode: stateless, one turn per connection.
+    #[command(hide = true)]
+    Acp(AcpArgs),
+    /// Extension management: new, list, uninstall, doctor.
+    #[command(hide = true)]
+    Extension(ExtensionArgs),
+    /// Show how the current work drifts from the plan.
+    #[command(hide = true)]
+    Drift(DriftArgs),
+    /// Simulate a change without applying it.
+    #[command(hide = true)]
+    Simulate(SimulateArgs),
+    /// Trace an entity's provenance.
+    #[command(hide = true)]
+    Lineage(LineageArgs),
+    /// Why a symbol is believed, in code and in the vault.
+    #[command(hide = true)]
+    Why(WhyArgs),
+    /// Blast radius of a symbol.
+    #[command(hide = true)]
+    Impact(ImpactArgs),
+    /// Set or show the session plan.
+    #[command(hide = true)]
+    Plan(PlanArgs),
+    /// Set or show the session goal condition.
+    #[command(hide = true)]
+    Goal(GoalArgs),
+    /// Run a command in the sandbox, or set the sandbox up.
+    #[command(hide = true)]
+    Sandbox(SandboxArgs),
+    /// Show token budget usage.
+    #[command(hide = true)]
+    Budget(BudgetArgs),
+    /// Trust: list trusted folders, or forget one.
+    #[command(hide = true)]
+    Trust(TrustArgs),
 }
+
+/// Arguments for `mn drift`.
+#[derive(Debug, Args)]
+pub struct DriftArgs {
+    /// Only show drift since this instant.
+    #[arg(long, value_name = "SINCE")]
+    pub since: Option<String>,
+}
+
+/// Arguments for `mn simulate`.
+#[derive(Debug, Args)]
+pub struct SimulateArgs {
+    /// The change to simulate, in words.
+    #[arg(value_name = "CHANGE")]
+    pub change: String,
+}
+
+/// Arguments for `mn lineage`.
+#[derive(Debug, Args)]
+pub struct LineageArgs {
+    /// The entity to trace.
+    #[arg(value_name = "ENTITY")]
+    pub entity: String,
+    /// How far back to trace.
+    #[arg(long, value_name = "N", default_value_t = 3)]
+    pub depth: usize,
+}
+
+/// Arguments for `mn why`.
+#[derive(Debug, Args)]
+pub struct WhyArgs {
+    /// The symbol to explain.
+    #[arg(value_name = "SYMBOL")]
+    pub symbol: String,
+    /// Reconstruct the belief at this instant.
+    #[arg(long, value_name = "WHEN")]
+    pub at: Option<String>,
+}
+
+/// Arguments for `mn impact`.
+#[derive(Debug, Args)]
+pub struct ImpactArgs {
+    /// The symbol whose blast radius to show.
+    #[arg(value_name = "SYMBOL")]
+    pub symbol: String,
+    /// How far to walk the graph.
+    #[arg(long, value_name = "N", default_value_t = 2)]
+    pub depth: usize,
+    /// Show the diff form.
+    #[arg(long)]
+    pub diff: bool,
+}
+
+/// Arguments for `mn goal`.
+#[derive(Debug, Args)]
+pub struct GoalArgs {
+    /// The completion condition to set, or omit to show it.
+    #[arg(value_name = "CONDITION")]
+    pub condition: Option<String>,
+}
+
+/// Arguments for `mn sandbox`.
+#[derive(Debug, Args)]
+pub struct SandboxArgs {
+    #[command(subcommand)]
+    pub command: SandboxCommand,
+}
+
+/// Sandbox subcommands.
+#[derive(Debug, Subcommand)]
+pub enum SandboxCommand {
+    /// Run a command through the sandbox test harness.
+    #[command(name = "test")]
+    Test {
+        /// The command to run.
+        #[arg(value_name = "COMMAND")]
+        command: String,
+    },
+    /// Set the sandbox up for this workspace.
+    #[command(name = "setup")]
+    Setup,
+}
+
+/// Arguments for `mn budget`.
+#[derive(Debug, Args)]
+pub struct BudgetArgs {}
+
+/// Arguments for `mn trust`.
+#[derive(Debug, Args)]
+pub struct TrustArgs {
+    #[command(subcommand)]
+    pub action: TrustCommand,
+}
+
+/// Trust subcommands.
+#[derive(Debug, Subcommand)]
+pub enum TrustCommand {
+    /// List trusted folders.
+    #[command(name = "list")]
+    List,
+    /// Forget a trusted folder.
+    #[command(name = "forget")]
+    Forget(TrustForgetArgs),
+}
+
+/// Arguments for `mn trust forget`.
+#[derive(Debug, Args)]
+pub struct TrustForgetArgs {
+    /// The folder to forget.
+    #[arg(value_name = "PATH")]
+    pub path: String,
+}
+/// Arguments for `mn checkpoint`.
+#[derive(Debug, Args)]
+pub struct CheckpointArgs {
+    /// Name for the checkpoint.
+    #[arg(long, value_name = "NAME")]
+    pub name: Option<String>,
+}
+
+/// Arguments for `mn delegate`.
+#[derive(Debug, Args)]
+pub struct DelegateArgs {
+    /// Who to delegate to.
+    #[arg(value_name = "NAME")]
+    pub name: String,
+    /// The task to hand over.
+    #[arg(value_name = "TASK")]
+    pub task: String,
+}
+
+/// Arguments for `mn merge`.
+#[derive(Debug, Args)]
+pub struct MergeArgs {
+    /// The branch to merge in.
+    #[arg(value_name = "BRANCH")]
+    pub branch: String,
+}
+
+/// Arguments for `mn compact`.
+#[derive(Debug, Args)]
+pub struct CompactArgs {
+    /// What to focus the compaction on.
+    #[arg(long, value_name = "FOCUS")]
+    pub focus: Option<String>,
+}
+
+/// Arguments for `mn btw`.
+#[derive(Debug, Args)]
+pub struct BtwArgs {
+    /// The side question.
+    #[arg(value_name = "QUESTION")]
+    pub question: String,
+}
+
+/// Arguments for `mn export`.
+#[derive(Debug, Args)]
+pub struct ExportArgs {
+    /// Where to write the export.
+    #[arg(long, value_name = "PATH")]
+    pub path: Option<String>,
+}
+
+/// Arguments for `mn rename`.
+#[derive(Debug, Args)]
+pub struct RenameArgs {
+    /// The new session name.
+    #[arg(value_name = "NAME")]
+    pub name: String,
+}
+
 /// `mn connect` — configure model provider with API key.
 #[derive(Debug, Args)]
 pub struct ConnectArgs {
@@ -438,6 +691,12 @@ pub enum SessionCommand {
     Attach(AttachArgs),
     /// Hand off session to another machine (pair with attach).
     Handoff(HandoffArgs),
+    /// Import a Claude Code session JSONL.
+    FromClaude(FromClaudeArgs),
+    /// Import a Codex session JSONL.
+    FromCodex(FromCodexArgs),
+    /// Import an OMP session JSONL.
+    FromOmp(FromOmpArgs),
     /// Run a command under the policy engine (sandbox).
     Exec(ExecArgs),
 }
@@ -556,6 +815,9 @@ pub struct PlanArgs {
     /// Session name (defaults to current session).
     #[arg(long, value_name = "NAME")]
     pub name: Option<String>,
+    /// Append a step to the plan artifact.
+    #[arg(long, value_name = "TEXT")]
+    pub step: Option<String>,
     /// Enable/disable plan mode.
     #[arg(long, action = clap::ArgAction::SetTrue)]
     pub enable: bool,
@@ -740,6 +1002,14 @@ pub struct HandoffArgs {
     pub json: bool,
 }
 
+/// `mn handoff` — bundle a session for transfer to another machine.
+#[derive(Debug, Args)]
+pub struct HandoffTopArgs {
+    /// Where to write the bundle.
+    #[arg(long, value_name = "PATH")]
+    pub path: Option<String>,
+}
+
 /// `memnoth session exec` — run command under policy engine.
 #[derive(Debug, Args)]
 pub struct ExecArgs {
@@ -764,6 +1034,39 @@ pub struct ExecArgs {
     /// Output as JSON.
     #[arg(long)]
     pub json: bool,
+}
+
+/// `memnoth session from-claude <path>` — import Claude Code session JSONL.
+#[derive(Debug, Args)]
+pub struct FromClaudeArgs {
+    /// Path to the Claude Code session JSONL file.
+    #[arg(value_name = "PATH")]
+    pub path: String,
+    /// Session name to import into (defaults to source filename stem).
+    #[arg(long, value_name = "NAME")]
+    pub name: Option<String>,
+}
+
+/// `memnoth session from-codex <path>` — import Codex session JSONL.
+#[derive(Debug, Args)]
+pub struct FromCodexArgs {
+    /// Path to the Codex session JSONL file.
+    #[arg(value_name = "PATH")]
+    pub path: String,
+    /// Session name to import into (defaults to source filename stem).
+    #[arg(long, value_name = "NAME")]
+    pub name: Option<String>,
+}
+
+/// `memnoth session from-omp <path>` — import OMP session JSONL.
+#[derive(Debug, Args)]
+pub struct FromOmpArgs {
+    /// Path to the OMP session JSONL file.
+    #[arg(value_name = "PATH")]
+    pub path: String,
+    /// Session name to import into (defaults to source filename stem).
+    #[arg(long, value_name = "NAME")]
+    pub name: Option<String>,
 }
 /// `mn teams …` — team operations.
 #[derive(Debug, Args)]
@@ -804,6 +1107,65 @@ pub enum TeamsCommand {
     Review(TeamReviewArgs),
     /// Run an audit of team activity.
     Audit(TeamAuditArgs),
+    /// Show or set the team vault namespace.
+    #[command(name = "namespace")]
+    Namespace(TeamsNamespaceArgs),
+    /// Show where team memories came from.
+    #[command(name = "provenance")]
+    Provenance(TeamsProvenanceArgs),
+    /// Show disputed team memories.
+    #[command(name = "disputed")]
+    Disputed(TeamsDisputedArgs),
+    /// Enforce team quotas.
+    #[command(name = "enforce")]
+    Enforce(TeamsEnforceArgs),
+    /// Import or export a session transcript.
+    #[command(name = "import-export")]
+    ImportExport(TeamsImportExportArgs),
+}
+
+/// Arguments for `mn teams namespace`.
+#[derive(Debug, Args)]
+pub struct TeamsNamespaceArgs {
+    /// The namespace action: show, or a name to set.
+    #[arg(value_name = "ACTION")]
+    pub action: Option<String>,
+}
+
+/// Arguments for `mn teams provenance`.
+#[derive(Debug, Args)]
+pub struct TeamsProvenanceArgs {
+    /// How many rows to show.
+    #[arg(long, value_name = "LIMIT")]
+    pub limit: Option<usize>,
+}
+
+/// Arguments for `mn teams disputed`.
+#[derive(Debug, Args)]
+pub struct TeamsDisputedArgs {}
+
+/// Arguments for `mn teams enforce`.
+#[derive(Debug, Args)]
+pub struct TeamsEnforceArgs {}
+
+/// Arguments for `mn teams import-export`.
+#[derive(Debug, Args)]
+pub struct TeamsImportExportArgs {
+    /// Import a Claude session transcript from this path.
+    #[arg(long, value_name = "PATH")]
+    pub from_claude: Option<String>,
+    /// Import a Codex session transcript from this path.
+    #[arg(long, value_name = "PATH")]
+    pub from_codex: Option<String>,
+    /// Import an OMP session transcript from this path.
+    #[arg(long, value_name = "PATH")]
+    pub from_omp: Option<String>,
+    /// Export the session to this path.
+    #[arg(long, value_name = "PATH")]
+    pub export: Option<String>,
+    /// Export format.
+    #[arg(long, value_name = "FORMAT", default_value = "markdown")]
+    pub format: String,
 }
 
 /// Arguments for `mn teams join`.
@@ -1060,61 +1422,6 @@ pub struct ConfigExplainArgs {
     pub json: bool,
 }
 
-/// `mn models` — list available models from the cloud.
-/// `mn model use <id>` — switch default model (persisted).
-#[derive(Debug, Args)]
-pub struct ModelsArgs {
-    #[command(subcommand)]
-    pub action: ModelsCommand,
-}
-
-/// Models subcommands.
-#[derive(Debug, Subcommand)]
-pub enum ModelsCommand {
-    /// List available models from the cloud.
-    #[command(name = "list")]
-    List(ModelsListArgs),
-    /// Set default model (persisted to config).
-    #[command(name = "use")]
-    Use(ModelUseArgs),
-}
-
-/// Arguments for `mn models list`.
-#[derive(Debug, Args)]
-pub struct ModelsListArgs {
-    /// Filter by provider name.
-    #[arg(long, value_name = "NAME")]
-    pub provider: Option<String>,
-    /// Only show models from configured providers (have API keys).
-    #[arg(long)]
-    pub connected: bool,
-    /// Output as JSON with full metadata.
-    #[arg(long, global = true)]
-    pub json: bool,
-    /// Output format: table, wide (all columns), or json.
-    #[arg(long, value_name = "FORMAT", default_value = "table")]
-    pub format: ModelsFormat,
-    /// Compare two models side-by-side (comma-separated IDs).
-    #[arg(long, value_name = "ID1,ID2")]
-    pub compare: Option<String>,
-}
-
-/// Output format for models list.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-pub enum ModelsFormat {
-    Table,
-    Wide,
-    Json,
-}
-
-/// Arguments for `mn model use <id>`.
-#[derive(Debug, Args)]
-pub struct ModelUseArgs {
-    /// Model ID to set as default.
-    #[arg(value_name = "ID")]
-    pub model_id: String,
-}
-
 /// `mn telemetry` — show telemetry status and toggle.
 #[derive(Debug, Args)]
 pub struct TelemetryArgs {
@@ -1172,7 +1479,7 @@ pub enum PrivacyCommand {
     /// Show privacy status and what data leaves the machine.
     #[command(name = "status")]
     Status(PrivacyStatusArgs),
-    /// Enable telemetry collection (default: on).
+    /// Enable telemetry collection (default: off).
     #[command(name = "on")]
     On(PrivacyOnArgs),
     /// Disable telemetry collection (no telemetry data leaves machine).
@@ -1230,7 +1537,69 @@ pub struct PrivacyShowDataArgs {
     pub json: bool,
 }
 
-/// `mn billing` — invoices, plan, limits.
+/// Arguments for `mn agents`.
+#[derive(Debug, Args)]
+pub struct AgentsArgs {
+    #[command(subcommand)]
+    pub action: AgentsCommand,
+}
+
+/// `mn agents` subcommands.
+#[derive(Debug, Subcommand)]
+pub enum AgentsCommand {
+    /// List headless agents in the coordination room.
+    #[command(name = "list")]
+    List(AgentListArgs),
+    /// Run a headless agent task.
+    #[command(name = "run")]
+    Run(AgentRunArgs),
+    /// Show an agent's result.
+    #[command(name = "result")]
+    Result(AgentResultArgs),
+    /// Unpack an agent's result artifacts.
+    #[command(name = "unpack")]
+    Unpack(AgentUnpackArgs),
+}
+
+/// Arguments for `mn agents list`.
+#[derive(Debug, Args)]
+pub struct AgentListArgs {
+    /// Output as JSON.
+    #[arg(long, global = true)]
+    pub json: bool,
+}
+
+/// Arguments for `mn agents run <task>`.
+#[derive(Debug, Args)]
+pub struct AgentRunArgs {
+    /// Task description.
+    pub task: String,
+    /// Output as JSON.
+    #[arg(long, global = true)]
+    pub json: bool,
+}
+
+/// Arguments for `mn agents result <id>`.
+#[derive(Debug, Args)]
+pub struct AgentResultArgs {
+    /// Agent run id.
+    pub id: String,
+    /// Output as JSON.
+    #[arg(long, global = true)]
+    pub json: bool,
+}
+
+/// Arguments for `mn agents unpack <id>`.
+#[derive(Debug, Args)]
+pub struct AgentUnpackArgs {
+    /// Agent run id.
+    pub id: String,
+    /// Output as JSON.
+    #[arg(long, global = true)]
+    pub json: bool,
+}
+
+/// Arguments for `mn billing` — invoices, plan, limits.
 #[derive(Debug, Args)]
 pub struct BillingCommands {
     #[command(subcommand)]
@@ -1472,6 +1841,14 @@ pub struct KeysRevokeArgs {
     #[arg(value_name = "ID")]
     pub id: String,
 
+    /// Answer yes without asking.
+    #[arg(long)]
+    pub yes: bool,
+
+    /// Show what would be revoked without revoking anything.
+    #[arg(long)]
+    pub dry_run: bool,
+
     /// Output as JSON.
     #[arg(long, global = true)]
     pub json: bool,
@@ -1530,6 +1907,89 @@ pub enum OrgCommand {
     /// Withdraw a pending invite.
     #[command(name = "withdraw")]
     Withdraw(OrgWithdrawArgs),
+    /// Show SSO configuration.
+    #[command(name = "sso")]
+    Sso(OrgSsoArgs),
+    /// Show seat usage.
+    #[command(name = "seats")]
+    Seats,
+    /// Show the IP clause.
+    #[command(name = "ip-clause")]
+    IpClause(OrgIpClauseArgs),
+    /// Show the DPA clause.
+    #[command(name = "dpa-clause")]
+    DpaClause(OrgDpaClauseArgs),
+    /// Install an org extension.
+    #[command(name = "extension-install")]
+    ExtensionInstall(OrgExtensionInstallArgs),
+    /// Uninstall an org extension.
+    #[command(name = "extension-uninstall")]
+    ExtensionUninstall(OrgExtensionUninstallArgs),
+    /// Show or set the vault namespace.
+    #[command(name = "namespace")]
+    Namespace(OrgNamespaceArgs),
+}
+
+/// Arguments for `mn org sso`.
+#[derive(Debug, Args)]
+pub struct OrgSsoArgs {
+    /// Output as JSON.
+    #[arg(long, global = true)]
+    pub json: bool,
+}
+
+/// Arguments for `mn org ip-clause`.
+#[derive(Debug, Args)]
+pub struct OrgIpClauseArgs {
+    /// Output as JSON.
+    #[arg(long, global = true)]
+    pub json: bool,
+}
+
+/// Arguments for `mn org dpa-clause`.
+#[derive(Debug, Args)]
+pub struct OrgDpaClauseArgs {
+    /// Output as JSON.
+    #[arg(long, global = true)]
+    pub json: bool,
+}
+
+/// Arguments for `mn org extension-install`.
+#[derive(Debug, Args)]
+pub struct OrgExtensionInstallArgs {
+    /// The extension spec to install.
+    #[arg(value_name = "SPEC")]
+    pub spec: String,
+}
+
+/// Arguments for `mn org extension-uninstall`.
+#[derive(Debug, Args)]
+pub struct OrgExtensionUninstallArgs {
+    /// The extension name to uninstall.
+    #[arg(value_name = "NAME")]
+    pub name: String,
+}
+
+/// Arguments for `mn org namespace`.
+#[derive(Debug, Args)]
+pub struct OrgNamespaceArgs {
+    #[command(subcommand)]
+    pub action: OrgNamespaceAction,
+}
+
+/// Org namespace subcommands.
+#[derive(Debug, Subcommand)]
+pub enum OrgNamespaceAction {
+    /// Show the current namespace.
+    #[command(name = "show")]
+    Show,
+    /// Set the namespace.
+    #[command(name = "set")]
+    Set {
+        /// The namespace name.
+        #[arg(value_name = "NAME")]
+        name: String,
+    },
 }
 
 /// Arguments for `mn org show`.
@@ -1640,46 +2100,6 @@ pub struct OrgWithdrawArgs {
     pub json: bool,
 }
 
-/// `mn usage` — show usage and costs, with local reconciliation.
-#[derive(Debug, Args)]
-pub struct UsageArgs {
-    /// Group by: day, model, project.
-    #[arg(long, value_name = "KIND")]
-    pub by: Option<String>,
-
-    /// Since date (YYYY-MM-DD).
-    #[arg(long, value_name = "DATE")]
-    pub since: Option<String>,
-
-    /// Time range: 7d, 30d, 90d, 365d.
-    #[arg(long, value_name = "RANGE", default_value = "30d")]
-    pub range: String,
-
-    /// Output as JSON.
-    #[arg(long, global = true)]
-    pub json: bool,
-}
-
-/// `mn stats` — show usage statistics with local reconciliation.
-#[derive(Debug, Args)]
-pub struct StatsArgs {
-    /// Group by: day, model, project.
-    #[arg(long, value_name = "KIND")]
-    pub by: Option<String>,
-
-    /// Since date (YYYY-MM-DD).
-    #[arg(long, value_name = "DATE")]
-    pub since: Option<String>,
-
-    /// Time range: 7d, 30d, 90d, 365d.
-    #[arg(long, value_name = "RANGE", default_value = "30d")]
-    pub range: String,
-
-    /// Output as JSON.
-    #[arg(long, global = true)]
-    pub json: bool,
-}
-
 /// `mn completions …` — shell completion commands.
 #[derive(Debug, Args)]
 pub struct CompletionArgs {
@@ -1696,6 +2116,17 @@ pub enum CompletionCommand {
     /// Install shell completions to the standard location.
     #[command(name = "install")]
     Install(CompletionInstallArgs),
+    /// Remove installed shell completions.
+    #[command(name = "uninstall")]
+    Uninstall(CompletionUninstallArgs),
+}
+
+/// Arguments for `mn completions uninstall`.
+#[derive(Debug, Args)]
+pub struct CompletionUninstallArgs {
+    /// Shell to uninstall for (bash, zsh, fish, powershell, elvish).
+    #[arg(long, short = 's', value_name = "SHELL")]
+    pub shell: Option<String>,
 }
 
 /// Arguments for `mn completions show`.
@@ -1893,6 +2324,10 @@ pub struct UpdateArgs {
     /// different failure from an unsigned one.
     #[arg(long)]
     pub no_verify: bool,
+
+    /// Restore the binary the last update replaced, from `<exe>.old`.
+    #[arg(long, conflicts_with_all = ["check", "version"])]
+    pub rollback: bool,
 }
 
 /// `mn install` — install memnoth (shows installer instructions).
@@ -1909,6 +2344,12 @@ pub struct UninstallArgs {
     /// Keep configuration and state files.
     #[arg(long)]
     pub keep_state: bool,
+    /// Answer yes without asking.
+    #[arg(long)]
+    pub yes: bool,
+    /// Show what would be removed without removing anything.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 /// `mn auth …` — authentication commands.
@@ -2542,6 +2983,13 @@ pub enum McpCommand {
         /// cloud endpoint. No account or token is needed.
         #[arg(long)]
         local: bool,
+        /// Team vault: register a shared team vault path instead of the
+        /// personal vault. Requires --local.
+        #[arg(long, value_name = "TEAM", requires = "local")]
+        team: Option<String>,
+        /// Vault path for local registration. Defaults to the configured vault.
+        #[arg(long, value_name = "PATH")]
+        db: Option<PathBuf>,
         /// Allow a local server to write beliefs. Without this flag the
         /// registration is read-only; `--local` is required.
         #[arg(long, requires = "local")]
@@ -2561,7 +3009,7 @@ pub enum McpCommand {
         #[arg(long, value_name = "PROFILE")]
         profile: Option<String>,
     },
-    /// Run the server's own initialize/tools/list/resources/list probe.
+    /// Run the server's own server/discover/tools/list/resources/list probe.
     Selftest,
     /// Remove a client's MCP registration.
     Remove {
@@ -2883,6 +3331,42 @@ pub enum WorktreeCommand {
     /// Diff between worktrees.
     #[command(name = "diff")]
     Diff(WorktreeDiffArgs),
+    /// Remove stale worktrees.
+    #[command(name = "prune")]
+    Prune(WorktreePruneArgs),
+    /// Finish a run: clean its worktree on success, keep it on failure.
+    #[command(name = "finish")]
+    Finish(WorktreeFinishArgs),
+}
+
+/// Arguments for `mn worktree finish`.
+///
+/// The run outcome is the argument, not something this command infers: a
+/// worktree that is kept because git could not answer is indistinguishable from
+/// one kept because the run failed, and only the caller knows which happened.
+#[derive(Debug, Args)]
+pub struct WorktreeFinishArgs {
+    /// Run id (the directory name under .memnoth/worktrees/).
+    #[arg(value_name = "RUN_ID")]
+    pub run_id: String,
+    /// `success` removes the worktree and its branch; `failed` keeps both for
+    /// inspection.
+    #[arg(long, value_name = "OUTCOME", default_value = "success")]
+    pub outcome: String,
+    /// Output as JSON.
+    #[arg(long, global = true)]
+    pub json: bool,
+}
+
+/// Arguments for `mn worktree prune`.
+#[derive(Debug, Args)]
+pub struct WorktreePruneArgs {
+    /// Show what would be pruned without removing anything.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Output as JSON.
+    #[arg(long, global = true)]
+    pub json: bool,
 }
 
 /// Arguments for `mn worktree create`.
@@ -2919,6 +3403,12 @@ pub struct WorktreeCleanArgs {
     /// Force removal even with uncommitted changes.
     #[arg(long, short = 'f')]
     pub force: bool,
+    /// Answer yes without asking.
+    #[arg(long)]
+    pub yes: bool,
+    /// Show what would be removed without removing anything.
+    #[arg(long)]
+    pub dry_run: bool,
     /// Output as JSON.
     #[arg(long, global = true)]
     pub json: bool,
@@ -2995,6 +3485,12 @@ pub struct SkillRemoveArgs {
     /// Force removal without confirmation.
     #[arg(long, short)]
     pub force: bool,
+    /// Answer yes without asking.
+    #[arg(long)]
+    pub yes: bool,
+    /// Show what would be removed without removing anything.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 /// Arguments for `mn skill run`.
@@ -3226,6 +3722,95 @@ impl clap::FromArgMatches for crate::tui::app::ScreenReaderMode {
         *self = <Self as clap::FromArgMatches>::from_arg_matches(matches)?;
         Ok(())
     }
+}
+/// `mn acp serve` — run the ACP server.
+#[derive(Debug, Args)]
+pub struct AcpArgs {
+    /// Bind host.
+    #[arg(long, default_value = "127.0.0.1")]
+    pub host: String,
+    /// Bind port.
+    #[arg(short, long, default_value = "8765")]
+    pub port: u16,
+}
+
+#[derive(Debug, Args)]
+pub struct ExtensionArgs {
+    #[command(subcommand)]
+    pub action: ExtensionCommand,
+}
+
+/// Extension subcommands.
+#[derive(Debug, Subcommand)]
+pub enum ExtensionCommand {
+    /// Install an extension from a directory with manifest.json.
+    #[command(name = "new")]
+    New(ExtensionNewArgs),
+    /// List installed extensions.
+    List(ExtensionListArgs),
+    /// Remove an installed extension.
+    #[command(name = "uninstall")]
+    Uninstall(ExtensionUninstallArgs),
+    /// Verify installed extensions' manifests.
+    Doctor(ExtensionDoctorArgs),
+    /// Print the prompt one installed command resolves to.
+    #[command(name = "run")]
+    Run(ExtensionRunArgs),
+}
+
+/// `mn extension new <path>` — install an extension.
+#[derive(Debug, Args)]
+pub struct ExtensionNewArgs {
+    /// Path to the extension directory containing manifest.json.
+    #[arg(value_name = "PATH")]
+    pub path: String,
+}
+
+/// `mn extension list` — list installed extensions.
+#[derive(Debug, Args)]
+pub struct ExtensionListArgs {
+    /// Output as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// `mn extension uninstall <name>` — remove an extension.
+#[derive(Debug, Args)]
+pub struct ExtensionUninstallArgs {
+    /// Name of the extension to remove.
+    #[arg(value_name = "NAME")]
+    pub name: String,
+}
+
+/// `mn extension doctor` — verify extension manifests.
+#[derive(Debug, Args)]
+pub struct ExtensionDoctorArgs {
+    /// Output as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// `mn extension run <EXT>:<COMMAND>` — print the prompt a command resolves to.
+#[derive(Debug, Args)]
+pub struct ExtensionRunArgs {
+    /// Qualified command, as `<extension>:<command>` (an `ext:` prefix is
+    /// accepted too, so the spelling from a session works here).
+    #[arg(value_name = "EXT:COMMAND")]
+    pub command: String,
+}
+
+/// `mn keymap` — view, rebind, or reset the agent key layer.
+#[derive(Debug, Args, Default)]
+pub struct KeymapArgs {
+    /// Bind a key, as `KEY=ACTION` (e.g. `alt+d=surface: review`).
+    #[arg(long, value_name = "KEY=ACTION")]
+    pub set: Option<String>,
+    /// Remove a binding.
+    #[arg(long, value_name = "KEY")]
+    pub unset: Option<String>,
+    /// Restore the built-in table and delete the overrides file.
+    #[arg(long)]
+    pub reset: bool,
 }
 
 impl Cli {

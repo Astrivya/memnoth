@@ -1,18 +1,11 @@
 //! Shell completion commands for memnoth.
 
 use anyhow::{Context, Result};
-use clap::CommandFactory;
-use clap_complete::aot::generate;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
 
 pub use clap_complete::aot::Shell;
-
-/// Build the root clap command for generating completions.
-fn build_cli() -> clap::Command {
-    crate::cli::Cli::command().bin_name("memnoth")
-}
 
 /// Detect the user's current shell from the SHELL environment variable.
 pub fn detect_shell() -> Option<Shell> {
@@ -128,11 +121,15 @@ fn backup_if_exists(path: &std::path::Path) -> Result<Option<PathBuf>> {
 ///
 /// One renderer feeds stdout, the installed file and `--check`; a check that
 /// generated a second, slightly different script would be worse than none.
+///
+/// The script is built from the command registry (`build_completions`), not
+/// from the clap tree: the registry is the surface the docs, the man page and
+/// the schema are generated from, so a verb added to the registry reaches the
+/// shell completions in the same change. `tests/registry_parity.rs` holds the
+/// registry and the parser together, so the two cannot drift apart silently.
 pub fn render_completions(shell: Shell) -> Result<Vec<u8>> {
-    let mut cmd = build_cli();
-    let mut out = Vec::new();
-    generate(shell, &mut cmd, "memnoth", &mut out);
-    Ok(out)
+    let registry = memnoth_command::build_p0_registry().build();
+    Ok(registry.build_completions(shell).into_bytes())
 }
 
 /// Print completions to stdout.
@@ -160,10 +157,32 @@ pub fn install_completions(shell: Shell) -> Result<PathBuf> {
     let mut file = fs::File::create(&file_path)
         .with_context(|| format!("Failed to create completion file: {}", file_path.display()))?;
 
-    let mut cmd = build_cli();
-    generate(shell, &mut cmd, "memnoth", &mut file);
+    use std::io::Write;
+    file.write_all(&render_completions(shell)?)
+        .with_context(|| format!("Failed to write completion file: {}", file_path.display()))?;
 
     Ok(file_path)
+}
+/// Remove installed completions for the given shell.
+pub fn uninstall_completions(shell: Shell) -> Result<PathBuf> {
+    let path = completion_path(shell)?;
+    if path.is_file() {
+        fs::remove_file(&path)
+            .with_context(|| format!("Failed to remove completion file: {}", path.display()))?;
+    }
+    Ok(path)
+}
+
+/// Uninstall completions for the detected or specified shell.
+pub fn uninstall(shell_opt: Option<Shell>) -> Result<()> {
+    let shell = shell_opt.or_else(detect_shell).unwrap_or(Shell::Bash);
+    let path = uninstall_completions(shell)?;
+    println!(
+        "Uninstalled completions for {:?} from: {}",
+        shell,
+        path.display()
+    );
+    Ok(())
 }
 
 /// Show completions for a specific shell (prints to stdout).

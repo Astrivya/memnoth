@@ -7,15 +7,16 @@ use crate::cli::{
     AuthCommand, ConnectCommand, KgCommand, McpCommand, McpProfileCommand, SkillCommand,
     TeamsCommand, VaultCommand, Verb,
 };
-use crate::completion::{Shell, install, render_completions};
+use crate::completion::{Shell, install, render_completions, uninstall};
 use crate::context::AppContext;
-use crate::output::{ErrorOutcome, ExitCode, Outcome};
-use crate::{
-    audit_cmd, automation, billing, cloud, config_cmd, connect, docs, doctor, feedback, keys, kg,
-    mcp, models, open, org, projects, receipt, serve, session_cmd, setup, stats, team, teams,
-    telemetry, update_cmd, usage, vault, watch, worktree,
-};
+use crate::output::{ErrorOutcome, ExitCode, Outcome, confirm};
+use serde_json::json;
 
+use crate::{
+    acp, agents, audit_cmd, automation, bench, billing, budget, cloud, config_cmd, connect, demo,
+    docs, doctor, extension, feedback, keys, kg, mcp, open, org, projects, receipt, sandbox, serve,
+    session_cmd, setup, team, teams, telemetry, trust, update_cmd, vault, watch, worktree,
+};
 pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
     match verb {
         Verb::Session(args) => match &args.action {
@@ -71,6 +72,18 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
                 handoff.json,
             )
             .map_err(|e| ErrorOutcome::from_anyhow(&e)),
+            crate::cli::SessionCommand::FromClaude(import) => {
+                session_cmd::from_claude(ctx, &import.path, import.name.as_deref())
+                    .map_err(|e| ErrorOutcome::from_anyhow(&e))
+            }
+            crate::cli::SessionCommand::FromCodex(import) => {
+                session_cmd::from_codex(ctx, &import.path, import.name.as_deref())
+                    .map_err(|e| ErrorOutcome::from_anyhow(&e))
+            }
+            crate::cli::SessionCommand::FromOmp(import) => {
+                session_cmd::from_omp(ctx, &import.path, import.name.as_deref())
+                    .map_err(|e| ErrorOutcome::from_anyhow(&e))
+            }
             crate::cli::SessionCommand::Exec(exec) => session_cmd::exec(
                 ctx,
                 exec.cmd.clone(),
@@ -499,6 +512,8 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
                 url,
                 token,
                 local,
+                db,
+                team,
                 allow_writes,
                 dry_run,
             } => {
@@ -511,6 +526,8 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
                         url: url.as_deref(),
                         token: token.as_deref(),
                         local: *local,
+                        db: db.clone(),
+                        team: team.as_deref(),
                         allow_writes: *allow_writes,
                         dry_run: *dry_run,
                     },
@@ -653,9 +670,6 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
                 ))
             }
         },
-        Verb::Models(args) => models::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
-        Verb::Usage(args) => usage::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
-        Verb::Stats(args) => stats::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
         Verb::Auth(args) => match &args.action {
             AuthCommand::Login(args) => login(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
             AuthCommand::Logout(args) => {
@@ -710,6 +724,31 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
             }
             TeamsCommand::Audit(args) => {
                 team::audit(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e))
+            }
+            TeamsCommand::Namespace(args) => team::team_namespace(ctx, args.action.as_deref())
+                .map_err(|e| ErrorOutcome::from_anyhow(&e)),
+            TeamsCommand::Provenance(args) => {
+                team::team_provenance(ctx, args.limit).map_err(|e| ErrorOutcome::from_anyhow(&e))
+            }
+            TeamsCommand::Disputed(_args) => {
+                team::team_disputed(ctx).map_err(|e| ErrorOutcome::from_anyhow(&e))
+            }
+            TeamsCommand::Enforce(_args) => {
+                team::enforce(ctx).map_err(|e| ErrorOutcome::from_anyhow(&e))
+            }
+            TeamsCommand::ImportExport(args) => {
+                let output = if let Some(path) = args.from_claude.as_deref() {
+                    format!("Importing Claude session from {path}")
+                } else if let Some(path) = args.from_codex.as_deref() {
+                    format!("Importing Codex session from {path}")
+                } else if let Some(path) = args.from_omp.as_deref() {
+                    format!("Importing OMP session from {path}")
+                } else if let Some(path) = args.export.as_deref() {
+                    format!("Exporting session to {path} as {}", args.format)
+                } else {
+                    "Specify --from-claude, --from-codex, --from-omp, or --export".to_string()
+                };
+                Ok(Outcome::new("team.import_export", output, json!({})))
             }
         },
         Verb::Cloud(args) => cloud::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
@@ -768,6 +807,7 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
                 }),
             ))
         }
+        Verb::Sandbox(args) => sandbox::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
         Verb::Completion(args) => match &args.action {
             crate::cli::CompletionCommand::Show(show_args) => {
                 let shell = match show_args.shell.as_str() {
@@ -876,6 +916,22 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
                     serde_json::json!({ "shell": label }),
                 ))
             }
+            crate::cli::CompletionCommand::Uninstall(uninstall_args) => {
+                let shell = uninstall_args.shell.as_deref().and_then(|s| match s {
+                    "bash" => Some(Shell::Bash),
+                    "zsh" => Some(Shell::Zsh),
+                    "fish" => Some(Shell::Fish),
+                    "powershell" => Some(Shell::PowerShell),
+                    "elvish" => Some(Shell::Elvish),
+                    _ => None,
+                });
+                uninstall(shell).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                Ok(Outcome::new(
+                    "completion.uninstall",
+                    "Uninstalled completions.".to_string(),
+                    serde_json::json!({ "shell": shell.map(|s| format!("{s:?}")) }),
+                ))
+            }
         },
         Verb::Setup(args) => setup::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
         Verb::Telemetry(args) => {
@@ -889,6 +945,24 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
         Verb::Keys(args) => keys::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
         Verb::Org(args) => org::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
         Verb::Skills(args) => {
+            // `skill remove` deletes a file tree. Ask here, in front of the
+            // skill crate's own `--force` rule, so a piped run refuses with the
+            // documented exit 2 and names `--yes` instead of surfacing a
+            // lower-level "use --force" error.
+            if let SkillCommand::Remove(remove) = &args.action
+                && !remove.dry_run
+                && !confirm(
+                    &format!("Remove skill '{}'?", remove.name),
+                    remove.yes || remove.force,
+                )?
+            {
+                return Ok(Outcome::new(
+                    "skills.remove",
+                    "Cancelled; nothing was removed.
+",
+                    serde_json::json!({ "cancelled": true, "name": remove.name }),
+                ));
+            }
             // Which verb answered is part of the answer: `skill list --json`
             // and `skill run --json` both return a document, and a script has
             // to be able to tell them apart without re-reading the command.
@@ -916,6 +990,8 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
                 SkillCommand::Remove(a) => {
                     SkillsSkillCommand::Remove(memnoth_skills::commands::RemoveArgs {
                         name: a.name.clone(),
+                        yes: a.yes,
+                        dry_run: a.dry_run,
                         force: a.force,
                     })
                 }
@@ -962,6 +1038,7 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
             }
         },
         Verb::Feedback(args) => feedback::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
+        Verb::Agents(args) => agents::run(ctx, args),
         Verb::Automation(args) => {
             automation::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e))
         }
@@ -983,6 +1060,7 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
             };
             Ok(Outcome::new("version", text, data))
         }
+        Verb::Bench(args) => bench::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
         Verb::Help(args) => {
             use clap::CommandFactory;
 
@@ -1106,12 +1184,53 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
                 )),
             }
         }
+        Verb::Checkpoint(args) => crate::tui::commands::checkpoint::run(ctx, args.name.as_deref()),
+        Verb::Undo => crate::tui::commands::undo::run(ctx),
+        Verb::Redo => crate::tui::commands::redo::run(ctx),
+        Verb::Delegate(args) => crate::tui::commands::delegate::run(ctx, &args.name, &args.task),
+        Verb::Merge(args) => crate::tui::commands::merge::run(ctx, &args.branch),
+        Verb::Handoff(args) => crate::tui::commands::handoff::run(ctx, args.path.as_deref()),
+        Verb::Compact(args) => crate::tui::commands::compact::run(ctx, args.focus.as_deref()),
+        Verb::Btw(args) => crate::tui::commands::btw::run(ctx, &args.question),
+        Verb::Recap => crate::tui::commands::recap::run(ctx),
+        Verb::Export(args) => crate::tui::commands::export::run(ctx, args.path.as_deref()),
+        Verb::Rename(args) => crate::tui::commands::rename::run(ctx, &args.name),
+        Verb::Keymap(args) => crate::tui::commands::keymap::run(ctx, args),
+        Verb::Onboarding => crate::tui::commands::onboarding::run(ctx),
+        Verb::Extension(args) => extension::run(ctx, &args.action),
+        Verb::Acp(args) => acp::run(&acp::AcpArgs {
+            host: args.host.clone(),
+            port: args.port,
+        })
+        .map(|()| {
+            Outcome::new(
+                "acp",
+                "acp server exited",
+                serde_json::json!({ "host": args.host, "port": args.port }),
+            )
+        })
+        .map_err(|e| ErrorOutcome::from_anyhow(&e)),
         Verb::Watch(args) => watch::run(ctx, args),
         Verb::Serve(args) => {
             let runtime = tokio::runtime::Runtime::new()
                 .map_err(|e| ErrorOutcome::from_anyhow(&anyhow::Error::from(e)))?;
             runtime.block_on(serve::run(ctx, args))
         }
+        Verb::Drift(args) => crate::tui::commands::drift::run(ctx, args),
+        Verb::Simulate(args) => crate::tui::commands::simulate::run(ctx, args),
+        Verb::Lineage(args) => {
+            crate::tui::commands::lineage::run(ctx, &args.entity, args.depth, None, ctx.json)
+        }
+        Verb::Why(args) => crate::tui::commands::why::run(ctx, &args.symbol, args.at.as_deref()),
+        Verb::Impact(args) => crate::tui::commands::impact::run(ctx, args),
+        Verb::Plan(args) => {
+            crate::tui::commands::plan::run(ctx, args.name.as_deref(), args.step.as_deref())
+        }
+        Verb::Goal(args) => crate::tui::commands::goal::run(ctx, args.condition.as_deref()),
+        Verb::Budget(args) => budget::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
+        Verb::Trust(args) => trust::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
+        Verb::Demo => demo::run(ctx),
+        Verb::Brief => crate::tui::commands::brief::run(ctx),
     }
 }
 
