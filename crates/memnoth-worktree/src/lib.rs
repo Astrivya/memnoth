@@ -11,10 +11,12 @@
 
 use memnoth_coord::join_workspace;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
+pub mod hygiene;
 
 /// Result of a worktree operation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,8 +59,8 @@ pub fn create_worktree(
     let target_branch = match branch {
         Some(b) => b.to_string(),
         None => {
-            // Generate a unique branch name
-            format!("worktree/{}", name)
+            // Generate a unique branch name: memnoth/<run-id>
+            format!("memnoth/{}", name)
         }
     };
 
@@ -80,6 +82,7 @@ pub fn create_worktree(
     let output = cmd.output().context("failed to execute git worktree add")?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        // On failure keep the directory so the run can be inspected (failure retention).
         bail!("git worktree add failed: {}", stderr);
     }
 
@@ -182,11 +185,11 @@ pub fn clean_worktree(repo_root: &Path, name: &str, force: bool) -> Result<()> {
         bail!("git worktree remove failed: {}", stderr);
     }
 
-    // Also remove the branch if it was a worktree branch
-    let branch_name = format!("worktree/{}", name);
+    // Also remove the branch if it was a worktree branch (memnoth/<name>)
+    let branch_name = format!("memnoth/{name}");
     let _ = Command::new("git")
         .current_dir(repo_root)
-        .args(["branch", "-D", &branch_name])
+        .args(["branch", "-D", branch_name.as_str()])
         .output();
 
     Ok(())
@@ -205,11 +208,76 @@ fn get_head_commit(path: &Path) -> Result<String> {
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
+/// Report of a worktree prune operation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PruneReport {
+    /// Worktree names removed
+    pub removed: Vec<String>,
+    /// Worktree names kept
+    pub kept: Vec<String>,
+    /// Errors encountered while pruning
+    pub errors: Vec<String>,
+}
+
+/// Prune stale worktrees under `.memnoth/worktrees/`.
+///
+/// Removes worktree entries (and their `memnoth/<run-id>` branches) that are no
+/// longer tracked by `git worktree list`, and deletes leftover directories that
+/// git's metadata references but are missing on disk.
+pub fn prune_worktrees(repo_root: &Path) -> Result<PruneReport> {
+    let worktrees_dir = repo_root.join(".memnoth").join("worktrees");
+    let known = list_worktrees(repo_root)?;
+    let known_paths: HashSet<PathBuf> = known.iter().map(|w| w.path.clone()).collect();
+
+    let mut removed = Vec::new();
+    let mut kept = Vec::new();
+    let mut errors = Vec::new();
+
+    if worktrees_dir.exists() {
+        for entry in
+            std::fs::read_dir(&worktrees_dir).context("failed to read worktrees directory")?
+        {
+            let entry = entry.context("failed to read worktree directory entry")?;
+            let path = entry.path();
+            if path.is_dir() && !known_paths.contains(&path) {
+                let name = path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                let _ = Command::new("git")
+                    .current_dir(repo_root)
+                    .args(["branch", "-D", &format!("memnoth/{}", name)])
+                    .output();
+                match std::fs::remove_dir_all(&path) {
+                    Ok(()) => removed.push(name.clone()),
+                    Err(e) => errors.push(format!("{}: {}", name, e)),
+                }
+                continue;
+            }
+            kept.push(
+                path.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string(),
+            );
+        }
+    }
+
+    Ok(PruneReport {
+        removed,
+        kept,
+        errors,
+    })
+}
 
 /// Configuration for batch task execution.
+///
+/// Spawns `config.workers` workers in isolated worktrees, each running the
+/// configured command. Workers coordinate via the shared coordination room.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchConfig {
-    /// Task description
+    /// The task line each worker is given.
     pub task: String,
     /// Number of workers to spawn
     pub workers: usize,
@@ -267,9 +335,12 @@ pub async fn execute_batch(
     // Run commands in parallel. Path claims are taken before spawning: the pool
     // owns a database handle and cannot be moved into a worker task.
     let mut results = Vec::new();
+    // Track each worker's worktree path for success/failure cleanup.
+    let mut worktree_by_worker: HashMap<String, PathBuf> = HashMap::new();
     for worker_id in &worker_ids {
         let worker = pool.worker(worker_id).unwrap().clone();
         let worktree_path = worker.worktree.clone();
+        worktree_by_worker.insert(worker_id.clone(), worktree_path.clone());
         let command = config.command.clone();
         let workdir = config.workdir.clone();
         let claim_glob = config.claim_glob.clone();
@@ -359,6 +430,21 @@ pub async fn execute_batch(
         }
     }
 
+    // Hygiene: clean worktrees for successful runs, keep on failure.
+    for result in &results {
+        if let Some(path) = worktree_by_worker.get(&result.worker_id) {
+            let name = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            let succeeded = result.exit_code == Some(0) && result.error.is_none();
+            if succeeded {
+                let _ = clean_worktree(repo_root, &name, true);
+            }
+        }
+    }
+
     // Cleanup: shutdown pool
     pool.shutdown()?;
 
@@ -423,8 +509,10 @@ pub async fn execute_parallel(
 
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(config.max_concurrent));
     let mut handles = Vec::new();
+    let mut worktree_by_index: HashMap<usize, PathBuf> = HashMap::new();
 
-    for wt in targets {
+    for (idx, wt) in targets.into_iter().enumerate() {
+        worktree_by_index.insert(idx, wt.path.clone());
         let permit = semaphore.clone().acquire_owned().await.unwrap();
         let worktree_path = wt.path.clone();
         let branch = wt.branch.clone();
@@ -478,6 +566,21 @@ pub async fn execute_parallel(
                     duration_ms: 0,
                     error: Some(format!("task join error: {}", e)),
                 });
+            }
+        }
+    }
+
+    // Hygiene: clean worktrees for successful runs, keep on failure.
+    for (idx, result) in results.iter().enumerate() {
+        if let Some(path) = worktree_by_index.get(&idx) {
+            let name = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            let succeeded = result.exit_code == Some(0) && result.error.is_none();
+            if succeeded {
+                let _ = clean_worktree(repo_root, &name, true);
             }
         }
     }
