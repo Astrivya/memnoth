@@ -175,9 +175,17 @@ impl ColorScheme {
             // A tool row's glyph is its state, so it is not themed away.
             crate::tui::app::EntryRole::Tool => (self.tool, "▌"),
             crate::tui::app::EntryRole::ToolDone => (self.success, "✓"),
+            crate::tui::app::EntryRole::Thinking => (self.dim, "▸"),
         };
 
         let mut style = Style::default().fg(base_color).add_modifier(Modifier::BOLD);
+        if role == crate::tui::app::EntryRole::Thinking {
+            // The transcript's rule, mirrored here: reasoning is grey italic,
+            // never the answer's weight.
+            style = style
+                .remove_modifier(Modifier::BOLD)
+                .add_modifier(Modifier::ITALIC);
+        }
         if selected {
             style = style.bg(self.selected_bg).fg(self.selected_fg);
         }
@@ -203,6 +211,7 @@ impl ScreenReaderOutput {
             crate::tui::app::EntryRole::Error => "[ERROR]",
             crate::tui::app::EntryRole::Tool => "[TOOL]",
             crate::tui::app::EntryRole::ToolDone => "[TOOL]",
+            crate::tui::app::EntryRole::Thinking => "[THINKING]",
         };
         format!("{} {}", role_str, entry.text)
     }

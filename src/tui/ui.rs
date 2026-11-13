@@ -29,6 +29,15 @@ const CONTEXT_MIN_WIDTH: u16 = 88;
 
 /// The footer is state, not decoration: at most five keys, and only ones that
 /// do something in the state the screen is in.
+/// The discovery hint, read from the projection so the footer cannot name a
+/// command count the palette does not have.
+fn command_hint() -> String {
+    format!(
+        "/ {} commands",
+        crate::tui::overlays::command_rows::command_count()
+    )
+}
+
 fn footer_hint(app: &App) -> String {
     if app.approval.is_some() || app.pending_shell.is_some() {
         "y approve · n / esc reject · the box names exactly what changes".to_string()
@@ -72,7 +81,22 @@ fn footer_hint(app: &App) -> String {
             "↑↓ choose · enter run · esc conversation · / commands · ? keys".to_string()
         }
     } else if app.busy {
-        "esc cancel turn · ctrl-c twice quit · / commands · ctrl-k palette".to_string()
+        let elapsed = ((crate::session::now_ms() - app.turn_started_ms).max(0) / 1000) as u64;
+        let age = if elapsed < 60 {
+            format!("{elapsed}s")
+        } else {
+            format!("{}m {:02}s", elapsed / 60, elapsed % 60)
+        };
+        let thinking = if app
+            .entries
+            .iter()
+            .any(|entry| entry.role == EntryRole::Thinking)
+        {
+            " · ctrl-r thinking"
+        } else {
+            ""
+        };
+        format!("esc cancel turn · working {age} · ctrl-c twice quit · ctrl-k palette{thinking}",)
     } else if let Some(running) = &app.running_verb {
         // A verb on its own thread: the screen stays live, so this line is what
         // says the silence is work and not a hang.
@@ -93,7 +117,10 @@ fn footer_hint(app: &App) -> String {
         // keys wide, and the one that belongs is the one this state enabled.
         "enter send · ctrl-g fix · ? help · ctrl-k palette · / commands".to_string()
     } else {
-        "enter send · / commands · ? help · ctrl-k palette · ctrl-t tasks".to_string()
+        format!(
+            "enter send · {} · ? help · ctrl-k palette · ctrl-t tasks",
+            command_hint()
+        )
     }
 }
 
@@ -111,12 +138,15 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     // The brief owns the whole frame. The header repeats its facts (root,
     // vault, graph), so showing both would spend the first thing a person sees
-    // saying the same thing twice.
-    let splash = app.home_showing() && app.entries.is_empty();
+    // saying the same thing twice. The brief's masthead is the header then:
+    // while it is up, the one-line transcript header is not drawn at all.
+    let splash = app.home_showing();
     let rows = Layout::vertical([
         Constraint::Length(if splash { 0 } else { 1 }),
         Constraint::Min(3),
-        Constraint::Length(3),
+        // The composer box: top rule, the line, the bottom rule, and the hint.
+        // The box is the separator now, so the blank row it replaced is gone.
+        Constraint::Length(4),
     ])
     .split(area);
 
@@ -537,9 +567,9 @@ fn draw_completions(
         return None;
     }
 
-    // A single row the prompt already spells out is not a list: the ghost on
-    // the line is the whole suggestion, and a one-row box under it is noise.
-    if rows.len() == 1 && (app.slash.ghost().is_some() || app.slash.exact()) {
+    // A single row the prompt already spells out is not a list: a one-row box
+    // under it would only repeat what is on the prompt.
+    if rows.len() == 1 && app.slash.exact() {
         return None;
     }
 
@@ -547,6 +577,10 @@ fn draw_completions(
     let start = app.slash.window_start(rows.len().min(MAX_ROWS));
     let selected = app.slash.selected_index();
     let column = app.slash.name_column();
+    // The dropdown is themed, not hard-coded: the accent for matched letters
+    // and the dim for the rest come from the active scheme, so high-contrast
+    // and no-color change the list with the rest of the screen.
+    let scheme = crate::tui::theme::ColorScheme::for_theme(app.theme);
 
     // Rows are drawn from the window start until the row cap or the screen runs
     // out. A description takes as many lines as it needs, so the budget is in
@@ -557,7 +591,7 @@ fn draw_completions(
         if offset >= MAX_ROWS || lines.len() >= room {
             break;
         }
-        let mut block = row_lines(row, column, start + offset == selected, width);
+        let mut block = row_lines(row, column, start + offset == selected, width, &scheme);
         block.truncate(room - lines.len());
         lines.extend(block);
     }
@@ -579,22 +613,28 @@ fn draw_completions(
 ///
 /// The command column is one fixed width so the names line up in a single column
 /// the eye runs down; the description wraps under the column it started in.
-fn row_lines(row: &Row, column: usize, selected: bool, width: usize) -> Vec<Line<'static>> {
+fn row_lines(
+    row: &Row,
+    column: usize,
+    selected: bool,
+    width: usize,
+    scheme: &crate::tui::theme::ColorScheme,
+) -> Vec<Line<'static>> {
     let plain = if selected {
         Style::default()
-            .fg(Color::White)
+            .fg(scheme.selected_fg)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(scheme.dim)
     };
-    // Cyan always means "this is what you typed": the prompt glyph, the marker
-    // and the letters the query landed on.
+    // The accent always means "this is what you typed": the prompt glyph, the
+    // marker and the letters the query landed on.
     let matched = if selected {
         Style::default()
-            .fg(Color::Cyan)
+            .fg(scheme.accent)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::Cyan)
+        Style::default().fg(scheme.accent)
     };
     let mut spans = vec![Span::styled(
         if selected { "› " } else { "  " },
@@ -621,9 +661,9 @@ fn row_lines(row: &Row, column: usize, selected: bool, width: usize) -> Vec<Line
     }
 
     let description_style = Style::default().fg(if selected {
-        Color::Gray
+        scheme.foreground
     } else {
-        Color::DarkGray
+        scheme.dim
     });
 
     // Beside the name while there is a column's worth of room for it, and under
@@ -708,11 +748,56 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
     let start = app.scroll.min(visual.len());
     let end = (start + inner.height as usize).min(visual.len());
 
+    // The pointer's row, translated into the visible window. Exactly one
+    // drawn line may carry the `ctrl-r` hint: a thinking header the pointer
+    // rests on. Every other line, and every thinking header without the
+    // pointer, stays one word long.
+    let hovered = app.mouse_row.and_then(|row| {
+        if row >= inner.y {
+            let offset = (row - inner.y) as usize;
+            if offset < end - start {
+                return Some(start + offset);
+            }
+        }
+        None
+    });
+    let scheme = crate::tui::theme::ColorScheme::for_theme(app.theme);
     let lines: Vec<Line> = visual[start..end]
         .iter()
-        .map(|(role, line)| {
+        .enumerate()
+        .map(|(offset, (role, line, header))| {
             let (style, glyph) = style_for(*role);
-            let mut spans = vec![Span::styled(glyph, style.add_modifier(Modifier::BOLD))];
+            // A blank separator row carries no glyph: the space is the whole
+            // of its ink. A thinking header carries its own marker, and its
+            // body runs down a rail under it.
+            if line.width() == 0 {
+                return Line::from("");
+            }
+            // The rail is what makes reasoning impossible to mistake for the
+            // answer, in a dark theme or a light one. Three marks stack: the
+            // header wears the accent in bold, the body is the scheme's dim
+            // in italic faint under an accent gutter, and the body indents
+            // one level deeper than any answer text. Any one of the three is
+            // subtle; together they are unmistakable.
+            let style = if *role == EntryRole::Thinking {
+                if *header {
+                    Style::default()
+                        .fg(scheme.accent)
+                        .add_modifier(Modifier::BOLD | Modifier::ITALIC)
+                } else {
+                    Style::default()
+                        .fg(scheme.dim)
+                        .add_modifier(Modifier::ITALIC | Modifier::DIM)
+                }
+            } else {
+                style
+            };
+            let (glyph, glyph_style) = match (*role, *header) {
+                (EntryRole::Thinking, true) => ("", style),
+                (EntryRole::Thinking, false) => ("┃   ", Style::default().fg(scheme.accent)),
+                _ => (glyph, style.add_modifier(Modifier::BOLD)),
+            };
+            let mut spans = vec![Span::styled(glyph, glyph_style)];
             for span in &line.spans {
                 // The row's colour belongs to the row; a span that named one
                 // (inline code, say) keeps it, and every span keeps its weight.
@@ -722,7 +807,15 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
                 }
                 spans.push(Span::styled(span.content.clone(), patched));
             }
-            Line::from(spans)
+            let mut drawn = Line::from(spans);
+            if hovered == Some(start + offset)
+                && *role == EntryRole::Thinking
+                && *header
+                && let Some(text) = drawn.spans.get_mut(1)
+            {
+                text.content.to_mut().push_str(" · ctrl-r");
+            }
+            drawn
         })
         .collect();
     // Lines are already wrapped to the pane, so they are drawn verbatim. The
@@ -779,20 +872,11 @@ fn draw_footer(
         .saturating_sub(typed)
         .saturating_sub(counter.chars().count() + 3);
 
-    // The rest of the highlighted command, dimmed after what is typed. The
-    // suggestion belongs on the line, where it is read, not in a box below it —
-    // and when it is the whole answer there is no box at all.
-    let ghost = app
-        .slash
-        .is_open()
-        .then(|| app.slash.ghost())
-        .flatten()
-        .map(|rest| ellipsize(&rest, room))
-        .unwrap_or_default();
-
-    // A blank row is the separator. A rule across the width is the heaviest
-    // line a terminal can draw, and this one separated things that were already
-    // one row apart.
+    // The rest of the highlighted command is deliberately not drawn: the
+    // dropdown already marks the selection with `›` and picks out the letters
+    // the query landed on, and `Tab` completes. Painting the remainder into
+    // the line made typing `/` look like it had already typed `/search`.
+    let _ = room;
     let input_line = Line::from(vec![
         Span::styled(
             "› ",
@@ -801,55 +885,68 @@ fn draw_footer(
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(app.input.clone(), Style::default().fg(Color::White)),
-        Span::styled(ghost, Style::default().fg(Color::DarkGray)),
     ]);
-    // The model shares the hint line, right-aligned: it is the fact a person
-    // checks before typing, and a whole row for it would cost the transcript a
-    // line on every frame. On a narrow terminal the hint gives way, never the
-    // model, because the hint is discoverable in `/help` and the model is not.
-    let model = app.model.clone();
-    let model_room = if (area.width as usize) >= 60 {
-        model.chars().count()
+    let hint_text = ellipsize(&footer_hint(app), area.width as usize);
+    let hint = Line::from(Span::styled(
+        hint_text,
+        Style::default().fg(Color::DarkGray),
+    ));
+
+    // The composer is a box: a rounded rule around the line, with the model in
+    // the top rule, right-aligned. The border colour follows the theme, so a
+    // high-contrast screen gets a high-contrast box and no-colour gets none.
+    let scheme = crate::tui::theme::ColorScheme::for_theme(app.theme);
+    let boxed = area.height >= 4;
+    let box_area = if boxed {
+        Rect::new(area.x, area.y, area.width, 3)
     } else {
-        0
+        Rect::new(area.x, area.y, area.width, area.height.saturating_sub(1))
     };
-    let hint_room = (area.width as usize).saturating_sub(model_room + 1);
-    let hint_text = ellipsize(&footer_hint(app), hint_room);
-    let pad = (area.width as usize).saturating_sub(hint_text.chars().count() + model_room);
-    let hint = Line::from(vec![
-        Span::styled(hint_text, Style::default().fg(Color::DarkGray)),
-        Span::raw(" ".repeat(pad)),
-        Span::styled(
-            if model_room == 0 {
-                String::new()
-            } else {
-                model
-            },
-            Style::default().fg(Color::Cyan),
-        ),
-    ]);
-    frame.render_widget(Paragraph::new(vec![Line::from(""), input_line, hint]), area);
+    let model = app.model.clone();
+    let boxed_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(scheme.border));
+    let inner = boxed_block.inner(box_area);
+    frame.render_widget(boxed_block, box_area);
+    if boxed && !model.is_empty() && area.width >= 50 {
+        let label = ellipsize(&model, (area.width as usize).saturating_sub(4));
+        let label_width = label.chars().count() as u16 + 2;
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!(" {label} "),
+                Style::default().fg(scheme.accent),
+            ))),
+            Rect::new(
+                area.x + area.width - label_width - 1,
+                area.y,
+                label_width,
+                1,
+            ),
+        );
+    }
+    frame.render_widget(Paragraph::new(input_line), inner);
+    frame.render_widget(
+        Paragraph::new(hint),
+        Rect::new(area.x, area.y + 3, area.width, 1),
+    );
 
     if !counter.is_empty() && (area.width as usize) > counter.chars().count() + 4 {
         let width = counter.chars().count() as u16;
         frame.render_widget(
             Paragraph::new(Span::styled(counter, Style::default().fg(Color::DarkGray))),
-            Rect::new(
-                area.x + area.width - width - 1,
-                area.y + area.height - 2,
-                width,
-                1,
-            ),
+            Rect::new(area.x + area.width - width - 2, area.y + 1, width, 1),
         );
     }
 
     // The cursor belongs after the prompt and the characters already typed —
-    // but only when this line is the one taking keys.
+    // but only when this line is the one taking keys. Inside the box it sits
+    // one column in from the border.
     if caret {
         let prefix = 2u16;
         let typed = app.cursor.min(app.input.chars().count()) as u16;
-        let x = (area.x + prefix + typed).min(area.x + area.width.saturating_sub(1));
-        let y = area.y + area.height.saturating_sub(2);
+        let x = (inner.x + prefix + typed).min(inner.x + inner.width.saturating_sub(1));
+        let y = area.y + 1;
         frame.set_cursor_position(Position::new(x, y));
     }
 }
@@ -864,6 +961,15 @@ fn style_for(role: EntryRole) -> (Style, &'static str) {
         EntryRole::Info => (Style::default().fg(Color::Gray), "· "),
         EntryRole::Tool => (Style::default().fg(Color::Cyan), "▌ "),
         EntryRole::ToolDone => (Style::default().fg(Color::Green), "✓ "),
+        // Thinking is the one role that is italic: grey italic is how every
+        // coding agent separates reasoning from the answer it produced, and
+        // a reader's eye learns the distinction without a legend.
+        EntryRole::Thinking => (
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
+            "",
+        ),
     }
 }
 
@@ -972,19 +1078,50 @@ mod tests {
     }
 
     #[test]
-    fn the_model_sits_beside_the_prompt_until_the_terminal_is_too_narrow() {
+    fn the_model_sits_on_the_composer_until_the_terminal_is_too_narrow() {
         // The model is what a person checks before typing; it belongs on the
-        // footer line, not behind `/models`.
+        // composer's top rule, not behind `/models`.
         let mut app = App::new("s", false);
         app.model = "kilo/reflection/beam-free".to_string();
         let wide = screen(&mut app, 80, 24);
         assert!(wide.contains("kilo/reflection/beam-free"), "{wide}");
 
-        // A narrow footer keeps the keys: the model is recoverable with
-        // `/models`, the key hints are not obvious anywhere else.
+        // Below 50 columns the label gives way: the model is recoverable with
+        // `/models`, the box and the keys are not obvious anywhere else.
         let narrow = screen(&mut app, 44, 24);
         assert!(!narrow.contains("kilo/reflection/beam-free"), "{narrow}");
         assert!(narrow.contains("enter"), "{narrow}");
+    }
+
+    #[test]
+    fn a_frame_stays_inside_the_perf_budget() {
+        // W12-05: one frame of the live app must stay far under a 60 fps
+        // budget. Debug builds are slower than release, so the budget is
+        // generous; the point is catching a frame that grew by an order of
+        // magnitude, not shaving microseconds.
+        let mut app = App::new("perf", true);
+        app.set_paths("D:/ws".into(), "D:/state/vault.db".into());
+        for i in 0..50 {
+            app.push(EntryRole::User, format!("question {i}"));
+            app.push(EntryRole::Answer, format!("answer {i}"));
+        }
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        // Warm the layout caches, then time 100 frames.
+        terminal
+            .draw(|frame| draw(frame, &mut app))
+            .expect("warm draw");
+        let started = std::time::Instant::now();
+        for _ in 0..100 {
+            terminal
+                .draw(|frame| draw(frame, &mut app))
+                .expect("draw must not fail");
+        }
+        let per_frame_ms = started.elapsed().as_secs_f64() * 10.0;
+        assert!(
+            per_frame_ms < 25.0,
+            "mean frame {per_frame_ms:.2} ms exceeds the 25 ms debug budget"
+        );
     }
 
     fn screen(app: &mut App, width: u16, height: u16) -> String {
@@ -1025,9 +1162,12 @@ mod tests {
         // No box around the transcript and no rule above the prompt: no frame
         // characters at all, and the title that labelled the box is gone.
         assert!(!text.contains("transcript"), "{text}");
-        for frame_char in ['─', '│', '┌', '┐', '└', '┘'] {
+        for frame_char in ['┌', '┐', '└', '┘'] {
             assert!(!text.contains(frame_char), "{frame_char} in\n{text}");
         }
+        // The composer is boxed by design (rounded corners), separate from
+        // the flat transcript this test is about.
+        assert!(text.contains('╭'), "the composer is boxed:\n{text}");
     }
 
     #[test]
@@ -1037,7 +1177,8 @@ mod tests {
         app.context = "vault\n  412 beliefs".into();
         let text = screen(&mut app, 100, 24);
         assert!(text.contains("context"), "{text}");
-        assert!(!text.contains('─'), "no horizontal rules: {text}");
+        // The panel itself is a left rule, not a box: no square corners.
+        // (The composer's rounded box below has its own rules.)
         assert!(!text.contains('┌'), "{text}");
         assert!(text.contains('│'), "the left rule still separates: {text}");
     }
@@ -1236,11 +1377,13 @@ mod tests {
         typed(&mut app, "/vault");
         let text = screen(&mut app, 80, 30);
         assert!(text.contains("/vault recall"), "{text}");
-        // No frame, no title, and no key hint of its own: the footer one row
-        // below already names the keys.
-        for frame_char in ['─', '┌', '┐', '└', '┘', '│'] {
+        // The list itself is text, not a box: no frame, no title, and no key
+        // hint of its own — the footer already names the keys. The box on
+        // screen belongs to the composer, which is rounded by design.
+        for frame_char in ['┌', '┐', '└', '┘'] {
             assert!(!text.contains(frame_char), "{frame_char} in\n{text}");
         }
+        assert!(text.contains('╭'), "the composer is boxed:\n{text}");
         assert!(!text.contains("commands ·"), "{text}");
         assert_eq!(text.matches("↑↓ move").count(), 1, "{text}");
         // The position in the list rides on the prompt row instead.
@@ -1252,9 +1395,9 @@ mod tests {
         let mut app = App::new("s", false);
         typed(&mut app, "/vault");
         let text = screen(&mut app, 60, 24);
-        assert!(text.contains("Search vault"), "{text}");
+        assert!(text.contains("Search the vault"), "{text}");
         assert!(
-            text.contains("temporal)"),
+            text.contains("windows understood)"),
             "the end of the sentence is on screen:\n{text}"
         );
     }
@@ -1279,10 +1422,10 @@ mod tests {
     }
 
     #[test]
-    fn the_prompt_carries_the_rest_of_the_command() {
+    fn nothing_is_painted_into_the_line() {
         let mut app = App::new("s", false);
         typed(&mut app, "/vau");
-        assert_eq!(app.input, "/vau", "the ghost is never typed for you");
+        assert_eq!(app.input, "/vau", "the suggestion is never typed for you");
         let text = screen(&mut app, 80, 24);
         assert!(text.contains("/vault remember"), "{text}");
 

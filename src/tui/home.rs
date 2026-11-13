@@ -31,8 +31,10 @@ const FACT_LABEL: usize = 12;
 const STEP_COLUMN: usize = 20;
 
 /// The widest window that is still one column: below this an inline label plus
-/// a badge leaves the value too little room to say anything.
-const COMPACT_MIN_WIDTH: u16 = 80;
+/// a badge leaves the value too little room to say anything. At 64 the value
+/// keeps ~49 columns, which is room enough; below that the stacked layout is
+/// the honest one.
+const COMPACT_MIN_WIDTH: u16 = 64;
 
 /// The narrowest window that earns two columns. Deliberately above the context
 /// pane's 88: at 90 a split would leave a right pane too narrow to hold a step
@@ -178,7 +180,10 @@ fn split(frame: &mut Frame, area: Rect, home: &Home, cursor: usize) {
     let rows = Layout::vertical([Constraint::Length(top_rows), Constraint::Min(0)]).split(area);
     frame.render_widget(Paragraph::new(top), rows[0]);
 
-    let left_width = ((area.width as usize * 46 / 100).clamp(34, 56)) as u16;
+    // Half the frame, floored at 40: the facts are one line each (label and
+    // value side by side), and a value needs the room to say its sentence in
+    // one pass rather than wrapping into a second ragged line.
+    let left_width = ((area.width as usize / 2).clamp(40, 64)) as u16;
     let columns = Layout::horizontal([
         Constraint::Length(left_width),
         Constraint::Length(2),
@@ -192,10 +197,12 @@ fn split(frame: &mut Frame, area: Rect, home: &Home, cursor: usize) {
         return;
     }
 
-    // Stacked facts: at 46–56 columns an inline label would leave the graph row
-    // two words wide, and the graph is the row with the most to say.
+    // Inline facts: label and value on one line, so each fact costs one row
+    // and the pane reads as a glanceable list instead of a two-line ledger.
+    // A long value wraps onto its own next line indented under the value
+    // column, which is still one fact, one block, no orphan header.
     let facts = fit_groups(
-        stacked_groups(&home.facts, left.width as usize),
+        inline_groups(&home.facts, left.width as usize),
         left.height as usize,
     );
     frame.render_widget(Paragraph::new(facts), left);
