@@ -24,16 +24,16 @@
 //!
 //! # Tool Profiles
 //!
-//! memnoth exposes 51 tools on the full profile (plus 6 agent-mode tools)
+//! memnoth exposes 47 tools on the full profile (plus 6 agent-mode tools)
 //! across 6 profiles:
 //!
 //! | Profile | Tools | Use Case |
 //! |---------|-------|----------|
 //! | `micro` | 4 | Minimal context (coding agents) |
 //! | `memory` | 21 | Memory-focused workflows, incl. the temporal quartet |
-//! | `code` | 26 | Code intelligence: KG navigation + fs/git toolbox |
-//! | `coord` | 11 | Multi-agent coordination |
-//! | `full` | 51 | Complete feature set (no allowlist: Full means all) |
+//! | `code` | 19 | Code intelligence: KG navigation + fs/git toolbox |
+//! | `coord` | 14 | Multi-agent coordination |
+//! | `full` | 47 | Complete feature set (no allowlist: Full means all) |
 //! | `agent` | 6 | Agent session management (HTTP transport only) |
 //!
 //! Membership is declared once per tool in `TOOL_PROFILES`; the counts above
@@ -69,11 +69,11 @@ mod cli_graph;
 // The `tools/list` projection, so the two anti-drift rules (membership from the
 // shared table, stable order) live in one file rather than in the middle of the
 // dispatcher.
+mod kg_more;
 mod visible;
 
 use catalog::tool_definitions;
 pub use visible::{compose_toolset, declared_names, visible_tools};
-pub(crate) mod cloud_ingest;
 // W0.1 — the dense (embedding) retrieval arm. A sibling module rather than more
 // functions here, because it owns a process-wide embedding cache and its own cost
 // model, and none of that belongs in the dispatcher.
@@ -108,6 +108,9 @@ mod kg_tools;
 mod llm;
 mod mrtr;
 mod oauth;
+// W11-09 / P15-04: spec-conforming MCP client (stateless HTTP, _meta,
+// MRTR, JSON Schema 2020-12, outputSchema, OAuth scope consent).
+pub mod client;
 pub mod plugin_hooks;
 mod policy;
 /// S1 fixed-cost retrieval: per-arm recall budgets, rerank cap, token-budget
@@ -128,8 +131,7 @@ pub use memnoth_harness_api::leader_socket_path as harness_leader_socket_path;
 /// harness API clients use, without adding a second dependency edge.
 pub use memnoth_harness_api::runtime_dir as harness_runtime_dir;
 pub use plugin_hooks::{
-    PluginHookPoint, PluginHookSpec, dispatch_plugin_hook, matching_plugin_hooks,
-    parse_plugin_hooks,
+    HookEvent, PluginHookSpec, dispatch_plugin_hook, matching_plugin_hooks, parse_plugin_hooks,
 };
 
 use memnoth_coord::{ClaimResult, Coord, MessageRow, SessionStatus, TaskRow};
@@ -156,21 +158,12 @@ const LATEST_PROTOCOL_VERSION: &str = "2026-07-28";
 /// retry instead of mistaking a silent downgrade for success.
 const MODERN_PROTOCOL_VERSIONS: &[&str] = &[LATEST_PROTOCOL_VERSION];
 
-/// The revision our `initialize` handshake implements.
-///
-/// A handshake must never select a *modern* revision: those revisions have no
-/// handshake, so answering one would tell the client to switch to per-request
-/// semantics — and to a `resultType`/`_meta` contract — on the strength of a
-/// negotiation that does not exist in them. A dual-era server picks its era
-/// from *how the client opens* (spec 2026-07-28, `basic/versioning`), which is
-/// why this stays legacy-only and why `server/discover` is what modern clients
-/// probe.
-const LEGACY_PROTOCOL_VERSION: &str = "2024-11-05";
-
-/// `_meta` keys defined by the 2026-07-28 revision (SEP-2575).
-const META_PROTOCOL_VERSION: &str = "io.modelcontextprotocol/protocolVersion";
-const META_CLIENT_CAPABILITIES: &str = "io.modelcontextprotocol/clientCapabilities";
-const META_SERVER_INFO: &str = "io.modelcontextprotocol/serverInfo";
+/// The `_meta` keys defined by the 2026-07-28 revision (SEP-2575). Made
+/// `pub(crate)` so the conformance client (`client.rs`) can build the same
+/// `_meta` envelope the server reads.
+pub(crate) const META_PROTOCOL_VERSION: &str = "io.modelcontextprotocol/protocolVersion";
+pub(crate) const META_CLIENT_CAPABILITIES: &str = "io.modelcontextprotocol/clientCapabilities";
+pub(crate) const META_SERVER_INFO: &str = "io.modelcontextprotocol/serverInfo";
 
 /// Spec-reserved error codes. The 2026-07-28 error-code allocation policy
 /// partitions the JSON-RPC server-error range: `-32000..-32019` is
@@ -274,7 +267,7 @@ fn cache_ttl(kind: CacheKind) -> i64 {
 /// failing a call it cannot host.
 const TASK_ELIGIBLE_TOOLS: &[&str] = &["kg_index", "mem_ingest"];
 
-/// Agent playbook injected into the `initialize` response as `instructions`.
+/// Agent playbook published in the `server/discover` response as `instructions`.
 /// MCP clients surface this in the agent's system prompt automatically, so it
 /// steers agent behavior before the first tool call. Modeled on the strongest
 /// competitor pattern (codegraph's server instructions) but scoped to memnoth's
@@ -627,11 +620,11 @@ pub fn call(
     tools_call(&engine, &coord, profile, &params, None, Some(db))
 }
 
-/// Prove the MCP wire: spawn the stdio server under the active profile, perform the
-/// `initialize` handshake, run a cursor-paginated `tools/list`, and compare the returned
-/// count against the profile promise. This is the function `memnoth mcp doctor` reaches
-/// into, so a CLI flag and the crate's own probe can never disagree about what a healthy
-/// server looks like.
+/// Prove the MCP wire: spawn the stdio server under the active profile, probe it with
+/// `server/discover` (the stateless 2026-07-28 discovery RPC), run a cursor-paginated
+/// `tools/list`, and compare the returned count against the profile promise. This is the
+/// function `memnoth mcp doctor` reaches into, so a CLI flag and the crate's own probe
+/// can never disagree about what a healthy server looks like.
 ///
 /// `db` is the vault the spawned server serves. A temporary path is fine — the server only
 /// needs a writable database, not a populated one.
@@ -659,38 +652,47 @@ pub async fn doctor(db: &Path) -> Result<DoctorReport> {
     let mut handshake = false;
     let mut error: Option<String> = None;
 
-    // initialize
-    let initialize = json!({
+    // server/discover: the stateless probe. The named version is declared in
+    // `_meta` on this and every later request; `server/discover` itself is
+    // callable either way, so it can report what the server speaks.
+    let discover = json!({
         "jsonrpc": "2.0",
         "id": next_id,
-        "method": "initialize",
+        "method": "server/discover",
         "params": {
-            "protocolVersion": "2024-11-05",
-            "capabilities": {},
+            "_meta": {
+                META_PROTOCOL_VERSION: LATEST_PROTOCOL_VERSION,
+                META_CLIENT_CAPABILITIES: {},
+            },
             "clientInfo": {"name": "memnoth-mcp doctor", "version": env!("CARGO_PKG_VERSION")}
         }
     });
     next_id += 1;
-    let initialize_text =
-        serde_json::to_string(&initialize).expect("serializing a static JSON value cannot fail");
-    if writeln!(stdin, "{initialize_text}").is_err() || stdin.flush().is_err() {
-        error = Some("server closed stdin during initialize".to_owned());
+    let discover_text =
+        serde_json::to_string(&discover).expect("serializing a static JSON value cannot fail");
+    if writeln!(stdin, "{discover_text}").is_err() || stdin.flush().is_err() {
+        error = Some("server closed stdin during server/discover".to_owned());
     } else {
         let reply_text = match lines.next() {
             Some(Ok(line)) => line,
-            Some(Err(e)) => bail!("failed to read initialize reply: {e}"),
-            None => bail!("stream closed before reply to initialize"),
+            Some(Err(e)) => bail!("failed to read server/discover reply: {e}"),
+            None => bail!("stream closed before reply to server/discover"),
         };
         let reply: Value = serde_json::from_str(&reply_text)
-            .with_context(|| format!("initialize reply was not JSON: {reply_text}"))?;
-        handshake = reply.get("error").is_none();
+            .with_context(|| format!("server/discover reply was not JSON: {reply_text}"))?;
+        let versions: Vec<&str> = reply
+            .pointer("/result/protocolVersions")
+            .and_then(Value::as_array)
+            .map(|versions| versions.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        handshake = reply.get("error").is_none() && versions.contains(&LATEST_PROTOCOL_VERSION);
         if !handshake {
             error = Some(format!(
-                "initialize failed: {}",
+                "server/discover failed: {}",
                 reply
                     .pointer("/error/message")
                     .and_then(Value::as_str)
-                    .unwrap_or("unknown error")
+                    .unwrap_or("server does not advertise 2026-07-28")
             ));
         }
     }
@@ -776,7 +778,7 @@ pub struct DoctorReport {
     pub promise: usize,
     /// The tool count `tools/list` actually returned.
     pub tools: usize,
-    /// Whether `initialize` completed without an error field.
+    /// Whether `server/discover` answered and advertised the named 2026-07-28 revision.
     pub handshake: bool,
     /// Any error encountered while probing, if any.
     pub error: Option<String>,
@@ -790,6 +792,9 @@ impl DoctorReport {
 }
 
 pub mod selftest;
+
+#[cfg(test)]
+mod tests;
 
 fn profile_name(profile: Profile) -> &'static str {
     match profile {
@@ -945,8 +950,10 @@ pub(crate) fn handle_message_for_profile(
     // every request instead of handshaking. An unknown revision is a hard
     // error carrying the list we do speak: the spec's whole point is that the
     // client retries with a mutually supported version rather than silently
-    // living with a downgrade. Absent `_meta` means a legacy request, which is
-    // served exactly as it was before this revision existed.
+    // living with a downgrade. Absent `_meta` on stdio is the current revision
+    // (the in-process dispatcher and stdio probes declare it explicitly via
+    // `server/discover` first); the HTTP binding additionally requires the
+    // named version header on every request except `server/discover`.
     if let Some(requested) = params
         .get("_meta")
         .and_then(|meta| meta.get(META_PROTOCOL_VERSION))
@@ -968,43 +975,28 @@ pub(crate) fn handle_message_for_profile(
         }));
     }
 
-    // Plugin hook point (fail-open, detached): every inbound method notifies
-    // on_command subscribers with the method name; tool calls additionally
-    // notify on_tool_call subscribers with the tool name (see tools_call).
-    if !method.starts_with("notifications/") {
-        dispatch_plugin_hook(PluginHookPoint::OnCommand, &method);
-    }
-
     let response = match method.as_str() {
         // The spec's liveness utility. Without this arm a host that pings us — which is exactly
         // what a host does before deciding whether to keep a server in a session — received
         // `-32601 method not found`, i.e. "this is not an MCP server". It is a request/response
         // no-op, and the only correct answer is an empty result.
         "ping" => Ok(json!({})),
-        "initialize" => {
-            Ok(json!({
-                "protocolVersion": LEGACY_PROTOCOL_VERSION,
-                "capabilities": legacy_capabilities(),
-                "serverInfo": server_info(),
-                // Agent playbook: MCP clients surface this in the system
-                // prompt, steering the agent to explore-first behavior
-                // before it sees individual tool descriptions.
-                "instructions": SERVER_INSTRUCTIONS,
-            }))
-        }
         // REQUIRED by the 2026-07-28 revision: the one RPC every server must
         // implement, advertising the revisions it speaks, its capabilities and
-        // its identity. It doubles as the stdio backward-compatibility probe,
-        // so a dual-era client can tell us apart from a legacy-only server
-        // before it commits to an era.
-        //
-        // `protocolVersions` lists every revision this server speaks, newest
-        // first. The version *error* lists only the modern ones, because only
-        // those are selectable on a stateless request.
+        // its identity. It is the only probe: there is no `initialize`
+        // handshake in this revision, and no legacy era is served, so a
+        // client learns the named version (`2026-07-28`) here and then
+        // declares it in `_meta` (stdio) or `MCP-Protocol-Version` (HTTP)
+        // on every later request. Callable without a version declaration,
+        // because it is how a client learns which version to declare.
         "server/discover" => Ok(json!({
             "protocolVersions": supported_protocol_versions(),
             "capabilities": server_capabilities(),
             "serverInfo": server_info(),
+            // Agent playbook: MCP clients surface this in the system
+            // prompt, steering the agent to explore-first behavior
+            // before it sees individual tool descriptions.
+            "instructions": SERVER_INSTRUCTIONS,
         })),
         "tools/list" => Ok(cacheable(
             json!({ "tools": visible_tools(profile) }),
@@ -1147,7 +1139,7 @@ pub(crate) fn handle_message_for_profile(
     })
 }
 
-/// Identity reported in `initialize`, in `server/discover`, and in the `_meta`
+/// Identity reported in `server/discover` and in the `_meta`
 /// of every result — the revision asks servers to identify themselves per
 /// result, which is what lets a host (or a proxy in the middle) see which
 /// server actually answered.
@@ -1173,16 +1165,15 @@ fn server_capabilities() -> Value {
     // client-side negotiation check reads. Declaring the extension in one spot
     // and gating on a literal in another is how a server ends up advertising an
     // extension it then refuses to honour.
-    let mut capabilities = legacy_capabilities();
+    let mut capabilities = base_capabilities();
     capabilities["extensions"] = json!({});
     capabilities["extensions"][tasks::TASKS_EXTENSION] = json!({});
     capabilities
 }
 
-/// Capabilities returned by the legacy `initialize` handshake. Deliberately no
-/// `extensions` map: extensions are a 2026-07-28 concept, and a legacy client
-/// has no vocabulary for one.
-fn legacy_capabilities() -> Value {
+/// The base capability map `server/discover` advertises. `server_capabilities`
+/// adds the 2026-07-28 `extensions` map on top of this.
+fn base_capabilities() -> Value {
     // `completions` is the one capability a host must be *told* about before it
     // will ever ask, so declaring it is the whole difference between an
     // autocompleting host and a host that never tries (see
@@ -1201,14 +1192,10 @@ fn legacy_capabilities() -> Value {
     })
 }
 
-/// Every revision this server speaks, newest first. Modern revisions are
-/// selectable per request; the legacy one is selected by the handshake.
+/// Every revision this server speaks. Only the named stateless revision
+/// (`2026-07-28`) exists: there is no legacy handshake era to chain.
 fn supported_protocol_versions() -> Vec<&'static str> {
-    MODERN_PROTOCOL_VERSIONS
-        .iter()
-        .copied()
-        .chain(std::iter::once(LEGACY_PROTOCOL_VERSION))
-        .collect()
+    MODERN_PROTOCOL_VERSIONS.to_vec()
 }
 
 /// Attach the SEP-2549 caching hints a list/read result is required to carry.
@@ -2103,6 +2090,30 @@ tool_def!(
     CostClass::Cheap,
     CacheClass::Session,
 );
+tool_def!(
+    TOOL_MEM_SEARCH_TEAM,
+    "mem_search_team",
+    "Search the shared team vault by relevance",
+    Approval::ReadOnly,
+    CostClass::Moderate,
+    CacheClass::Session,
+);
+tool_def!(
+    TOOL_VAULT_ASOF_TEAM,
+    "vault_asof_team",
+    "Team vault belief state at a point in time",
+    Approval::ReadOnly,
+    CostClass::Moderate,
+    CacheClass::Session,
+);
+tool_def!(
+    TOOL_VAULT_PROPOSALS,
+    "vault_proposals",
+    "Team vault proposals awaiting acceptance",
+    Approval::ReadOnly,
+    CostClass::Cheap,
+    CacheClass::Session,
+);
 
 // ── clock / scratchpad / toolbox ─────────────────────────────────────────
 tool_def!(
@@ -2648,6 +2659,18 @@ fn mcp_registry() -> Registry {
                 .and_then(|v| v.as_str())
                 .unwrap_or("fact")
                 .to_string();
+            // Provenance mirrors the CLI's `vault remember`: a recorded user
+            // (author) and the surface that wrote it. A missing author is
+            // reported as unknown, never invented — see [`provenance_of`].
+            let author = args
+                .get("author")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+                .unwrap_or_else(|| {
+                    std::env::var("MEMNOTH_USER")
+                        .or_else(|_| std::env::var("USER"))
+                        .unwrap_or_else(|_| "unknown".to_string())
+                });
             let now = memnoth_engine::now_ms();
             let entity_id = match surface
                 .engine()
@@ -2659,9 +2682,16 @@ fn mcp_registry() -> Registry {
                     .engine()
                     .add_entity(EntityKind::Other, &entity_name, 0.9, now)?,
             };
-            let observation_id = surface
-                .engine()
-                .add_observation(entity_id, &content, &kind, 0.9, now)?;
+            let provenance = serde_json::to_string(&json!({"user": author, "agent": "mcp"}))?;
+            let observation_id = surface.engine().ingest_observation_attributed(
+                entity_id,
+                &content,
+                &kind,
+                0.9,
+                now,
+                &provenance,
+                Some(now),
+            )?;
             Ok(json!({"entity_id": entity_id, "observation_id": observation_id}))
         },
     });
@@ -2811,6 +2841,23 @@ fn mcp_registry() -> Registry {
     });
 
     registry.add(McpTool {
+        def: &TOOL_MEM_SEARCH_TEAM,
+        call: |args, surface| {
+            let query = arg_str(args, "query")?;
+            tools_agent::mem_search_team(surface.engine(), &query)
+        },
+    });
+
+    registry.add(McpTool {
+        def: &TOOL_VAULT_ASOF_TEAM,
+        call: |args, surface| {
+            let name = arg_str(args, "name")?;
+            let at_ms = arg_opt_i64(args, "at", memnoth_engine::now_ms());
+            tools_agent::vault_asof_team(surface.engine(), &name, at_ms)
+        },
+    });
+
+    registry.add(McpTool {
         def: &TOOL_VAULT_CONTRADICTIONS,
         call: |args, surface| tools_agent::vault_contradictions(surface.engine(), args),
     });
@@ -2820,6 +2867,14 @@ fn mcp_registry() -> Registry {
         call: |args, surface| {
             let now = memnoth_engine::now_ms();
             tools_agent::vault_top(surface.engine(), args, now)
+        },
+    });
+
+    registry.add(McpTool {
+        def: &TOOL_VAULT_PROPOSALS,
+        call: |args, surface| {
+            let now = memnoth_engine::now_ms();
+            tools_agent::vault_proposals(surface.engine(), args, now)
         },
     });
 
@@ -2867,7 +2922,10 @@ fn mcp_registry() -> Registry {
         call: |args, surface| {
             let name = arg_str(args, "name")?;
             let root = db_parent_display(args);
-            let session_id = surface.coord().join(&name, std::process::id(), &root)?;
+            let session_id =
+                surface
+                    .coord()
+                    .join(&name, std::process::id() as i32, root.as_str())?;
             Ok(json!({"session_id": session_id}))
         },
     });
@@ -3186,6 +3244,12 @@ fn tools_call(
     } else {
         name
     };
+    let args = params.get("arguments").cloned().unwrap_or(json!({}));
+    // `kg_more` carries the KG tools that are not advertised; it hands the
+    // call back to this function so the inner tool passes the same gate.
+    if name == "kg_more" {
+        return kg_more::call(engine, coord, profile, &args, principal, vault);
+    }
     if !profile.allows(name) {
         anyhow::bail!(
             "tool '{name}' is not available in the '{}' tool profile; restart with \
@@ -3193,8 +3257,6 @@ fn tools_call(
             crate::profile_name(profile)
         );
     }
-    let args = params.get("arguments").cloned().unwrap_or(json!({}));
-
     // Read-only is a launch mode, not a hint. Enforce it before the policy and
     // approval paths so no write can be reached by a host that ignores the
     // tool annotations.
@@ -3218,16 +3280,11 @@ fn tools_call(
 
     // Plugin hook point (fail-open, detached): lets plugin authors observe or
     // audit tool calls without touching the daemon hook engine.
-    // Two names for the same moment: `on_tool_call` predates the lifecycle
-    // vocabulary and stays for manifests already in use; `pre_tool_use` is the
-    // name new ones should declare.
-    dispatch_plugin_hook(PluginHookPoint::OnToolCall, name);
-    dispatch_plugin_hook(PluginHookPoint::PreToolUse, name);
+    dispatch_plugin_hook(HookEvent::ToolPre, name);
     // Fires on the way out of this function by `Drop`, so an error, an approval
     // request and a task handle all reach it.
     let _post_tool_hook = crate::plugin_hooks::PostToolHook { name };
 
-    // Multi-round-trip confirmation for bulk writes (SEP-2322). Sits ahead of
     // dispatch so no code path can reach a bulk write without passing it, and
     // the only way past is the explicit env switch, a host that cannot be
     // asked, or a retry carrying a verified single-use approval.
@@ -3441,15 +3498,14 @@ pub(crate) fn arg_usize(args: &Value, key: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+pub(crate) fn arg_opt_i64(args: &Value, key: &str, default: i64) -> i64 {
+    args.get(key).and_then(|v| v.as_i64()).unwrap_or(default)
+}
+
 /// The parse ledger for one workspace: the **single** answer to "how out of date
 /// is the code graph, and does that permit caching?".
 ///
 /// Every consumer comes through here — the `mem://index/status` resource,
-/// `kg_status`, `kg_coverage`, and the in-band `staleness_notice` on the other
-/// `kg_*` reads. Before this existed, seven call sites each ran their own
-/// `staleness_report` and each opened the code graph a *second* time to do it:
-/// one workspace could be described two different ways in one session, and every
-/// `kg_*` read paid for an extra connection to say so.
 pub(crate) struct Freshness {
     /// What the ledger implies for a host's caching (see [`cache_ttl`]).
     kind: CacheKind,
@@ -7550,10 +7606,22 @@ const TYPED_OUTPUT_TOOLS: &[&str] = &[
     "vault_asof",
     "vault_contradictions",
     "vault_top",
+    "vault_proposals",
     "coord_join",
     "coord_heartbeat",
     "coord_leave",
     "coord_task_create",
+    "kg_impact",
+    "kg_def",
+    "kg_refs",
+    "kg_search",
+    "kg_status",
+    "kg_index",
+    "kg_trace",
+    "kg_explore",
+    "kg_changes",
+    "kg_callees",
+    "kg_dead",
 ];
 
 /// Does this tool promise a typed result? (see [`TYPED_OUTPUT_TOOLS`])
@@ -7622,6 +7690,214 @@ fn coord_task_create_schema() -> Value {
         &["task_id"],
     )
 }
+/// `kg_impact` output schema: structured blast radius with precision label.
+fn kg_impact_schema() -> Value {
+    open_object(
+        json!({
+            "supported": {"type": "boolean"},
+            "target": {"type": "string"},
+            "precision": {"type": "string", "enum": ["lexical", "tree-sitter", "lsp"]},
+            "counts": {
+                "type": "object",
+                "properties": {
+                    "exact": {"type": "integer"},
+                    "likely": {"type": "integer"},
+                    "direct": {"type": "integer"},
+                    "transitive": {"type": "integer"},
+                },
+                "required": ["exact", "likely", "direct", "transitive"],
+            },
+            "impacted": {"type": "array"},
+            "risk": {"type": "object"},
+        }),
+        &["supported", "target", "precision", "counts"],
+    )
+}
+
+/// `kg_def` output schema: symbol declaration with precision label.
+fn kg_def_schema() -> Value {
+    open_object(
+        json!({
+            "supported": {"type": "boolean"},
+            "symbol": {"type": "string"},
+            "resolved": {"type": "boolean"},
+            "precision": {"type": "string", "enum": ["lexical", "tree-sitter", "lsp"]},
+            "definitions": {"type": "array"},
+        }),
+        &["supported", "symbol", "resolved", "precision"],
+    )
+}
+
+/// `kg_refs` output schema: symbol references with precision label.
+fn kg_refs_schema() -> Value {
+    open_object(
+        json!({
+            "supported": {"type": "boolean"},
+            "symbol": {"type": "string"},
+            "resolved": {"type": "boolean"},
+            "precision": {"type": "string", "enum": ["lexical", "tree-sitter", "lsp"]},
+            "references": {"type": "array"},
+            "references_direct": {"type": "integer"},
+        }),
+        &["supported", "symbol", "resolved", "precision"],
+    )
+}
+
+/// `kg_search` output schema: symbol search hits.
+fn kg_search_schema() -> Value {
+    open_object(
+        json!({
+            "supported": {"type": "boolean"},
+            "query": {"type": "string"},
+            "hits": {"type": "array"},
+            "precision": {"type": "string", "enum": ["lexical", "tree-sitter", "lsp"]},
+        }),
+        &["supported", "query", "hits", "precision"],
+    )
+}
+
+/// Like [`output_object`], but the payload may carry fields this server does
+/// not pin. A tool whose answer grows a field per feature (staleness stamps,
+/// provenance) still gets a typed core, and an engine change stays out of the
+/// protocol.
+fn open_object(properties: Value, required: &[&str]) -> Value {
+    let mut schema = output_object(properties, required);
+    schema["additionalProperties"] = json!(true);
+    schema
+}
+
+/// `kg_trace` output schema: one page of mentions plus the cursor for the next.
+fn kg_trace_schema() -> Value {
+    open_object(
+        json!({
+            "supported": {"type": "boolean"},
+            "symbol": {"type": "string"},
+            "resolved": {"type": "boolean"},
+            "references": {"type": "array"},
+            "next_cursor": {"type": "string"},
+            "precision": {"type": "string"},
+            "generation": {"type": "integer"},
+            "direct": {"type": "array"},
+            "transitive_symbols": {"type": "array"},
+            "files_touched": {"type": "array"},
+            "hubs": {"type": "array"},
+        }),
+        &["supported"],
+    )
+}
+
+/// `kg_explore` output schema: definitions and the flow among them.
+fn kg_explore_schema() -> Value {
+    open_object(
+        json!({
+            "supported": {"type": "boolean"},
+            "symbol": {"type": "string"},
+            "resolved": {"type": "boolean"},
+            "symbol_info": {"type": "object"},
+            "callers": {"type": "array"},
+            "callees": {"type": "array"},
+            "precision": {"type": "string"},
+            "stale_files": {"type": "integer"},
+            "staleness_notice": {"type": "string"},
+        }),
+        &["supported"],
+    )
+}
+
+/// `kg_changes` output schema: the reachable surface of an uncommitted edit.
+fn kg_changes_schema() -> Value {
+    open_object(
+        json!({
+            "supported": {"type": "boolean"},
+            "changed_files": {"type": "integer"},
+            "affected_symbols": {"type": "integer"},
+            "impact": {"type": "array"},
+            "guidance": {"type": "string"},
+        }),
+        &["supported"],
+    )
+}
+
+/// `kg_callees` output schema: what one declaration mentions in its own body,
+/// or the reason this graph cannot say.
+fn kg_callees_schema() -> Value {
+    open_object(
+        json!({
+            "supported": {"type": "boolean"},
+            "tool": {"type": "string"},
+            "reason": {"type": "string"},
+            "instead": {"type": "string"},
+            "symbol": {"type": "string"},
+            "resolved": {"type": "boolean"},
+            "callees": {"type": "array"},
+        }),
+        &["supported"],
+    )
+}
+
+/// `kg_dead` output schema: declarations no other file mentions.
+fn kg_dead_schema() -> Value {
+    open_object(
+        json!({
+            "supported": {"type": "boolean"},
+            "dead_symbols": {"type": "array"},
+        }),
+        &["supported"],
+    )
+}
+
+/// `kg_index` output schema: the counts a completed index reports.
+///
+/// Two producers answer this: the CLI (`memnoth kg index --json`) when one is
+/// findable, and the bundled indexer otherwise. Their field sets overlap rather
+/// than match, so this declares the union — every field either producer may
+/// report, none of them required beyond the shared `supported`.
+fn kg_index_schema() -> Value {
+    open_object(
+        json!({
+            "supported": {"type": "boolean"},
+            "indexed": {"type": "boolean"},
+            "engine": {"type": "string"},
+            "workspace": {"type": "string"},
+            "codebases": {"type": "array"},
+            "files_indexed": {"type": "integer"},
+            "files": {"type": "integer"},
+            "symbols": {"type": "integer"},
+            "symbols_extracted": {"type": "integer"},
+            "references": {"type": "integer"},
+            "relations_created": {"type": "integer"},
+            "stale_files": {"type": "integer"},
+            "precision": {"type": "string"},
+            "truncated": {"type": "boolean"},
+            "elapsed_ms": {"type": "integer"},
+        }),
+        &["supported"],
+    )
+}
+
+/// `kg_status` output schema: graph health and staleness.
+fn kg_status_schema() -> Value {
+    open_object(
+        json!({
+            "supported": {"type": "boolean"},
+            "workspace": {"type": "string"},
+            "files_indexed": {"type": "integer"},
+            "symbols": {"type": "integer"},
+            "references": {"type": "integer"},
+            "stale_files": {"type": "integer"},
+            "precision": {"type": "string", "enum": ["lexical", "tree-sitter", "lsp"]},
+        }),
+        &[
+            "supported",
+            "workspace",
+            "files_indexed",
+            "symbols",
+            "references",
+            "stale_files",
+            "precision",
+        ],
+    )
+}
 
 fn tool(name: &str, description: &str, args: &[Arg], annotations: Annotations) -> Value {
     json!({
@@ -7636,6 +7912,3 @@ fn tool(name: &str, description: &str, args: &[Arg], annotations: Annotations) -
         },
     })
 }
-
-#[cfg(test)]
-mod tests;
