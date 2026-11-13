@@ -23,14 +23,19 @@
 //! the verb says so by name instead of returning an empty list that reads as
 //! "nothing found".
 
+pub mod agents;
 pub mod ask;
 pub mod audit_cmd;
 pub mod auth;
 pub mod automation;
 pub mod cli;
-
-pub use context::Config;
+pub mod demo;
+pub use context::{AppContext, Config, DEFAULT_MCP_URL, DEFAULT_PROFILE};
+pub mod acp;
+pub mod bench;
 pub mod billing;
+pub mod budget;
+pub mod checkpoint;
 pub mod cloud;
 pub mod commands;
 pub mod completion;
@@ -41,52 +46,127 @@ pub mod docs;
 pub mod doctor;
 pub mod edit;
 pub mod env_file;
+pub mod extension;
+pub mod extension_commands;
 pub mod feedback;
+pub mod goals;
 pub mod keys;
 pub mod kg;
 pub mod mcp;
-pub mod models;
 pub mod net_guard;
 pub mod open;
 pub mod org;
 pub mod output;
 pub mod projects;
 pub mod provider;
+pub mod provider_stream;
 pub mod receipt;
 pub mod report;
+pub mod sandbox;
+
 pub mod serve;
 pub mod session;
 pub mod session_cmd;
 pub mod setup;
-pub mod stats;
 pub mod sync;
 pub mod sync_crypto;
 pub mod sync_engine;
 pub mod team;
 pub mod teams;
 pub mod telemetry;
+pub mod trust;
 pub mod tui;
 pub mod update_cmd;
-pub mod usage;
 pub mod vault;
 pub mod watch;
 pub mod worktree;
-use clap::Parser;
+use anyhow::Context;
+use clap::{CommandFactory, Parser};
 use cli::{Cli, Verb};
-use context::{AppContext, DEFAULT_MCP_URL, DEFAULT_PROFILE};
+use memnoth_command::build_p0_registry;
+use memnoth_harness_api::{ApiEvent, ApiRequest, ClientFrame, ServerFrame};
+use memnoth_transport::Stream;
+use net_guard::strip_proxy_env;
 use output::ErrorOutcome;
+use std::collections::HashSet;
 use std::io::IsTerminal;
 use std::process::ExitCode;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 /// Parse the command line, run it, and turn the outcome into an exit code.
 ///
 /// `main` is this call and nothing else: printing, JSON envelopes and exit codes
 /// all live here so the TUI and the CLI cannot disagree about what a failure
 /// looks like.
 pub fn run() -> ExitCode {
-    // Before anything reads the environment: a repository-local `.env` fills in
-    // only the variables the shell has not already set, and never prints a value.
-    env_file::load();
+    // Strip proxy environment variables before anything touches the network, so an
+    // attacker-controlled proxy cannot steer an outbound request at an internal
+    // address.
+    strip_proxy_env();
+    // `env_file::load()` used to run here. It now runs after the workspace
+    // trust decision below: a cloned repository must not be able to set a
+    // variable for this process merely by being the working directory.
+    // Harness API wire: open the socket, say hello, and handle the reply.
+    // The harness socket is optional: an editor or a driver may have one open,
+    // and a plain `mn ask` has none. A refused connection is the normal case,
+    // not a reason to stop before the verb runs.
+    let _harness = tokio::runtime::Runtime::new()
+        .context("harness runtime")
+        .and_then(|rt| {
+            rt.block_on(async {
+                let stream = Stream::connect(memnoth_harness_api::api_socket_path())
+                    .await
+                    .context("connect harness socket")?;
+                let (mut reader, mut writer) = stream.into_split();
+                let frame = ClientFrame::new(
+                    1,
+                    ApiRequest::Hello {
+                        min_version: memnoth_harness_api::API_VERSION_MAJOR,
+                        max_version: memnoth_harness_api::API_VERSION_MAJOR,
+                        client: "memnoth-cli".to_string(),
+                    },
+                );
+                let payload = serde_json::to_string(&frame)?;
+                writer.write_all(payload.as_bytes()).await?;
+                writer.write_all(b"\n").await?;
+                writer.flush().await?;
+                let mut line = String::new();
+                reader.read_line(&mut line).await?;
+                let reply: ServerFrame = serde_json::from_str(&line)?;
+                match reply.event {
+                    ApiEvent::HelloOk { .. } | ApiEvent::Ok => Ok(()),
+                    ApiEvent::Error { code, message } => {
+                        anyhow::bail!("harness hello failed: {code:?} {message}")
+                    }
+                    other => anyhow::bail!("unexpected reply to hello: {:?}", other),
+                }
+            })
+        })
+        .ok();
+
     let cli = Cli::parse();
+    // Registry validation: every `Verb` variant clap parses must exist as a
+    // row in the command registry, and every registry row must name a verb
+    // clap parses. A mismatch exits non-zero before any command runs.
+    let code = validate_registry(&cli);
+    if code != ExitCode::SUCCESS {
+        return code;
+    }
+
+    // Workspace trust comes before `.env`, the graph, `AGENTS.md`, the sandbox
+    // policy, hooks or MCP configuration. `--trust-folder` allows this run and
+    // writes nothing; without a terminal the answer is no.
+    if needs_trust(cli.verb.as_ref()) {
+        let root = cli
+            .root
+            .clone()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        if let Err(error) = trust::check(&root, cli.trust_folder) {
+            return fail(cli.json, &ErrorOutcome::from_anyhow(&error));
+        }
+    }
+    // After the trust decision, never before: this is the project's `.env`.
+    env_file::load();
+
     let json = cli.json;
     let ctx = match AppContext::new(&cli) {
         Ok(ctx) => ctx,
@@ -156,7 +236,71 @@ fn run_session(ctx: &AppContext, cli: &Cli, json: bool) -> ExitCode {
     }
 }
 
+/// Whether this invocation reads the project before it can answer.
+///
+/// The rest — `doctor`, `trust`, `auth`, `version`, `completion`, `update`,
+/// `config` — reads only `~/.memnoth` and may run in any folder.
+fn needs_trust(verb: Option<&Verb>) -> bool {
+    match verb {
+        None => true,
+        Some(verb) => matches!(
+            verb,
+            Verb::Session(_)
+                | Verb::Ask(_)
+                | Verb::Kg(_)
+                | Verb::Mcp(_)
+                | Verb::Open(_)
+                | Verb::Serve(_)
+                | Verb::Watch(_)
+                | Verb::Batch(_)
+                | Verb::Parallel(_)
+                | Verb::Worktree(_)
+                | Verb::Agents(_)
+                | Verb::Automation(_)
+                | Verb::Setup(_)
+        ),
+    }
+}
+
 fn fail(json: bool, error: &ErrorOutcome) -> ExitCode {
     output::emit_error(json, error);
     ExitCode::from(error.code)
 }
+/// Validate that every `Verb` variant clap parses has a row in the command
+/// registry, and every registry row names a verb clap parses. Exit non-zero
+/// on mismatch.
+fn validate_registry(_cli: &Cli) -> ExitCode {
+    let parsed: HashSet<String> = Cli::command()
+        .get_subcommands()
+        .map(|verb| verb.get_name().to_string())
+        .collect();
+
+    let registry = build_p0_registry().build();
+    let registered: HashSet<String> = registry
+        .all()
+        .filter_map(|spec| spec.cli_path.first().cloned())
+        .collect();
+
+    let missing: Vec<&String> = parsed
+        .iter()
+        .filter(|verb| !registered.contains(*verb))
+        .collect();
+    let stray: Vec<&String> = registered
+        .iter()
+        .filter(|verb| !parsed.contains(*verb))
+        .collect();
+
+    if missing.is_empty() && stray.is_empty() {
+        return ExitCode::SUCCESS;
+    }
+
+    if !missing.is_empty() {
+        eprintln!("registry mismatch: these verbs parse but have no CommandSpec row: {missing:?}");
+    }
+    if !stray.is_empty() {
+        eprintln!("registry mismatch: these registry rows name no verb in src/cli.rs: {stray:?}");
+    }
+    ExitCode::from(1)
+}
+
+pub mod lsp_diag;
