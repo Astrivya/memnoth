@@ -18,6 +18,28 @@
 //! exist while `pre-commit` runs, so the receipt is written from a `post-commit`
 //! hook — a receipt for a commit that may not happen would describe nothing.
 //! `mn receipt write` is idempotent; running it again rewrites the same file.
+//!
+//! # The commit a receipt is bound to
+//!
+//! A receipt is bound to the full commit id it describes and says so. The file
+//! name is that id, so `write`, `show` and `verify` all answer for the same
+//! commit, whether it is `HEAD` or forty commits back.
+//!
+//! The commit can leave the repository while the receipt stays: an amend, a
+//! rebase, or a force-push replaces the id and leaves the receipt describing a
+//! commit that no longer exists. That is a named failure, not a crash and not
+//! silence — `mn receipt verify` reports the moved commit and still reads the
+//! receipt, because the document that proves the history moved is the one thing
+//! worth keeping. This is why [`load`] resolves a revision to its file without
+//! requiring git to still know the commit.
+//!
+//! # Beliefs
+//!
+//! A receipt records the beliefs that were in play, each with its author, agent,
+//! source, and date. A field nobody recorded is `null` and is named in
+//! [`Belief::unknown`]; it is never filled with a plausible substitute — the
+//! agent that wrote a fact is not the person who authorised it, and the string
+//! `"unknown"` is a placeholder, not a name.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -32,11 +54,12 @@ use serde::{Deserialize, Serialize};
 /// The schema name and major version this build writes.
 pub const SCHEMA: &str = "mn-receipt/1";
 
-/// The reason `beliefs` is null in this build.
-///
-/// Stated rather than omitted: a consumer must not read "no beliefs" when the
-/// truth is "beliefs are not attributed yet". It disappears when M6 lands.
-pub const BELIEFS_UNAVAILABLE: &str = "memory-v1";
+/// The family half of [`SCHEMA`]; the number after the slash is the major
+/// version a consumer refuses to guess about.
+pub const SCHEMA_FAMILY: &str = "mn-receipt";
+
+/// The major version this build reads and writes (D19).
+pub const SCHEMA_VERSION: u32 = 1;
 
 /// One change receipt.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,16 +125,35 @@ pub struct Agent {
 
 /// A belief that was in play.
 ///
-/// Empty until team memory lands; the field exists now so a consumer can be
-/// written against the final shape rather than a second schema later.
+/// One row per fact the vault held about a symbol the change moved, carrying the
+/// same provenance shape the vault's own history returns: who recorded it, which
+/// surface recorded it, what it points at, and when. A belief with no recorded
+/// author is not dropped and not signed by the agent — its author is `null` and
+/// `"author"` appears in [`Belief::unknown`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Belief {
     pub entity: String,
     pub predicate: Option<String>,
     pub text: String,
+    /// The observation kind (`fact`, `decision`, `gotcha`, …), when recorded.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// Who recorded the belief; `null` when nobody was recorded.
+    #[serde(default)]
+    pub author: Option<String>,
+    /// The surface that recorded it: `cli`, `mcp`, or a named subagent.
+    #[serde(default)]
+    pub agent: Option<String>,
+    /// Where the belief came from (file, URL, session); `null` when none was
+    /// recorded. Never inferred from the text.
+    #[serde(default)]
+    pub source: Option<String>,
     pub recorded_at: Option<i64>,
     pub valid_from: Option<i64>,
     pub supersedes: Option<String>,
+    /// The fields above that nobody recorded, named explicitly.
+    #[serde(default)]
+    pub unknown: Vec<String>,
 }
 
 /// Who was accountable.
@@ -177,8 +219,11 @@ pub struct Policy {
 pub struct Verification {
     /// The schema that was verified.
     pub schema: String,
-    /// The commit the receipt names.
+    /// The commit that was verified.
     pub commit: String,
+    /// The commit the receipt says it is bound to. Equal to [`Self::commit`]
+    /// unless the receipt was misfiled or edited.
+    pub bound_commit: String,
     /// True only when every check passed.
     pub ok: bool,
     /// One row per check.
@@ -235,11 +280,14 @@ fn write_cmd(ctx: &AppContext, commit: Option<&str>, as_json: bool) -> Result<Ou
 
 fn show_cmd(ctx: &AppContext, commit: Option<&str>, as_json: bool) -> Result<Outcome> {
     let receipt = load(ctx, commit)?;
+    // `false` is not an error here: a receipt outlives the commit it names, and
+    // showing it is how a reader finds out that the commit is gone.
+    let present = commit_present(ctx, &receipt.change.commit);
     let data = serde_json::to_value(&receipt)?;
     let text = if as_json {
         serde_json::to_string_pretty(&data)?
     } else {
-        render(&receipt)
+        render_bound(&receipt, present)
     };
     Ok(Outcome::new("receipt.show", text, data))
 }
@@ -248,9 +296,10 @@ fn verify_cmd(ctx: &AppContext, commit: Option<&str>, as_json: bool) -> Result<O
     let verification = verify(ctx, commit)?;
     let data = serde_json::to_value(&verification)?;
     let mut text = format!(
-        "{} {}",
+        "{} {} (bound to {})",
         if verification.ok { "OK" } else { "FAILED" },
-        &verification.commit[..verification.commit.len().min(12)]
+        short(&verification.commit),
+        short(&verification.bound_commit)
     );
     for check in &verification.checks {
         text.push_str(&format!(
@@ -272,10 +321,15 @@ fn verify_cmd(ctx: &AppContext, commit: Option<&str>, as_json: bool) -> Result<O
 
 /// Build a receipt for `commit` (default `HEAD`) and write it.
 ///
-/// The impact section is measured only when `commit` is `HEAD`: the code graph
-/// answers for the working revision, so asking it about an older commit would
-/// attribute one commit's tests to another. Anything else is `null` with that
-/// reason, which is the honest answer rather than an empty list.
+/// The impact and belief sections are measured only when `commit` is `HEAD`: the
+/// code graph and the vault answer for the working revision, so asking them about
+/// an older commit would attribute one commit's tests and beliefs to another.
+/// Anything else is `null` with that reason, which is the honest answer rather
+/// than an empty list.
+///
+/// `base` is the first parent. A merge commit is therefore measured against the
+/// branch it landed on, which is what a reviewer asks about ("what does this merge
+/// add"), not against the side branch it came from.
 pub fn write(ctx: &AppContext, commit: Option<&str>) -> Result<Receipt> {
     let commit = resolve_commit(ctx, commit)?;
     let base = parent_of(ctx, &commit);
@@ -283,26 +337,35 @@ pub fn write(ctx: &AppContext, commit: Option<&str>) -> Result<Receipt> {
     let files = files_in(ctx, &commit, base.as_deref())?;
 
     let head = git(ctx, &["rev-parse", "HEAD"]).unwrap_or_default();
-    let impact = if commit == head {
+    let is_head = commit == head;
+    let (impact, symbols) = if is_head {
         match &base {
             Some(base) => measure_impact(ctx, base),
-            None => Impact {
+            None => (
+                Impact {
+                    symbols: None,
+                    references: None,
+                    impacted_tests: None,
+                    unavailable: Some("root commit: no base revision to review".to_string()),
+                },
+                Vec::new(),
+            ),
+        }
+    } else {
+        (
+            Impact {
                 symbols: None,
                 references: None,
                 impacted_tests: None,
-                unavailable: Some("root commit: no base revision to review".to_string()),
+                unavailable: Some(format!(
+                    "the code graph measures HEAD; {commit} is not HEAD"
+                )),
             },
-        }
-    } else {
-        Impact {
-            symbols: None,
-            references: None,
-            impacted_tests: None,
-            unavailable: Some(format!(
-                "the code graph measures HEAD; {commit} is not HEAD"
-            )),
-        }
+            Vec::new(),
+        )
     };
+
+    let (beliefs, beliefs_unavailable) = beliefs_in_play(ctx, &commit, &symbols, is_head);
 
     let (session_id, model, approvals) = latest_session(ctx);
 
@@ -327,8 +390,8 @@ pub fn write(ctx: &AppContext, commit: Option<&str>) -> Result<Receipt> {
             sandbox: "policy".to_string(),
             approvals,
         },
-        beliefs: None,
-        beliefs_unavailable: Some(BELIEFS_UNAVAILABLE.to_string()),
+        beliefs,
+        beliefs_unavailable,
         impact,
         policy: Policy {
             denied: Vec::new(),
@@ -352,14 +415,18 @@ pub fn write(ctx: &AppContext, commit: Option<&str>) -> Result<Receipt> {
 }
 
 /// Read a receipt for `commit` (default `HEAD`).
+///
+/// The revision is resolved to the commit it names, but a full object name whose
+/// receipt is on disk is read even when this repository no longer has the
+/// commit. See [`bound_commit`] for why that is the point rather than leniency.
 pub fn load(ctx: &AppContext, commit: Option<&str>) -> Result<Receipt> {
-    let commit = resolve_commit(ctx, commit)?;
+    let commit = bound_commit(ctx, commit)?;
     let path = path_for(ctx, &commit);
     let text = std::fs::read_to_string(&path).with_context(|| {
         format!(
             "no receipt for {} at {}. Write one with `mn receipt write` \
              (or reinstall the hook with `mn hooks install --force`).",
-            &commit[..commit.len().min(12)],
+            short(&commit),
             path.display()
         )
     })?;
@@ -368,51 +435,65 @@ pub fn load(ctx: &AppContext, commit: Option<&str>) -> Result<Receipt> {
 }
 
 /// Check a receipt against the repository it claims to describe.
+///
+/// Every check is reported, including the ones that could not run. A receipt
+/// whose commit has left the repository is verified as far as it can be: the
+/// schema, the binding, and the approvals are still readable, and the checks
+/// that need the commit report that they could not run instead of disappearing
+/// from the report.
 pub fn verify(ctx: &AppContext, commit: Option<&str>) -> Result<Verification> {
-    let wanted = resolve_commit(ctx, commit)?;
-    let receipt = load(ctx, commit)?;
+    let wanted = bound_commit(ctx, commit)?;
+    let receipt = load(ctx, Some(&wanted))?;
     let mut checks = Vec::new();
 
     checks.push(Check {
         name: "schema".to_string(),
-        ok: receipt.schema == SCHEMA,
-        detail: format!("found `{}`, expected `{SCHEMA}`", receipt.schema),
+        ok: schema_supported(&receipt.schema),
+        detail: if receipt.schema == SCHEMA {
+            format!("`{}` is this build's schema", receipt.schema)
+        } else if schema_supported(&receipt.schema) {
+            format!("`{}` is accepted as `{SCHEMA}`", receipt.schema)
+        } else {
+            format!(
+                "found `{}`; this build reads `{SCHEMA}` only, so a newer or older \
+                 receipt needs the matching memnoth",
+                receipt.schema
+            )
+        },
     });
 
-    let commit_ok = receipt.change.commit == wanted;
+    let bound = receipt.change.commit.clone();
+    let commit_ok = bound == wanted;
     checks.push(Check {
         name: "commit".to_string(),
         ok: commit_ok,
-        detail: format!(
-            "receipt names {}, file is for {}",
-            short(&receipt.change.commit),
-            short(&wanted)
-        ),
+        detail: if commit_ok {
+            format!("the receipt is bound to {wanted}")
+        } else {
+            format!(
+                "the receipt is bound to {}, but it was read for {}",
+                short(&bound),
+                short(&wanted)
+            )
+        },
     });
 
-    let exists = git_ok(
-        ctx,
-        &[
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            &format!("{}^{{commit}}", receipt.change.commit),
-        ],
-    )
-    .is_some();
+    let exists = commit_present(ctx, &bound);
     checks.push(Check {
         name: "commit-exists".to_string(),
         ok: exists,
         detail: if exists {
-            "the commit is in this repository".to_string()
+            format!("{bound} is in this repository")
         } else {
-            "the commit named by the receipt is not in this repository".to_string()
+            format!(
+                "{bound} is not in this repository: the receipt is bound to it, but the \
+                 history it described moved (amend, rebase or force-push)"
+            )
         },
     });
 
     if exists {
-        let patch = patch_bytes(ctx, &receipt.change.commit, receipt.change.base.as_deref())
-            .unwrap_or_default();
+        let patch = patch_bytes(ctx, &bound, receipt.change.base.as_deref()).unwrap_or_default();
         let digest = sha256_hex(&patch);
         checks.push(Check {
             name: "patch".to_string(),
@@ -420,8 +501,7 @@ pub fn verify(ctx: &AppContext, commit: Option<&str>) -> Result<Verification> {
             detail: format!("patch sha256 {digest}"),
         });
 
-        let actual = files_in(ctx, &receipt.change.commit, receipt.change.base.as_deref())
-            .unwrap_or_default();
+        let actual = files_in(ctx, &bound, receipt.change.base.as_deref()).unwrap_or_default();
         let recorded: BTreeSet<&str> = receipt
             .change
             .files
@@ -438,6 +518,16 @@ pub fn verify(ctx: &AppContext, commit: Option<&str>) -> Result<Verification> {
                 measured.len()
             ),
         });
+    } else {
+        // Said, not omitted: a report that lists only what it could check reads
+        // as a report where everything passed.
+        for name in ["patch", "files"] {
+            checks.push(Check {
+                name: name.to_string(),
+                ok: false,
+                detail: format!("not checked: {bound} is not in this repository"),
+            });
+        }
     }
 
     let unattributed = receipt
@@ -463,10 +553,13 @@ pub fn verify(ctx: &AppContext, commit: Option<&str>) -> Result<Verification> {
         },
     });
 
+    checks.push(beliefs_check(&receipt));
+
     let ok = checks.iter().all(|check| check.ok);
     Ok(Verification {
         schema: receipt.schema,
-        commit: receipt.change.commit,
+        commit: wanted,
+        bound_commit: bound,
         ok,
         checks,
     })
@@ -539,25 +632,214 @@ pub fn render(receipt: &Receipt) -> String {
     out
 }
 
-fn measure_impact(ctx: &AppContext, base: &str) -> Impact {
+fn measure_impact(ctx: &AppContext, base: &str) -> (Impact, Vec<String>) {
     match crate::kg::review(ctx, false, Some(base)) {
         Ok(report) => {
             let mut tests: BTreeSet<String> = BTreeSet::new();
+            let mut symbols: BTreeSet<String> = BTreeSet::new();
             for change in &report.changes {
                 tests.extend(change.impacted_tests.iter().cloned());
+                for symbol in &change.symbols {
+                    symbols.insert(symbol.name.clone());
+                }
             }
+            (
+                Impact {
+                    symbols: Some(report.summary.symbols_changed),
+                    references: Some(report.summary.references_affected),
+                    impacted_tests: Some(tests.into_iter().collect()),
+                    unavailable: None,
+                },
+                symbols.into_iter().collect(),
+            )
+        }
+        Err(error) => (
             Impact {
-                symbols: Some(report.summary.symbols_changed),
-                references: Some(report.summary.references_affected),
-                impacted_tests: Some(tests.into_iter().collect()),
-                unavailable: None,
+                symbols: None,
+                references: None,
+                impacted_tests: None,
+                unavailable: Some(format!("code graph unavailable: {error}")),
+            },
+            Vec::new(),
+        ),
+    }
+}
+
+/// The commit a receipt is bound to, without requiring git to still know it.
+///
+/// A full object name whose receipt is on disk is already the binding: reading a
+/// receipt for a commit that an amend or force-push replaced is the case the
+/// format exists to serve. Anything else resolves through git.
+fn bound_commit(ctx: &AppContext, commit: Option<&str>) -> Result<String> {
+    let rev = commit.unwrap_or("HEAD").trim();
+    if rev.is_empty() {
+        bail!("a receipt needs a revision; `HEAD` is the default");
+    }
+    let lower = rev.to_ascii_lowercase();
+    let full_oid =
+        (lower.len() == 40 || lower.len() == 64) && lower.chars().all(|ch| ch.is_ascii_hexdigit());
+    if full_oid && path_for(ctx, &lower).exists() {
+        return Ok(lower);
+    }
+    resolve_commit(ctx, Some(rev))
+}
+
+/// Whether the repository still knows this commit.
+fn commit_present(ctx: &AppContext, commit: &str) -> bool {
+    git_ok(
+        ctx,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{commit}^{{commit}}"),
+        ],
+    )
+    .is_some()
+}
+
+/// Whether this build can read the receipt's schema.
+///
+/// The family must match and the major version must be exactly the one this
+/// build writes: guessing across a major boundary is how a consumer reads fields
+/// that moved.
+fn schema_supported(schema: &str) -> bool {
+    match schema.rsplit_once('/') {
+        Some((family, major)) => {
+            family == SCHEMA_FAMILY && major.parse::<u32>() == Ok(SCHEMA_VERSION)
+        }
+        None => false,
+    }
+}
+
+/// [`render`] plus the binding, always naming the commit the receipt is bound
+/// to — whether the commit is still in this repository or the history moved.
+fn render_bound(receipt: &Receipt, present: bool) -> String {
+    let mut out = render(receipt);
+    out.push_str(&format!("\n  bound:     {}", receipt.change.commit));
+    if !present {
+        out.push_str("  (not in this repository; the history moved)");
+    }
+    out
+}
+
+/// The beliefs the vault held about the symbols this change moved.
+///
+/// Only measured at `HEAD`: the vault answers for the working revision, and
+/// asking it about an older commit would attribute today's beliefs to that
+/// commit. A fact with no recorded author is kept and its unknowns are named —
+/// never signed by the agent.
+fn beliefs_in_play(
+    ctx: &AppContext,
+    commit: &str,
+    symbols: &[String],
+    is_head: bool,
+) -> (Option<Vec<Belief>>, Option<String>) {
+    if !is_head {
+        return (
+            None,
+            Some(format!(
+                "beliefs are measured at HEAD; {commit} is not HEAD"
+            )),
+        );
+    }
+    if symbols.is_empty() {
+        return (Some(Vec::new()), None);
+    }
+    let engine = match ctx.open_vault() {
+        Ok(engine) => engine,
+        Err(error) => return (None, Some(format!("vault unavailable: {error}"))),
+    };
+    let now = crate::session::now_ms();
+    let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut beliefs = Vec::new();
+    let mut failures: Vec<String> = Vec::new();
+    for symbol in symbols {
+        let entities = match engine.find_entities_by_name(symbol, now) {
+            Ok(entities) => entities,
+            Err(error) => {
+                failures.push(format!("{symbol}: {error}"));
+                continue;
+            }
+        };
+        for entity in entities {
+            let facts = match memnoth_engine::vault_history::current_facts(&engine, entity.id, now)
+            {
+                Ok(facts) => facts,
+                Err(error) => {
+                    failures.push(format!("{}: {error}", entity.name));
+                    continue;
+                }
+            };
+            for fact in facts {
+                let text = fact["fact"].as_str().unwrap_or_default().to_string();
+                if text.trim().is_empty() || !seen.insert((entity.name.clone(), text.clone())) {
+                    continue;
+                }
+                beliefs.push(Belief {
+                    entity: entity.name.clone(),
+                    predicate: None,
+                    text,
+                    kind: fact["kind"].as_str().map(str::to_string),
+                    author: fact["author"].as_str().map(str::to_string),
+                    agent: fact["agent"].as_str().map(str::to_string),
+                    source: fact["source"].as_str().map(str::to_string),
+                    recorded_at: fact["date"].as_i64(),
+                    valid_from: fact["valid_from"].as_i64(),
+                    supersedes: None,
+                    unknown: fact["unknown"]
+                        .as_array()
+                        .map(|rows| {
+                            rows.iter()
+                                .filter_map(|value| value.as_str().map(str::to_string))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                });
             }
         }
-        Err(error) => Impact {
-            symbols: None,
-            references: None,
-            impacted_tests: None,
-            unavailable: Some(format!("code graph unavailable: {error}")),
+    }
+    let unavailable =
+        (!failures.is_empty()).then(|| format!("vault query incomplete: {}", failures.join("; ")));
+    if beliefs.is_empty() && unavailable.is_some() {
+        (None, unavailable)
+    } else {
+        (Some(beliefs), unavailable)
+    }
+}
+
+/// The provenance check: every recorded belief either names its author or says
+/// which fields nobody recorded.
+fn beliefs_check(receipt: &Receipt) -> Check {
+    match &receipt.beliefs {
+        Some(beliefs) => {
+            let unattributed = beliefs.iter().filter(|b| b.author.is_none()).count();
+            Check {
+                name: "beliefs".to_string(),
+                ok: true,
+                detail: if beliefs.is_empty() {
+                    "measured: no vault fact names an impacted symbol".to_string()
+                } else if unattributed == 0 {
+                    format!("{} belief(s), every one names a person", beliefs.len())
+                } else {
+                    format!(
+                        "{} belief(s), {unattributed} without a recorded author \
+                         (named in `unknown`, not filled)",
+                        beliefs.len()
+                    )
+                },
+            }
+        }
+        None => Check {
+            name: "beliefs".to_string(),
+            ok: true,
+            detail: format!(
+                "not measured: {}",
+                receipt
+                    .beliefs_unavailable
+                    .as_deref()
+                    .unwrap_or("no reason recorded")
+            ),
         },
     }
 }

@@ -360,7 +360,13 @@ pub fn history(ctx: &AppContext, name: &str) -> Result<Outcome, ErrorOutcome> {
             .with_fix("check the entity name spelling")
             .with_docs_url(crate::context::docs_url("vault/history"))
     })?;
-    let versions = report["versions"].as_array().cloned().unwrap_or_default();
+    let mut versions = report["versions"].as_array().cloned().unwrap_or_default();
+    // Enrich each version with its source/date/author chain: the observations
+    // that made up that belief, who recorded each, and when.
+    for version in &mut versions {
+        let entity_id = version["entity_id"].as_i64().unwrap_or(0);
+        version["facts"] = json!(version_facts(&engine, entity_id)?);
+    }
 
     let mut text = format!("history of {name}\n");
     let next_commands = if versions.is_empty() {
@@ -383,6 +389,20 @@ pub fn history(ctx: &AppContext, name: &str) -> Result<Outcome, ErrorOutcome> {
                 version["entity_id"].as_i64().unwrap_or(0),
                 window
             ));
+            // Source/date/author chain: each observation that made up this
+            // belief, with who recorded it and when. Absent when a version
+            // carries no facts (e.g. a bare rename), which is why conditional.
+            if let Some(facts) = version.get("facts").and_then(Value::as_array) {
+                for fact in facts {
+                    let source = fact["content"].as_str().unwrap_or("unknown");
+                    let author = fact["provenance"]["user"].as_str().unwrap_or("unknown");
+                    let recorded = fact["recorded_at"].as_i64();
+                    let date = recorded.map(rfc3339).unwrap_or_else(|| rfc3339(from));
+                    text.push_str(&format!(
+                        "      source: {source}\n        date:   {date}\n      author:   {author}\n",
+                    ));
+                }
+            }
             // The reason a window closed is the answer this verb exists to give,
             // and it was only in the JSON — so "why did this change?" printed a
             // list of dates. It is recorded on the journaled rows and absent on
@@ -407,6 +427,40 @@ pub fn history(ctx: &AppContext, name: &str) -> Result<Outcome, ErrorOutcome> {
             "next_commands": next_commands,
         }),
     ))
+}
+
+/// The observations that made up one belief version: their text (source),
+/// when each was recorded (date), and who recorded it (author).
+fn version_facts(engine: &MemoryEngine, entity_id: i64) -> Result<Vec<Value>, ErrorOutcome> {
+    let conn = engine.connection();
+    let mut stmt = conn
+        .prepare(
+            "SELECT content, kind, confidence, valid_from, valid_to, recorded_at, provenance \
+         FROM observations WHERE entity_id = ?1 \
+           AND (invalid_at IS NULL OR invalid_at > ?2) \
+         ORDER BY valid_from, id",
+        )
+        .map_err(|e| vault_failure("history", "failed to prepare the fact query", e))?;
+    let rows = stmt
+        .query_map(params![entity_id, now_ms()], |r| {
+            let provenance: String = r.get(6)?;
+            Ok(json!({
+                "content": r.get::<_, String>(0)?,
+                "kind": r.get::<_, String>(1)?,
+                "confidence": r.get::<_, f64>(2)?,
+                "valid_from": r.get::<_, i64>(3)?,
+                "valid_to": r.get::<_, Option<i64>>(4)?,
+                "recorded_at": r.get::<_, Option<i64>>(5)?,
+                "provenance": serde_json::from_str::<Value>(&provenance)
+                    .unwrap_or(Value::Null),
+            }))
+        })
+        .map_err(|e| vault_failure("history", "failed to read belief facts", e))?;
+    let mut facts = Vec::new();
+    for row in rows {
+        facts.push(row.map_err(|e| vault_failure("history", "failed to read belief facts", e))?);
+    }
+    Ok(facts)
 }
 
 /// `memnoth vault contradictions`.
@@ -2105,13 +2159,6 @@ pub fn backup(
     include_wal: bool,
     compress: bool,
 ) -> Result<Outcome, ErrorOutcome> {
-    if compress {
-        // Parsed and advertised, but not compiled in: exit 8, not a usage error.
-        return Err(
-            ErrorOutcome::unsupported("gzip compression is not available in this build")
-                .with_fix("re-run without --compress; the backup is a byte-for-byte SQLite copy"),
-        );
-    }
     if !ctx.vault_path.exists() {
         return Err(ErrorOutcome::not_found(format!(
             "no vault at {}; run `memnoth vault init` first",
@@ -2133,11 +2180,31 @@ pub fn backup(
     engine
         .checkpoint()
         .map_err(|e| vault_failure("backup", "failed to checkpoint the WAL", e))?;
-    let copied = std::fs::copy(&ctx.vault_path, &target)
-        .map_err(|e| vault_failure("backup", "failed to copy the vault", e))?;
+    let copied = if compress {
+        // gzip the SQLite file itself. WAL sidecars are not compressed: they
+        // are loose files next to the main backup and belong to the
+        // uncompressed layout, so they are skipped below and said so in
+        // the output.
+        let mut source = std::fs::File::open(&ctx.vault_path)
+            .map_err(|e| vault_failure("backup", "failed to open the vault", e))?;
+        let dest = std::fs::File::create(&target)
+            .map_err(|e| vault_failure("backup", "failed to create the backup file", e))?;
+        let mut encoder = flate2::write::GzEncoder::new(dest, flate2::Compression::default());
+        std::io::copy(&mut source, &mut encoder)
+            .map_err(|e| vault_failure("backup", "failed to compress the vault", e))?;
+        encoder
+            .finish()
+            .map_err(|e| vault_failure("backup", "failed to finish the gzip backup", e))?
+            .metadata()
+            .map_err(|e| vault_failure("backup", "failed to stat the backup", e))?
+            .len()
+    } else {
+        std::fs::copy(&ctx.vault_path, &target)
+            .map_err(|e| vault_failure("backup", "failed to copy the vault", e))?
+    };
 
     let mut sidecars = Vec::new();
-    if include_wal {
+    if include_wal && !compress {
         for suffix in ["-wal", "-shm"] {
             let source = PathBuf::from(format!("{}{suffix}", ctx.vault_path.display()));
             if !source.exists() {
@@ -2151,7 +2218,7 @@ pub fn backup(
     }
 
     let text = format!(
-        "backed up\n  from     {}\n  to       {}\n  bytes    {}\n  sidecars {}",
+        "backed up\n  from     {}\n  to       {}\n  bytes    {}\n  sidecars {}{}",
         ctx.vault_path.display(),
         target.display(),
         human_bytes(copied),
@@ -2159,6 +2226,11 @@ pub fn backup(
             "none".to_string()
         } else {
             sidecars.join(", ")
+        },
+        if compress {
+            "\n  gzip     yes (WAL sidecars skipped; restore detects gzip by magic bytes)"
+        } else {
+            ""
         }
     );
     Ok(Outcome::new(
@@ -2168,7 +2240,8 @@ pub fn backup(
             "from": ctx.vault_path.display().to_string(),
             "to": target.display().to_string(),
             "bytes": copied,
-            "include_wal": include_wal,
+            "include_wal": include_wal && !compress,
+            "compressed": compress,
             "sidecars": sidecars,
             "next_commands": [format!("memnoth vault restore --input {}", target.display())],
         }),
@@ -2199,7 +2272,11 @@ pub fn restore(
         ))
         .with_fix("re-run with --force after checking the backup"));
     }
-    if verify {
+    // A gzipped backup is recognised by its magic bytes, not its name; the
+    // pre-copy SQLite check cannot run on it, so the post-copy integrity
+    // check below is the verification for that path.
+    let compressed = is_gzip(&source);
+    if verify && !compressed {
         verify_sqlite(&source)?;
     }
 
@@ -2216,8 +2293,21 @@ pub fn restore(
         std::fs::create_dir_all(parent)
             .map_err(|e| vault_failure("restore", "failed to create the vault directory", e))?;
     }
-    let copied = std::fs::copy(&source, &ctx.vault_path)
-        .map_err(|e| vault_failure("restore", "failed to copy the backup into place", e))?;
+    let copied = if compressed {
+        let file = std::fs::File::open(&source)
+            .map_err(|e| vault_failure("restore", "failed to open the backup", e))?;
+        let mut decoder = flate2::read::GzDecoder::new(file);
+        let mut dest = std::fs::File::create(&ctx.vault_path)
+            .map_err(|e| vault_failure("restore", "failed to create the vault file", e))?;
+        std::io::copy(&mut decoder, &mut dest)
+            .map_err(|e| vault_failure("restore", "the backup is not a valid gzip file", e))?;
+        dest.metadata()
+            .map_err(|e| vault_failure("restore", "failed to stat the restored vault", e))?
+            .len()
+    } else {
+        std::fs::copy(&source, &ctx.vault_path)
+            .map_err(|e| vault_failure("restore", "failed to copy the backup into place", e))?
+    };
 
     if verify {
         let engine = open_for(ctx, "restore")?;
@@ -2253,6 +2343,7 @@ pub fn restore(
             "from": source.display().to_string(),
             "to": ctx.vault_path.display().to_string(),
             "bytes": copied,
+            "compressed": compressed,
             "verified": verify,
             "safety_copy": safety.exists().then(|| safety.display().to_string()),
             "next_commands": ["memnoth vault status", "memnoth vault stats"],
@@ -2954,6 +3045,16 @@ fn rebuild_fts(engine: &MemoryEngine) -> Result<(), ErrorOutcome> {
         .map_err(|e| vault_failure("reindex", "failed to rebuild the full-text index", e))
 }
 
+/// True when the file starts with the gzip magic (1f 8b).
+fn is_gzip(path: &Path) -> bool {
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(_) => return false,
+    };
+    let mut magic = [0u8; 2];
+    file.read_exact(&mut magic).is_ok() && magic == [0x1f, 0x8b]
+}
+
 fn verify_sqlite(path: &Path) -> Result<(), ErrorOutcome> {
     let mut file = std::fs::File::open(path)
         .map_err(|e| vault_failure("restore", "failed to open the backup", e))?;
@@ -2961,10 +3062,11 @@ fn verify_sqlite(path: &Path) -> Result<(), ErrorOutcome> {
     file.read_exact(&mut header)
         .map_err(|e| vault_failure("restore", "the backup is too short to be SQLite", e))?;
     if header != *b"SQLite format 3\0" {
-        return Err(ErrorOutcome::usage(
-            "the backup is not a SQLite database (or it is compressed)",
-        )
-        .with_fix("restore only an uncompressed `vault backup` file"));
+        return Err(
+            ErrorOutcome::usage("the backup is not a SQLite database").with_fix(
+                "restore only a `vault backup` file (gzip backups are detected automatically)",
+            ),
+        );
     }
     let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|e| vault_failure("restore", "failed to open the backup read-only", e))?;
