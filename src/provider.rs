@@ -36,8 +36,12 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use memnoth_context::assemble::{Assembly, Layer, Piece, assemble};
-use memnoth_context::budget::{Budget, Slot};
+use memnoth_context::assemble::{Assembly, Layer, Piece, Receipt, assemble};
+use memnoth_context::budget::{Budget, DropReason, Slot};
+use memnoth_context::compact::{Fact, FactKind, Selection, retention_ok, select};
+use memnoth_engine::hooks::{HookCommand, run_hooks};
+use memnoth_engine::workflow::HookPoint;
+use memnoth_harness_api::ApiEvent;
 use memnoth_session::{Role, WriteReceipt, now_ms as session_now_ms};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -63,12 +67,30 @@ pub const MAX_ROUNDS: usize = 8;
 /// them crowds out the question. The truncation is stated to the model, which
 /// can narrow the query instead of pretending it saw everything.
 pub const TOOL_RESULT_CHARS: usize = 4000;
+/// How long a delivered tool result stays visible in one turn.
+///
+/// A result older than this has its body dropped from the context the model
+/// sees. The call itself stays on the record (the model can still see that it
+/// asked for `{tool}`), and a short hint in place of the body tells it to
+/// re-call the tool when it needs the output again.
+pub const TOOL_RESULT_MAX_AGE_MS: i64 = 5 * 60 * 1000;
 
-/// Request timeout, in seconds. Generous enough for a long completion over a
-/// slow link, short enough that a wedged connection is a message rather than a
-/// terminal that never comes back.
 const TIMEOUT_SECONDS: u64 = 120;
 
+/// Tokens of history allowed through compaction before exact facts are asserted.
+///
+/// The prefix keeps every exact fact verbatim; only narrative may be summarised.
+/// If exact facts alone overflow this budget, the caller still gets them all —
+/// compaction never drops a decision to make room.
+const COMPACT_BUDGET_TOKENS: usize = 2_000;
+/// Used only when the registry has no entry for the configured model.
+///
+/// A documented, conservative number is better than a silent 200k assumption:
+/// the budget stays small and `/budget` can say the window was assumed rather
+/// than advertised.
+const FALLBACK_CONTEXT_WINDOW: usize = 32_000;
+/// Kept clear of the prompt so the reply and the next tool round fit.
+const RESERVED_OUTPUT_TOKENS: usize = 4_096;
 /// Which wire shape to speak.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -404,6 +426,24 @@ pub struct Settings {
 }
 
 impl Settings {
+    /// The window the provider advertises for this model.
+    ///
+    /// Never a hard-coded 200k: an unknown model gets
+    /// [`FALLBACK_CONTEXT_WINDOW`], which the budget may report as assumed.
+    pub fn context_window(&self) -> usize {
+        memnoth_provider_registry::context_window_for(&self.model)
+            .map(|tokens| tokens as usize)
+            .unwrap_or(FALLBACK_CONTEXT_WINDOW)
+    }
+
+    /// Tokens one request may spend on context: the window minus the reply
+    /// reservation, and never less than one compaction budget.
+    pub fn prompt_budget(&self) -> usize {
+        self.context_window()
+            .saturating_sub(RESERVED_OUTPUT_TOKENS)
+            .max(COMPACT_BUDGET_TOKENS)
+    }
+
     /// Resolve the session's model settings.
     ///
     /// Precedence, highest first: environment, `[provider]` in the config, the
@@ -515,6 +555,16 @@ impl Settings {
             .map(|pricing| pricing.cost_micros(input_tokens, output_tokens))
     }
 
+    /// What the brief and the composer label show: provider and model only.
+    ///
+    /// The endpoint and the key state belong to `doctor` and `/model`
+    /// (`describe`), where a person is diagnosing a connection. On a home
+    /// screen they are noise beside the one fact that matters: which model
+    /// answers the next turn.
+    pub fn label(&self) -> String {
+        format!("{} · {}", self.kind.name(), self.model)
+    }
+
     /// One line for `doctor`: what would answer, not what might.
     pub fn describe(&self) -> String {
         let key = if self.ready() {
@@ -612,7 +662,7 @@ pub fn fetch_memnoth_models(base_url: &str, api_key: Option<&str>) -> Result<Vec
     if !status.is_success() {
         if status.as_u16() == 402 {
             bail!(
-                "out of credits — run `mn credits` to check balance, top up at {}",
+                "out of credits — run `mn billing` to check balance, top up at {}",
                 crate::context::console_url("usage")
             );
         }
@@ -734,6 +784,22 @@ pub struct Answer {
     pub output_tokens: u64,
     /// How many tool rounds it took (0 for an immediate answer).
     pub rounds: usize,
+    /// The full system prompt text sent to the provider this turn.
+    ///
+    /// Stored so session replay can reproduce the same prompt bytes:
+    /// two turns with the same prefix + tail produce identical prompts.
+    pub prompt: String,
+    /// Identity of the cacheable prefix this turn sent. Two turns of one
+    /// session share it; a project change moves it.
+    pub prefix_hash: u64,
+    /// Tokens the assembler admitted into the prompt, from its receipt.
+    pub context_tokens: usize,
+    /// Per-layer token accounting (Global, Project, Session, Turn).
+    pub layer_tokens: [usize; 4],
+    /// How many pieces survived the budget.
+    pub pieces: usize,
+    /// Pieces the budget refused, with the reason each was refused.
+    pub dropped: Vec<(&'static str, DropReason)>,
 }
 
 impl Answer {
@@ -798,16 +864,24 @@ pub struct Toolbox<'a> {
     approvals: Vec<memnoth_session::ApprovalRecord>,
     /// Current turn index for correlating writes with receipts.
     turn_id: Option<usize>,
+    /// Shell hooks from `.memnoth/hooks.toml`, fired at the tool boundary.
+    hooks: Vec<HookCommand>,
+    /// Why the hook file could not be read, kept so the first tool call refuses
+    /// loudly instead of running with the policy silently switched off.
+    hooks_error: Option<String>,
 }
 impl<'a> Toolbox<'a> {
     /// Bind the tools to this invocation's workspace and vault.
     pub fn new(ctx: &'a crate::context::AppContext) -> Self {
+        let (hooks, hooks_error) = load_hooks(&ctx.root);
         Self {
             ctx,
             approver: None,
             writes: Vec::new(),
             approvals: Vec::new(),
             turn_id: None,
+            hooks,
+            hooks_error,
         }
     }
 
@@ -873,6 +947,76 @@ impl<'a> Toolbox<'a> {
         record
     }
 
+    /// Spawn one scoped subagent and run its read-only plan, the same shape
+    /// the chat screen's `/delegate` uses: a child under a session root, two
+    /// read steps, and the slice it staged accepted into vault proposals.
+    ///
+    /// The result is text for the model, not a promise: proposals are not
+    /// facts until the person approves them, and the run says so.
+    fn delegate_tool(&mut self, input: &Value) -> Result<String> {
+        let name = text_arg("delegate", input, "name")?;
+        let task = text_arg("delegate", input, "task")?;
+        let mut delegator = memnoth_agent::Delegator::new(self.ctx.home.join("agents"));
+        let root = delegator.root(None, "memnoth", "session")?;
+        let child = delegator.spawn(Some(&root.agent_id), None, &name, &task)?;
+        let steps = vec![
+            memnoth_agent::Step::with_detail("read_file", task.clone()),
+            memnoth_agent::Step::with_detail("grep", task.clone()),
+        ];
+        let task_owned = task.clone();
+        let agent_name = name.clone();
+        let mut executor = memnoth_agent::Executor::without_hooks(&mut delegator);
+        let run_result = executor.run(&child.agent_id, &steps, |step, slice| {
+            slice.propose(
+                &agent_name,
+                &format!("delegated task: {task_owned}"),
+                "fact",
+                0.5,
+                &step.detail,
+                1,
+            );
+            Ok(())
+        });
+        let proposals: Vec<memnoth_engine::ProposedBelief> = executor
+            .slice(&child.agent_id)
+            .map(|slice| slice.proposals().to_vec())
+            .unwrap_or_default();
+        let mut accepted = 0;
+        if let Ok(engine) = self.ctx.open_vault() {
+            let now = memnoth_engine::now_ms();
+            for proposal in &proposals {
+                let provenance = proposal.provenance.to_json();
+                if engine
+                    .propose_belief(
+                        &proposal.entity,
+                        memnoth_engine::EntityKind::Concept,
+                        &proposal.content,
+                        &proposal.kind,
+                        proposal.confidence,
+                        &provenance,
+                        now,
+                    )
+                    .is_ok()
+                {
+                    accepted += 1;
+                }
+            }
+        }
+        drop(executor);
+        let summary = match run_result {
+            Ok(result) => format!(
+                "child {} ({name}) finished: {}",
+                child.agent_id, result.summary
+            ),
+            Err(error) => format!("child {} ({name}) failed: {error}", child.agent_id),
+        };
+        Ok(format!(
+            "{summary}\nrun {} · log {} · {accepted} proposal(s) staged in the vault (they need approval before they are facts)",
+            child.agent_id,
+            child.log.display()
+        ))
+    }
+
     fn kg_index(&mut self, input: &Value) -> Result<String> {
         let full = input["full"].as_bool().unwrap_or(false);
         let no_embed = input["no_embed"].as_bool().unwrap_or(false);
@@ -898,7 +1042,18 @@ impl<'a> Toolbox<'a> {
             body: preview.confirmation(),
         };
         self.confirm(&request)?;
-        let result = crate::edit::apply(&preview)?;
+        let mut result = crate::edit::apply(&preview)?;
+        // Diagnostics are a footnote on the edit, not a second approval: the
+        // write already happened, and a server that cannot answer leaves the
+        // answer exactly as it was.
+        if let Some(summary) = crate::lsp_diag::after_write(
+            &self.ctx.root,
+            Path::new(&preview.display),
+            &preview.after,
+        ) {
+            result.push_str("\n\n");
+            result.push_str(&summary);
+        }
 
         // Record the write receipt
         let receipt = WriteReceipt {
@@ -940,8 +1095,12 @@ impl<'a> Toolbox<'a> {
     }
 }
 
-impl Tools for Toolbox<'_> {
-    fn call(&mut self, name: &str, input: &Value) -> Result<String> {
+impl<'a> Toolbox<'a> {
+    /// The tool body, with no hook around it.
+    ///
+    /// [`Tools::call`] is the only caller, so every tool — file tool, verb, or
+    /// graph question — passes the configured hooks exactly once.
+    fn call_tool(&mut self, name: &str, input: &Value) -> Result<String> {
         // The denial comes first, before any branch can read or write: a gate
         // that only covers the verbs would leave `read_file` open, and a gate
         // that runs after an edit has already happened is decoration.
@@ -960,6 +1119,7 @@ impl Tools for Toolbox<'_> {
                 return crate::edit::read(&self.ctx.root, &path, start, end);
             }
             "edit_file" => return self.edit_file(input),
+            "delegate" => return self.delegate_tool(input),
             // `kg_index` is dispatched here rather than through its verb for one
             // reason: `memnoth kg index` narrates its progress to stderr, which
             // is right in a terminal and wrong under the alternate screen. The
@@ -1000,6 +1160,32 @@ impl Tools for Toolbox<'_> {
         }
         Ok(outcome.text)
     }
+}
+
+impl Tools for Toolbox<'_> {
+    /// The tool boundary: pre hooks, the tool, post hooks.
+    ///
+    /// The pre hook runs before the denial check inside the body, because a
+    /// policy hook must be able to observe a call the config already denies —
+    /// "the agent asked for it" is the fact an audit hook exists to record.
+    /// A non-zero exit or an overrun deadline is an `Err`: a hook that cannot
+    /// answer in time is a refusal, never consent.
+    fn call(&mut self, name: &str, input: &Value) -> Result<String> {
+        if let Some(error) = &self.hooks_error {
+            bail!("`.memnoth/hooks.toml` could not be read, so no hook can run: {error}");
+        }
+        run_hooks(&self.hooks, HookPoint::PreToolUse, name, &self.ctx.root)
+            .with_context(|| format!("a pre_tool_use hook refused `{name}`"))?;
+        let result = self.call_tool(name, input);
+        // A post hook observes the outcome. Its own failure is reported only
+        // when the tool succeeded: the tool's error is the sentence the model
+        // needs, and replacing it with a hook's would hide the cause.
+        if result.is_ok() {
+            run_hooks(&self.hooks, HookPoint::PostToolUse, name, &self.ctx.root)
+                .with_context(|| format!("a post_tool_use hook failed after `{name}`"))?;
+        }
+        result
+    }
 
     fn take_writes(&mut self) -> Vec<memnoth_session::WriteReceipt> {
         std::mem::take(&mut self.writes)
@@ -1008,6 +1194,81 @@ impl Tools for Toolbox<'_> {
     fn take_approvals(&mut self) -> Vec<memnoth_session::ApprovalRecord> {
         std::mem::take(&mut self.approvals)
     }
+}
+
+/// Read `<root>/.memnoth/hooks.toml` into the closed hook vocabulary.
+///
+/// A missing file is no hooks. A file that exists but does not parse is kept as
+/// an error the first tool call reports: running with a policy file silently
+/// ignored is the one failure mode a policy file must not have.
+fn load_hooks(root: &Path) -> (Vec<HookCommand>, Option<String>) {
+    let path = root.join(".memnoth").join("hooks.toml");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return (Vec::new(), None),
+        Err(error) => return (Vec::new(), Some(format!("{}: {error}", path.display()))),
+    };
+    match parse_hooks(&text) {
+        Ok(hooks) => (hooks, None),
+        Err(error) => (Vec::new(), Some(error)),
+    }
+}
+
+/// The shape of the hook file.
+#[derive(serde::Deserialize)]
+struct HooksFile {
+    #[serde(default)]
+    hooks: Vec<HookEntry>,
+}
+
+/// One `[[hooks]]` row.
+#[derive(serde::Deserialize)]
+struct HookEntry {
+    /// `pre_tool_use` or `post_tool_use`.
+    event: String,
+    /// `*` or a case-insensitive substring of the tool name.
+    #[serde(default = "any_matcher")]
+    matcher: String,
+    /// Run through the platform shell, one JSON document on stdin.
+    command: String,
+    /// How long it may run before it is killed. Absent means the default.
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+}
+
+fn any_matcher() -> String {
+    "*".to_string()
+}
+
+fn parse_hooks(text: &str) -> Result<Vec<HookCommand>, String> {
+    let file: HooksFile = toml::from_str(text).map_err(|error| error.to_string())?;
+    let mut hooks = Vec::new();
+    for entry in file.hooks {
+        let point = HookPoint::parse(&entry.event).ok_or_else(|| {
+            format!(
+                "`{}` is not a hook event; use pre_tool_use or post_tool_use",
+                entry.event
+            )
+        })?;
+        // The other three points are not tool boundaries, so a row naming one
+        // is a mistake in the file rather than a hook that never fires.
+        if !matches!(point, HookPoint::PreToolUse | HookPoint::PostToolUse) {
+            return Err(format!(
+                "`{}` does not fire at a tool boundary; use pre_tool_use or post_tool_use",
+                entry.event
+            ));
+        }
+        hooks.push(match entry.timeout_ms {
+            Some(ms) => HookCommand::new(
+                point,
+                entry.matcher,
+                entry.command,
+                Duration::from_millis(ms),
+            ),
+            None => HookCommand::with_default_timeout(point, entry.matcher, entry.command),
+        });
+    }
+    Ok(hooks)
 }
 
 /// The person at the keyboard, as recorded on an approval.
@@ -1386,6 +1647,18 @@ fn spec() -> Vec<(&'static str, &'static str, Value)> {
             }),
         ),
         (
+            "delegate",
+            "Spawn a scoped subagent for a task that is worth parallel or independent work: a second pass over the codebase, a research slice, a check that is independent of yours. The child runs read-only against a scoped slice and its result comes back here as proposals, which need approval before they become vault facts. Use it for independent work, not for a question you can answer with one search yourself.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Who to delegate to, e.g. scout, reviewer, indexer." },
+                    "task": { "type": "string", "description": "What the subagent should do, in one or two sentences." }
+                },
+                "required": ["name", "task"]
+            }),
+        ),
+        (
             "edit_file",
             "Replace one exact snippet in a file, or create a file when `old` is empty and the path does not exist. `old` must occur exactly once. The person sees the change and must approve it before anything is written; a refusal is final.",
             json!({
@@ -1439,6 +1712,13 @@ fn identity_prompt(root: &Path) -> String {
          first; if they decline, do not retry it, do not repeat it in different words, and say \
          what you would have changed. Never claim a change a tool did not make, and never claim to \
          have run a command — those tools are the only actions you have.\n\n\
+         You have a subagent: `delegate` spawns a scoped child agent that works a task on its own \
+         and reports back here with proposals. Reach for it when a task is parallel or independent \
+         — a second pass over the codebase, a research slice, a check that does not depend on your \
+         own search. The child is read-only; what it stages becomes vault proposals, not facts, \
+         until the person approves them. If the person asks what subagents you have or whether you \
+         can delegate, you can: say so, name `delegate`, and use it when the task fits. Never say \
+         you have no subagents — you do, and the tool is how you reach them.\n\n\
          Read a file before editing it, and copy the snippet for `old` exactly from `read_file`. If \
          the tool says the text does not match or is ambiguous, read again; do not guess a second \
          snippet.\n\n\
@@ -1452,7 +1732,12 @@ fn identity_prompt(root: &Path) -> String {
 /// The prompt slots. Larger than `budget::default_slots` because these are the
 /// authored layers, not retrieved context: the identity contract is ~450 tokens
 /// and truncating it would drop the approval rule the agent depends on.
-const PROMPT_SLOTS: [(&str, usize); 3] = [("identity", 800), ("policy", 800), ("session", 400)];
+const PROMPT_SLOTS: [(&str, usize); 4] = [
+    ("identity", 800),
+    ("policy", 800),
+    ("session", 400),
+    ("tools_hint", 120),
+];
 
 /// The effective instruction text from the files this workspace actually has.
 ///
@@ -1477,40 +1762,6 @@ fn project_policy(root: &Path) -> Option<String> {
         Some(rendered)
     }
 }
-
-/// Installed skills, rendered as a list the model can choose from.
-///
-/// The registry used to be reachable only through `/skill`: the model could not
-/// see that a skill existed, so it never asked to run one. The block names the
-/// skill and its purpose; it does not inline the instructions, which would cost
-/// the whole prefix budget for skills the turn will not use.
-fn skills_block_from(dir: &Path) -> Option<String> {
-    if !dir.is_dir() {
-        return None;
-    }
-    let registry = memnoth_skills::SkillRegistry::with_dir(dir).ok()?;
-    let skills = registry.list();
-    if skills.is_empty() {
-        return None;
-    }
-    let mut text = String::from(
-        "Installed skills, available through `mn skill run <name>`. Run one only when it fits \
-         the request, and say why:",
-    );
-    for entry in skills {
-        text.push_str(&format!(
-            "\n- {}: {}",
-            entry.frontmatter.metadata.name, entry.frontmatter.metadata.description
-        ));
-    }
-    Some(text)
-}
-
-fn skills_block() -> Option<String> {
-    let dir = memnoth_skills::default_skills_dir().ok()?;
-    skills_block_from(&dir)
-}
-
 fn prompt_pieces(root: &Path) -> Vec<Piece> {
     let mut pieces = vec![Piece {
         layer: Layer::Global,
@@ -1524,13 +1775,21 @@ fn prompt_pieces(root: &Path) -> Vec<Piece> {
             text: policy,
         });
     }
-    if let Some(skills) = skills_block() {
+    if let Some(skills) = memnoth_skills::skills_block() {
         pieces.push(Piece {
             layer: Layer::Session,
             slot: "session",
             text: skills,
         });
     }
+    // Turn layer: mutable tail, changes per request. A tools hint tells the
+    // model what it can call this turn.
+    pieces.push(Piece {
+        layer: Layer::Turn,
+        slot: "tools_hint",
+        text: "Available tools this turn: kg_search, vault_recall, vault_remember, edit_file, delegate, and more. Call them to investigate and modify the workspace. `delegate` spawns a scoped subagent for independent or parallel work."
+            .to_string(),
+    });
     pieces
 }
 
@@ -1540,6 +1799,16 @@ fn prompt_pieces(root: &Path) -> Vec<Piece> {
 /// Both requests and `mn doctor` go through here, so "what the model saw" has
 /// one answer.
 pub fn assemble_system_prompt(root: &Path) -> Assembly {
+    assemble_system_prompt_for(root, None)
+}
+
+/// Assemble with an explicit request ceiling.
+///
+/// The authored layers keep their own slot caps; `ceiling` only decides when the
+/// request-level budget runs out. It is never allowed below the sum of the slot
+/// caps, because a ceiling that starves an authored layer would make the prefix
+/// depend on the model rather than on the workspace.
+pub fn assemble_system_prompt_for(root: &Path, ceiling: Option<usize>) -> Assembly {
     let slots: Vec<Slot> = PROMPT_SLOTS
         .iter()
         .map(|(name, max_tokens)| Slot {
@@ -1547,18 +1816,77 @@ pub fn assemble_system_prompt(root: &Path) -> Assembly {
             max_tokens: *max_tokens,
         })
         .collect();
-    let total = slots.iter().map(|slot| slot.max_tokens).sum();
+    let authored: usize = slots.iter().map(|slot| slot.max_tokens).sum();
+    let total = ceiling.unwrap_or(authored).max(authored);
     assemble(prompt_pieces(root), &slots, &Budget { total })
 }
 
-/// The system prompt as the provider receives it.
+/// The system prompt as the provider receives it. Only the tests read this
+/// directly; the assembled pieces feed the real request.
+#[cfg(test)]
 fn system_prompt(root: &Path) -> String {
     let assembly = assemble_system_prompt(root);
     if assembly.tail.is_empty() {
         assembly.prefix
     } else {
-        format!("{}\n\n{}", assembly.prefix, assembly.tail)
+        format!(
+            "{}
+
+{}",
+            assembly.prefix, assembly.tail
+        )
     }
+}
+
+/// Turn one exchange into a compaction fact.
+///
+/// Exact kinds carry decisions, paths, symbols, versions, tasks and corrections —
+/// everything a later `grep` might depend on — and survive verbatim. The assistant's
+/// own words and the user's story are narrative: they may be summarised.
+fn exchange_to_fact((index, exchange): (usize, &Exchange)) -> Fact {
+    let kind = match exchange.role {
+        Role::System => FactKind::Decision,
+        Role::User => FactKind::Task,
+        Role::Assistant => FactKind::Narrative,
+        Role::Tool => FactKind::Path,
+    };
+    Fact::new(format!("h-{index}"), kind, exchange.text.clone())
+}
+
+/// Rebuild history from a compaction selection, in the recorded order.
+///
+/// Kept facts return as exchanges so the turn sees exactly what compaction
+/// decided survives; summarised facts are dropped (the caller condenses them).
+fn history_from_selection(selection: &Selection) -> Vec<Exchange> {
+    selection
+        .kept
+        .iter()
+        .map(|fact| {
+            let role = match fact.kind {
+                FactKind::Decision => Role::System,
+                FactKind::Task => Role::User,
+                FactKind::Narrative => Role::Assistant,
+                FactKind::Path => Role::Tool,
+                FactKind::Symbol | FactKind::Version | FactKind::Correction => Role::Assistant,
+            };
+            Exchange {
+                role,
+                text: fact.text.clone(),
+            }
+        })
+        .collect()
+}
+
+/// Wire compaction into the turn's history: exact facts survive verbatim,
+/// narrative may be summarised, and retention is asserted so an exact fact
+/// is never silently paraphrased or dropped.
+fn compact_history(history: &[Exchange], budget_tokens: usize) -> Result<Vec<Exchange>> {
+    let facts: Vec<Fact> = history.iter().enumerate().map(exchange_to_fact).collect();
+    let selection = select(&facts, budget_tokens);
+    retention_ok(&facts, &selection).map_err(|failures| {
+        anyhow::anyhow!("compaction lost exact facts: {}", failures.join(", "))
+    })?;
+    Ok(history_from_selection(&selection))
 }
 
 /// Run one turn: the prompt, the tools, and whatever the model asks for in
@@ -1568,6 +1896,9 @@ fn system_prompt(root: &Path) -> String {
 /// is being looked up, so a caller can show the turn happening rather than a
 /// frozen screen. It is deliberately not called for the final text: the caller
 /// already renders that.
+/// Run one turn without an event sink. [`run_turn_with`] is the same turn with
+/// the harness API's event stream; this wrapper is for callers that only need
+/// the answer and the receipt.
 pub fn run_turn(
     settings: &Settings,
     root: &Path,
@@ -1575,6 +1906,34 @@ pub fn run_turn(
     prompt: &str,
     tools: &mut dyn Tools,
     on_note: &mut dyn FnMut(&str),
+) -> Result<Answer> {
+    run_turn_with(
+        settings,
+        root,
+        history,
+        prompt,
+        tools,
+        on_note,
+        "",
+        &mut |_| {},
+    )
+}
+
+/// Run one turn, emitting the harness API's lifecycle events.
+///
+/// The event stream is the contract every other surface reads — the TUI, the
+/// socket harness, and the benchmark runner — so a turn reports the same
+/// `ToolStart`/`ToolDone`/`TurnDone` sequence wherever it is driven from.
+#[allow(clippy::too_many_arguments)]
+pub fn run_turn_with(
+    settings: &Settings,
+    root: &Path,
+    history: &[Exchange],
+    prompt: &str,
+    tools: &mut dyn Tools,
+    on_note: &mut dyn FnMut(&str),
+    session_id: &str,
+    emit: &mut dyn FnMut(ApiEvent),
 ) -> Result<Answer> {
     match settings.api_key.as_deref() {
         Some(key) if !key.trim().is_empty() => {}
@@ -1586,6 +1945,18 @@ pub fn run_turn(
     if settings.model.trim().is_empty() {
         bail!("provider.model is empty — set it in ~/.memnoth/config.toml or MEMNOTH_MODEL");
     }
+    emit(ApiEvent::ModelInfo {
+        provider: settings.kind.name().to_string(),
+        model: settings.model.clone(),
+    });
+
+    // Compact history: exact facts verbatim, narrative summarised,
+    // retention asserted so no exact fact is silently dropped.
+    let before_compaction = history.len();
+    let history = compact_history(history, settings.prompt_budget())?;
+    if history.len() < before_compaction {
+        emit(ApiEvent::Compacted);
+    }
 
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(TIMEOUT_SECONDS))
@@ -1595,42 +1966,119 @@ pub fn run_turn(
         .build()
         .context("cannot build the HTTP client")?;
 
-    let mut conversation = Conversation::new(settings, root, history, prompt);
+    let mut conversation = Conversation::new(settings, root, &history, prompt);
     for round in 0..MAX_ROUNDS {
         let (body, url, headers) = conversation.request();
         // The URL can carry a model-supplied endpoint; resolve it now, with the
         // network about to be used, and refuse a private answer.
         crate::net_guard::validate_before_request(&url)
             .map_err(|error| anyhow::anyhow!("refusing the provider request: {error}"))?;
-        let reply = post_json(
+        // The stream is tried first; a gateway that never starts one falls
+        // back to the whole-reply path. Deltas go to the harness stream as
+        // they land, so the screen and `ask --jsonl` read the same events.
+        let stream_body = streaming_body(&body, settings);
+        let session_id = session_id.to_string();
+        let streamed = crate::provider_stream::post_stream(
             &client,
             &url,
-            headers,
-            &body,
+            headers.clone(),
+            &stream_body,
             settings.kind,
-            settings.api_key.as_deref(),
-        )?;
-        let step = conversation.absorb(&reply)?;
+            &mut |delta| {
+                let event = match delta {
+                    crate::provider_stream::Delta::Text(text) => ApiEvent::TextDelta {
+                        session_id: session_id.clone(),
+                        text,
+                    },
+                    crate::provider_stream::Delta::Reasoning(text) => ApiEvent::ReasoningDelta {
+                        session_id: session_id.clone(),
+                        delta: text,
+                    },
+                };
+                emit(event);
+            },
+        );
+        let step = match streamed {
+            Err(crate::provider_stream::StreamError::Fatal(error)) => return Err(error),
+            Ok(outcome) => {
+                conversation.add_usage(outcome.input_tokens, outcome.output_tokens);
+                if !outcome.reasoning.is_empty() {
+                    emit(ApiEvent::ReasoningDone {
+                        session_id: session_id.clone(),
+                    });
+                }
+                Step {
+                    text: outcome.text,
+                    calls: outcome
+                        .calls
+                        .into_iter()
+                        .map(|call| Call {
+                            id: call.id,
+                            name: call.name,
+                            input: call.input,
+                        })
+                        .collect(),
+                    raw_content: outcome.raw_content,
+                }
+            }
+            Err(crate::provider_stream::StreamError::Fallback(_)) => {
+                let reply = post_json(
+                    &client,
+                    &url,
+                    headers,
+                    &body,
+                    settings.kind,
+                    settings.api_key.as_deref(),
+                )?;
+                conversation.absorb(&reply)?
+            }
+        };
         if step.calls.is_empty() {
+            emit(ApiEvent::TurnDone {
+                session_id: session_id.to_string(),
+            });
             return Ok(Answer {
                 text: step.text,
                 input_tokens: conversation.input_tokens,
                 output_tokens: conversation.output_tokens,
                 rounds: round,
+                prompt: format!("{}\n\n{}", conversation.prefix, conversation.tail),
+                prefix_hash: conversation.receipt.prefix_hash,
+                context_tokens: conversation.receipt.total_tokens,
+                layer_tokens: conversation.receipt.layer_tokens,
+                pieces: conversation.receipt.pieces.len(),
+                dropped: conversation.receipt.dropped.clone(),
             });
         }
 
         let mut results = Vec::new();
         for call in &step.calls {
+            emit(ApiEvent::ToolStart {
+                session_id: session_id.to_string(),
+                name: call.name.clone(),
+            });
+            emit(ApiEvent::ToolExec {
+                session_id: session_id.to_string(),
+                name: call.name.clone(),
+            });
             let label = describe_call(&call.name, &call.input);
             on_note(&label);
-            let output = match tools.call(&call.name, &call.input) {
-                Ok(text) => text,
+            let outcome = tools.call(&call.name, &call.input);
+            let (output, error) = match outcome {
+                Ok(text) => (text, None),
                 // A failing tool is information, not a dead turn: the model can
                 // report it or try a narrower query.
-                Err(error) => format!("tool error: {error:#}"),
+                Err(error) => (format!("tool error: {error:#}"), Some(format!("{error:#}"))),
             };
-            results.push((call.id.clone(), clip(&output, TOOL_RESULT_CHARS)));
+            let clipped = clip(&output, TOOL_RESULT_CHARS);
+            emit(ApiEvent::ToolDone {
+                session_id: session_id.to_string(),
+                call_id: call.id.clone(),
+                name: call.name.clone(),
+                output: clipped.clone(),
+                error,
+            });
+            results.push((call.id.clone(), call.name.clone(), clipped));
         }
         conversation.record_round(step.raw_content, results);
     }
@@ -1657,6 +2105,23 @@ struct Step {
     /// reconstructed instead of echoed.
     raw_content: Value,
 }
+/// One tool result delivered to the model this turn, stamped when it landed.
+///
+/// Once the result ages past [`TOOL_RESULT_MAX_AGE_MS`] its body is replaced
+/// by a re-call hint, while `id` and `name` stay on the record so the model
+/// can still see that it asked for `{name}` and can ask again.
+struct ToolResult {
+    /// The tool-call id the result answers.
+    id: String,
+    /// The tool that produced it, for the re-call hint.
+    name: String,
+    /// The delivered text, or a re-call hint once evicted by age.
+    content: String,
+    /// Wall-clock ms when the result was recorded.
+    at_ms: i64,
+    /// Whether the body has already been replaced by a hint.
+    evicted: bool,
+}
 
 /// The provider-neutral state one turn keeps between rounds.
 struct Conversation<'a> {
@@ -1665,10 +2130,23 @@ struct Conversation<'a> {
     prompt: &'a str,
     /// Anthropic messages, or OpenAI messages.
     messages: Vec<Value>,
-    /// Assembled once per turn: the prefix must not change between rounds.
-    system: String,
+    /// Byte-stable prefix: Global + Project + Session layers. Identical on
+    /// every round of one turn so the provider can cache it.
+    prefix: String,
+    /// Mutable tail: Turn layer. Changes per request — the tools hint and any
+    /// retrieved context. Filled from the assembler's `Layer::Turn` pieces, and
+    /// sent after the byte-stable prefix so the provider can cache the prefix.
+    tail: String,
     input_tokens: u64,
     output_tokens: u64,
+    /// Tool results delivered this turn, newest last. Bodies older than
+    /// `TOOL_RESULT_MAX_AGE_MS` are replaced by a re-call hint while the call
+    /// stays on the record, so age-based eviction never loses the fact that a
+    /// tool was asked.
+    tool_results: Vec<ToolResult>,
+    /// The assembler's accounting for this turn, so the answer can carry a
+    /// receipt rather than a token count nobody can audit.
+    receipt: Receipt,
 }
 
 impl<'a> Conversation<'a> {
@@ -1678,14 +2156,19 @@ impl<'a> Conversation<'a> {
         history: &'a [Exchange],
         prompt: &'a str,
     ) -> Self {
+        let assembly = assemble_system_prompt_for(root, Some(settings.prompt_budget()));
+        let receipt = assembly.receipt.clone();
         let mut conversation = Self {
             settings,
             history,
             prompt,
             messages: Vec::new(),
-            system: system_prompt(root),
+            prefix: assembly.prefix,
+            tail: assembly.tail,
             input_tokens: 0,
             output_tokens: 0,
+            tool_results: Vec::new(),
+            receipt,
         };
         conversation.seed();
         conversation
@@ -1715,7 +2198,7 @@ impl<'a> Conversation<'a> {
             Kind::OpenAi | Kind::Memnoth | Kind::Kilo => {
                 self.messages.push(json!({
                     "role": "system",
-                    "content": self.system
+                    "content": format!("{}\n\n{}", self.prefix, self.tail)
                 }));
                 for exchange in self.history {
                     let role = match exchange.role {
@@ -1762,7 +2245,7 @@ impl<'a> Conversation<'a> {
                 let body = self.sampled(json!({
                     "model": self.settings.model,
                     "max_tokens": self.settings.max_tokens,
-                    "system": self.system,
+                    "system": format!("{}\n\n{}", self.prefix, self.tail),
                     "messages": self.messages,
                     "tools": wire_tools(Kind::Anthropic),
                 }));
@@ -1813,6 +2296,12 @@ impl<'a> Conversation<'a> {
                 (body, url, headers)
             }
         }
+    }
+
+    /// Add streamed usage to the turn's accounting, in one place.
+    fn add_usage(&mut self, input: u64, output: u64) {
+        self.input_tokens += input;
+        self.output_tokens += output;
     }
 
     /// Read one response: the text, the tool calls, and the accounting.
@@ -1961,7 +2450,18 @@ impl<'a> Conversation<'a> {
 
     /// Append the assistant message and the tool results, in the shape this
     /// provider expects back.
-    fn record_round(&mut self, raw_content: Value, results: Vec<(String, String)>) {
+    ///
+    /// Tool results older than [`TOOL_RESULT_MAX_AGE_MS`] have their body
+    /// replaced by a re-call hint: the call stays on the record (the model
+    /// still sees that it asked for `{name}`), and the hint tells it to
+    /// re-call the tool if it needs the output again.
+    fn record_round(
+        &mut self,
+        raw_content: Value,
+        results: Vec<(String, String, String)>, // (id, name, content)
+    ) {
+        let now = session_now_ms();
+        self.evict_stale(now);
         match self.settings.kind {
             Kind::Anthropic => {
                 self.messages.push(json!({
@@ -1969,8 +2469,8 @@ impl<'a> Conversation<'a> {
                     "content": raw_content,
                 }));
                 let blocks: Vec<Value> = results
-                    .into_iter()
-                    .map(|(id, content)| {
+                    .iter()
+                    .map(|(id, _name, content)| {
                         json!({
                             "type": "tool_result",
                             "tool_use_id": id,
@@ -1988,7 +2488,7 @@ impl<'a> Conversation<'a> {
                 }
                 self.messages
                     .push(json!({ "role": "assistant", "content": message["content"], "tool_calls": message["tool_calls"] }));
-                for (id, content) in results {
+                for (id, _name, content) in &results {
                     self.messages.push(json!({
                         "role": "tool",
                         "tool_call_id": id,
@@ -2003,7 +2503,7 @@ impl<'a> Conversation<'a> {
                 }
                 self.messages
                     .push(json!({ "role": "assistant", "content": message["content"], "tool_calls": message["tool_calls"] }));
-                for (id, content) in results {
+                for (id, _name, content) in &results {
                     self.messages.push(json!({
                         "role": "tool",
                         "tool_call_id": id,
@@ -2012,6 +2512,83 @@ impl<'a> Conversation<'a> {
                 }
             }
         }
+        self.record_new_results(now, results);
+    }
+
+    /// Replace the body of any tool result older than
+    /// [`TOOL_RESULT_MAX_AGE_MS`] with a re-call hint, keeping the call id
+    /// and name on the record.
+    fn evict_stale(&mut self, now: i64) {
+        // Collect first: the hint for one result mutates `messages`, and a
+        // mutable borrow of `tool_results` held across that call is two mutable
+        // borrows of `self`.
+        let stale: Vec<(usize, String)> = self
+            .tool_results
+            .iter()
+            .enumerate()
+            .filter(|(_, result)| !result.evicted && now - result.at_ms > TOOL_RESULT_MAX_AGE_MS)
+            .map(|(index, result)| (index, Self::re_call_hint(&result.name)))
+            .collect();
+        for (index, hint) in stale {
+            let id = self.tool_results[index].id.clone();
+            self.replace_tool_result_content(&id, &hint);
+            self.tool_results[index].content = hint;
+            self.tool_results[index].evicted = true;
+        }
+    }
+
+    /// Store this round's delivered results, timestamped, so they can be
+    /// evicted by age on later rounds.
+    fn record_new_results(&mut self, now: i64, results: Vec<(String, String, String)>) {
+        for (id, name, content) in results {
+            self.tool_results.push(ToolResult {
+                id,
+                name,
+                content,
+                at_ms: now,
+                evicted: false,
+            });
+        }
+    }
+
+    /// Overwrite the body of the tool result answering `id` with `hint`,
+    /// wherever it lives in `messages` (per-provider wire shape).
+    fn replace_tool_result_content(&mut self, id: &str, hint: &str) {
+        match self.settings.kind {
+            Kind::Anthropic => {
+                for message in self.messages.iter_mut() {
+                    if message["role"].as_str() != Some("user") {
+                        continue;
+                    }
+                    let Some(blocks) = message["content"].as_array_mut() else {
+                        continue;
+                    };
+                    for block in blocks.iter_mut() {
+                        if block["type"].as_str() == Some("tool_result")
+                            && block["tool_use_id"].as_str() == Some(id)
+                        {
+                            block["content"] = Value::String(hint.to_string());
+                        }
+                    }
+                }
+            }
+            Kind::OpenAi | Kind::Kilo | Kind::Memnoth => {
+                for message in self.messages.iter_mut() {
+                    if message["role"].as_str() != Some("tool") {
+                        continue;
+                    }
+                    if message["tool_call_id"].as_str() == Some(id) {
+                        message["content"] = Value::String(hint.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    /// A short hint standing in for an evicted tool result, naming the tool
+    /// so the model knows exactly what to re-call.
+    fn re_call_hint(name: &str) -> String {
+        format!("[tool result for `{name}` evicted by age — re-call `{name}` to see it again]")
     }
 }
 
@@ -2030,6 +2607,44 @@ pub(crate) fn scrub_secrets(text: &str, secret: Option<&str>) -> String {
         }
     }
     out
+}
+
+/// The same request, asking for a stream.
+///
+/// OpenAI-shaped gateways get `stream_options.include_usage` so the final
+/// chunk carries the accounting; Anthropic gets a thinking budget only when
+/// the person asked for reasoning and the model is a Claude family, because
+/// sending a thinking block to a model that cannot think is a 400.
+fn streaming_body(body: &Value, settings: &Settings) -> Value {
+    let mut streaming = body.clone();
+    if let Some(object) = streaming.as_object_mut() {
+        object.insert("stream".into(), json!(true));
+        match settings.kind {
+            Kind::OpenAi | Kind::Memnoth | Kind::Kilo => {
+                object.insert("stream_options".into(), json!({ "include_usage": true }));
+            }
+            Kind::Anthropic => {
+                if settings
+                    .reasoning_effort
+                    .as_deref()
+                    .is_some_and(|effort| !effort.trim().is_empty())
+                    && settings.model.to_ascii_lowercase().contains("claude")
+                {
+                    let budget: u32 = match settings.reasoning_effort.as_deref() {
+                        Some("low") => 1_024,
+                        Some("high") => 8_192,
+                        _ => 4_096,
+                    };
+                    let budget = budget.min(settings.max_tokens.saturating_sub(1_024).max(1_024));
+                    object.insert(
+                        "thinking".into(),
+                        json!({ "type": "enabled", "budget_tokens": budget }),
+                    );
+                }
+            }
+        }
+    }
+    streaming
 }
 
 fn post_json(
@@ -2055,7 +2670,7 @@ fn post_json(
         // Handle 402 (out of credits) specially for Memnoth provider
         if status.as_u16() == 402 && matches!(kind, Kind::Memnoth) {
             bail!(
-                "out of credits — run `mn credits` to check balance, top up at {}",
+                "out of credits — run `mn billing` to check balance, top up at {}",
                 crate::context::console_url("usage")
             );
         }
@@ -2273,7 +2888,7 @@ mod tests {
             "text": "t", "path": "p", "new": "n"
         });
         for name in tool_names() {
-            let implemented = matches!(name, "read_file" | "edit_file" | "kg_index")
+            let implemented = matches!(name, "read_file" | "edit_file" | "kg_index" | "delegate")
                 || verb_for(name, &input).is_ok();
             assert!(
                 implemented,
@@ -2297,6 +2912,71 @@ mod tests {
         ] {
             assert!(!requires_approval(read_only), "{read_only}");
         }
+    }
+
+    fn write_hook(dir: &Path, body: &str) {
+        std::fs::create_dir_all(dir.join(".memnoth")).unwrap();
+        std::fs::write(dir.join(".memnoth/hooks.toml"), body).unwrap();
+    }
+
+    #[test]
+    fn a_pre_tool_hook_that_exits_non_zero_stops_the_tool_before_it_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "hello\n").unwrap();
+        let exit_three = if cfg!(windows) { "exit /B 3" } else { "exit 3" };
+        write_hook(
+            dir.path(),
+            &format!(
+                "[[hooks]]\nevent = \"pre_tool_use\"\nmatcher = \"read_file\"\ncommand = \"{exit_three}\"\n"
+            ),
+        );
+        let ctx = test_context(dir.path());
+        let mut tools = Toolbox::new(&ctx);
+        let error = tools
+            .call("read_file", &json!({"path": "a.txt"}))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("pre_tool_use"), "{error}");
+    }
+
+    #[test]
+    fn a_post_tool_hook_runs_after_a_successful_call() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "hello\n").unwrap();
+        let mark = if cfg!(windows) {
+            "echo done>post-ran.txt"
+        } else {
+            "echo done > post-ran.txt"
+        };
+        write_hook(
+            dir.path(),
+            &format!(
+                "[[hooks]]\nevent = \"post_tool_use\"\nmatcher = \"read_file\"\ncommand = \"{mark}\"\n"
+            ),
+        );
+        let ctx = test_context(dir.path());
+        let mut tools = Toolbox::new(&ctx);
+        tools
+            .call("read_file", &json!({"path": "a.txt"}))
+            .expect("a matching post hook that exits zero allows the call");
+        assert!(ctx.root.join("post-ran.txt").is_file(), "the hook ran");
+    }
+
+    #[test]
+    fn a_hook_file_that_does_not_parse_refuses_the_tool_instead_of_disabling_the_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "hello\n").unwrap();
+        write_hook(
+            dir.path(),
+            "[[hooks]]\nevent = \"nope\"\ncommand = \"true\"\n",
+        );
+        let ctx = test_context(dir.path());
+        let mut tools = Toolbox::new(&ctx);
+        let error = tools
+            .call("read_file", &json!({"path": "a.txt"}))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not a hook event"), "{error}");
     }
 
     /// The agent may index itself: the graph is derived data, so there is no
@@ -2552,7 +3232,11 @@ mod tests {
         assert_eq!(conversation.input_tokens, 11);
         assert_eq!(conversation.output_tokens, 4);
 
-        conversation.record_round(step.raw_content, vec![("t1".into(), "hit".into())]);
+        conversation.record_round(
+            step.raw_content,
+            vec![("t1".into(), "kg_impact".into(), "hit".into())],
+        );
+
         assert_eq!(
             conversation.messages.len(),
             3,
@@ -2588,7 +3272,11 @@ mod tests {
         assert_eq!(step.calls[0].input["query"], "Engine");
         assert_eq!(conversation.input_tokens, 7);
 
-        conversation.record_round(step.raw_content, vec![("c1".into(), "found".into())]);
+        conversation.record_round(
+            step.raw_content,
+            vec![("c1".into(), "kg_search".into(), "found".into())],
+        );
+
         assert_eq!(conversation.messages.last().unwrap()["role"], "tool");
         assert_eq!(conversation.messages.last().unwrap()["tool_call_id"], "c1");
     }
@@ -2662,7 +3350,8 @@ mod tests {
             "---\nname = \"release\"\ndescription = \"Cut a release\"\n---\n\nSteps.\n",
         )
         .unwrap();
-        let block = skills_block_from(dir.path()).expect("the skill was discovered");
+        let block =
+            memnoth_skills::skills_block_from(dir.path()).expect("the skill was discovered");
         assert!(block.contains("release: Cut a release"));
         assert!(block.contains("mn skill run"));
     }
