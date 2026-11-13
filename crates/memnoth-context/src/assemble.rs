@@ -18,7 +18,7 @@
 //! The receipt is how that rule is enforced rather than trusted: [`prefix_hash`] covers only the
 //! prefix, so a test can assert "the tail changed and the prefix did not".
 
-use crate::budget::{Budget, Slot, estimate_tokens};
+use crate::budget::{Allocation, Budget, DropReason, Item, Slot, allocate};
 use crate::stable::{StableHasher, hex};
 
 /// The four layers, in cache order. The declaration order is the rendering order.
@@ -83,8 +83,10 @@ pub struct Receipt {
     /// Identity of the whole rendered prompt (prefix + tail).
     pub hash: u64,
     pub pieces: Vec<PieceReceipt>,
+    /// What was dropped and why, in allocation order. Records explicit [`DropReason`] values so
+    /// the receipt says *what was left out*, not only what went in.
+    pub dropped: Vec<(&'static str, DropReason)>,
 }
-
 /// The compiled prompt and its accounting.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Assembly {
@@ -101,18 +103,26 @@ pub struct Assembly {
 /// sorts its inputs; this function never reorders, because a stable order that the assembler
 /// decides for itself would silently change when a `HashMap` did.
 pub fn assemble(pieces: Vec<Piece>, slots: &[Slot], budget: &Budget) -> Assembly {
-    // Map slot name -> max_tokens for fast lookup.
-    let slot_caps: Vec<(&str, usize)> = slots.iter().map(|s| (s.name, s.max_tokens)).collect();
-
+    // Ordering contract: layers in declaration order, insertion order within a layer.
     let mut ordered: Vec<Piece> = Vec::with_capacity(pieces.len());
     for layer in [Layer::Global, Layer::Project, Layer::Session, Layer::Turn] {
         ordered.extend(pieces.iter().filter(|piece| piece.layer == layer).cloned());
     }
 
+    // Delegate the keep/drop decision to `budget::allocate`, which fills slots
+    // under both ceilings and records an explicit `DropReason` for every drop.
+    let items: Vec<Item> = ordered
+        .iter()
+        .map(|piece| Item::new(piece.slot, piece.text.clone(), 1))
+        .collect();
+    // `allocate` decides what survives and consumes the candidates; the render
+    // loop below still walks `items` in caller order, so the candidate list is
+    // cloned in rather than handed over.
+    let Allocation { kept, dropped, .. } = allocate(items.clone(), slots, budget);
+
     let mut prefix = String::new();
     let mut tail = String::new();
     let mut layer_tokens_used = [0usize; 4];
-    let mut slot_used = vec![0usize; slots.len()];
     let mut receipts = Vec::with_capacity(ordered.len());
     let mut whole = StableHasher::new();
     // Admitted prefix pieces, hashed after the loop in canonical order. Hashing
@@ -120,32 +130,14 @@ pub fn assemble(pieces: Vec<Piece>, slots: &[Slot], budget: &Budget) -> Assembly
     // `prefix_hash` did not (B3).
     let mut admitted_prefix: Vec<Piece> = Vec::new();
 
-    for piece in &ordered {
-        let tokens = estimate_tokens(&piece.text);
-
-        // An unregistered slot is a bug in the caller, not a reason to panic
-        // mid-assembly (B2). Drop it: `budget::allocate` reports the same case
-        // as `DropReason::UnknownSlot`, and dropping keeps a typo from being
-        // admitted under an uncapped name.
-        let Some(slot_index) = slot_caps.iter().position(|(name, _)| *name == piece.slot) else {
-            continue;
-        };
-
-        // Enforce per-slot ceiling: skip pieces that would exceed their slot cap.
-        let cap = slot_caps[slot_index].1;
-        if slot_used[slot_index] + tokens > cap {
+    for (piece, item) in ordered.iter().zip(items.iter()) {
+        // Render only admitted pieces, preserving the original (layer, then
+        // insertion) order. `allocate` already decided what survives.
+        if !kept.iter().any(|kept_item| kept_item == item) {
             continue;
         }
 
-        // Enforce the overall ceiling against what has actually been admitted.
-        // Accounting is committed once, below, after both checks (B1): adding
-        // before them counted every piece twice and leaked the tokens of a
-        // piece the total budget then rejected.
-        let used_so_far: usize = slot_used.iter().sum();
-        if used_so_far + tokens > budget.total {
-            continue;
-        }
-
+        let tokens = item.tokens;
         let mut piece_hasher = StableHasher::new();
         piece_hasher.write(piece.slot);
         piece_hasher.write(&piece.text);
@@ -157,7 +149,6 @@ pub fn assemble(pieces: Vec<Piece>, slots: &[Slot], budget: &Budget) -> Assembly
             admitted_prefix.push(piece.clone());
         }
 
-        slot_used[slot_index] += tokens;
         layer_tokens_used[piece.layer.index()] += tokens;
         receipts.push(PieceReceipt {
             layer: piece.layer.index() as u8,
@@ -188,6 +179,10 @@ pub fn assemble(pieces: Vec<Piece>, slots: &[Slot], budget: &Budget) -> Assembly
             prefix_hash: prefix_hash(&admitted_prefix),
             hash: whole.finish(),
             pieces: receipts,
+            dropped: dropped
+                .into_iter()
+                .map(|(item, reason)| (item.slot, reason))
+                .collect(),
         },
     }
 }
@@ -235,7 +230,7 @@ pub fn hash_label(hash: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::budget::{default_budget, default_slots};
+    use crate::budget::{default_budget, default_slots, estimate_tokens};
 
     fn test_budget() -> (Vec<Slot>, Budget) {
         let slots = default_slots();
