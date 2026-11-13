@@ -20,6 +20,7 @@
 //! - `off`: no confinement. Must never be a base profile for `extends`.
 
 use crate::allow_path::normalize_allow_path;
+use crate::backend::NetworkPolicy;
 use crate::deny::{effective_deny_paths, partition_deny_entries};
 use crate::paths::{
     PROJECT_CONFIG_DIR, SANDBOX_CONFIG_FILENAME, essential_writable_paths,
@@ -47,7 +48,12 @@ pub struct SandboxProfile {
 }
 
 /// One named profile block in `sandbox.toml`.
+///
+/// Unknown keys are refused rather than ignored: `deny_globs = [...]` (a
+/// plausible typo for `deny`) would otherwise be a policy that reads as written
+/// and enforces nothing, which is the failure this engine exists to prevent.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProfileConfig {
     #[serde(default)]
     pub extends: Option<String>,
@@ -61,16 +67,29 @@ pub struct ProfileConfig {
     pub deny: Vec<String>,
 }
 
-/// Whole `sandbox.toml` file: an optional enterprise lock plus named profiles.
+/// Whole `sandbox.toml` file: an optional enterprise lock, an egress policy, and
+/// named profiles.
 ///
 /// `managed_by = "<governor>"` at the top level is §9 managed mode: the
 /// project config is ignored (the global/MDM definition wins outright) and
 /// the TUI banner shows the governor. Only the global file can set it — a
 /// project file's `managed_by` is never read.
+///
+/// `network = "off" | "allowlist" | "open"` is the machine's egress statement
+/// (W10-02). It is deliberately top-level rather than per-profile: egress is a
+/// property of the machine's network, and a workspace file that could widen it
+/// would be a policy the repository author wrote for the user. A custom profile
+/// may still opt in with `restrict_network = false`, which is the per-command
+/// shape `session exec --network` uses.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct SandboxConfig {
     #[serde(default)]
     pub managed_by: Option<String>,
+    #[serde(default)]
+    pub network: Option<String>,
+    #[serde(default)]
+    pub network_allowlist: Vec<String>,
     #[serde(default)]
     pub profiles: HashMap<String, ProfileConfig>,
 }
@@ -85,6 +104,104 @@ impl SandboxConfig {
     pub fn governor(&self) -> Option<&str> {
         self.managed_by.as_deref().filter(|g| !g.is_empty())
     }
+
+    /// Validate the whole file before any of it is used.
+    ///
+    /// Everything here is a refusal, never a repair: a policy that had to be
+    /// guessed is a policy the user did not write. `load_sandbox_config` calls
+    /// this, and [`crate::backend::BackendPlan::build`] calls it again for
+    /// callers that constructed a config by hand.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if let Some(raw) = self.network.as_deref() {
+            // `parse` is the single classifier; validation only needs it to be
+            // able to state the policy, including its allowlist.
+            NetworkPolicy::parse(raw, self.network_allowlist.clone())?;
+            for entry in &self.network_allowlist {
+                crate::egress::HostSpec::parse(entry)
+                    .map_err(|error| anyhow::anyhow!("network_allowlist: {error}"))?;
+            }
+        } else if !self.network_allowlist.is_empty() {
+            anyhow::bail!(
+                "network_allowlist is set without `network = \"allowlist\"`; those hosts would \
+                 be declared and never consulted"
+            );
+        }
+
+        for (name, profile) in &self.profiles {
+            validate_profile_name(name)?;
+            if let Some(base) = &profile.extends {
+                let base: ProfileName = base.parse().map_err(|error: String| {
+                    anyhow::anyhow!("profile '{name}': extends = {base:?}: {error}")
+                })?;
+                if matches!(base, ProfileName::Off) {
+                    anyhow::bail!("profile '{name}' extends 'off'; 'off' is not a base profile");
+                }
+                if matches!(base, ProfileName::Custom(_)) {
+                    anyhow::bail!(
+                        "profile '{name}' extends '{base}'; custom profiles cannot extend custom \
+                         profiles"
+                    );
+                }
+            }
+            for entry in &profile.deny {
+                if entry.trim().is_empty() {
+                    anyhow::bail!("profile '{name}': an empty deny entry is not a path");
+                }
+                if entry.contains('\0') {
+                    anyhow::bail!("profile '{name}': a deny entry contains a NUL byte");
+                }
+                if crate::deny::is_glob(entry) {
+                    crate::deny::validate_deny_glob(entry)
+                        .map_err(|error| anyhow::anyhow!("profile '{name}': {error}"))?;
+                }
+            }
+            for (field, entries) in [
+                ("read_only", &profile.read_only),
+                ("read_write", &profile.read_write),
+            ] {
+                for entry in entries {
+                    // `resolve_profile` drops what it cannot normalize, which is
+                    // indistinguishable from a grant that worked. Refuse here.
+                    if crate::allow_path::normalize_allow_path(entry).is_none() {
+                        anyhow::bail!(
+                            "profile '{name}': {field} entry {entry:?} is not a path this build \
+                             can resolve (write an absolute path or one relative to the \
+                             workspace)"
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A profile name: a key in `[profiles.<name>]`, so it is also a TOML key and a
+/// string a rule or a CLI flag can name.
+fn validate_profile_name(name: &str) -> anyhow::Result<()> {
+    if name.trim().is_empty() {
+        anyhow::bail!("a profile name is empty");
+    }
+    if name.len() > 64 {
+        anyhow::bail!("profile name {name:?} is longer than 64 characters");
+    }
+    if name
+        .chars()
+        .any(|c| c.is_control() || c.is_whitespace() || matches!(c, '/' | '\\' | '.' | ':'))
+    {
+        anyhow::bail!(
+            "profile name {name:?} contains a character that is not allowed in a profile name \
+             (letters, digits, `-`, `_`)"
+        );
+    }
+    // The built-ins own their names; a custom profile may not shadow them.
+    if name
+        .parse::<ProfileName>()
+        .is_ok_and(|parsed| !matches!(parsed, ProfileName::Custom(_)))
+    {
+        anyhow::bail!("profile name {name:?} is a built-in profile; choose another name");
+    }
+    Ok(())
 }
 
 /// A sandbox profile name: five built-ins plus user-defined customs.
@@ -165,7 +282,12 @@ pub fn load_sandbox_config(workspace: &Path) -> anyhow::Result<SandboxConfig> {
         .join(SANDBOX_CONFIG_FILENAME);
     let project = load_config_file(&project_path)?;
 
-    Ok(merge_configs(&mut config, project))
+    let merged = merge_configs(&mut config, project);
+    // Validate the file the user will actually be governed by, not only the two
+    // halves: a project profile can be valid alone and shadowed by a global
+    // name, and the merged answer is the one that runs.
+    merged.validate()?;
+    Ok(merged)
 }
 
 /// Pure merge step behind [`load_sandbox_config`] (kept separate so the
@@ -246,6 +368,12 @@ fn load_config_file(path: &Path) -> anyhow::Result<Option<SandboxConfig>> {
         anyhow::anyhow!(
             "{} does not parse ({error}); refusing to run with a policy that was silently \
              replaced by the defaults",
+            path.display()
+        )
+    })?;
+    SandboxConfig::validate(&config).map_err(|error| {
+        anyhow::anyhow!(
+            "{}: {error}; refusing to run with a policy that cannot be stated",
             path.display()
         )
     })?;
@@ -586,6 +714,8 @@ mod tests {
         }
         let config = SandboxConfig {
             managed_by: None,
+            network: None,
+            network_allowlist: Vec::new(),
             profiles,
         };
         for (name, expected) in [
@@ -608,6 +738,8 @@ mod tests {
         let workspace = std::env::temp_dir();
         let config = SandboxConfig {
             managed_by: None,
+            network: None,
+            network_allowlist: Vec::new(),
             profiles: HashMap::from([(
                 "mydev".to_string(),
                 ProfileConfig {
@@ -643,6 +775,8 @@ mod tests {
         let workspace = std::env::temp_dir();
         let config = SandboxConfig {
             managed_by: None,
+            network: None,
+            network_allowlist: Vec::new(),
             profiles: HashMap::from([(
                 "broken".to_string(),
                 ProfileConfig {
@@ -665,6 +799,8 @@ mod tests {
         let workspace = std::env::temp_dir();
         let config = SandboxConfig {
             managed_by: None,
+            network: None,
+            network_allowlist: Vec::new(),
             profiles: HashMap::from([
                 (
                     "base".to_string(),
@@ -699,6 +835,8 @@ mod tests {
     fn project_cannot_redefine_global_profile() {
         let mut config = SandboxConfig {
             managed_by: None,
+            network: None,
+            network_allowlist: Vec::new(),
             profiles: HashMap::from([(
                 "secure".to_string(),
                 ProfileConfig {
@@ -712,6 +850,8 @@ mod tests {
         };
         let project = SandboxConfig {
             managed_by: None,
+            network: None,
+            network_allowlist: Vec::new(),
             profiles: HashMap::from([
                 (
                     "secure".to_string(),
@@ -766,6 +906,8 @@ mod tests {
         };
         let global = SandboxConfig {
             managed_by: None,
+            network: None,
+            network_allowlist: Vec::new(),
             profiles: HashMap::from([
                 ("dev".to_string(), profile(false)),
                 ("same".to_string(), profile(false)),
@@ -773,6 +915,8 @@ mod tests {
         };
         let project = SandboxConfig {
             managed_by: None,
+            network: None,
+            network_allowlist: Vec::new(),
             profiles: HashMap::from([
                 ("dev".to_string(), profile(true)),
                 ("same".to_string(), profile(false)),
@@ -812,12 +956,16 @@ mod tests {
         };
         let mut global = SandboxConfig {
             managed_by: Some("enterprise-mdm".to_string()),
+            network: None,
+            network_allowlist: Vec::new(),
             profiles: HashMap::from([("secure".to_string(), profile())]),
         };
         let project = SandboxConfig {
             // A project file cannot seize the lock: merge_configs never
             // reads project.managed_by (only load() reads the global one).
             managed_by: Some("workspace-impostor".to_string()),
+            network: None,
+            network_allowlist: Vec::new(),
             profiles: HashMap::from([("project-only".to_string(), profile())]),
         };
         let merged = merge_configs(&mut global, Some(project));
@@ -836,6 +984,8 @@ mod tests {
             &mut open,
             Some(SandboxConfig {
                 managed_by: None,
+                network: None,
+                network_allowlist: Vec::new(),
                 profiles: HashMap::from([("project-only".to_string(), profile())]),
             }),
         );

@@ -2,10 +2,16 @@
 //!
 //! v1 is a policy engine: [`BackendPlan`] describes what each OS backend must
 //! enforce for a resolved profile, and [`decide`] answers read/write for one
-//! path in pure Rust on every OS (including Windows). Kernel application —
-//! Landlock/bwrap on Linux, Seatbelt on macOS, job objects / integrity levels
-//! on Windows — is phase 2 and consumes these plans without changing policy.
-
+//! path in pure Rust on every OS (including Windows). Kernel application is
+//! handled by the per-OS backends and consumes these plans:
+//!
+//! - Linux: `bwrap` bind-mount filesystem view + an explicit seccomp BPF
+//!   syscall filter (`linux.rs` + `seccomp.rs`);
+//! - macOS: Seatbelt `sandbox-exec` profiles (`seatbelt.rs`);
+//! - Windows: restricted token + discretionary ACLs on deny paths (`windows.rs`).
+//!
+//! A plan that nobody applies is the exact failure this crate was warned about
+//! — "policy only" printed in the same voice as "enforced".
 use crate::deny::{
     DENY_GLOB_CAPS, effective_deny_paths, expand_deny_globs, partition_deny_entries,
 };
@@ -32,11 +38,12 @@ impl OsBackend {
         }
     }
 
-    pub fn as_str(self) -> &'static str {
+    /// The backend label, as `doctor` and the trust screen print it.
+    pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Linux => "linux/landlock+bwrap",
+            Self::Linux => "linux/bwrap+seccomp",
             Self::MacOs => "macos/seatbelt",
-            Self::Windows => "windows/policy",
+            Self::Windows => "windows/restricted-token+acl",
         }
     }
 }
@@ -44,14 +51,252 @@ impl OsBackend {
 /// How a plan is enforced on its backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnforcementKind {
-    /// Linux: Landlock allow sets + bwrap bind-over for deny paths (phase 2).
-    PlanLandlockBwrap,
-    /// macOS: Seatbelt profile with deny-last-match rules (phase 2).
+    /// Linux: `bwrap` bind-mount filesystem view + explicit seccomp BPF
+    /// syscall filter applied before the child execs.
+    PlanBwrapSeccomp,
+    /// macOS: Seatbelt profile with deny-last-match rules.
     PlanSeatbelt,
-    /// Windows + fallback: tool-layer policy decisions via [`decide`].
-    /// This is real enforcement at the agent's own file-op boundary today,
-    /// not a stub: every tool call checks `decide` before touching disk.
-    Policy,
+    /// Windows: restricted token + discretionary ACLs on deny paths.
+    PlanRestrictedToken,
+    /// Linux with Landlock available: Landlock rules plus a `bwrap` filesystem
+    /// view, for kernels that expose the LSM.
+    PlanLandlockBwrap,
+}
+
+/// Declared child-process network policy.
+///
+/// Every confining profile defaults to [`NetworkPolicy::Off`]: a workspace
+/// grant is a filesystem grant, not a network one. Opening the network is an
+/// explicit choice, and `allowlist` is reported as declared-but-unenforced on
+/// backends that can only express "all or nothing".
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkPolicy {
+    /// No egress at all.
+    Off,
+    /// Only the named hosts.
+    Allowlist(Vec<String>),
+    /// Unrestricted egress.
+    Open,
+}
+
+impl NetworkPolicy {
+    /// Parse the `network =` value from a policy file.
+    ///
+    /// Fail-closed: an unknown value is an error, and `allowlist` without at
+    /// least one host is an error rather than a policy that silently means
+    /// "off" or "open".
+    pub fn parse(raw: &str, allowlist: Vec<String>) -> anyhow::Result<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "off" | "deny" | "none" => Ok(Self::Off),
+            "open" | "allow" => Ok(Self::Open),
+            "allowlist" => {
+                if allowlist.is_empty() {
+                    anyhow::bail!(
+                        "network = \"allowlist\" requires at least one host in network_allowlist"
+                    );
+                }
+                Ok(Self::Allowlist(allowlist))
+            }
+            other => anyhow::bail!(
+                "unknown network policy {other:?}; expected off|allowlist|open \
+                 (refusing to run with a policy that could not be stated)"
+            ),
+        }
+    }
+
+    /// Stable label for status lines and reports.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Allowlist(_) => "allowlist",
+            Self::Open => "open",
+        }
+    }
+
+    /// Whether this policy denies egress.
+    pub fn is_off(&self) -> bool {
+        matches!(self, Self::Off)
+    }
+
+    /// Whether the per-OS kernel boundary must deny **all** egress for this
+    /// policy to hold.
+    ///
+    /// `bwrap --unshare-net` and Seatbelt's `(deny network*)` are all-or-
+    /// nothing. `off` and `allowlist` both need that bit set; for `allowlist`
+    /// the kernel is then *stricter* than the declaration, and only a client
+    /// that consults [`crate::egress::decide`] may reach a listed host.
+    pub fn requires_kernel_denial(&self) -> bool {
+        !matches!(self, Self::Open)
+    }
+
+    /// The sentence a status line or approval card prints next to the label.
+    pub fn detail(&self) -> String {
+        match self {
+            Self::Off => "no child egress; enforced by the kernel boundary when it exists".into(),
+            Self::Allowlist(hosts) => format!(
+                "{} listed host(s); the kernel denies all egress, so only a client that asks \
+                 the egress policy first may reach them",
+                hosts.len()
+            ),
+            Self::Open => "unfiltered egress; the kernel boundary is not asked to unshare the \
+                           network"
+                .into(),
+        }
+    }
+}
+
+/// What this machine actually enforces, in words the statusline may print.
+///
+/// `mode` is `enforced` only when a backend launcher exists and the plan was
+/// applied by it. Windows never claims an OS sandbox: it is `policy-checked`,
+/// because the tool-layer policy engine runs but no kernel boundary does.
+///
+/// `network` is a separate sentence on purpose. A machine can enforce the
+/// filesystem view and not the network (`bwrap` present, policy `allowlist`),
+/// and printing one `enforced` for both would be the overstatement this crate
+/// exists to prevent.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct EnforcementReport {
+    pub backend: &'static str,
+    pub mode: &'static str,
+    pub filesystem: &'static str,
+    /// `enforced` only when a kernel boundary denies egress for this plan.
+    pub network: &'static str,
+    /// The declared policy: `off`, `allowlist`, `open`.
+    pub network_policy: &'static str,
+    pub detail: String,
+    /// What the network claim means in one sentence.
+    pub network_detail: String,
+    /// The elevated helper's state: `not installed`, `installed`, `n/a`.
+    pub helper: &'static str,
+    /// Whether this plan refuses to run when no boundary exists.
+    pub fail_closed: bool,
+    /// One actionable sentence, when there is one.
+    pub next_step: Option<String>,
+}
+
+/// Describe what `plan` can enforce on its backend right now.
+pub fn enforcement_report(plan: &BackendPlan) -> EnforcementReport {
+    let (mode, filesystem, available, detail, next_step) = match plan.backend {
+        OsBackend::Linux => {
+            // Presence on PATH is not the claim: `confine` refuses when the
+            // probe cannot start a namespace (Ubuntu 24.04's AppArmor rule is
+            // the common case), so the report asks the same probe.
+            let probe = crate::linux::probe_available();
+            let available = probe.is_ok();
+            (
+                if available {
+                    "enforced"
+                } else {
+                    "policy-checked"
+                },
+                if available {
+                    "enforced"
+                } else {
+                    "policy-checked"
+                },
+                available,
+                if available {
+                    "bwrap filesystem view applied; the seccomp filter is built but installed \
+                     only by a caller that runs sandbox::linux::install_seccomp_in_child in a \
+                     pre_exec hook"
+                        .to_string()
+                } else {
+                    format!(
+                        "the policy engine decides and no kernel boundary is applied: {}",
+                        probe.unwrap_err()
+                    )
+                },
+                (!available).then(|| {
+                    "install bubblewrap (`bwrap`), or fix its namespace permissions".to_string()
+                }),
+            )
+        }
+        OsBackend::MacOs => {
+            // Same rule as Linux: `confine` probes a real profile, so the
+            // report does too rather than believing a file exists.
+            let probe = crate::seatbelt::probe_available();
+            let available = probe.is_ok();
+            (
+                if available {
+                    "enforced"
+                } else {
+                    "policy-checked"
+                },
+                if available {
+                    "enforced"
+                } else {
+                    "policy-checked"
+                },
+                available,
+                if available {
+                    "Seatbelt profile applied via sandbox-exec".to_string()
+                } else {
+                    format!(
+                        "the policy engine decides and no kernel boundary is applied: {}",
+                        probe.unwrap_err()
+                    )
+                },
+                (!available).then(|| {
+                    "restore /usr/bin/sandbox-exec; Seatbelt is the macOS \
+                     boundary"
+                        .to_string()
+                }),
+            )
+        }
+        OsBackend::Windows => (
+            "policy-checked",
+            "policy-checked",
+            false,
+            "the Windows plan (restricted token, job object, deny ACLs, firewall rule) is \
+             built as data, but this build installs none of it: filesystem and process-tree \
+             confinement are not applied and egress is not blocked"
+                .to_string(),
+            Some(
+                "run `mn sandbox setup` once (elevated) to install the helper; until this build \
+                 launches it, Windows stays policy-checked"
+                    .to_string(),
+            ),
+        ),
+    };
+    let policy = plan.effective_network();
+    // The kernel can only deny all egress, so the claim is `enforced` exactly
+    // when the plan asked it to and the boundary exists.
+    let network = if plan.restrict_network && available {
+        "enforced"
+    } else {
+        "not enforced"
+    };
+    let network_detail = if !plan.restrict_network {
+        format!(
+            "{}: the boundary is not asked to deny egress",
+            policy.detail()
+        )
+    } else if available {
+        format!("{}: {}", policy.label(), policy.detail())
+    } else {
+        format!(
+            "{} declared, but no boundary exists here to apply it",
+            policy.label()
+        )
+    };
+    let helper = match plan.backend {
+        OsBackend::Windows => crate::windows::helper_state().label(),
+        _ => "n/a",
+    };
+    EnforcementReport {
+        backend: plan.backend.as_str(),
+        mode,
+        filesystem,
+        network,
+        network_policy: policy.label(),
+        detail,
+        network_detail,
+        helper,
+        fail_closed: plan.requires_kernel_boundary(),
+        next_step,
+    }
 }
 
 /// A buildable enforcement plan for one profile on one backend.
@@ -73,6 +318,9 @@ pub struct BackendPlan {
     pub deny_globs: Vec<String>,
     pub default_read: bool,
     pub restrict_network: bool,
+    /// Declared network policy. `restrict_network` stays the enforcement bit
+    /// for the per-OS backends; this records what the policy asked for.
+    pub network: NetworkPolicy,
 }
 
 impl BackendPlan {
@@ -90,7 +338,7 @@ impl BackendPlan {
         if matches!(profile, ProfileName::Off) {
             return Ok(Self {
                 backend,
-                enforcement: EnforcementKind::Policy,
+                enforcement: EnforcementKind::PlanRestrictedToken,
                 profile: "off".to_string(),
                 read_only: vec![],
                 read_write: vec![],
@@ -99,10 +347,14 @@ impl BackendPlan {
                 deny_globs: vec![],
                 default_read: true,
                 restrict_network: false,
+                network: NetworkPolicy::Open,
             });
         }
 
         let resolved: SandboxProfile = profile.resolve_profile(workspace, config)?;
+        // A hand-built config never passed through `load_sandbox_config`; the
+        // policy has to be validated on the path that actually builds a plan.
+        config.validate()?;
         let (exact, globs) = partition_deny_entries(&resolved.deny);
         // Validate every glob before expanding: fail closed, identically on
         // all backends.
@@ -129,10 +381,13 @@ impl BackendPlan {
         };
 
         let enforcement = match backend {
-            OsBackend::Linux => EnforcementKind::PlanLandlockBwrap,
+            OsBackend::Linux => EnforcementKind::PlanBwrapSeccomp,
             OsBackend::MacOs => EnforcementKind::PlanSeatbelt,
-            OsBackend::Windows => EnforcementKind::Policy,
+            OsBackend::Windows => EnforcementKind::PlanRestrictedToken,
         };
+
+        let network = resolve_network(profile, config)?;
+        let restrict_network = network.requires_kernel_denial();
 
         Ok(Self {
             backend,
@@ -144,8 +399,44 @@ impl BackendPlan {
             deny_expanded,
             deny_globs: globs,
             default_read: resolved.default_read,
-            restrict_network: resolved.restrict_network,
+            // Network default-deny in workspace-write: a confining profile that
+            // did not ask for egress gets none. `restrict_network` is derived
+            // from the policy so the two cannot disagree at build time.
+            restrict_network,
+            network,
         })
+    }
+
+    /// The egress policy this plan actually achieves.
+    ///
+    /// `restrict_network` is the enforcement bit a per-OS backend reads;
+    /// `network` is the declaration. When a caller clears the bit to open the
+    /// network for one command, the achieved policy is `open` whatever the
+    /// declaration said, and reporting anything else would describe a plan that
+    /// did not run.
+    pub fn effective_network(&self) -> NetworkPolicy {
+        if self.profile == "off" || !self.restrict_network {
+            return NetworkPolicy::Open;
+        }
+        match &self.network {
+            // The kernel cannot express `open` while the enforcement bit
+            // denies egress. A pair like this is a caller bug; the achieved
+            // policy is the stricter one.
+            NetworkPolicy::Open => NetworkPolicy::Off,
+            other => other.clone(),
+        }
+    }
+
+    /// Whether this plan promised a boundary it must not run without.
+    ///
+    /// `strict` and `read-only` exist to contain a command, and any profile
+    /// with deny entries promised those paths would be gone. On a machine with
+    /// no boundary, running anyway is the silent fallback this crate refuses:
+    /// [`crate::prepare`] answers `Refuse` for these plans. `workspace` and
+    /// `devbox` are policy-checked by design, and `off` promised nothing.
+    pub fn requires_kernel_boundary(&self) -> bool {
+        self.profile != "off"
+            && (self.has_deny() || matches!(self.profile.as_str(), "strict" | "read-only"))
     }
 
     /// Convenience: build for the compiling host.
@@ -161,6 +452,39 @@ impl BackendPlan {
     pub fn has_deny(&self) -> bool {
         !self.deny_exact.is_empty() || !self.deny_expanded.is_empty() || !self.deny_globs.is_empty()
     }
+}
+
+/// The egress policy a plan is built with.
+///
+/// Order is fixed, and the default is deny (W10-02):
+///
+/// 1. an explicit machine-level `network =` in `sandbox.toml` decides;
+/// 2. otherwise a **custom** profile's `restrict_network = false` is its own
+///    grant;
+/// 3. otherwise no egress. The built-in profiles' `restrict_network` field is a
+///    recommendation the status line shows, not a grant — a workspace write
+///    grant is a filesystem grant, and a network grant has to be written down.
+///
+/// A `network_allowlist` without `network = "allowlist"` is refused rather than
+/// ignored: hosts that are listed and never consulted look exactly like a
+/// policy that works.
+fn resolve_network(name: &ProfileName, config: &SandboxConfig) -> anyhow::Result<NetworkPolicy> {
+    if let Some(raw) = config.network.as_deref() {
+        return NetworkPolicy::parse(raw, config.network_allowlist.clone());
+    }
+    if !config.network_allowlist.is_empty() {
+        anyhow::bail!(
+            "network_allowlist is set without `network = \"allowlist\"`; those hosts would be \
+             declared and never consulted, so the policy is refused"
+        );
+    }
+    if let ProfileName::Custom(custom) = name
+        && let Some(profile_config) = config.profiles.get(custom)
+        && profile_config.restrict_network == Some(false)
+    {
+        return Ok(NetworkPolicy::Open);
+    }
+    Ok(NetworkPolicy::Off)
 }
 
 /// Add canonical forms of exact deny paths so symlink aliases are covered.
@@ -184,14 +508,14 @@ fn mask_symlink_aliases(paths: &[PathBuf]) -> Vec<PathBuf> {
 /// Split out because it is asked twice per decision — once for the path as
 /// written and once for its resolved form — and a deny that ran a subset of the
 /// rules on the second spelling would be the same bug in a new place.
-fn deny_matches(plan: &BackendPlan, path: &Path) -> bool {
+fn deny_rule(plan: &BackendPlan, path: &Path) -> Option<&'static str> {
     // 1. Exact deny: the path itself or any ancestor is denied.
     if plan
         .deny_exact
         .iter()
         .any(|d| path == d || path.starts_with(d))
     {
-        return true;
+        return Some("deny:exact");
     }
 
     // 2. Expanded glob matches (concrete paths from resolve time).
@@ -199,11 +523,14 @@ fn deny_matches(plan: &BackendPlan, path: &Path) -> bool {
         let mp = Path::new(m);
         path == mp || path.starts_with(mp)
     }) {
-        return true;
+        return Some("deny:glob-expanded");
     }
 
     // 3. Live glob patterns (covers files created after resolve).
-    !plan.deny_globs.is_empty() && glob_patterns_deny(&plan.deny_globs, path)
+    if !plan.deny_globs.is_empty() && glob_patterns_deny(&plan.deny_globs, path) {
+        return Some("deny:glob-live");
+    }
+    None
 }
 
 /// The same path with symlinks in its existing prefix resolved, when that is a
@@ -244,23 +571,77 @@ pub enum PathDecision {
     Deny,
 }
 
-pub fn decide(plan: &BackendPlan, path: &Path, access: Access) -> PathDecision {
+/// Resolve `..` and `.` lexically so a path cannot escape a root while still
+/// comparing as a child of it (`rw/../../.ssh/id_rsa` starts with `rw`
+/// component-wise, which is why a raw `starts_with` was not enough).
+///
+/// `None` means the path climbed above its own root: there is nothing left to
+/// allow, so the caller denies.
+fn lexical_normalize(path: &Path) -> Option<PathBuf> {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                if !out.pop() {
+                    return None;
+                }
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    Some(out)
+}
+
+/// One path decision with the rule that made it.
+///
+/// The rule string is what the audit log and the approval card print, so a
+/// denial can always answer "which rule?" without re-deriving the plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathDecisionRecord {
+    pub outcome: PathDecision,
+    pub rule: String,
+    /// The path as the caller spelled it.
+    pub requested: PathBuf,
+    /// The symlink-resolved spelling, when it differs.
+    pub resolved: Option<PathBuf>,
+}
+
+/// Decide one path by the first matching rule.
+///
+/// Order is fixed and deny-first: `profile off` → exact deny → expanded deny
+/// → live deny → the same three checks against the canonical path → write root
+/// → default read → read root → default deny. The first rule that matches is
+/// the decision; nothing later can widen it.
+pub fn decide_record(plan: &BackendPlan, path: &Path, access: Access) -> PathDecisionRecord {
+    let record = |outcome, rule: &str, resolved: Option<PathBuf>| PathDecisionRecord {
+        outcome,
+        rule: rule.to_string(),
+        requested: path.to_path_buf(),
+        resolved,
+    };
+
     if plan.profile == "off" {
-        return PathDecision::Allow;
+        return record(PathDecision::Allow, "policy:off", None);
     }
 
-    if deny_matches(plan, path) {
-        return PathDecision::Deny;
+    let Some(logical) = lexical_normalize(path) else {
+        return record(PathDecision::Deny, "deny:traversal", None);
+    };
+
+    if let Some(rule) = deny_rule(plan, &logical) {
+        return record(PathDecision::Deny, rule, None);
     }
 
     // The same checks against the path with symlinks resolved. A denied
     // directory reached through a symlink is still that directory —
     // `link/secret.pem` opens `real/secret.pem` — and matching only the logical
     // spelling let a rule be stepped around by writing the other name.
-    if let Some(resolved) = resolve_alias(path)
-        && deny_matches(plan, &resolved)
+    let resolved = resolve_alias(path);
+    if let Some(alias) = &resolved
+        && let Some(rule) = deny_rule(plan, alias)
     {
-        return PathDecision::Deny;
+        return record(PathDecision::Deny, &format!("{rule}:resolved"), resolved);
     }
 
     match access {
@@ -268,29 +649,47 @@ pub fn decide(plan: &BackendPlan, path: &Path, access: Access) -> PathDecision {
             if plan
                 .read_write
                 .iter()
-                .any(|r| path == r || path.starts_with(r))
+                .any(|r| logical == *r || logical.starts_with(r))
             {
-                PathDecision::Allow
+                record(PathDecision::Allow, "allow:write-root", resolved)
             } else {
-                PathDecision::Deny
+                record(PathDecision::Deny, "deny:write-outside-root", resolved)
             }
         }
         Access::Read => {
             if plan.default_read {
-                return PathDecision::Allow;
+                return record(PathDecision::Allow, "allow:read-default", resolved);
             }
             if plan
                 .read_only
                 .iter()
                 .chain(plan.read_write.iter())
-                .any(|r| path == r || path.starts_with(r))
+                .any(|r| logical == *r || logical.starts_with(r))
             {
-                PathDecision::Allow
+                record(PathDecision::Allow, "allow:read-root", resolved)
             } else {
-                PathDecision::Deny
+                record(PathDecision::Deny, "deny:read-outside-allowlist", resolved)
             }
         }
     }
+}
+
+/// Decision only (the form the tool layer uses).
+pub fn decide(plan: &BackendPlan, path: &Path, access: Access) -> PathDecision {
+    decide_record(plan, path, access).outcome
+}
+
+/// Re-check a path after it has been opened.
+///
+/// `decide` runs before the open; a symlink swapped in between the check and
+/// the open (TOCTOU) would otherwise pass. Callers that actually open a path
+/// must call this with the handle's real target, and deny when it disagrees.
+pub fn recheck_after_open(
+    plan: &BackendPlan,
+    opened_path: &Path,
+    access: Access,
+) -> PathDecisionRecord {
+    decide_record(plan, opened_path, access)
 }
 
 /// Match live deny-glob patterns against one path.
@@ -354,6 +753,81 @@ mod tests {
     }
 
     #[test]
+    fn parent_traversal_cannot_borrow_a_write_root() {
+        // A plan whose only write root is `ws`, built by hand so the host's
+        // real temp directory cannot mask the traversal.
+        let ws = std::env::temp_dir().join("sb-traversal");
+        let plan = BackendPlan {
+            backend: OsBackend::Windows,
+            enforcement: EnforcementKind::PlanRestrictedToken,
+            profile: "strict".to_string(),
+            read_only: vec![],
+            read_write: vec![ws.clone()],
+            deny_exact: vec![],
+            deny_expanded: vec![],
+            deny_globs: vec![],
+            default_read: false,
+            restrict_network: true,
+            network: NetworkPolicy::Off,
+        };
+        // Component-wise, `ws/../secret` starts with `ws`; lexically it does not.
+        let escape = ws.join("..").join("secret.txt");
+        let record = decide_record(&plan, &escape, Access::Write);
+        assert_eq!(record.outcome, PathDecision::Deny, "{}", record.rule);
+        // A path that climbs above the filesystem root has no allow root left.
+        let above_root = Path::new("../../../../etc/shadow");
+        assert_eq!(
+            decide_record(&plan, above_root, Access::Write).outcome,
+            PathDecision::Deny
+        );
+    }
+
+    #[test]
+    fn decision_records_name_their_rule() {
+        let plan = workspace_plan(ProfileName::Workspace);
+        assert_eq!(
+            decide_record(&plan, Path::new("/etc/shadow"), Access::Write).rule,
+            "deny:write-outside-root"
+        );
+        assert_eq!(
+            decide_record(&plan, Path::new("/etc/shadow"), Access::Read).rule,
+            "allow:read-default"
+        );
+    }
+
+    #[test]
+    fn network_defaults_to_deny_in_workspace_write() {
+        let plan = workspace_plan(ProfileName::Workspace);
+        assert!(plan.restrict_network);
+        assert!(plan.network.is_off());
+        let report = enforcement_report(
+            &BackendPlan::build(
+                OsBackend::Windows,
+                &ProfileName::Workspace,
+                Path::new("C:/w"),
+                &SandboxConfig::default(),
+            )
+            .unwrap(),
+        );
+        assert_eq!(report.mode, "policy-checked");
+        assert_eq!(report.network, "not enforced");
+    }
+
+    #[test]
+    fn network_policy_parsing_fails_closed() {
+        assert!(matches!(
+            NetworkPolicy::parse("off", vec![]),
+            Ok(NetworkPolicy::Off)
+        ));
+        assert!(matches!(
+            NetworkPolicy::parse("open", vec![]),
+            Ok(NetworkPolicy::Open)
+        ));
+        assert!(NetworkPolicy::parse("allowlist", vec![]).is_err());
+        assert!(NetworkPolicy::parse("sometimes", vec![]).is_err());
+    }
+
+    #[test]
     fn off_allows_everything() {
         let plan = workspace_plan(ProfileName::Off);
         assert_eq!(
@@ -406,6 +880,8 @@ mod tests {
         let ws = std::env::temp_dir().join("sb-test-deny");
         let config = SandboxConfig {
             managed_by: None,
+            network: None,
+            network_allowlist: Vec::new(),
             profiles: HashMap::from([(
                 "node".to_string(),
                 crate::profiles::ProfileConfig {
@@ -440,6 +916,8 @@ mod tests {
         let ws = std::env::temp_dir();
         let config = SandboxConfig {
             managed_by: None,
+            network: None,
+            network_allowlist: Vec::new(),
             profiles: HashMap::from([(
                 "bad".to_string(),
                 crate::profiles::ProfileConfig {
@@ -484,6 +962,8 @@ mod tests {
         }
         let config = SandboxConfig {
             managed_by: None,
+            network: None,
+            network_allowlist: Vec::new(),
             profiles: HashMap::from([(
                 "node".to_string(),
                 crate::profiles::ProfileConfig {

@@ -22,6 +22,17 @@
 //! text), `WebFetch` (URLs), `MCP`, and `*`, but not for path tools
 //! (`Read`/`Write`/`Edit`, where `/` separates).
 //!
+//! # Command-prefix policy (W10-05)
+//!
+//! File globs and command prefixes are two spellings of one policy. A `Bash`
+//! pattern that ends in `" *"` also names the bare command: `Bash(cargo test *)`
+//! matches `cargo test` as well as `cargo test --all`, because a rule author
+//! writing "the commands under this prefix" means the prefix itself too. This
+//! is a *command* convenience only — path patterns keep exact glob semantics,
+//! so `Read(src/*)` does not silently start matching the directory `src`.
+//! Widening happens before strictest-wins, so a prefix deny still beats a prefix
+//! allow and cannot be used to slip the bare verb past policy.
+//!
 //! # Decision procedure (Bash)
 //!
 //! 1. If ANY `deny` rule matches the FULL command (covers pipe-to-shell and
@@ -120,8 +131,34 @@ impl Rule {
         if self.tool != "*" && !self.tool.eq_ignore_ascii_case(tool) {
             return false;
         }
-        glob_full_match(&self.pattern, arg, separator_is_significant(tool))
+        pattern_matches(tool, &self.pattern, arg)
     }
+}
+
+/// Whether `tool`'s argument is a command line, so a pattern may also name the
+/// bare command (see the module docs on command prefixes).
+fn command_tool(tool: &str) -> bool {
+    tool.eq_ignore_ascii_case("Bash")
+}
+
+/// Match one pattern against one argument, applying the tool's separator rules
+/// and the command-prefix widening for command tools.
+///
+/// The widening is deliberately one-directional: `Bash(git *)` names `git`, but
+/// `Bash(git)` does not name `git status`. A prefix is a grant to the verb and
+/// its arguments, never to an unbounded suffix the author did not type.
+fn pattern_matches(tool: &str, pattern: &str, candidate: &str) -> bool {
+    let literal_separator = separator_is_significant(tool);
+    if glob_full_match(pattern, candidate, literal_separator) {
+        return true;
+    }
+    if command_tool(tool)
+        && let Some(prefix) = pattern.strip_suffix(" *")
+        && !prefix.is_empty()
+    {
+        return glob_full_match(prefix, candidate, false);
+    }
+    false
 }
 
 /// Whether `/` is a significant separator for a tool's patterns: yes for
@@ -249,6 +286,10 @@ fn glob_full_match(pattern: &str, candidate: &str, literal_separator: bool) -> b
 pub struct RuleSet {
     pub rules: Vec<Rule>,
     pub managed_by: Option<String>,
+    /// Strict mode: a command no rule names is denied, not allowed. The
+    /// fail-open default is a usability choice for the workspace profile; a
+    /// strict profile must not make it on the user's behalf.
+    pub strict: bool,
 }
 
 impl RuleSet {
@@ -259,6 +300,7 @@ impl RuleSet {
         Self {
             rules,
             managed_by: None,
+            strict: false,
         }
     }
 
@@ -266,6 +308,16 @@ impl RuleSet {
         Self {
             rules: builtin_rules(),
             managed_by: None,
+            strict: false,
+        }
+    }
+
+    /// Strict mode: builtins only, and an unnamed command is denied.
+    pub fn strict() -> Self {
+        Self {
+            rules: builtin_rules(),
+            managed_by: None,
+            strict: true,
         }
     }
 
@@ -274,6 +326,7 @@ impl RuleSet {
         Self {
             rules: builtin_rules(),
             managed_by: Some(governor.to_string()),
+            strict: false,
         }
     }
 
@@ -463,9 +516,7 @@ fn decide_single(rules: &RuleSet, tool: &str, arg: &str) -> RuleDecision {
         }
     }
     match best {
-        None => RuleDecision::Allow {
-            rule: "default:allow".to_string(),
-        },
+        None => default_decision(rules),
         Some(rule) => match rule.behavior {
             Behavior::Allow => RuleDecision::Allow {
                 rule: rule.id.clone(),
@@ -506,7 +557,7 @@ fn decide_bash(rules: &RuleSet, command: &str) -> RuleDecision {
     for rule in &rules.rules {
         if rule.behavior == Behavior::Deny
             && (rule.tool == "*" || rule.tool.eq_ignore_ascii_case("Bash"))
-            && glob_full_match(&rule.pattern, full, false)
+            && pattern_matches("Bash", &rule.pattern, full)
         {
             return RuleDecision::Deny {
                 reason: format!(
@@ -561,7 +612,7 @@ fn decide_bash(rules: &RuleSet, command: &str) -> RuleDecision {
         let mut best: Option<&Rule> = None;
         for rule in &rules.rules {
             if (rule.tool == "*" || rule.tool.eq_ignore_ascii_case("Bash"))
-                && glob_full_match(&rule.pattern, &normalized, false)
+                && pattern_matches("Bash", &rule.pattern, &normalized)
                 && best.is_none_or(|b: &Rule| rule.behavior.rank() > b.behavior.rank())
             {
                 best = Some(rule);
@@ -626,8 +677,24 @@ fn decide_bash(rules: &RuleSet, command: &str) -> RuleDecision {
             kind: AskKind::CompoundGap,
         };
     }
-    RuleDecision::Allow {
-        rule: allowed.unwrap_or_else(|| "default:allow".to_string()),
+    match allowed {
+        Some(rule) => RuleDecision::Allow { rule },
+        None => default_decision(rules),
+    }
+}
+
+/// What to do when no rule names the call: allow in the fail-open workspace
+/// default, deny in strict mode.
+fn default_decision(rules: &RuleSet) -> RuleDecision {
+    if rules.strict {
+        RuleDecision::Deny {
+            reason: "strict mode: no allow rule names this command".to_string(),
+            rule: "default:deny".to_string(),
+        }
+    } else {
+        RuleDecision::Allow {
+            rule: "default:allow".to_string(),
+        }
     }
 }
 
@@ -1285,6 +1352,74 @@ mod tests {
             decide(&set, "Read", "src/main.rs"),
             RuleDecision::Allow { .. }
         ));
+    }
+
+    #[test]
+    fn a_command_prefix_also_names_the_bare_command() {
+        // A rule author writing "these commands" means the bare verb too.
+        let user =
+            parse_rules("Bash(cargo test *) => allow\nBash(deploy *) => ask\nBash(scp *) => deny")
+                .unwrap();
+        let set = RuleSet::with_user_rules(user);
+        assert!(matches!(
+            decide(&set, "Bash", "cargo test"),
+            RuleDecision::Allow { .. }
+        ));
+        assert!(matches!(
+            decide(&set, "Bash", "deploy"),
+            RuleDecision::Ask { .. }
+        ));
+        assert!(matches!(
+            decide(&set, "Bash", "scp"),
+            RuleDecision::Deny { .. }
+        ));
+        // Argument forms keep matching, and a bare prefix is not a license for
+        // a different verb that merely starts with the same letters.
+        assert!(matches!(
+            decide(&set, "Bash", "cargo test --all"),
+            RuleDecision::Allow { .. }
+        ));
+        assert!(matches!(
+            decide(&set, "Bash", "scpfile"),
+            RuleDecision::Allow { .. }
+        ));
+    }
+
+    #[test]
+    fn a_prefix_deny_still_beats_a_prefix_allow() {
+        let set = RuleSet::with_user_rules(
+            parse_rules("Bash(git *) => allow\nBash(git push *) => deny").unwrap(),
+        );
+        assert!(matches!(
+            decide(&set, "Bash", "git"),
+            RuleDecision::Allow { .. }
+        ));
+        // The longer deny covers both the bare prefix and its arguments.
+        for command in ["git push", "git push origin main"] {
+            assert!(
+                decide(&set, "Bash", command).is_deny(),
+                "{command} must deny"
+            );
+        }
+    }
+
+    #[test]
+    fn command_prefix_widening_does_not_touch_path_tools() {
+        // `src` is a directory, not a call of `src/…`: a path rule must not
+        // silently start matching the parent directory.
+        let set = RuleSet::with_user_rules(
+            parse_rules("Read(src/*) => deny\nWrite(out/*) => deny").unwrap(),
+        );
+        assert!(matches!(
+            decide(&set, "Read", "src"),
+            RuleDecision::Allow { .. }
+        ));
+        assert!(decide(&set, "Read", "src/a.rs").is_deny());
+        assert!(matches!(
+            decide(&set, "Write", "out"),
+            RuleDecision::Allow { .. }
+        ));
+        assert!(decide(&set, "Write", "out/a.txt").is_deny());
     }
 
     #[test]

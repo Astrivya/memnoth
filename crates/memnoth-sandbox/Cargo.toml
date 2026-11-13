@@ -4,14 +4,22 @@ version = "0.1.0-beta.2"
 edition = "2024"
 publish = false
 
-# Lane F (sandbox): OS-aware sandbox profiles + fail-closed deny-globs +
-# rule-language v1 + denial tracking.
+# Lane W10 (sandbox): OS-aware sandbox profiles, fail-closed deny-globs,
+# rule-language v1 with command prefixes, denial tracking, egress policy, and
+# the per-OS backend plans.
 #
-# Policy engine only (no kernel enforcement in v1): it resolves profiles,
-# validates/expands deny-globs fail-closed, compiles text rules to decisions,
-# and describes per-OS backend plans. Enforcement at the tool layer uses
-# `Backend::decide` + the rule engine on every OS (including Windows).
-# Kernel backends (Landlock/bwrap, Seatbelt, Windows job objects) are phase 2.
+# What is enforced, and by whom:
+# - Linux: `linux::confine` builds the `bwrap` filesystem view and
+#   `seccomp::install` can install the syscall filter in a `pre_exec` hook;
+#   `enforcement_report` reports the boundary only when `bwrap` actually starts.
+# - macOS: `seatbelt::confine` builds the `sandbox-exec` argv.
+# - Windows: `windows::confine` applies nothing in this build. The restricted
+#   token / job object / deny ACL / firewall plan is data, and the module says so.
+# - Every OS: `backend::decide`, `egress::decide`, and `rules::decide` make the
+#   tool-layer decision, and `prepare` refuses to run a profile that promised a
+#   kernel boundary when this machine cannot apply it.
+#
+# This crate adds no dependencies for any of that.
 
 [dependencies]
 anyhow = "1"
