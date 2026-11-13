@@ -20,10 +20,8 @@ const MAX_QUEUE_SIZE_MB: u64 = 100;
 /// Maximum queue entries
 const MAX_QUEUE_ENTRIES: usize = 10000;
 /// Base retry delay in seconds
-#[cfg(test)]
 const BASE_RETRY_DELAY_SECS: u64 = 2;
 /// Maximum retry delay in seconds
-#[cfg(test)]
 const MAX_RETRY_DELAY_SECS: u64 = 300;
 /// Heartbeat interval in seconds
 const HEARTBEAT_INTERVAL_SECS: u64 = 30;
@@ -44,6 +42,9 @@ pub struct QueuedSyncItem {
 }
 
 /// Sync queue persisted to disk
+///
+/// Used by both the dashboard session sync (`run_sync`) and the encrypted
+/// vault sync (`sync_engine::push`) for retry-with-backoff of failed uploads.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncQueue {
     pub items: VecDeque<QueuedSyncItem>,
@@ -176,8 +177,15 @@ fn now_secs() -> u64 {
 }
 
 /// Calculate exponential backoff delay
-#[cfg(test)]
-fn backoff_delay(attempt: u32) -> Duration {
+/// Calculate exponential backoff delay for a given attempt number.
+///
+/// Public so [`crate::sync_engine`] can use the same backoff schedule as the
+/// dashboard session sync queue.
+/// Calculate exponential backoff delay for a given attempt number.
+///
+/// Public so [`crate::sync_engine`] can use the same backoff schedule as the
+/// dashboard session sync queue.
+pub fn backoff_delay(attempt: u32) -> Duration {
     let delay = BASE_RETRY_DELAY_SECS * (2u64.pow(attempt.min(10)));
     Duration::from_secs(delay.min(MAX_RETRY_DELAY_SECS))
 }
@@ -691,9 +699,11 @@ fn run_watch_mode(
             }
         }
 
-        // Send heartbeat every 30 seconds
+        // Send heartbeat every 30 seconds (telemetry off by default)
         if last_heartbeat.elapsed() >= Duration::from_secs(HEARTBEAT_INTERVAL_SECS) {
-            if let Err(e) = send_heartbeat(&client) {
+            if ctx.config().telemetry_enabled()
+                && let Err(e) = send_heartbeat(&client)
+            {
                 eprintln!("Heartbeat failed: {}", e);
             }
             last_heartbeat = Instant::now();
@@ -786,7 +796,7 @@ fn describe_privacy_mode(mode: &str) -> String {
             "  • Session IDs and timestamps\n  • Model names used\n  • Token counts (input/output)\n  • File counts touched\n  • Cost estimates\n  • Project IDs (if set)\n  • NO prompt/response content\n  • NO file contents\n  • NO code snippets"
         }
         "balanced" => {
-            "  • All metadata-only data\n  • File paths touched (relative)\n  • NO file contents\n  • NO prompt/response content\n  • NO code snippets"
+            "  • All metadata-only data\n  • File paths touched (relative)\n  • First user message and last assistant message, each capped at 2,000 chars\n  • NO file contents\n  • NO code snippets"
         }
         "open" => {
             "  • All balanced data\n  • Session transcripts (prompts & responses)\n  • File diffs for edits\n  • Code graph queries and results\n  • Full context for team collaboration"
@@ -946,6 +956,30 @@ const OUTBOUND_PATHS: &[OutboundPath] = &[
             "cost_micros",
             "project_id",
         ],
+    },
+    OutboundPath {
+        name: "device-flow sign-in",
+        endpoint: "POST /api/v1/auth/device, POST /api/v1/auth/token",
+        when: "`mn auth login` or `/login`",
+        gate: "explicit user action; no account is needed for anything local",
+        fields: &[
+            "device code request",
+            "token exchange (stored in the OS keyring)",
+        ],
+    },
+    OutboundPath {
+        name: "update check",
+        endpoint: "GET <dist>/latest/manifest.json",
+        when: "`mn update` or `mn update --check`",
+        gate: "explicit user action; there is no passive background check",
+        fields: &["nothing but the request itself (the manifest is public)"],
+    },
+    OutboundPath {
+        name: "uninstaller lookup",
+        endpoint: "GET <dist>/latest/manifest.json",
+        when: "`mn uninstall`, after you confirm",
+        gate: "the uninstall confirmation; it fails open so an offline uninstall continues",
+        fields: &["nothing but the request itself (the manifest is public)"],
     },
 ];
 

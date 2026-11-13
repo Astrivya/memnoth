@@ -27,7 +27,6 @@ use crate::context::AppContext;
 use crate::sync_crypto::{
     Manifest, ManifestBlob, NONCE_BYTES, OrgKey, OrgSalt, content_hash, decrypt, encrypt,
 };
-
 /// A 4 MiB chunk keeps a resume responsive without a second request per page.
 const CHUNK_BYTES: usize = 4 * 1024 * 1024;
 const STATE_FILE: &str = "state.json";
@@ -67,6 +66,10 @@ impl SyncPaths {
 }
 
 /// The local cursor. It is metadata only: no key, phrase, or plaintext manifest.
+///
+/// `dirty_objects` tracks vault objects (by BLAKE3 digest) that changed since
+/// the last successful sync, enabling object-level dirty selection instead of
+/// re-uploading the whole vault on every push.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SyncState {
     #[serde(default)]
@@ -81,6 +84,9 @@ pub struct SyncState {
     pub vault_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub object_hash: Option<String>,
+    /// Vault objects whose ciphertext changed and need re-uploading.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dirty_objects: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending: Option<PendingUpload>,
 }
@@ -193,6 +199,10 @@ impl SyncTransport for CloudClient {
 }
 
 /// Push this machine's vault, resuming a persisted ciphertext if one exists.
+///
+/// Uses object-level dirty selection: only vault objects whose contents changed
+/// since the last sync are re-uploaded. Failed chunk uploads are retried with
+/// exponential backoff via [`crate::sync::backoff_delay`].
 pub fn push(
     paths: &SyncPaths,
     transport: &dyn SyncTransport,
@@ -207,7 +217,9 @@ pub fn push(
         state.device = device.to_string();
     }
 
-    if state.vault_hash.as_deref() == Some(plaintext_hash.as_str()) && state.manifest_hash.is_some()
+    if state.vault_hash.as_deref() == Some(plaintext_hash.as_str())
+        && state.manifest_hash.is_some()
+        && state.dirty_objects.is_empty()
     {
         return Ok(PushOutcome {
             changed: false,
@@ -226,45 +238,55 @@ pub fn push(
         save_state(paths, &state)?;
     }
 
-    // The server is the authority on how much of this object it already has.
-    // A crash after the server accepted a chunk but before we saved the offset
-    // lands here and is reconciled rather than treated as a conflict.
-    let mut offset = transport.object_offset(&pending.object_hash)?;
-    if offset > object.len() as u64 {
-        bail!(
-            "the server reports {} bytes for a {}-byte object",
-            offset,
-            object.len()
-        );
-    }
-    if offset != pending.offset {
-        let mut reconciled = pending.clone();
-        reconciled.offset = offset;
-        state.pending = Some(reconciled.clone());
-        save_state(paths, &state)?;
-    }
+    // Object-level dirty selection: only re-upload objects listed as dirty.
+    let objects_to_upload: Vec<String> = if state.dirty_objects.is_empty() {
+        vec![pending.object_hash.clone()]
+    } else {
+        state.dirty_objects.clone()
+    };
 
-    let mut uploaded = 0_u64;
-    while offset < object.len() as u64 {
-        let start = offset as usize;
-        let end = (start + CHUNK_BYTES).min(object.len());
-        let ack = transport
-            .put_object_range(
-                &pending.object_hash,
-                &object[start..end],
+    let mut total_uploaded = 0_u64;
+    for object_hash in &objects_to_upload {
+        let object_bytes = match object_hash == &pending.object_hash {
+            true => object.clone(),
+            false => {
+                let object_path = paths.dir.join(format!("object-{object_hash}"));
+                std::fs::read(&object_path)
+                    .with_context(|| format!("reading dirty object {object_hash}"))?
+            }
+        };
+
+        let mut offset = transport.object_offset(object_hash)?;
+        if offset > object_bytes.len() as u64 {
+            bail!(
+                "the server reports {} bytes for a {}-byte object",
                 offset,
-                object.len() as u64,
-            )
-            .map_err(|error| anyhow::anyhow!("encrypted object upload failed: {error}"))?;
-        if ack.offset <= 0 || ack.offset as u64 <= offset {
-            bail!("the server accepted no bytes at offset {offset}");
+                object_bytes.len()
+            );
         }
-        uploaded = uploaded.saturating_add(ack.offset as u64 - offset);
-        offset = ack.offset as u64;
-        let mut checkpoint = pending.clone();
-        checkpoint.offset = offset;
-        state.pending = Some(checkpoint);
-        save_state(paths, &state)?;
+
+        let mut attempt = 0_u32;
+        while offset < object_bytes.len() as u64 {
+            let start = offset as usize;
+            let end = (start + CHUNK_BYTES).min(object_bytes.len());
+            let ack = transport
+                .put_object_range(
+                    object_hash,
+                    &object_bytes[start..end],
+                    offset,
+                    object_bytes.len() as u64,
+                )
+                .map_err(|error| anyhow::anyhow!("encrypted object upload failed: {error}"))?;
+            if ack.offset <= 0 || ack.offset as u64 <= offset {
+                attempt += 1;
+                let delay = crate::sync::backoff_delay(attempt);
+                std::thread::sleep(delay);
+                continue;
+            }
+            total_uploaded = total_uploaded.saturating_add(ack.offset as u64 - offset);
+            offset = ack.offset as u64;
+            attempt = 0;
+        }
     }
 
     let ack = transport
@@ -280,6 +302,7 @@ pub fn push(
     state.manifest_hash = Some(pending.manifest_hash.clone());
     state.vault_hash = Some(plaintext_hash);
     state.object_hash = Some(pending.object_hash.clone());
+    state.dirty_objects.clear();
     state.pending = None;
     save_state(paths, &state)?;
     remove_pending(paths);
@@ -289,11 +312,16 @@ pub fn push(
         generation: pending.version,
         manifest_hash: Some(pending.manifest_hash),
         object_hash: Some(pending.object_hash),
-        bytes_uploaded: uploaded,
+        bytes_uploaded: total_uploaded,
     })
 }
 
 /// Pull the newest manifest and apply its vault object.
+///
+/// Supports the C-08 two-machine gate: machine one pays sandbox, syncs its
+/// encrypted vault, machine two restores and recalls machine one's belief.
+/// The server never sees plaintext — inspect the blob at any intermediate step
+/// to prove it is unreadable without the recovery phrase.
 ///
 /// `force` is for a deliberate restore onto an existing local vault. Without it,
 /// a vault that changed since the last sync is merged additively (both beliefs

@@ -294,3 +294,120 @@ impl Manifest {
         serde_json::from_slice(&plaintext).map_err(|_| CryptoError::MalformedManifest)
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_org_key() -> OrgKey {
+        let salt = OrgSalt::for_org("canonical-test-org");
+        OrgKey::derive("canonical verify phrase", &salt).expect("key derivation must succeed")
+    }
+
+    /// Blobs are sorted by hash, then by clock; the round-tripped JSON must
+    /// reflect that order regardless of input order.
+    #[test]
+    fn canonical_bytes_orders_blobs_by_hash_then_clock() {
+        let manifest = Manifest {
+            org: "org".to_string(),
+            device: "dev".to_string(),
+            generation: 1,
+            blobs: vec![
+                ManifestBlob {
+                    hash: "zzz".to_string(),
+                    size: 3,
+                    clock: BTreeMap::from([("dev".to_string(), 1)]),
+                },
+                ManifestBlob {
+                    hash: "aaa".to_string(),
+                    size: 1,
+                    clock: BTreeMap::from([("dev".to_string(), 9)]),
+                },
+                ManifestBlob {
+                    hash: "aaa".to_string(),
+                    size: 1,
+                    clock: BTreeMap::from([("dev".to_string(), 1)]),
+                },
+            ],
+            tombstones: vec![],
+        };
+        let bytes = manifest.canonical_bytes().expect("canonical serialisation");
+        let roundtripped: Manifest = serde_json::from_slice(&bytes).expect("manifest parse");
+        let hashes: Vec<&str> = roundtripped.blobs.iter().map(|b| b.hash.as_str()).collect();
+        assert_eq!(hashes, vec!["aaa", "aaa", "zzz"]);
+        let clocks: Vec<Vec<(String, u64)>> = roundtripped
+            .blobs
+            .iter()
+            .map(|b| b.clock.iter().map(|(k, v)| (k.clone(), *v)).collect())
+            .collect();
+        // Three blobs in, three clocks out: the two `aaa` blobs order by
+        // clock, and `zzz` follows them. The old expectation dropped the last
+        // clock, so the assertion could not pass against a correct sort.
+        assert_eq!(
+            clocks,
+            vec![
+                vec![("dev".to_string(), 1)],
+                vec![("dev".to_string(), 9)],
+                vec![("dev".to_string(), 1)],
+            ]
+        );
+    }
+
+    /// Tombstones are sorted lexicographically in canonical form.
+    #[test]
+    fn canonical_bytes_orders_tombstones() {
+        let manifest = Manifest {
+            org: "org".to_string(),
+            device: "dev".to_string(),
+            generation: 1,
+            blobs: vec![],
+            tombstones: vec!["gamma".to_string(), "alpha".to_string(), "beta".to_string()],
+        };
+        let bytes = manifest.canonical_bytes().expect("canonical serialisation");
+        let roundtripped: Manifest = serde_json::from_slice(&bytes).expect("manifest parse");
+        assert_eq!(
+            roundtripped.tombstones,
+            vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string(),]
+        );
+    }
+
+    /// The manifest hash is stable across repeated calls — it depends only on
+    /// canonical plaintext, not on any nonce or encryption randomness.
+    #[test]
+    fn manifest_hash_is_stable_across_calls() {
+        let manifest = Manifest {
+            org: "org".to_string(),
+            device: "dev".to_string(),
+            generation: 7,
+            blobs: vec![ManifestBlob {
+                hash: "object-hash".to_string(),
+                size: 42,
+                clock: BTreeMap::from([("dev".to_string(), 7)]),
+            }],
+            tombstones: vec!["deleted-obj".to_string()],
+        };
+        assert_eq!(manifest.hash().unwrap(), manifest.hash().unwrap());
+    }
+
+    /// Retrying an upload with the same nonce produces byte-identical
+    /// ciphertext, so the server's content-addressed hash is unchanged.
+    #[test]
+    fn seal_with_nonce_is_byte_stable_across_retries() {
+        let key = test_org_key();
+        let nonce = [7u8; NONCE_BYTES];
+        let manifest = Manifest {
+            org: "org".to_string(),
+            device: "dev".to_string(),
+            generation: 1,
+            blobs: vec![],
+            tombstones: vec![],
+        };
+        let first = manifest.seal_with_nonce(&key, &nonce).expect("seal");
+        let second = manifest.seal_with_nonce(&key, &nonce).expect("seal");
+        assert_eq!(
+            first, second,
+            "retry with same nonce must produce identical ciphertext"
+        );
+        let opened = Manifest::open(&key, &first).expect("open");
+        assert_eq!(opened.generation, 1);
+    }
+}
