@@ -20,31 +20,42 @@ pub fn notification(method: &str, params: Value) -> Value {
     json!({ "jsonrpc": "2.0", "method": method, "params": params })
 }
 
-/// The `initialize` request.
+/// The `_meta` every request carries in the stateless 2026-07-28 revision: the
+/// named protocol version plus the client's capabilities, per request instead
+/// of in a handshake.
 ///
-/// Capabilities are advertised honestly: this client reads tools and nothing else today, so it
-/// claims tools and no sampling/roots/elicitation. A server that sees `sampling: {}` may call back
-/// into the client, and a client that cannot answer that is worse than one that never offered.
-pub fn initialize(id: u64) -> Value {
+/// Capabilities are advertised honestly: this client reads tools and nothing else
+/// today, so it claims tools and no sampling/roots/elicitation. A server that
+/// sees `sampling: {}` may call back into the client, and a client that cannot
+/// answer that is worse than one that never offered.
+fn meta() -> Value {
+    json!({
+        "io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION,
+        "io.modelcontextprotocol/clientCapabilities": { "tools": {} },
+    })
+}
+
+/// The `server/discover` probe: the one RPC that teaches a client which named
+/// revision the server speaks. There is no `initialize` handshake.
+pub fn discover(id: u64) -> Value {
     request(
         id,
-        "initialize",
+        "server/discover",
         json!({
-            "protocolVersion": PROTOCOL_VERSION,
-            "capabilities": { "tools": {} },
+            "_meta": meta(),
             "clientInfo": { "name": CLIENT_NAME, "version": env!("CARGO_PKG_VERSION") },
         }),
     )
 }
 
-pub fn initialized() -> Value {
-    notification("notifications/initialized", json!({}))
-}
-
 pub fn tools_list(id: u64, cursor: Option<&str>) -> Value {
     match cursor {
-        Some(cursor) => request(id, "tools/list", json!({ "cursor": cursor })),
-        None => request(id, "tools/list", json!({})),
+        Some(cursor) => request(
+            id,
+            "tools/list",
+            json!({ "cursor": cursor, "_meta": meta() }),
+        ),
+        None => request(id, "tools/list", json!({ "_meta": meta() })),
     }
 }
 
@@ -52,7 +63,7 @@ pub fn tools_call(id: u64, name: &str, arguments: Value) -> Value {
     request(
         id,
         "tools/call",
-        json!({ "name": name, "arguments": arguments }),
+        json!({ "name": name, "arguments": arguments, "_meta": meta() }),
     )
 }
 
@@ -81,16 +92,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_handshake_names_the_protocol_and_the_client() {
-        let message = initialize(1);
+    fn discover_names_the_protocol_and_the_client() {
+        let message = discover(1);
         assert_eq!(message["jsonrpc"], "2.0");
-        assert_eq!(message["method"], "initialize");
-        assert_eq!(message["params"]["protocolVersion"], PROTOCOL_VERSION);
+        assert_eq!(message["method"], "server/discover");
+        assert_eq!(
+            message["params"]["_meta"]["io.modelcontextprotocol/protocolVersion"],
+            PROTOCOL_VERSION
+        );
         assert_eq!(message["params"]["clientInfo"]["name"], "memnoth");
         // Claiming a capability the client cannot honour invites a callback it cannot answer.
-        let capabilities = message["params"]["capabilities"].as_object().unwrap();
+        let capabilities = message["params"]["_meta"]["io.modelcontextprotocol/clientCapabilities"]
+            .as_object()
+            .unwrap();
         assert_eq!(capabilities.len(), 1);
         assert!(capabilities.contains_key("tools"));
+    }
+
+    #[test]
+    fn every_request_declares_the_named_version_in_meta() {
+        for message in [tools_list(2, None), tools_call(3, "mem_search", json!({}))] {
+            assert_eq!(
+                message["params"]["_meta"]["io.modelcontextprotocol/protocolVersion"],
+                PROTOCOL_VERSION,
+                "{message}"
+            );
+        }
     }
 
     #[test]

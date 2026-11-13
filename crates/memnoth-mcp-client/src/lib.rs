@@ -6,8 +6,9 @@
 //!
 //! What it is built around, taken from the protocol rather than from convenience:
 //!
-//! * **`initialize` first, then `notifications/initialized`.** A server may refuse any other
-//!   request until the handshake completes, so the client cannot lazily negotiate on first use.
+//! * **`server/discover` first.** The stateless 2026-07-28 revision has no handshake: the client
+//!   probes `server/discover` for the named version, then declares it in `_meta` (and the
+//!   `MCP-Protocol-Version` header over HTTP) on every request.
 //! * **A deadline on every request.** A server that hangs must not hang the turn: the transport
 //!   waits with a timeout and reports `timed out` as the failure, rather than blocking a thread
 //!   forever.
@@ -16,10 +17,10 @@
 //! * **Definitions are cached, calls are not.** The schema list is stable for a connection, so it
 //!   is fetched once and reused; a `tools/call` always reaches the server.
 //! * **stdio is newline-delimited JSON-RPC**; Streamable HTTP is one POST per message with a JSON
-//!   or SSE reply and an `Mcp-Session-Id` the server may hand out during `initialize`.
+//!   or SSE reply and no session id: stateless, the named version on every request.
 //!
 //! The transports are behind one trait ([`Transport`]) for a testable reason: the interesting
-//! logic — handshake order, pagination, caching, error shapes — is exercised in tests against a
+//! logic — discovery order, pagination, caching, error shapes — is exercised in tests against a
 //! scripted transport, so it is verified without spawning a process or opening a socket.
 
 pub mod client;

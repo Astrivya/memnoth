@@ -1,9 +1,10 @@
-//! The client: handshake, a cached tool list, and calls.
+//! The client: discovery, a cached tool list, and calls.
 //!
 //! Three decisions worth stating, because each one is a place clients usually go wrong:
 //!
-//! * **The handshake is eager.** `connect` refuses to hand back a client that has not completed
-//!   `initialize` → `notifications/initialized`, so every later method can assume negotiation.
+//! * **Discovery is eager.** `connect` refuses to hand back a client that has not completed
+//!   `server/discover` for the named 2026-07-28 revision, so every later method can assume the
+//!   server speaks it. There is no `initialize` handshake to complete.
 //! * **`tools/list` is read to exhaustion.** A `nextCursor` that is not followed is silent data
 //!   loss, and a model that cannot see the tool cannot call it.
 //! * **Definitions are cached for the connection.** The list is stable per session by design; a
@@ -85,7 +86,7 @@ pub struct Client {
 }
 
 impl Client {
-    /// Complete the handshake, or fail.
+    /// Run `server/discover`, or fail.
     pub fn connect(transport: Box<dyn Transport>, timeout: Duration) -> Result<Self> {
         let mut client = Self {
             transport,
@@ -95,11 +96,24 @@ impl Client {
             timeout,
         };
         let id = client.next_id();
-        let reply = client.request(protocol::initialize(id), "initialize")?;
+        let reply = client.request(protocol::discover(id), "server/discover")?;
         // No extra context on a server error: `result_of` already carries the code and the
         // server's own wording, and wrapping it hides both.
         let result = protocol::result_of(&reply)?;
-        client.info.protocol = text_field(&result, "protocolVersion");
+        client.info.protocol = result
+            .get("protocolVersions")
+            .and_then(Value::as_array)
+            .and_then(|versions| versions.first())
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if client.info.protocol != protocol::PROTOCOL_VERSION {
+            bail!(
+                "server does not advertise the named {} revision (got {:?})",
+                protocol::PROTOCOL_VERSION,
+                result.get("protocolVersions")
+            );
+        }
         if let Some(server) = result.get("serverInfo") {
             client.info.name = text_field(server, "name");
             client.info.version = text_field(server, "version");
@@ -108,10 +122,6 @@ impl Client {
             // Not fatal: a name is cosmetic, and refusing a working server over it helps nobody.
             client.info.name = client.address();
         }
-        client
-            .transport
-            .notify(&protocol::initialized())
-            .context("cannot tell the server the handshake is complete")?;
         Ok(client)
     }
 

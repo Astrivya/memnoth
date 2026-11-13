@@ -41,26 +41,18 @@ impl Transport for Scripted {
         (self.handler)(message)
     }
 
-    fn notify(&mut self, message: &Value) -> Result<()> {
-        match self.seen.lock() {
-            Ok(mut seen) => seen.push(message.clone()),
-            Err(poisoned) => poisoned.into_inner().push(message.clone()),
-        }
-        Ok(())
-    }
-
     fn describe(&self) -> String {
         "scripted".to_string()
     }
 }
 
-/// The handshake every scripted server must answer.
+/// The discover reply every scripted server must answer.
 fn handshake(message: &Value) -> Value {
     json!({
         "jsonrpc": "2.0",
         "id": message["id"],
         "result": {
-            "protocolVersion": "2026-07-28",
+            "protocolVersions": ["2026-07-28"],
             "capabilities": { "tools": {} },
             "serverInfo": { "name": "scripted", "version": "1.2.3" }
         }
@@ -90,9 +82,9 @@ fn client(handler: Handler) -> (Client, Arc<Mutex<Vec<Value>>>) {
 }
 
 #[test]
-fn the_handshake_is_initialize_then_initialized_and_it_records_the_server() {
+fn discovery_is_server_discover_only_and_it_records_the_server() {
     let (client, seen) = client(Box::new(|message| {
-        if message["method"] == "initialize" {
+        if message["method"] == "server/discover" {
             Ok(handshake(message))
         } else {
             Ok(json!({ "jsonrpc": "2.0", "id": message["id"], "result": { "tools": [] } }))
@@ -100,9 +92,16 @@ fn the_handshake_is_initialize_then_initialized_and_it_records_the_server() {
     }));
 
     let seen = seen.lock().unwrap();
-    assert_eq!(seen[0]["method"], "initialize");
-    assert_eq!(seen[1]["method"], "notifications/initialized");
-    assert!(seen[1].get("id").is_none(), "a notification has no id");
+    assert_eq!(
+        seen.len(),
+        1,
+        "discovery is the only connect-time request: {seen:?}"
+    );
+    assert_eq!(seen[0]["method"], "server/discover");
+    assert_eq!(
+        seen[0]["params"]["_meta"]["io.modelcontextprotocol/protocolVersion"],
+        "2026-07-28"
+    );
     assert_eq!(client.server().name, "scripted");
     assert_eq!(client.server().version, "1.2.3");
     assert_eq!(client.server().protocol, "2026-07-28");
@@ -111,7 +110,7 @@ fn the_handshake_is_initialize_then_initialized_and_it_records_the_server() {
 #[test]
 fn the_tool_list_follows_every_cursor() {
     let (mut client, seen) = client(Box::new(|message| match message["method"].as_str() {
-        Some("initialize") => Ok(handshake(message)),
+        Some("server/discover") => Ok(handshake(message)),
         Some("tools/list") => {
             if message["params"]["cursor"].is_null() {
                 Ok(page(message, json!([tool("first")]), Some("p2")))
@@ -142,7 +141,7 @@ fn the_tool_list_follows_every_cursor() {
 #[test]
 fn the_list_is_cached_and_refresh_forces_a_reread() {
     let (mut client, seen) = client(Box::new(|message| {
-        if message["method"] == "initialize" {
+        if message["method"] == "server/discover" {
             Ok(handshake(message))
         } else {
             Ok(page(message, json!([tool("only")]), None))
@@ -167,7 +166,7 @@ fn the_list_is_cached_and_refresh_forces_a_reread() {
 #[test]
 fn a_tool_level_failure_is_an_outcome_not_an_error() {
     let (mut client, _seen) = client(Box::new(|message| match message["method"].as_str() {
-        Some("initialize") => Ok(handshake(message)),
+        Some("server/discover") => Ok(handshake(message)),
         Some("tools/call") => Ok(json!({
             "jsonrpc": "2.0",
             "id": message["id"],
@@ -187,7 +186,7 @@ fn a_tool_level_failure_is_an_outcome_not_an_error() {
 #[test]
 fn a_json_rpc_error_is_an_error_and_keeps_the_servers_wording() {
     let (mut client, _seen) = client(Box::new(|message| {
-        if message["method"] == "initialize" {
+        if message["method"] == "server/discover" {
             return Ok(handshake(message));
         }
         Ok(json!({
@@ -205,7 +204,7 @@ fn a_json_rpc_error_is_an_error_and_keeps_the_servers_wording() {
 #[test]
 fn a_server_that_never_stops_paginating_is_refused_rather_than_looped() {
     let (mut client, _seen) = client(Box::new(|message| {
-        if message["method"] == "initialize" {
+        if message["method"] == "server/discover" {
             Ok(handshake(message))
         } else {
             Ok(page(message, json!([tool("again")]), Some("forever")))

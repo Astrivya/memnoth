@@ -1,8 +1,8 @@
 //! How a message reaches a server: stdio, or Streamable HTTP.
 //!
-//! The trait exists so the client's logic (handshake, pagination, cache, error shapes) is testable
+//! The trait exists so the client's logic (discovery, pagination, cache, error shapes) is testable
 //! without a child process or a socket. The two real transports are deliberately thin: framing,
-//! deadlines, and the session header — nothing that belongs to the client.
+//! deadlines, and the `MCP-Protocol-Version` header — nothing that belongs to the client.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Write};
@@ -14,13 +14,11 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
-/// One request/response exchange, plus the one-way notifications.
+/// One request/response exchange. The stateless revision has no
+/// `notifications/initialized` to send, so there is no notify path.
 pub trait Transport: Send {
     /// Send one message and wait at most `timeout` for its reply.
     fn round_trip(&mut self, message: &Value, timeout: Duration) -> Result<Value>;
-
-    /// Send a notification. No reply is expected, and a server that sends one is broken.
-    fn notify(&mut self, message: &Value) -> Result<()>;
 
     /// Where this transport goes, for a diagnostic line.
     fn describe(&self) -> String;
@@ -185,10 +183,6 @@ impl Transport for StdioTransport {
         }
     }
 
-    fn notify(&mut self, message: &Value) -> Result<()> {
-        self.write_line(message)
-    }
-
     fn describe(&self) -> String {
         format!("stdio:{}", self.label)
     }
@@ -225,15 +219,14 @@ impl Drop for StdioTransport {
 
 // ---------------------------------------------------------------- Streamable HTTP
 
-/// One POST per message, with a JSON or SSE reply and an optional session id.
+/// One POST per message, with a JSON or SSE reply. Stateless: no session id
+/// is issued or sent; the named revision travels in the
+/// `MCP-Protocol-Version` header on every request.
 pub struct HttpTransport {
     client: reqwest::blocking::Client,
     url: String,
-    session: Option<String>,
     label: String,
 }
-
-const SESSION_HEADER: &str = "mcp-session-id";
 
 impl HttpTransport {
     pub fn new(url: impl Into<String>) -> Result<Self> {
@@ -245,32 +238,22 @@ impl HttpTransport {
             label: url.clone(),
             client,
             url,
-            session: None,
         })
     }
 
     fn post(&mut self, message: &Value, timeout: Duration) -> Result<reqwest::blocking::Response> {
-        let mut request = self
+        let request = self
             .client
             .post(&self.url)
             .timeout(timeout)
             .header("content-type", "application/json")
             // The spec requires both: a server may answer either way, per request.
             .header("accept", "application/json, text/event-stream")
+            .header("MCP-Protocol-Version", crate::protocol::PROTOCOL_VERSION)
             .json(message);
-        if let Some(session) = &self.session {
-            request = request.header(SESSION_HEADER, session);
-        }
         let response = request
             .send()
             .with_context(|| format!("cannot reach `{}`", self.label))?;
-        // The session is created by the initialize reply; every later request must carry it.
-        if self.session.is_none()
-            && let Some(session) = response.headers().get(SESSION_HEADER)
-            && let Ok(session) = session.to_str()
-        {
-            self.session = Some(session.to_string());
-        }
         Ok(response)
     }
 }
@@ -299,19 +282,6 @@ impl Transport for HttpTransport {
         }
         parse_http_body(&body, &content_type, id)
             .with_context(|| format!("`{}` sent a reply this client cannot read", self.label))
-    }
-
-    fn notify(&mut self, message: &Value) -> Result<()> {
-        // A notification is fire-and-forget: the status is the answer, and 202 usually has no body.
-        let response = self.post(message, Duration::from_secs(30))?;
-        if !response.status().is_success() {
-            bail!(
-                "`{}` refused a notification: {}",
-                self.label,
-                response.status()
-            );
-        }
-        Ok(())
     }
 
     fn describe(&self) -> String {
