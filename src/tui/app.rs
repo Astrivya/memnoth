@@ -933,10 +933,11 @@ impl App {
                 let index = match self.stream_answer_first {
                     Some(first) if first < self.entries.len() => {
                         self.entries.insert(first, entry);
-                        for slot in [&mut self.stream_answer, &mut self.stream_answer_first] {
-                            if let Some(position) = slot {
-                                *position += 1;
-                            }
+                        for position in [&mut self.stream_answer, &mut self.stream_answer_first]
+                            .into_iter()
+                            .flatten()
+                        {
+                            *position += 1;
                         }
                         first
                     }
