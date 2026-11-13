@@ -9,9 +9,26 @@ name: release
 #   dist/<tag>/manifest.json                           what `mn update` reads
 #
 # `scripts/dist.sh` owns that layout; this workflow only builds the five
-# targets and hands the resulting files to it. Nothing here reimplements the
-# installer, because a second copy of "which target is this" is how a release
-# ships a binary nobody can check.
+# targets, signs what needs signing, and hands the resulting files to it.
+# Nothing here reimplements the installer, because a second copy of "which
+# target is this" is how a release ships a binary nobody can check.
+#
+# Signing, in order:
+#
+#   * minisign signs SHA256SUMS (dist.sh does this when
+#     MEMNOTH_MINISIGN_SECRET_KEY is set); the signature is embedded in
+#     manifest.json so `mn update` can verify an update before it installs it.
+#   * macOS archives are notarized and stapled when Apple credentials are
+#     configured, so Gatekeeper accepts a downloaded binary.
+#   * the Windows archive is Authenticode-signed when a certificate is
+#     configured; without one it ships unsigned, which is the honest default.
+#
+# SBOM (CycloneDX + SPDX) and SLSA provenance are generated for every
+# published artifact.
+#
+# The digest is written after signing, so it always describes the file that is
+# actually published — a re-signed or notarized archive is never paired with a
+# stale digest.
 #
 # The workflow lives in this repository because this is the repository a tag is
 # pushed to. A copy in a directory that is not under version control cannot be
@@ -95,10 +112,15 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      # Two packages, not one. `memnoth mcp serve` execs a separate
+      # `memnoth-mcp` server, so an archive that carries only `memnoth` has no
+      # server to start: it either fails, or — worse — starts whatever
+      # `memnoth-mcp` happens to be on PATH, which is how a stale beta.1 server
+      # served a beta.2 CLI and answered writes in a read-only session.
       - name: cargo build
         if: ${{ !matrix.cross }}
         shell: bash
-        run: cargo build --release --locked --target "${{ matrix.target }}" -p memnoth
+        run: cargo build --release --locked --target "${{ matrix.target }}" -p memnoth -p memnoth-mcp
 
       - name: cross build
         if: ${{ matrix.cross }}
@@ -106,13 +128,17 @@ jobs:
         run: |
           set -euo pipefail
           cargo install cross --locked
-          cross build --release --locked --target "${{ matrix.target }}" -p memnoth
+          cross build --release --locked --target "${{ matrix.target }}" -p memnoth -p memnoth-mcp
 
       # A binary that builds and does not run is the failure this step exists
       # for: it is caught here, on the runner, rather than by whoever installs
       # the archive. `memnoth --version` touches no vault and no graph, and it
       # also proves the version the binary reports is the tag being published.
-      - name: smoke test and package
+      - name: smoke test
+        # The aarch64 Linux leg is cross-built on an x86_64 host, so nothing it
+        # produces can execute here. It is checked structurally in
+        # `artifact smoke` instead of being green by accident.
+        if: ${{ !matrix.cross }}
         shell: bash
         run: |
           set -euo pipefail
@@ -125,26 +151,130 @@ jobs:
             echo "no binary at $binary" >&2
             exit 1
           fi
-          "$binary" --version
+          "$binary" --version        # The server gets the same treatment for the same reason: it is shipped in
+      # the archive now, so a server that builds and cannot serve must fail on
+      # the runner. `--selftest` runs initialize, tools/list, resources/list and
+      # prompts/list through the real handler; an empty temp database keeps it
+      # off any real vault.
+      - name: smoke test the server
+        if: ${{ !matrix.cross }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="${{ matrix.target }}"
+          server="target/$target/release/memnoth-mcp"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            server="$server.exe"
+          fi
+          if [ ! -f "$server" ]; then
+            echo "no server at $server" >&2
+            exit 1
+          fi
+          server="$(pwd)/$server"
+          work="$(mktemp -d)"
+          cd "$work"
+          # An explicit database file, not the default `./.memnoth/vault.db`: the
+          # server opens the path it is given and does not create a missing
+          # parent directory, so the default fails on a fresh temp dir.
+          "$server" --selftest --db "$work/vault.db"
 
+      - name: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="${{ matrix.target }}"
+          binary="target/$target/release/memnoth"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            binary="$binary.exe"
+          fi
+          if [ ! -f "$binary" ]; then
+            echo "no binary at $binary" >&2
+            exit 1
+          fi
           stage="package/$target"
           rm -rf "$stage"
           mkdir -p "$stage"
+          server="target/$target/release/memnoth-mcp"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            server="$server.exe"
+          fi
+          if [ ! -f "$server" ]; then
+            echo "no server at $server" >&2
+            exit 1
+          fi
           cp "$binary" "$stage/"
+          cp "$server" "$stage/"
           cp README.md "$stage/"
 
-          artifact="memnoth-$target.tar.gz"
+          artifact="memnoth-$target"
           if [ "$RUNNER_OS" = "Windows" ]; then
-            artifact="memnoth-$target.zip"
+            artifact="$artifact.zip"
             # A relative destination: 7z is a native executable and Git Bash
             # mangles a POSIX absolute path into something it cannot open.
-            (cd "$stage" && 7z a -tzip "../../$artifact" memnoth.exe README.md > /dev/null)
+            (cd "$stage" && 7z a -tzip "../../$artifact.zip" memnoth.exe memnoth-mcp.exe README.md > /dev/null)
           else
-            tar -czf "$artifact" -C "$stage" memnoth README.md
+            artifact="$artifact.tar.gz"
+            tar -czf "$artifact" -C "$stage" memnoth memnoth-mcp README.md
           fi
 
-          # The installer refuses a release without this file, so it is written
-          # here, next to the artifact, and verified again by `dist.sh`.
+      # Signing happens before the digest is written: a re-signed or notarized
+      # archive must have a digest that matches the file that is actually
+      # published, so the `.sha256` is produced in the "write digest" step.
+
+      # macOS: notarize the archive and staple the ticket when Apple
+      # credentials are configured. Notarization is what lets Gatekeeper accept
+      # a downloaded binary; stapling bundles the ticket so the first run does
+      # not have to reach Apple. Without the credentials the archive ships
+      # unsigned, which is the honest default.
+      - name: notarize and staple (macOS)
+        if: |
+          !matrix.cross &&
+          runner.os == 'macOS' &&
+          secrets.APPLE_ID != '' &&
+          secrets.APPLE_APP_SPECIFIC_PASSWORD != ''
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          NOTARYTOOL_TEAM_ID: ${{ secrets.NOTARYTOOL_TEAM_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact=$(ls memnoth-${{ matrix.target }}.tar.gz memnoth-${{ matrix.target }}.zip 2>/dev/null | head -n 1)
+          [ -n "$artifact" ] || { echo "no macOS archive to notarize" >&2; exit 1; }
+          xcrun notarytool store-credentials "memnoth" \
+              --apple-id "$APPLE_ID" \
+              --team-id "$NOTARYTOOL_TEAM_ID" \
+              --password "$APPLE_PASSWORD"
+          xcrun notarytool submit "$artifact" \
+              --keychain-profile "memnoth" \
+              --wait \
+              --output json > /dev/null
+          xcrun stapler staple "$artifact"
+
+      # Windows: Authenticode-sign the zip when a certificate is configured.
+      # Without WINDOWS_CERTIFICATE_BASE64 the zip ships unsigned.
+      - name: sign with Authenticode (Windows)
+        if: |
+          !matrix.cross &&
+          runner.os == 'Windows' &&
+          secrets.WINDOWS_CERTIFICATE_BASE64 != ''
+        env:
+          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        shell: pwsh
+        run: |
+          $certPath = "$env:TEMP\memnoth.pfx"
+          [System.IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64))
+          $artifact = Get-ChildItem -Filter "memnoth-${{ matrix.target }}.zip" | Select-Object -First 1
+          if (-not $artifact) { throw "no Windows zip to sign" }
+          signtool sign /f $certPath /p $env:WINDOWS_CERTIFICATE_PASSWORD /tr http://timestamp.digicert.com /td SHA256 /fd SHA256 "$($artifact.FullName)"
+
+      - name: write digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact=$(ls memnoth-${{ matrix.target }}.tar.gz memnoth-${{ matrix.target }}.zip 2>/dev/null | head -n 1)
+          [ -n "$artifact" ] || { echo "no archive to digest" >&2; exit 1; }
           if command -v sha256sum > /dev/null 2>&1; then
             digest=$(sha256sum "$artifact" | awk '{print $1}')
           else
@@ -161,9 +291,11 @@ jobs:
 
   # The build jobs run the binary before packaging. This job proves the
   # uploaded archives survive the round trip, that every published digest
-  # matches, and that the native Linux archive still executes after download.
-  # The other four targets were smoke-tested on their own runners above; they
-  # cannot be executed here, so they are checked structurally and by digest.
+  # matches, that every archive carries the server `memnoth mcp serve` execs,
+  # and that the native Linux archive still executes after download. The other
+  # four targets cannot run on this runner: three were smoke-tested on their own
+  # runners, and the aarch64 Linux leg is cross-built, so it is checked
+  # structurally and by digest here.
   artifact-test:
     name: artifact smoke
     needs: build
@@ -184,6 +316,26 @@ jobs:
             (cd "$dir" && sha256sum -c "$(basename "$sha")")
           done
 
+          # Both binaries, every archive. `memnoth mcp serve` execs
+          # `memnoth-mcp` from beside the CLI, so an archive carrying only the
+          # CLI sends the resolver to PATH — where a server from an older
+          # install answers with the old tool surface.
+          for archive in artifacts/*/*.tar.gz artifacts/*/*.zip; do
+            test -f "$archive" || continue
+            case "$archive" in
+              *.zip) listing=$(unzip -l "$archive") ;;
+              *) listing=$(tar -tzf "$archive") ;;
+            esac
+            echo "$listing" | grep -E 'memnoth-mcp(\.exe)?$' > /dev/null || {
+              echo "$archive has no memnoth-mcp" >&2
+              exit 1
+            }
+            echo "$listing" | grep -E '/?memnoth(\.exe)?$' > /dev/null || {
+              echo "$archive has no memnoth" >&2
+              exit 1
+            }
+          done
+
           mkdir -p unpack
           tar -xzf artifacts/x86_64-unknown-linux-gnu/memnoth-x86_64-unknown-linux-gnu.tar.gz -C unpack
           ./unpack/memnoth --version
@@ -193,6 +345,8 @@ jobs:
     name: dist bundle
     needs: [build, artifact-test]
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.layout.outputs.tag }}
     permissions:
       # Creating the release and attaching the bundle's assets to it.
       contents: write
@@ -209,6 +363,10 @@ jobs:
       - name: assemble dist
         id: layout
         shell: bash
+        env:
+          # dist.sh signs SHA256SUMS with minisign when this is set, and the
+          # signature is embedded in manifest.json for `mn update` to verify.
+          MEMNOTH_MINISIGN_SECRET_KEY: ${{ secrets.MEMNOTH_MINISIGN_SECRET_KEY }}
         run: |
           set -euo pipefail
           manifest_version=$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -n 1)
@@ -243,7 +401,29 @@ jobs:
 
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           sh scripts/dist.sh --from artifacts --version "$tag" --out dist
-          tar -czf "memnoth-dist-$tag.tar.gz" dist
+
+      # SBOM for every published artifact, generated after signing so it
+      # describes the exact bytes shipped. CycloneDX and SPDX are produced side
+      # by side and land in dist/<tag>/ alongside the archives, so the release
+      # step below attaches them as assets.
+      - name: generate SBOMs
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.layout.outputs.tag }}"
+          if ! command -v syft > /dev/null 2>&1; then
+            curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+          fi
+          shopt -s nullglob
+          for artifact in dist/$tag/memnoth-*; do
+            [ -f "$artifact" ] || continue
+            case "$artifact" in
+              *.sha256|*.minisig) continue ;;
+            esac
+            base="${artifact%.tar.gz}"
+            base="${base%.zip}"
+            syft "$artifact" -o cyclonedx-json="${base}.sbom.cdx.json" > /dev/null
+            syft "$artifact" -o spdx-json="${base}.sbom.spdx.json" > /dev/null
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -259,6 +439,9 @@ jobs:
       #
       # A staging host is MEMNOTH_INSTALL_BASE=https://<host>/dist, which is the
       # tree inside memnoth-dist-<tag>.tar.gz.
+      #
+      # A tag push creates a draft. Publishing is a human action, so an
+      # automated run can never make an unverified build "latest".
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ steps.layout.outputs.tag }}
@@ -274,3 +457,23 @@ jobs:
             dist/install.ps1
             dist/SHA256SUMS
             memnoth-dist-${{ steps.layout.outputs.tag }}.tar.gz
+
+  # SLSA provenance for the release, attesting that the published artifacts
+  # were produced by this workflow from the tagged commit.
+  provenance:
+    name: provenance
+    needs: dist
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: memnoth-dist-${{ needs.dist.outputs.tag }}
+          path: dist
+
+      - uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: "dist/**"
