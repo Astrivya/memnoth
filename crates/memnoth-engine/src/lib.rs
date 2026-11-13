@@ -60,6 +60,7 @@ pub mod brain;
 pub mod consolidation;
 pub mod decay;
 pub mod durability;
+pub mod hooks;
 pub mod model;
 pub mod namespace;
 pub mod reflect;
@@ -106,7 +107,8 @@ pub use vault_history::{
     vault_history as entity_history, vault_timeline,
 };
 pub use workflow::{
-    AgentToolDef, Dag, DagNode, JournalEntry, MAX_BUDGET, MAX_PHASES, SimReport, WorkflowJournal,
+    AgentToolDef, Dag, DagNode, Hook, HookCallback, HookPoint, Hooks, JournalEntry, MAX_BUDGET,
+    MAX_PHASES, ProposedBelief, Provenance, SimReport, VaultSlice, WorkflowJournal,
     build_agent_tool_set,
 };
 

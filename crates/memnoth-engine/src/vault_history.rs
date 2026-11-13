@@ -243,15 +243,172 @@ pub fn vault_timeline(engine: &MemoryEngine, limit: usize) -> Result<Value> {
     }))
 }
 
+/// What is known about where one fact came from: who recorded it, when, and
+/// what it points at.
+///
+/// The rule matches the one a receipt follows: every field is either measured or
+/// explicitly `null` with its name in `unknown`. A stored `"unknown"` (or an
+/// empty string) is a placeholder, not a name, so it is reported as absent
+/// rather than repeated as though somebody had answered. No field is ever filled
+/// with a plausible substitute — the agent that wrote a fact is never promoted
+/// to the person who authorised it.
+pub fn provenance_of(provenance: Option<&str>, recorded_at: Option<i64>) -> Value {
+    let parsed = provenance
+        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+        .filter(Value::is_object);
+    let field = |key: &str| {
+        parsed
+            .as_ref()
+            .and_then(|value| value.get(key))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("unknown"))
+            .map(str::to_owned)
+    };
+    let author = field("user");
+    let agent = field("agent");
+    let source = field("source")
+        .or_else(|| field("url"))
+        .or_else(|| field("file"));
+    let mut unknown: Vec<&str> = Vec::new();
+    if author.is_none() {
+        unknown.push("author");
+    }
+    if source.is_none() {
+        unknown.push("source");
+    }
+    if recorded_at.is_none() {
+        unknown.push("date");
+    }
+    // A row with no provenance at all is a stronger statement than three absent
+    // fields, and it is the reason they are absent — so it is said, not implied.
+    let note = if parsed.is_none() {
+        Value::String("the observation was recorded without provenance".to_string())
+    } else {
+        Value::Null
+    };
+    json!({
+        "author": author,
+        "agent": agent,
+        "source": source,
+        "date": recorded_at,
+        "unknown": unknown,
+        "recorded": parsed.is_some(),
+        "note": note,
+    })
+}
+
+/// The facts one entity holds at `as_of`, each with its provenance chain.
+///
+/// Same row shape [`version_facts`] produces, for callers that have an entity id
+/// but no version window: a receipt records the beliefs in play at the commit it
+/// describes, and every one of them is either attributed or says which fields
+/// nobody recorded.
+pub fn current_facts(engine: &MemoryEngine, entity_id: i64, as_of: i64) -> Result<Vec<Value>> {
+    let conn = engine.connection();
+    let mut stmt = conn
+        .prepare(
+            "SELECT content, kind, confidence, valid_from, valid_to, recorded_at, provenance \
+               FROM observations \
+              WHERE entity_id = ?1 \
+                AND valid_from <= ?2 \
+                AND (valid_to IS NULL OR valid_to > ?2) \
+                AND (invalid_at IS NULL OR invalid_at > ?2) \
+              ORDER BY valid_from, id",
+        )
+        .context("prepare current fact query")?;
+    let rows = stmt.query_map(params![entity_id, as_of], |row| {
+        let content: String = row.get(0)?;
+        let kind: String = row.get(1)?;
+        let confidence: f64 = row.get(2)?;
+        let valid_from: i64 = row.get(3)?;
+        let valid_to: Option<i64> = row.get(4)?;
+        let recorded_at: Option<i64> = row.get(5)?;
+        let provenance: Option<String> = row.get(6)?;
+        let mut fact = provenance_of(provenance.as_deref(), recorded_at);
+        fact["fact"] = Value::String(content);
+        fact["kind"] = Value::String(kind);
+        fact["confidence"] = json!(confidence);
+        fact["valid_from"] = json!(valid_from);
+        fact["valid_to"] = json!(valid_to);
+        Ok(fact)
+    })?;
+    let mut facts = Vec::new();
+    for row in rows {
+        facts.push(row?);
+    }
+    Ok(facts)
+}
+
+/// The facts believed during one version's validity window, each carrying its
+/// source/date/author chain.
+///
+/// The window test is overlap, not containment: a fact recorded before a
+/// revision was opened is still part of what that revision believed. `to` is
+/// the version's close (or [`i64::MAX`] while it is open).
+fn version_facts(engine: &MemoryEngine, entity_id: i64, from: i64, to: i64) -> Result<Vec<Value>> {
+    let conn = engine.connection();
+    let mut stmt = conn
+        .prepare(
+            "SELECT content, kind, confidence, valid_from, valid_to, recorded_at, provenance \
+               FROM observations \
+              WHERE entity_id = ?1 \
+                AND valid_from < ?3 \
+                AND (valid_to IS NULL OR valid_to > ?2) \
+                AND (invalid_at IS NULL OR invalid_at > ?4) \
+              ORDER BY valid_from, id",
+        )
+        .context("prepare version fact query")?;
+    let rows = stmt.query_map(params![entity_id, from, to, crate::now_ms()], |row| {
+        let content: String = row.get(0)?;
+        let kind: String = row.get(1)?;
+        let confidence: f64 = row.get(2)?;
+        let valid_from: i64 = row.get(3)?;
+        let valid_to: Option<i64> = row.get(4)?;
+        let recorded_at: Option<i64> = row.get(5)?;
+        let provenance: Option<String> = row.get(6)?;
+        let mut fact = provenance_of(provenance.as_deref(), recorded_at);
+        fact["fact"] = Value::String(content);
+        fact["kind"] = Value::String(kind);
+        fact["confidence"] = json!(confidence);
+        fact["valid_from"] = json!(valid_from);
+        fact["valid_to"] = json!(valid_to);
+        Ok(fact)
+    })?;
+    let mut facts = Vec::new();
+    for row in rows {
+        facts.push(row?);
+    }
+    Ok(facts)
+}
+
 /// Full temporal history of an entity: the live row plus every journaled
-/// version, each with its validity window and (where superseded/revoked)
-/// the recorded change reason.
+/// version, each with its validity window, the reason it closed (where
+/// superseded/revoked), and the source → date → author chain behind the facts
+/// that version believed.
+///
+/// `chain` rows answer "who says, when, and where", and `unattributed_facts`
+/// counts the rows whose author nobody recorded. A missing author is reported as
+/// `null` with `"author"` named in `unknown`; it is never replaced with the
+/// agent, the OS user, or the string "unknown" as though it were a name.
 pub fn vault_history(engine: &MemoryEngine, name: &str) -> Result<Value> {
-    let chain = entity_chain(engine, name)?;
+    let mut chain = entity_chain(engine, name)?;
+    let mut unattributed = 0usize;
+    for version in &mut chain {
+        let Some(entity_id) = version["entity_id"].as_i64() else {
+            continue;
+        };
+        let from = version["valid_from"].as_i64().unwrap_or(0);
+        let to = version["valid_to"].as_i64().unwrap_or(i64::MAX);
+        let facts = version_facts(engine, entity_id, from, to)?;
+        unattributed += facts.iter().filter(|fact| fact["author"].is_null()).count();
+        version["chain"] = Value::Array(facts);
+    }
     Ok(json!({
         "entity": name,
         "versions": chain,
         "count": chain.len(),
+        "unattributed_facts": unattributed,
     }))
 }
 
@@ -865,6 +1022,156 @@ mod tests {
         let bundle = recall_with_contradictions(&eng, &["calm"]).unwrap();
         assert_eq!(bundle["count"], 1);
         assert_eq!(bundle["warnings"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn a_fact_without_provenance_names_what_is_unknown() {
+        let anonymous = provenance_of(Some("{}"), Some(T0));
+        assert_eq!(anonymous["author"], serde_json::Value::Null);
+        assert_eq!(anonymous["source"], serde_json::Value::Null);
+        assert_eq!(anonymous["date"], serde_json::json!(T0));
+        assert_eq!(anonymous["recorded"], serde_json::json!(true));
+        assert_eq!(
+            anonymous["unknown"],
+            serde_json::json!(["author", "source"]),
+            "a field nobody recorded is named, not filled in: {anonymous}"
+        );
+
+        let absent = provenance_of(None, None);
+        assert_eq!(absent["recorded"], serde_json::json!(false));
+        assert_eq!(
+            absent["unknown"],
+            serde_json::json!(["author", "source", "date"])
+        );
+        assert!(
+            absent["note"]
+                .as_str()
+                .is_some_and(|note| note.contains("without provenance")),
+            "a row with no provenance at all says why the fields are empty: {absent}"
+        );
+    }
+
+    #[test]
+    fn a_placeholder_is_absence_not_a_name() {
+        // A stored "unknown" (or an empty string) is not somebody's name. It is
+        // what a writer puts down when it has nothing, so reading it back as an
+        // author would invent an attribution.
+        let p = provenance_of(
+            Some(r#"{"user":"unknown","agent":" mcp ","source":""}"#),
+            None,
+        );
+        assert_eq!(p["author"], serde_json::Value::Null);
+        assert_eq!(p["source"], serde_json::Value::Null);
+        assert_eq!(p["agent"], serde_json::json!("mcp"));
+        assert_eq!(
+            p["unknown"],
+            serde_json::json!(["author", "source", "date"])
+        );
+    }
+
+    #[test]
+    fn history_chain_carries_the_source_date_and_author_of_each_fact() {
+        let eng = MemoryEngine::open_in_memory().unwrap();
+        let a = eng.add_entity(EntityKind::Concept, "svc", 0.9, T0).unwrap();
+        eng.ingest_observation_attributed(
+            a,
+            "listens on 8080",
+            "fact",
+            0.9,
+            T0,
+            r#"{"user":"asha","agent":"cli"}"#,
+            Some(T0),
+        )
+        .unwrap();
+        eng.ingest_observation_attributed(a, "restarts nightly", "gotcha", 0.8, T0, "{}", None)
+            .unwrap();
+
+        let h = vault_history(&eng, "svc").unwrap();
+        let versions = h["versions"].as_array().unwrap();
+        let chain = versions.last().unwrap()["chain"].as_array().unwrap();
+        assert_eq!(chain.len(), 2, "both facts belong to the open version");
+
+        let attributed = chain
+            .iter()
+            .find(|fact| fact["fact"] == "listens on 8080")
+            .expect("the attributed fact is in the chain");
+        assert_eq!(attributed["author"], "asha");
+        assert_eq!(attributed["agent"], "cli");
+        assert_eq!(attributed["date"], serde_json::json!(T0));
+        assert_eq!(
+            attributed["unknown"],
+            serde_json::json!(["source"]),
+            "the content is what the fact says, not where it came from: {attributed}"
+        );
+
+        let anonymous = chain
+            .iter()
+            .find(|fact| fact["fact"] == "restarts nightly")
+            .expect("the unattributed fact is in the chain");
+        assert_eq!(anonymous["author"], serde_json::Value::Null);
+        assert_eq!(anonymous["date"], serde_json::Value::Null);
+        assert_eq!(
+            anonymous["unknown"],
+            serde_json::json!(["author", "source", "date"])
+        );
+
+        // The count says how much of the history cannot be attributed, which is
+        // the number a reviewer has to know before trusting the rest.
+        assert_eq!(h["unattributed_facts"], serde_json::json!(1));
+    }
+
+    #[test]
+    fn a_closed_version_keeps_the_facts_it_believed() {
+        let eng = MemoryEngine::open_in_memory().unwrap();
+        let a = eng
+            .add_entity(EntityKind::Concept, "api-port", 0.9, T0)
+            .unwrap();
+        eng.ingest_observation_attributed(
+            a,
+            "the API listens on 8080",
+            "fact",
+            0.9,
+            T0,
+            r#"{"user":"asha","agent":"cli"}"#,
+            Some(T0),
+        )
+        .unwrap();
+        let b = eng
+            .supersede_entity(
+                a,
+                None,
+                Some("api-port-v2"),
+                Some("the API listens on 9090"),
+                Some(0.95),
+                "moved",
+                T0 + DAY,
+            )
+            .unwrap();
+        eng.ingest_observation_attributed(
+            b,
+            "the API listens on 9090",
+            "fact",
+            0.95,
+            T0 + DAY,
+            r#"{"user":"ravi","agent":"cli"}"#,
+            Some(T0 + DAY),
+        )
+        .unwrap();
+
+        let h = vault_history(&eng, "api-port").unwrap();
+        let versions = h["versions"].as_array().unwrap();
+        let closed = versions
+            .iter()
+            .find(|version| version["entity_id"] == serde_json::json!(a))
+            .expect("the closed generation is in the history");
+        let chain = closed["chain"].as_array().unwrap();
+        assert_eq!(chain.len(), 1);
+        assert_eq!(chain[0]["fact"], "the API listens on 8080");
+        assert_eq!(chain[0]["author"], "asha");
+        assert!(
+            closed["valid_to"].as_i64().is_some(),
+            "the version the chain belongs to is closed: {closed}"
+        );
     }
 
     #[test]
