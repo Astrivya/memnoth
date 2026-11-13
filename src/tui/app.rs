@@ -14,19 +14,35 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
 use crate::cli::{
-    ActionArgs, ActionCommand, ActionInitArgs, AuthArgs, AuthCommand, AutomationArgs,
-    AutomationCommand, BatchCmdArgs, CiArgs, CiCommand, CiDetectArgs, CiIndexArgs, CloudArgs,
-    CloudCommand, CreditsArgs, DocsArgs, DoctorArgs, HookArgs, HookCommand, HookInstallArgs,
-    KeysArgs, KeysCommand, KeysListArgs, KeysRevokeAllArgs, KeysRevokeArgs, KgArgs, KgCommand,
-    McpArgs, McpCommand, OrgAddMemberArgs, OrgArgs, OrgCommand, OrgInvitesArgs, OrgMembersArgs,
+    ActionArgs, ActionCommand, ActionInitArgs, AgentListArgs, AgentResultArgs, AgentRunArgs,
+    AgentUnpackArgs, AgentsArgs, AgentsCommand, AskArgs, AuditArgs, AuditCommand, AuditExportArgs,
+    AuditShowArgs, AuditVerifyArgs, AuthArgs, AuthCommand, AuthLoginArgs, AuthLogoutArgs,
+    AuthStatusArgs, AutomationArgs, AutomationCommand, BatchCmdArgs, BillingCommand,
+    BillingCommands, BillingInvoicesArgs, BillingLimitsArgs, BillingPlanArgs, BtwArgs,
+    CheckpointArgs, CiArgs, CiCommand, CiDetectArgs, CiIndexArgs, CloudArgs, CloudCommand,
+    CompactArgs, CompletionArgs, CompletionCommand, CompletionInstallArgs, CompletionShowArgs,
+    CompletionUninstallArgs, ConfigArgs, ConfigCommand, ConfigEditArgs, ConfigExplainArgs,
+    ConfigGetArgs, ConfigListArgs, ConfigSetArgs, CreditsArgs, DelegateArgs, DocsArgs, DoctorArgs,
+    DriftArgs, ExportArgs, GoalArgs, HandoffTopArgs, HookArgs, HookCommand, HookInstallArgs,
+    ImpactArgs, InstallArgs, KeymapArgs, KeysArgs, KeysCommand, KeysListArgs, KeysRevokeAllArgs,
+    KeysRevokeArgs, KgArgs, KgCommand, LineageArgs, ListArgs, McpArgs, McpCommand, MergeArgs,
+    OpenArgs, OrgAddMemberArgs, OrgArgs, OrgCommand, OrgInvitesArgs, OrgMembersArgs,
     OrgRemoveMemberArgs, OrgRenameArgs, OrgSetRoleArgs, OrgShowArgs, OrgWithdrawArgs, ParallelArgs,
-    ProjectsArgs, ProjectsCommand, ProjectsCreateArgs, ProjectsDeleteArgs, ProjectsFileArgs,
-    ProjectsListArgs, ProjectsRenameArgs, ProjectsUnassignedArgs, ProjectsUseArgs, ServeArgs,
-    SkillAddArgs, SkillArgs, SkillCommand, SkillEditArgs, SkillListArgs, SkillRemoveArgs,
-    SkillRunArgs, StatsArgs, SyncArgs, TeamsArgs, TeamsCommand, TeamsCreateArgs, TeamsJoinArgs,
-    TeamsListArgs, TeamsMembersArgs, UsageArgs, VaultArgs, VaultCommand, Verb, WatchArgs,
-    WhoamiArgs, WorktreeArgs, WorktreeCleanArgs, WorktreeCommand, WorktreeCreateArgs,
-    WorktreeDiffArgs, WorktreeListArgs,
+    PlanArgs, PrivacyArgs, PrivacyCommand, PrivacyModeArgs, PrivacyOffArgs, PrivacyOnArgs,
+    PrivacyShowDataArgs, PrivacyStatusArgs, ProfileArgs, ProfileCommand, ProfileSetArgs,
+    ProfileShowArgs, ProjectsArgs, ProjectsCommand, ProjectsCreateArgs, ProjectsDeleteArgs,
+    ProjectsFileArgs, ProjectsListArgs, ProjectsRenameArgs, ProjectsUnassignedArgs,
+    ProjectsUseArgs, ReceiptArgs, ReceiptCommand, ReceiptShowArgs, ReceiptVerifyArgs,
+    ReceiptWriteArgs, RenameArgs, ResumeArgs, SchemaArgs, ServeArgs, SessionArgs, SessionCommand,
+    SetupArgs, SimulateArgs, SkillAddArgs, SkillArgs, SkillCommand, SkillEditArgs, SkillListArgs,
+    SkillRemoveArgs, SkillRunArgs, StartArgs, StatusArgs, StopArgs, SyncArgs, TeamAuditArgs,
+    TeamClaimArgs, TeamHandoffArgs, TeamInboxArgs, TeamLockArgs, TeamPresenceArgs, TeamReleaseArgs,
+    TeamReviewArgs, TeamTasksArgs, TeamsArgs, TeamsCommand, TeamsCreateArgs, TeamsDisputedArgs,
+    TeamsEnforceArgs, TeamsImportExportArgs, TeamsJoinArgs, TeamsListArgs, TeamsMembersArgs,
+    TeamsNamespaceArgs, TeamsProvenanceArgs, TelemetryArgs, TelemetryCommand, TelemetryOffArgs,
+    TelemetryOnArgs, TelemetryStatusArgs, UninstallArgs, VaultArgs, VaultCommand, Verb,
+    VersionArgs, WatchArgs, WhoamiArgs, WhyArgs, WorktreeArgs, WorktreeCleanArgs, WorktreeCommand,
+    WorktreeCreateArgs, WorktreeDiffArgs, WorktreeListArgs,
 };
 use crate::tui::jobs::{JobStatus, Jobs};
 use crate::tui::panes::{DiffPane, TasksPane, TranscriptPane};
@@ -218,7 +234,7 @@ pub enum Parsed {
     Shell(String),
     /// `/init`: generate AGENTS.md.
     Init,
-    /// `/memory`: edit project memory.
+    /// `/memory`: the vault as a hub.
     Memory,
     /// `/feedback`: open feedback overlay.
     FeedbackOverlay,
@@ -230,8 +246,13 @@ pub enum Parsed {
     DiffOverlay,
     /// `/rewind`: open the checkpoint picker.
     RewindOverlay,
+    /// `/checkpoints`: the rows `/checkpoint` wrote, and the one to restore.
+    CheckpointsOverlay,
     /// `/palette`: the same command list as ctrl-k, opened by name.
     PaletteOverlay,
+    /// `/onboarding`: the four-move capability card, replayed with the current
+    /// state and without changing the first-run flag.
+    Onboarding,
     /// `/commands`: the whole registry, grouped, with no row limit.
     CommandsOverlay,
     /// `/teams members` with no id: the id only exists in another command's
@@ -260,6 +281,8 @@ pub enum Parsed {
     /// `/permissions`: open the permissions overlay.
     PermissionsOverlay,
     /// A line this parser could not read; the message is the transcript entry.
+    /// A known command used wrongly: the string is the usage line.
+    Usage(String),
     Unknown(String),
 }
 
@@ -278,6 +301,9 @@ pub enum EntryRole {
     Tool,
     /// A tool call whose result landed. The same row, resolved in place.
     ToolDone,
+    /// The model's reasoning for one turn, collapsed to a header row until
+    /// expanded with `ctrl-r`. Never persisted: it is not part of the answer.
+    Thinking,
 }
 
 /// What a home fact is worth: the colour, and whether the eye should go there.
@@ -363,6 +389,96 @@ pub struct Entry {
     /// the moment the screen last repainted, which is a fact about the terminal
     /// rather than about the conversation.
     pub at_ms: i64,
+    /// Still streaming: the last visual line carries the caret glyph.
+    pub live: bool,
+    /// A thinking block's expanded state. Meaningless for other roles.
+    pub expanded: bool,
+    /// The turn's pace, stamped when the answer settles: `17s · 5.5 tps ·
+    /// ↑24k ↓8`. Rendered as one dim line under the answer; never persisted,
+    /// because the receipt already carries the same numbers in the file.
+    pub stats: Option<String>,
+}
+
+/// The stats line for one settled turn, in the shape every coding agent
+/// converged on: how long it took, how fast the answer was written, how much
+/// context moved, what it cost, and how many tools it ran. Tokens read 812,
+/// 1.8k, 128k — k is 1,000, never 1,024. The rate is end-to-end (output over
+/// wall time), so a tool-bound turn reads as slow; that is the truth about
+/// the turn, not a hidden detail.
+pub fn turn_stats(
+    elapsed_ms: i64,
+    input: u64,
+    output: u64,
+    cost_micros: Option<u64>,
+    tools: usize,
+) -> Option<String> {
+    if input == 0 && output == 0 {
+        return None;
+    }
+    let elapsed = elapsed_ms.max(0) as f64 / 1000.0;
+    let age = if elapsed < 10.0 {
+        format!("{elapsed:.1}s")
+    } else if elapsed < 60.0 {
+        format!("{}s", elapsed.round() as u64)
+    } else {
+        format!(
+            "{}m {:02}s",
+            (elapsed / 60.0) as u64,
+            (elapsed % 60.0) as u64
+        )
+    };
+    let mut parts = vec![age];
+    if output > 0 && elapsed > 0.0 {
+        let rate = output as f64 / elapsed;
+        if rate.fract() < 0.05 || rate >= 100.0 {
+            parts.push(format!("{} tps", rate.round() as u64));
+        } else {
+            parts.push(format!("{rate:.1} tps"));
+        }
+    }
+    fn short(tokens: u64) -> String {
+        if tokens < 1_000 {
+            tokens.to_string()
+        } else if tokens < 1_000_000 {
+            let kilos = tokens as f64 / 1000.0;
+            if kilos.fract() < 0.05 {
+                format!("{}k", kilos.round() as u64)
+            } else {
+                format!("{kilos:.1}k")
+            }
+        } else {
+            let megas = tokens as f64 / 1_000_000.0;
+            if megas.fract() < 0.05 {
+                format!("{}M", megas.round() as u64)
+            } else {
+                format!("{megas:.1}M")
+            }
+        }
+    }
+    parts.push(format!("↑{} ↓{}", short(input), short(output)));
+    // Order is the sentence the other agents read: how long, how fast, how
+    // much. A fourth slot exists for one extra, and only one: cost beats
+    // the tool count, because money is the number a person acts on and a
+    // tool count is colour. More than that is a log line, not a pace line.
+    if let Some(micros) = cost_micros.filter(|micros| *micros > 0) {
+        let dollars = micros as f64 / 1_000_000.0;
+        let cost = if dollars >= 1.0 {
+            format!("${dollars:.2}")
+        } else if dollars >= 0.1 {
+            format!("${dollars:.3}")
+        } else {
+            format!("${dollars:.4}")
+        };
+        parts.push(cost);
+    } else if tools > 0 {
+        parts.push(format!(
+            "{} {}",
+            tools,
+            if tools == 1 { "tool" } else { "tools" }
+        ));
+    }
+    debug_assert!(parts.len() <= 4);
+    Some(parts.join(" · "))
 }
 /// Something the header says needs a person, and the line that fixes it.
 ///
@@ -432,11 +548,28 @@ pub struct App {
     pub scroll: usize,
     /// Whether the view follows new output.
     pub follow: bool,
+    /// Screen row the pointer last sat on, absolute. Feeds the one hover
+    /// the transcript has: the `ctrl-r` hint on a thinking header exists
+    /// only while the pointer rests on it, and is noise everywhere else.
+    pub mouse_row: Option<u16>,
     /// Set when Enter was pressed; the run loop performs the dispatch so the
     /// pure state never needs an `AppContext`.
     pub pending_submit: bool,
     /// Set while a model turn is running on the worker thread.
     pub busy: bool,
+    /// The live answer entry the stream is writing, if any. One entry per
+    /// turn: deltas append to it, and the finished turn replaces its text
+    /// with the authoritative answer before persisting.
+    pub stream_answer: Option<usize>,
+    /// The first answer entry of the turn in flight. A turn with tool calls
+    /// grows several answer segments; the finished turn folds them back
+    /// into this one, so the transcript keeps the whole answer in one block
+    /// even though the text arrived in pieces around the tools.
+    pub stream_answer_first: Option<usize>,
+    /// The live thinking entry the stream is writing, if any.
+    pub stream_think: Option<usize>,
+    /// When the turn in flight started, for the busy line's elapsed time.
+    pub turn_started_ms: i64,
     /// A write waiting for the person's yes, rendered as a modal.
     pub approval: Option<String>,
     /// The rendered context pane (legacy string).
@@ -523,6 +656,13 @@ pub struct App {
     /// cloud. `None` in a unit test, which must never open the keyring; the run
     /// loop fills it in before the first frame.
     pub ctx: Option<crate::context::AppContext>,
+    /// The spawn tree behind the Deck and the Trace. `None` until the run loop
+    /// has a workspace context to root the child logs in.
+    pub delegator: Option<memnoth_agent::Delegator>,
+    /// The run that represents this session at the root of the tree.
+    pub delegation_root: Option<String>,
+    /// The child the Focus overlay is showing, chosen in the Deck or Trace.
+    pub focus_agent: Option<String>,
     /// Channel for provider test results from background threads
     pub provider_test_tx: mpsc::Sender<ProviderTestResult>,
     pub provider_test_rx: mpsc::Receiver<ProviderTestResult>,
@@ -541,6 +681,20 @@ pub struct App {
     /// The line whose verb is still running, so a second one is refused by name
     /// instead of interleaving its answer with the first.
     pub running_verb: Option<String>,
+    /// Surface back stack: surfaces visited since the last root return.
+    pub back_stack: Vec<String>,
+    /// Current focus owner: which surface owns the composer and input.
+    pub focus_owner: String,
+    /// Surface shell: eight surfaces, focus owner, back stack.
+    pub surface: crate::tui::surface::Surface,
+    /// Focus owner for the surface shell.
+    pub surface_focus: crate::tui::surface::FocusOwner,
+    /// Surface back stack as structured entries.
+    pub surface_back: Vec<crate::tui::surface::BackEntry>,
+    /// Keymap table for the surface shell.
+    pub surface_keymap: crate::tui::keymap::Keymap,
+    /// Keymap overrides: key chord → command name, persisted per machine.
+    pub keymap: Option<std::collections::HashMap<String, String>>,
 }
 /// Result of a provider connection test
 #[derive(Debug, Clone)]
@@ -600,10 +754,18 @@ impl App {
             draft: String::new(),
             scroll: 0,
             follow: true,
+            mouse_row: None,
             pending_submit: false,
             busy: false,
+            stream_answer: None,
+            stream_answer_first: None,
+            stream_think: None,
+            turn_started_ms: 0,
             approval: None,
             context: String::new(),
+            delegator: None,
+            delegation_root: None,
+            focus_agent: None,
             model: String::new(),
             graph_attention: None,
             root: String::new(),
@@ -617,6 +779,10 @@ impl App {
             command_queue: VecDeque::new(),
             pending_shell: None,
             sandbox_notice_shown: false,
+            surface: crate::tui::surface::Surface::Chat,
+            surface_focus: crate::tui::surface::FocusOwner::Chat,
+            surface_back: Vec::new(),
+            surface_keymap: crate::tui::keymap::Keymap::new(),
             theme: Theme::Default,
             screen_reader: ScreenReaderMode::Off,
             transcript_pane: TranscriptPane::new(),
@@ -647,6 +813,9 @@ impl App {
             provider_test_rx,
             models_tx,
             models_rx,
+            back_stack: Vec::new(),
+            focus_owner: "chat".to_string(),
+            keymap: None,
         }
     }
 
@@ -668,6 +837,9 @@ impl App {
                 role,
                 text: message.content.clone(),
                 at_ms: message.at_ms,
+                live: false,
+                expanded: false,
+                stats: None,
             });
         }
         self.follow = true;
@@ -692,10 +864,137 @@ impl App {
             // The same clock the session file records against, so a resumed
             // transcript and a live one put the same kind of stamp on a row.
             at_ms: crate::session::now_ms(),
+            live: false,
+            expanded: false,
+            stats: None,
         });
         self.home_visible = false;
         self.home_cursor = 0;
         self.follow = true;
+    }
+
+    /// One streamed text piece: appended to the turn's live answer entry,
+    /// which is created on the first piece and marked live until the turn
+    /// finishes. Coalescing here means the entry count never grows with the
+    /// token count.
+    pub fn append_stream_delta(&mut self, piece: &str) {
+        let index = match self.stream_answer {
+            Some(index) if index < self.entries.len() => index,
+            _ => {
+                self.entries.push(Entry {
+                    role: EntryRole::Answer,
+                    text: String::new(),
+                    at_ms: crate::session::now_ms(),
+                    live: true,
+                    expanded: false,
+                    stats: None,
+                });
+                let index = self.entries.len() - 1;
+                self.stream_answer = Some(index);
+                if self.stream_answer_first.is_none() {
+                    self.stream_answer_first = Some(index);
+                }
+                index
+            }
+        };
+        if let Some(entry) = self.entries.get_mut(index) {
+            entry.text.push_str(piece);
+        }
+        // Deliberately no `follow = true` here: a token is not a request to
+        // look at it. Forcing the view back to the bottom on every delta
+        // yanked the viewport out from under anyone who had scrolled up to
+        // read — the stream fought the reader, and the reader lost.
+        self.home_visible = false;
+    }
+
+    /// One streamed reasoning piece: the turn's thinking block. It starts
+    /// collapsed — the header plus a three-line tail — because a reasoning
+    /// block that is fully expanded while it streams pushes the answer off
+    /// the screen, and every agent's users have asked for the smaller one.
+    /// `ctrl-r` opens the whole of it.
+    pub fn append_reasoning_delta(&mut self, piece: &str) {
+        let index = match self.stream_think {
+            Some(index) if index < self.entries.len() => index,
+            _ => {
+                let entry = Entry {
+                    role: EntryRole::Thinking,
+                    text: String::new(),
+                    at_ms: crate::session::now_ms(),
+                    live: true,
+                    expanded: false,
+                    stats: None,
+                };
+                // Thinking belongs before the answer it produced, always.
+                // The push used to put the block wherever the delta landed:
+                // when a provider emits reasoning after the first answer
+                // chunk, the thinking calendarised itself *under* the
+                // response it explained. If this turn's answer already
+                // exists, the block inserts ahead of it.
+                let index = match self.stream_answer_first {
+                    Some(first) if first < self.entries.len() => {
+                        self.entries.insert(first, entry);
+                        for slot in [&mut self.stream_answer, &mut self.stream_answer_first] {
+                            if let Some(position) = slot {
+                                *position += 1;
+                            }
+                        }
+                        first
+                    }
+                    _ => {
+                        self.entries.push(entry);
+                        self.entries.len() - 1
+                    }
+                };
+                self.stream_think = Some(index);
+                index
+            }
+        };
+        if let Some(entry) = self.entries.get_mut(index) {
+            entry.text.push_str(piece);
+        }
+    }
+
+    /// Expand or collapse the newest thinking block.
+    pub fn toggle_thinking(&mut self) {
+        if let Some(entry) = self
+            .entries
+            .iter_mut()
+            .rev()
+            .find(|entry| entry.role == EntryRole::Thinking)
+        {
+            entry.expanded = !entry.expanded;
+        }
+    }
+
+    /// When the first answer piece lands, the thinking that produced it tucks
+    /// itself away: one row until the person asks for it.
+    pub fn collapse_thinking(&mut self) {
+        if let Some(index) = self.stream_think
+            && let Some(entry) = self.entries.get_mut(index)
+        {
+            entry.expanded = false;
+            entry.live = false;
+        }
+    }
+
+    /// End the turn's streaming: the live answer and thinking entries stop
+    /// carrying the caret, and the next turn starts without them.
+    pub fn finish_stream(&mut self) {
+        if let Some(index) = self.stream_answer
+            && let Some(entry) = self.entries.get_mut(index)
+        {
+            entry.live = false;
+        }
+        self.collapse_thinking();
+        self.stream_answer = None;
+        self.stream_answer_first = None;
+        self.stream_think = None;
+    }
+
+    /// Append a child's card to the parent timeline: the delegation row a person
+    /// sees where the work happened, not only in the deck.
+    pub fn push_card(&mut self, card: &crate::tui::agents::cards::AgentCard) {
+        self.push(EntryRole::Info, card.text());
     }
 
     /// Append a tool call that is running, and mark the app busy in one place.
@@ -704,7 +1003,22 @@ impl App {
     /// which is what makes a turn look like a live record instead of a scroll
     /// of past tense.
     pub fn push_tool(&mut self, text: impl Into<String>) {
+        // The answer pauses while a tool runs. Closing its segment here means
+        // the next text opens a fresh entry *below* the tool rows, so the
+        // timeline reads in the order it happened; appending into the open
+        // segment instead grew new tokens above the tools, where following
+        // eyes never saw them.
+        if let Some(index) = self.stream_answer.take()
+            && let Some(entry) = self.entries.get_mut(index)
+        {
+            entry.live = false;
+        }
         self.push(EntryRole::Tool, text);
+        // A running row is live: it carries its elapsed time until the round
+        // lands, so a turn that works is a turn that reports its own pace.
+        if let Some(entry) = self.entries.last_mut() {
+            entry.live = true;
+        }
     }
 
     /// Mark every running tool row at or after `from` as finished.
@@ -716,6 +1030,7 @@ impl App {
         for entry in self.entries.iter_mut().skip(from) {
             if entry.role == EntryRole::Tool {
                 entry.role = EntryRole::ToolDone;
+                entry.live = false;
             }
         }
     }
@@ -1076,28 +1391,108 @@ impl App {
     /// Wrapping here rather than in the widget is what makes scrolling exact:
     /// the offset is in visual lines, so `PgUp` moves by a screen and the last
     /// page is not an estimate.
-    pub fn visual_lines(&self, width: usize) -> Vec<(EntryRole, ratatui::text::Line<'static>)> {
+    /// One rendered transcript line: its role, its text, and whether it opens
+    /// its entry (the thinking header, for instance, is the only line a
+    /// collapsed block has).
+    pub fn visual_lines(
+        &self,
+        width: usize,
+    ) -> Vec<(EntryRole, ratatui::text::Line<'static>, bool)> {
         // Every row is drawn after a [`GUTTER`]-wide glyph, so the text may only
         // use what is left of the pane. Wrapping to the full width let the
         // terminal re-wrap the last word onto a line of its own.
         let width = width.saturating_sub(GUTTER).max(1);
         let mut out = Vec::new();
-        for entry in &self.entries {
+        for (index, entry) in self.entries.iter().enumerate() {
+            // A turn ends with a blank line: the space is what separates the
+            // previous answer from the next question, not a rule and not a
+            // glyph. The blank never carries one either — a `›` on an empty
+            // row reads as a second prompt.
+            if entry.role == EntryRole::User && index > 0 {
+                out.push((EntryRole::User, ratatui::text::Line::from(""), false));
+            }
+            if entry.role == EntryRole::Thinking {
+                // The industry shape, from Claude Code and friends: collapsed
+                // is one header row; the body is dimmer than any answer text;
+                // and while reasoning is still streaming, a *fixed-height*
+                // tail (three lines) shows the last of it. The fixed height
+                // is the point — a preview that grows and shrinks with the
+                // token count makes the whole screen jump on every chunk.
+                let marker = if entry.expanded { "▾" } else { "▸" };
+                // The header says one word. A character count is noise the
+                // eye re-reads every frame, and the expand hint lives under
+                // the pointer (see `ui::draw_transcript`), not in the text.
+                let header = ratatui::text::Line::from(format!("{marker} thinking"));
+                out.push((EntryRole::Thinking, header, true));
+                if !entry.text.trim().is_empty() {
+                    // The body indents two columns deeper than the rail, so
+                    // the wrap budget comes off the same two: nested reasoning
+                    // under an accent rail cannot be mistaken for answer text
+                    // at a glance, which is the entire point of the indent.
+                    // The body is markdown, like the answer: reasoning that
+                    // sketches a table or a chart renders as structure, not
+                    // as pipes and bars the reader must decode by hand.
+                    let wrapped = crate::tui::markdown::lines(&entry.text, width.saturating_sub(2));
+                    let shown: &[ratatui::text::Line<'static>] = if entry.expanded {
+                        &wrapped
+                    } else if entry.live {
+                        &wrapped[wrapped.len().saturating_sub(3)..]
+                    } else {
+                        &[][..]
+                    };
+                    for line in shown {
+                        out.push((EntryRole::Thinking, line.clone(), false));
+                    }
+                }
+                continue;
+            }
+            // A running tool row carries its elapsed time: a turn that works
+            // reports its own pace, and the row stops changing the moment
+            // the result lands.
+            let text = if entry.role == EntryRole::Tool && entry.live {
+                let elapsed = (crate::session::now_ms() - entry.at_ms).max(0) / 1000;
+                let age = if elapsed < 60 {
+                    format!("{elapsed}s")
+                } else {
+                    format!("{}m {:02}s", elapsed / 60, elapsed % 60)
+                };
+                format!("{} · {age}", entry.text)
+            } else {
+                entry.text.clone()
+            };
             // An answer is markdown and is rendered as such: headings without
             // their hashes, bullets with a hanging indent, code without its
             // backticks. A prompt or a tool row is text the person typed or the
             // tool printed, so it is wrapped and never reinterpreted.
             let rendered: Vec<ratatui::text::Line<'static>> = match entry.role {
-                EntryRole::Answer | EntryRole::Info => {
-                    crate::tui::markdown::lines(&entry.text, width)
-                }
-                _ => wrap_text(&entry.text, width)
+                EntryRole::Answer | EntryRole::Info => crate::tui::markdown::lines(&text, width),
+                _ => wrap_text(&text, width)
                     .into_iter()
                     .map(ratatui::text::Line::from)
                     .collect(),
             };
-            for line in rendered {
-                out.push((entry.role, line));
+            let last = rendered.len().saturating_sub(1);
+            let is_answer = entry.role == EntryRole::Answer;
+            let stats = if !entry.live {
+                entry.stats.clone()
+            } else {
+                None
+            };
+            for (position, line) in rendered.into_iter().enumerate() {
+                let mut line = line;
+                if entry.live && position == last {
+                    line.spans.push(ratatui::text::Span::styled(
+                        "▍",
+                        ratatui::style::Style::default(),
+                    ));
+                }
+                out.push((entry.role, line, position == 0));
+            }
+            // The pace line belongs to the answer, not to the session: one
+            // dim row under it, and the next user's blank line reclaims the
+            // spacing. It is the only post-answer row the design keeps.
+            if is_answer && let Some(stats) = stats {
+                out.push((EntryRole::Info, ratatui::text::Line::from(stats), false));
             }
         }
         out
@@ -1317,6 +1712,21 @@ fn chunk_chars(text: &str, width: usize) -> Vec<String> {
 
 /// Parse one submitted line.
 pub fn parse_line(raw: &str) -> Parsed {
+    parse_line_inner(raw, true)
+}
+
+/// The parser without the "did you mean" suggestion.
+///
+/// The suggestion reads the command projection, and building that projection
+/// asks this parser whether each row runs. Going through the full parser from
+/// the builder re-enters the projection while it is still initialising and
+/// deadlocks — the hang that used to freeze every `App::new` in a test.
+pub(crate) fn parse_line_quietly(raw: &str) -> Parsed {
+    parse_line_inner(raw, false)
+}
+
+/// The parser itself. `suggest` is false only while the projection is built.
+fn parse_line_inner(raw: &str, suggest: bool) -> Parsed {
     let line = raw.trim();
     if line.is_empty() {
         return Parsed::Empty;
@@ -1368,9 +1778,9 @@ pub fn parse_line(raw: &str) -> Parsed {
                 Parsed::Search(args)
             }
         }
-        "context" => Parsed::ContextOverlay,
         "diff" => Parsed::DiffOverlay,
         "rewind" => Parsed::RewindOverlay,
+        "checkpoints" => Parsed::CheckpointsOverlay,
         "permissions" => Parsed::PermissionsOverlay,
         "feedback" => Parsed::FeedbackOverlay,
         "doctor" => Parsed::Run(Verb::Doctor(DoctorArgs {
@@ -1379,6 +1789,175 @@ pub fn parse_line(raw: &str) -> Parsed {
             yes: false,
             dry_run: false,
         })),
+        "drift" => {
+            let (flags, _) = split_flags(&args);
+            Parsed::Run(Verb::Drift(DriftArgs {
+                since: flags.get("since").cloned(),
+            }))
+        }
+        "simulate" => {
+            let (_, positional) = split_flags(&args);
+            if positional.is_empty() {
+                return Parsed::Usage("usage: /simulate <change>".to_string());
+            }
+            Parsed::Run(Verb::Simulate(SimulateArgs {
+                change: positional.join(" "),
+            }))
+        }
+        "lineage" => {
+            let (flags, positional) = split_flags(&args);
+            if positional.is_empty() {
+                return Parsed::Usage("usage: /lineage <entity> [--depth N]".to_string());
+            }
+            Parsed::Run(Verb::Lineage(LineageArgs {
+                entity: positional[0].clone(),
+                depth: flags
+                    .get("depth")
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(3),
+            }))
+        }
+        "why" => {
+            let (flags, positional) = split_flags(&args);
+            if positional.is_empty() {
+                return Parsed::Usage("usage: /why <symbol> [--at WHEN]".to_string());
+            }
+            Parsed::Run(Verb::Why(WhyArgs {
+                symbol: positional.join(" "),
+                at: flags.get("at").cloned(),
+            }))
+        }
+        "impact" => {
+            let (flags, positional) = split_flags(&args);
+            if positional.is_empty() {
+                return Parsed::Usage("usage: /impact <symbol> [--depth N]".to_string());
+            }
+            Parsed::Run(Verb::Impact(ImpactArgs {
+                symbol: positional.join(" "),
+                depth: flags
+                    .get("depth")
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(2),
+                diff: flags.contains_key("diff"),
+            }))
+        }
+        "plan" => {
+            let (flags, positional) = split_flags(&args);
+            // `/plan step <text>` appends a step; anything else names the
+            // session and shows the artifact.
+            let (name, step) = match positional.first().map(String::as_str) {
+                Some("step") => (None, Some(positional[1..].join(" "))),
+                Some(_) => (Some(positional.join(" ")), None),
+                None => (None, None),
+            };
+            Parsed::Run(Verb::Plan(PlanArgs {
+                name,
+                step,
+                enable: false,
+                disable: false,
+                json: flags.contains_key("json"),
+            }))
+        }
+        "goal" => {
+            let (_flags, positional) = split_flags(&args);
+            if positional.is_empty() {
+                Parsed::Run(Verb::Goal(GoalArgs { condition: None }))
+            } else {
+                Parsed::Run(Verb::Goal(GoalArgs {
+                    condition: Some(positional.join(" ")),
+                }))
+            }
+        }
+        "checkpoint" => {
+            let (flags, _) = split_flags(&args);
+            Parsed::Run(Verb::Checkpoint(CheckpointArgs {
+                name: flags.get("name").cloned(),
+            }))
+        }
+        "undo" => Parsed::Run(Verb::Undo),
+        "redo" => Parsed::Run(Verb::Redo),
+        "delegate" => {
+            let (_, positional) = split_flags(&args);
+            if positional.len() < 2 {
+                return Parsed::Usage("usage: /delegate <name> <task>".to_string());
+            }
+            Parsed::Run(Verb::Delegate(DelegateArgs {
+                name: positional[0].clone(),
+                task: positional[1..].join(" "),
+            }))
+        }
+        "merge" => {
+            let (_, positional) = split_flags(&args);
+            if positional.is_empty() {
+                return Parsed::Usage("usage: /merge <branch>".to_string());
+            }
+            Parsed::Run(Verb::Merge(MergeArgs {
+                branch: positional.join(" "),
+            }))
+        }
+        "handoff" => {
+            let (flags, _) = split_flags(&args);
+            Parsed::Run(Verb::Handoff(HandoffTopArgs {
+                path: flags.get("path").cloned(),
+            }))
+        }
+        "compact" => {
+            let (flags, _) = split_flags(&args);
+            Parsed::Run(Verb::Compact(CompactArgs {
+                focus: flags.get("focus").cloned(),
+            }))
+        }
+        "btw" => {
+            let (_, positional) = split_flags(&args);
+            if positional.is_empty() {
+                return Parsed::Usage("usage: /btw <question>".to_string());
+            }
+            Parsed::Run(Verb::Btw(BtwArgs {
+                question: positional.join(" "),
+            }))
+        }
+        "recap" => Parsed::Run(Verb::Recap),
+        "export" => {
+            let (flags, _) = split_flags(&args);
+            Parsed::Run(Verb::Export(ExportArgs {
+                path: flags.get("path").cloned(),
+            }))
+        }
+        "rename" => {
+            let (_, positional) = split_flags(&args);
+            if positional.is_empty() {
+                return Parsed::Usage("usage: /rename <name>".to_string());
+            }
+            Parsed::Run(Verb::Rename(RenameArgs {
+                name: positional.join(" "),
+            }))
+        }
+        // `/keymap`, `/keymap set alt+d=surface: review`, `/keymap unset alt+d`,
+        // `/keymap reset`. The words become the same flags the CLI parses, so a
+        // chord rebound in a session is a chord rebound on the command line.
+        "keymap" => {
+            let mut parsed = KeymapArgs::default();
+            let mut words = args.iter();
+            while let Some(word) = words.next() {
+                match word.as_str() {
+                    "set" => {
+                        if let Some(spec) = words.next() {
+                            parsed.set = Some(spec.clone());
+                        }
+                    }
+                    "unset" => parsed.unset = words.next().cloned(),
+                    "reset" => parsed.reset = true,
+                    _ => {}
+                }
+            }
+            Parsed::Run(Verb::Keymap(parsed))
+        }
+        "onboarding" => Parsed::Onboarding,
+        "brief" => Parsed::Run(Verb::Brief),
+        "acp" => Parsed::Info(
+            "`memnoth acp` runs the ACP server until interrupted — run it in another terminal"
+                .to_string(),
+        ),
         "kg" => match args.first().map(String::as_str) {
             // Both run until interrupted. In a session that would freeze the
             // screen with no way back to the prompt, so name the shell command
@@ -1392,6 +1971,11 @@ pub fn parse_line(raw: &str) -> Parsed {
             ),
             _ => parse_kg(&args),
         },
+        // `/stats` is not a second money surface: it folds into `/billing`,
+        // the one place invoices, plan and limits live.
+        "stats" => Parsed::Run(Verb::Billing(BillingCommands {
+            action: BillingCommand::Limits(BillingLimitsArgs { json: false }),
+        })),
         "vault" => parse_vault(&args),
         "mcp" => parse_mcp(&args),
         // `/update` runs the same verb `mn update` parses: one implementation,
@@ -1405,13 +1989,10 @@ pub fn parse_line(raw: &str) -> Parsed {
                 version: flags.get("version").cloned(),
                 no_verify: flags.contains_key("no-verify")
                     || words.iter().any(|word| word == "no-verify"),
+                rollback: flags.contains_key("rollback")
+                    || words.iter().any(|word| word == "rollback"),
             }))
         }
-        "stats" => parse_usage_flags(&args, true),
-        "usage" => parse_usage_flags(&args, false),
-        "credits" => Parsed::Run(Verb::Cloud(CloudArgs {
-            action: CloudCommand::Credits(CreditsArgs { json: false }),
-        })),
         "sync" => {
             let (flags, _) = split_flags(&args);
             if flags.contains_key("watch") {
@@ -1458,9 +2039,9 @@ pub fn parse_line(raw: &str) -> Parsed {
         },
         "init" => Parsed::Init,
         "memory" => Parsed::Memory,
-        "theme" => {
+        "theme" | "set-theme" => {
             if args.is_empty() {
-                Parsed::Unknown("usage: /theme <default|high-contrast|no-color>".to_string())
+                Parsed::Usage("usage: /theme <default|high-contrast|no-color>".to_string())
             } else {
                 match args[0].as_str() {
                     "default" => Parsed::Run(Verb::SetTheme(crate::tui::app::Theme::Default)),
@@ -1476,9 +2057,9 @@ pub fn parse_line(raw: &str) -> Parsed {
                 }
             }
         }
-        "screen-reader" => {
+        "screen-reader" | "set-screen-reader" => {
             if args.is_empty() {
-                Parsed::Unknown("usage: /screen-reader <off|plain>".to_string())
+                Parsed::Usage("usage: /screen-reader <off|plain>".to_string())
             } else {
                 match args[0].as_str() {
                     "off" => Parsed::Run(Verb::SetScreenReader(
@@ -1493,8 +2074,603 @@ pub fn parse_line(raw: &str) -> Parsed {
                 }
             }
         }
-        "skill" => parse_skill(&args),
-        other => Parsed::Unknown(unknown_command(other)),
+        "skill" | "skills" => parse_skill(&args),
+        "sandbox" => {
+            if args.is_empty() {
+                Parsed::Usage("usage: /sandbox <test <cmd>|setup>".to_string())
+            } else {
+                match args[0].as_str() {
+                    "test" => {
+                        if args.len() < 2 {
+                            Parsed::Usage("usage: /sandbox test <cmd>".to_string())
+                        } else {
+                            Parsed::Run(Verb::Sandbox(crate::cli::SandboxArgs {
+                                command: crate::cli::SandboxCommand::Test {
+                                    command: args[1..].join(" "),
+                                },
+                            }))
+                        }
+                    }
+                    "setup" => Parsed::Run(Verb::Sandbox(crate::cli::SandboxArgs {
+                        command: crate::cli::SandboxCommand::Setup,
+                    })),
+                    other => Parsed::Unknown(format!(
+                        "unknown sandbox subcommand: {other} — use test <cmd> or setup"
+                    )),
+                }
+            }
+        }
+        "budget" => Parsed::Run(Verb::Budget(crate::cli::BudgetArgs {})),
+        "trust" => match args.first().map(String::as_str) {
+            Some("list") => Parsed::Run(Verb::Trust(crate::cli::TrustArgs {
+                action: crate::cli::TrustCommand::List,
+            })),
+            Some("forget") => match split_flags(&args[1..]).1.first() {
+                Some(path) => Parsed::Run(Verb::Trust(crate::cli::TrustArgs {
+                    action: crate::cli::TrustCommand::Forget(crate::cli::TrustForgetArgs {
+                        path: path.clone(),
+                    }),
+                })),
+                None => Parsed::Usage("usage: /trust forget <path>".to_string()),
+            },
+            _ => Parsed::Usage("usage: /trust <list|forget <path>>".to_string()),
+        },
+        "extension" => match args.first().map(String::as_str) {
+            Some("list") => Parsed::Run(Verb::Extension(crate::cli::ExtensionArgs {
+                action: crate::cli::ExtensionCommand::List(crate::cli::ExtensionListArgs {
+                    json: split_flags(&args).0.contains_key("json"),
+                }),
+            })),
+            Some("doctor") => Parsed::Run(Verb::Extension(crate::cli::ExtensionArgs {
+                action: crate::cli::ExtensionCommand::Doctor(crate::cli::ExtensionDoctorArgs {
+                    json: split_flags(&args).0.contains_key("json"),
+                }),
+            })),
+            Some("new") => match split_flags(&args[1..]).1.first() {
+                Some(path) => Parsed::Run(Verb::Extension(crate::cli::ExtensionArgs {
+                    action: crate::cli::ExtensionCommand::New(crate::cli::ExtensionNewArgs {
+                        path: path.clone(),
+                    }),
+                })),
+                None => Parsed::Usage("usage: /extension new <path>".to_string()),
+            },
+            Some("uninstall") => match split_flags(&args[1..]).1.first() {
+                Some(name) => Parsed::Run(Verb::Extension(crate::cli::ExtensionArgs {
+                    action: crate::cli::ExtensionCommand::Uninstall(
+                        crate::cli::ExtensionUninstallArgs { name: name.clone() },
+                    ),
+                })),
+                None => Parsed::Usage("usage: /extension uninstall <name>".to_string()),
+            },
+            _ => Parsed::Usage(
+                "usage: /extension <new <path>|list|uninstall <name>|doctor>".to_string(),
+            ),
+        },
+        "session" => parse_session(&args),
+        "ask" => parse_ask(&args),
+        "auth" => parse_auth(&args),
+        "config" => parse_config(&args),
+        "cloud" => parse_cloud(&args),
+        "billing" => parse_billing(&args),
+        "privacy" => parse_privacy(&args),
+        "telemetry" => parse_telemetry(&args),
+        "audit" => parse_audit(&args),
+        "receipt" => parse_receipt(&args),
+        "bench" => parse_bench(&args),
+        "agents" => parse_agents(&args),
+        "completion" => parse_completion(&args),
+        "version" => {
+            let (flags, _) = split_flags(&args);
+            Parsed::Run(Verb::Version(VersionArgs {
+                json: flags.contains_key("json"),
+            }))
+        }
+        "schema" => {
+            let (flags, _) = split_flags(&args);
+            Parsed::Run(Verb::Schema(SchemaArgs {
+                output: flags.get("path").map(PathBuf::from),
+                check: flags.contains_key("check"),
+            }))
+        }
+        "install" => {
+            let (flags, _) = split_flags(&args);
+            Parsed::Run(Verb::Install(InstallArgs {
+                force: flags.contains_key("force"),
+            }))
+        }
+        "uninstall" => {
+            let (flags, _) = split_flags(&args);
+            Parsed::Run(Verb::Uninstall(UninstallArgs {
+                keep_state: flags.contains_key("keep-state"),
+                yes: flags.contains_key("yes"),
+                dry_run: flags.contains_key("dry-run"),
+            }))
+        }
+        "open" => {
+            let (flags, positionals) = split_flags(&args);
+            match flags
+                .get("page")
+                .cloned()
+                .or_else(|| positionals.first().cloned())
+            {
+                Some(page) => Parsed::Run(Verb::Open(OpenArgs {
+                    page,
+                    project_id: None,
+                    session_id: None,
+                    no_browser: false,
+                    json: false,
+                })),
+                None => Parsed::Usage(
+                    "usage: /open <page> (console, dashboard, usage, billing)".to_string(),
+                ),
+            }
+        }
+        "setup" => {
+            let (flags, _) = split_flags(&args);
+            Parsed::Run(Verb::Setup(SetupArgs {
+                skip: flags
+                    .get("skip")
+                    .map(|value| value.split(',').map(str::to_string).collect())
+                    .unwrap_or_default(),
+                yes: flags.contains_key("yes"),
+                json: flags.contains_key("json"),
+            }))
+        }
+        "demo" => Parsed::Run(Verb::Demo),
+        "status" => Parsed::Run(Verb::Session(SessionArgs {
+            action: SessionCommand::Status(StatusArgs {
+                name: None,
+                json: false,
+            }),
+        })),
+        other => Parsed::Unknown(if suggest {
+            unknown_command(other)
+        } else {
+            format!("unknown command /{other}")
+        }),
+    }
+}
+
+/// `/session` and its subcommands. Bare `/session` lists.
+fn parse_session(args: &[String]) -> Parsed {
+    let Some(action) = args.first() else {
+        return Parsed::Run(Verb::Session(SessionArgs {
+            action: SessionCommand::List(ListArgs { json: false }),
+        }));
+    };
+    match action.as_str() {
+        "start" => {
+            let (flags, positionals) = split_flags(&args[1..]);
+            Parsed::Run(Verb::Session(SessionArgs {
+                action: SessionCommand::Start(StartArgs {
+                    name: flags
+                        .get("name")
+                        .cloned()
+                        .or_else(|| positionals.first().cloned()),
+                    resume: flags.get("resume").cloned(),
+                    model: flags.get("model").cloned(),
+                }),
+            }))
+        }
+        "resume" => match args.get(1) {
+            Some(name) => Parsed::Run(Verb::Session(SessionArgs {
+                action: SessionCommand::Resume(ResumeArgs { name: name.clone() }),
+            })),
+            None => Parsed::Usage("usage: /session resume <name>".to_string()),
+        },
+        "list" => Parsed::Run(Verb::Session(SessionArgs {
+            action: SessionCommand::List(ListArgs { json: false }),
+        })),
+        "status" => Parsed::Run(Verb::Session(SessionArgs {
+            action: SessionCommand::Status(StatusArgs {
+                name: args.get(1).cloned(),
+                json: false,
+            }),
+        })),
+        "stop" => Parsed::Run(Verb::Session(SessionArgs {
+            action: SessionCommand::Stop(StopArgs {
+                name: args.get(1).cloned(),
+                force: false,
+            }),
+        })),
+        other => Parsed::Unknown(format!(
+            "unknown session command {other:?} — use start, resume, list, status or stop"
+        )),
+    }
+}
+
+/// `/ask <prompt>` — one shot, printed in the transcript.
+fn parse_ask(args: &[String]) -> Parsed {
+    let (flags, positionals) = split_flags(args);
+    let prompt = flags.get("prompt").cloned();
+    if prompt.is_none() && positionals.iter().all(|word| word.trim().is_empty()) {
+        return Parsed::Usage("usage: /ask <prompt>".to_string());
+    }
+    Parsed::Run(Verb::Ask(AskArgs {
+        words: positionals,
+        prompt,
+        output_format: flags
+            .get("output-format")
+            .cloned()
+            .unwrap_or_else(|| "text".to_string()),
+    }))
+}
+
+/// `/auth` and its subcommands.
+fn parse_auth(args: &[String]) -> Parsed {
+    let Some(action) = args.first() else {
+        return Parsed::Usage("usage: /auth <login|logout|status|whoami>".to_string());
+    };
+    match action.as_str() {
+        "login" => {
+            let (flags, _) = split_flags(&args[1..]);
+            Parsed::Run(Verb::Auth(AuthArgs {
+                action: AuthCommand::Login(AuthLoginArgs {
+                    no_browser: flags.contains_key("no-browser"),
+                    with_token: flags.get("with-token").cloned(),
+                    client_name: flags.get("client-name").cloned(),
+                    tier: flags.get("tier").cloned(),
+                }),
+            }))
+        }
+        "logout" => Parsed::Run(Verb::Auth(AuthArgs {
+            action: AuthCommand::Logout(AuthLogoutArgs {}),
+        })),
+        "status" => Parsed::Run(Verb::Auth(AuthArgs {
+            action: AuthCommand::Status(AuthStatusArgs {}),
+        })),
+        "whoami" => Parsed::Run(Verb::Auth(AuthArgs {
+            action: AuthCommand::Whoami(WhoamiArgs {}),
+        })),
+        other => Parsed::Unknown(format!(
+            "unknown auth command {other:?} — use login, logout, status or whoami"
+        )),
+    }
+}
+
+/// `/config` and its subcommands. Bare `/config` opens the editor.
+fn parse_config(args: &[String]) -> Parsed {
+    let Some(action) = args.first() else {
+        return Parsed::Run(Verb::Config(ConfigArgs {
+            action: ConfigCommand::Edit(ConfigEditArgs { json: false }),
+        }));
+    };
+    match action.as_str() {
+        "get" => match args.get(1) {
+            Some(key) => Parsed::Run(Verb::Config(ConfigArgs {
+                action: ConfigCommand::Get(ConfigGetArgs {
+                    key: key.clone(),
+                    json: false,
+                }),
+            })),
+            None => Parsed::Usage("usage: /config get <key>".to_string()),
+        },
+        "set" => match (args.get(1), args.get(2)) {
+            (Some(key), Some(value)) => Parsed::Run(Verb::Config(ConfigArgs {
+                action: ConfigCommand::Set(ConfigSetArgs {
+                    key: key.clone(),
+                    value: value.clone(),
+                    json: false,
+                }),
+            })),
+            _ => Parsed::Usage("usage: /config set <key> <value>".to_string()),
+        },
+        "list" => Parsed::Run(Verb::Config(ConfigArgs {
+            action: ConfigCommand::List(ConfigListArgs { json: false }),
+        })),
+        "explain" => match args.get(1) {
+            Some(key) => Parsed::Run(Verb::Config(ConfigArgs {
+                action: ConfigCommand::Explain(ConfigExplainArgs {
+                    key: key.clone(),
+                    json: false,
+                }),
+            })),
+            None => Parsed::Usage("usage: /config explain <key>".to_string()),
+        },
+        "edit" => Parsed::Run(Verb::Config(ConfigArgs {
+            action: ConfigCommand::Edit(ConfigEditArgs { json: false }),
+        })),
+        other => Parsed::Unknown(format!(
+            "unknown config command {other:?} — use get, set, list, explain or edit"
+        )),
+    }
+}
+
+/// `/cloud` and its subcommands: the profile this session reads.
+fn parse_cloud(args: &[String]) -> Parsed {
+    match args.first().map(String::as_str) {
+        Some("login") => Parsed::Run(Verb::Auth(AuthArgs {
+            action: AuthCommand::Login(AuthLoginArgs {
+                no_browser: false,
+                with_token: None,
+                client_name: None,
+                tier: None,
+            }),
+        })),
+        Some("logout") => Parsed::Run(Verb::Auth(AuthArgs {
+            action: AuthCommand::Logout(AuthLogoutArgs {}),
+        })),
+        Some("status") => Parsed::Run(Verb::Auth(AuthArgs {
+            action: AuthCommand::Status(AuthStatusArgs {}),
+        })),
+        Some("whoami") => Parsed::Run(Verb::Auth(AuthArgs {
+            action: AuthCommand::Whoami(WhoamiArgs {}),
+        })),
+        Some("sync") => {
+            let (flags, _) = split_flags(&args[1..]);
+            Parsed::Run(Verb::Cloud(CloudArgs {
+                action: CloudCommand::Sync(SyncArgs {
+                    dry_run: flags.contains_key("dry-run"),
+                    watch: false,
+                    json: flags.contains_key("json"),
+                }),
+            }))
+        }
+        Some("credits") => Parsed::Run(Verb::Cloud(CloudArgs {
+            action: CloudCommand::Credits(CreditsArgs { json: false }),
+        })),
+        Some("billing") => {
+            Parsed::Usage("usage: /cloud billing — see /billing <invoices|plan|limits>".to_string())
+        }
+        Some("profile") => match args.get(1).map(String::as_str) {
+            Some("set") => match (args.get(2), args.get(3)) {
+                (Some(key), Some(value)) => Parsed::Run(Verb::Cloud(CloudArgs {
+                    action: CloudCommand::Profile(ProfileArgs {
+                        action: ProfileCommand::Set(ProfileSetArgs {
+                            key: key.clone(),
+                            value: value.clone(),
+                            json: false,
+                        }),
+                    }),
+                })),
+                _ => Parsed::Usage("usage: /cloud profile set <key> <value>".to_string()),
+            },
+            _ => Parsed::Run(Verb::Cloud(CloudArgs {
+                action: CloudCommand::Profile(ProfileArgs {
+                    action: ProfileCommand::Show(ProfileShowArgs { json: false }),
+                }),
+            })),
+        },
+        Some(_) => Parsed::Usage("usage: /cloud <login|logout|status|whoami|profile>".to_string()),
+        None => Parsed::Usage("usage: /cloud <login|logout|status|whoami|profile>".to_string()),
+    }
+}
+
+/// `/billing` and its subcommands.
+fn parse_billing(args: &[String]) -> Parsed {
+    match args.first().map(String::as_str) {
+        Some("invoices") => Parsed::Run(Verb::Billing(BillingCommands {
+            action: BillingCommand::Invoices(BillingInvoicesArgs { json: false }),
+        })),
+        Some("plan") => Parsed::Run(Verb::Billing(BillingCommands {
+            action: BillingCommand::Plan(BillingPlanArgs { json: false }),
+        })),
+        Some("limits") => Parsed::Run(Verb::Billing(BillingCommands {
+            action: BillingCommand::Limits(BillingLimitsArgs { json: false }),
+        })),
+        Some("credits") => Parsed::Run(Verb::Cloud(CloudArgs {
+            action: CloudCommand::Credits(CreditsArgs { json: false }),
+        })),
+        _ => Parsed::Usage("usage: /billing <invoices|plan|limits>".to_string()),
+    }
+}
+
+/// `/privacy` and its subcommands.
+fn parse_privacy(args: &[String]) -> Parsed {
+    match args.first().map(String::as_str) {
+        Some("status") => Parsed::Run(Verb::Privacy(PrivacyArgs {
+            action: PrivacyCommand::Status(PrivacyStatusArgs { json: false }),
+        })),
+        Some("on") => Parsed::Run(Verb::Privacy(PrivacyArgs {
+            action: PrivacyCommand::On(PrivacyOnArgs { json: false }),
+        })),
+        Some("off") => Parsed::Run(Verb::Privacy(PrivacyArgs {
+            action: PrivacyCommand::Off(PrivacyOffArgs { json: false }),
+        })),
+        Some("mode") => match args.get(1) {
+            Some(mode) => Parsed::Run(Verb::Privacy(PrivacyArgs {
+                action: PrivacyCommand::Mode(PrivacyModeArgs {
+                    mode: mode.clone(),
+                    json: false,
+                }),
+            })),
+            None => Parsed::Usage("usage: /privacy mode <mode>".to_string()),
+        },
+        Some("show-data") => Parsed::Run(Verb::Privacy(PrivacyArgs {
+            action: PrivacyCommand::ShowData(PrivacyShowDataArgs { json: false }),
+        })),
+        _ => Parsed::Usage("usage: /privacy <status|on|off|mode|show-data>".to_string()),
+    }
+}
+
+/// `/telemetry` and its subcommands.
+fn parse_telemetry(args: &[String]) -> Parsed {
+    match args.first().map(String::as_str) {
+        Some("status") => Parsed::Run(Verb::Telemetry(TelemetryArgs {
+            action: TelemetryCommand::Status(TelemetryStatusArgs { json: false }),
+        })),
+        Some("on") => Parsed::Run(Verb::Telemetry(TelemetryArgs {
+            action: TelemetryCommand::On(TelemetryOnArgs { json: false }),
+        })),
+        Some("off") => Parsed::Run(Verb::Telemetry(TelemetryArgs {
+            action: TelemetryCommand::Off(TelemetryOffArgs { json: false }),
+        })),
+        _ => Parsed::Usage("usage: /telemetry <status|on|off>".to_string()),
+    }
+}
+
+/// `/audit` and its subcommands.
+fn parse_audit(args: &[String]) -> Parsed {
+    match args.first().map(String::as_str) {
+        Some("show") => Parsed::Run(Verb::Audit(AuditArgs {
+            action: AuditCommand::Show(AuditShowArgs {
+                limit: 50,
+                json: false,
+            }),
+        })),
+        Some("verify") => Parsed::Run(Verb::Audit(AuditArgs {
+            action: AuditCommand::Verify(AuditVerifyArgs { json: false }),
+        })),
+        Some("export") => Parsed::Run(Verb::Audit(AuditArgs {
+            action: AuditCommand::Export(AuditExportArgs {
+                out: None,
+                json: false,
+            }),
+        })),
+        _ => Parsed::Usage("usage: /audit <show|verify|export>".to_string()),
+    }
+}
+
+/// `/receipt` and its subcommands.
+fn parse_receipt(args: &[String]) -> Parsed {
+    match args.first().map(String::as_str) {
+        Some("write") => Parsed::Run(Verb::Receipt(ReceiptArgs {
+            action: ReceiptCommand::Write(ReceiptWriteArgs {
+                commit: None,
+                json: false,
+            }),
+        })),
+        Some("show") => Parsed::Run(Verb::Receipt(ReceiptArgs {
+            action: ReceiptCommand::Show(ReceiptShowArgs {
+                commit: None,
+                json: false,
+            }),
+        })),
+        Some("verify") => Parsed::Run(Verb::Receipt(ReceiptArgs {
+            action: ReceiptCommand::Verify(ReceiptVerifyArgs {
+                commit: None,
+                json: false,
+            }),
+        })),
+        _ => Parsed::Usage("usage: /receipt <write|show|verify>".to_string()),
+    }
+}
+
+/// `/agents` and its subcommands.
+fn parse_agents(args: &[String]) -> Parsed {
+    match args.first().map(String::as_str) {
+        Some("run") => match args.get(1).cloned() {
+            Some(task) => Parsed::Run(Verb::Agents(AgentsArgs {
+                action: AgentsCommand::Run(AgentRunArgs { task, json: false }),
+            })),
+            None => Parsed::Usage("usage: /agents run <task>".to_string()),
+        },
+        Some("list") => Parsed::Run(Verb::Agents(AgentsArgs {
+            action: AgentsCommand::List(AgentListArgs { json: false }),
+        })),
+        Some("result") => match args.get(1) {
+            Some(id) => Parsed::Run(Verb::Agents(AgentsArgs {
+                action: AgentsCommand::Result(AgentResultArgs {
+                    id: id.clone(),
+                    json: false,
+                }),
+            })),
+            None => Parsed::Usage("usage: /agents result <id>".to_string()),
+        },
+        Some("unpack") => match args.get(1) {
+            Some(id) => Parsed::Run(Verb::Agents(AgentsArgs {
+                action: AgentsCommand::Unpack(AgentUnpackArgs {
+                    id: id.clone(),
+                    json: false,
+                }),
+            })),
+            None => Parsed::Usage("usage: /agents unpack <id>".to_string()),
+        },
+        _ => Parsed::Usage("usage: /agents <run|list|result|unpack>".to_string()),
+    }
+}
+
+/// `/completion` and its subcommands.
+fn parse_completion(args: &[String]) -> Parsed {
+    match args.first().map(String::as_str) {
+        Some("show") => match args.get(1) {
+            Some(shell) => Parsed::Run(Verb::Completion(CompletionArgs {
+                action: CompletionCommand::Show(CompletionShowArgs {
+                    shell: shell.clone(),
+                    output: None,
+                    check: false,
+                    json: false,
+                }),
+            })),
+            None => Parsed::Usage("usage: /completion show <shell>".to_string()),
+        },
+        Some("install") => match args.get(1) {
+            Some(shell) => Parsed::Run(Verb::Completion(CompletionArgs {
+                action: CompletionCommand::Install(CompletionInstallArgs {
+                    shell: Some(shell.clone()),
+                    json: false,
+                }),
+            })),
+            None => Parsed::Usage("usage: /completion install <shell>".to_string()),
+        },
+        Some("uninstall") => match args.get(1) {
+            Some(shell) => Parsed::Run(Verb::Completion(CompletionArgs {
+                action: CompletionCommand::Uninstall(CompletionUninstallArgs {
+                    shell: Some(shell.clone()),
+                }),
+            })),
+            None => Parsed::Usage("usage: /completion uninstall <shell>".to_string()),
+        },
+        _ => Parsed::Usage("usage: /completion <show|install|uninstall> <shell>".to_string()),
+    }
+}
+
+/// `/bench` and its subcommands.
+fn parse_bench(args: &[String]) -> Parsed {
+    use crate::bench::{AblationArgs, BenchArgs, BenchCommand, RunArgs, ScoreboardArgs, Suite};
+    match args.first().map(String::as_str) {
+        Some("run") => {
+            let (flags, _) = split_flags(&args[1..]);
+            let suite = match flags.get("suite").map(String::as_str) {
+                Some("trs") => Suite::Trs,
+                Some("kg") => Suite::Kg,
+                _ => Suite::Mts,
+            };
+            Parsed::Run(Verb::Bench(BenchArgs {
+                command: BenchCommand::Run(RunArgs {
+                    suite,
+                    dataset: None,
+                    model: flags.get("model").cloned(),
+                    effort: flags.get("effort").cloned(),
+                    n: flags
+                        .get("n")
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(3),
+                    seed: 20_261_110,
+                    bootstrap: 10_000,
+                    ci_level: 0.95,
+                    output: flags.get("output").map(PathBuf::from),
+                    ablation: flags.contains_key("ablation"),
+                    fail_below: None,
+                }),
+            }))
+        }
+        Some("scoreboard") => {
+            let (flags, positionals) = split_flags(&args[1..]);
+            let input = flags
+                .get("input")
+                .cloned()
+                .or_else(|| positionals.first().cloned());
+            match input {
+                Some(input) => Parsed::Run(Verb::Bench(BenchArgs {
+                    command: BenchCommand::Scoreboard(ScoreboardArgs {
+                        input: PathBuf::from(input),
+                        regenerate: flags.contains_key("regenerate"),
+                    }),
+                })),
+                None => Parsed::Usage("usage: /bench scoreboard --input <file>".to_string()),
+            }
+        }
+        Some("ablation") => {
+            let (flags, _) = split_flags(&args[1..]);
+            Parsed::Run(Verb::Bench(BenchArgs {
+                command: BenchCommand::Ablation(AblationArgs {
+                    input: flags.get("input").map(PathBuf::from),
+                    run_pending: flags.contains_key("run-pending"),
+                }),
+            }))
+        }
+        _ => Parsed::Usage("usage: /bench <run|scoreboard|ablation>".to_string()),
     }
 }
 
@@ -1507,7 +2683,7 @@ fn parse_tasks(args: &[String]) -> Parsed {
         "run" => {
             let command = args[1..].join(" ");
             if command.trim().is_empty() {
-                Parsed::Unknown("usage: /tasks run <command>".to_string())
+                Parsed::Usage("usage: /tasks run <command>".to_string())
             } else {
                 Parsed::Tasks(TasksCommand::Run(command))
             }
@@ -1516,37 +2692,11 @@ fn parse_tasks(args: &[String]) -> Parsed {
         "logs" | "log" => Parsed::Tasks(TasksCommand::Logs(args.get(1).cloned())),
         "cancel" | "stop" | "kill" => match args.get(1) {
             Some(id) => Parsed::Tasks(TasksCommand::Cancel(id.clone())),
-            None => Parsed::Unknown("usage: /tasks cancel <id>".to_string()),
+            None => Parsed::Usage("usage: /tasks cancel <id>".to_string()),
         },
         other => Parsed::Unknown(format!(
             "unknown tasks command {other:?} — use run, status, logs, or cancel"
         )),
-    }
-}
-
-/// `/stats` and `/usage` share every flag; only the verb differs.
-fn parse_usage_flags(args: &[String], stats: bool) -> Parsed {
-    let (flags, _) = split_flags(args);
-    let by = flags.get("by").cloned();
-    let since = flags.get("since").cloned();
-    let range = flags
-        .get("range")
-        .cloned()
-        .unwrap_or_else(|| "30d".to_string());
-    if stats {
-        Parsed::Run(Verb::Stats(StatsArgs {
-            by,
-            since,
-            range,
-            json: false,
-        }))
-    } else {
-        Parsed::Run(Verb::Usage(UsageArgs {
-            by,
-            since,
-            range,
-            json: false,
-        }))
     }
 }
 
@@ -1599,14 +2749,14 @@ fn edit_distance(a: &str, b: &str) -> usize {
 
 fn parse_skill(args: &[String]) -> Parsed {
     let Some(action) = args.first() else {
-        return Parsed::Unknown(SKILL_USAGE.to_string());
+        return Parsed::Usage(SKILL_USAGE.to_string());
     };
     let rest = &args[1..];
     match action.as_str() {
         "add" => {
             let (flags, positional) = split_flags(rest);
             if positional.is_empty() {
-                return Parsed::Unknown("usage: /skill add <path> [--name <name>]".to_string());
+                return Parsed::Usage("usage: /skill add <path> [--name <name>]".to_string());
             }
             let path = positional[0].clone();
             let name = flags.get("name").cloned();
@@ -1626,18 +2776,27 @@ fn parse_skill(args: &[String]) -> Parsed {
         "remove" | "rm" => {
             let (flags, positional) = split_flags(rest);
             if positional.is_empty() {
-                return Parsed::Unknown("usage: /skill remove <name> [--force]".to_string());
+                return Parsed::Usage(
+                    "usage: /skill remove <name> [--force] [--yes] [--dry-run]".to_string(),
+                );
             }
             let name = positional[0].clone();
             let force = flags.contains_key("force") || flags.contains_key("f");
+            let yes = flags.contains_key("yes");
+            let dry_run = flags.contains_key("dry-run");
             Parsed::Run(Verb::Skills(SkillArgs {
-                action: SkillCommand::Remove(SkillRemoveArgs { name, force }),
+                action: SkillCommand::Remove(SkillRemoveArgs {
+                    name,
+                    yes,
+                    dry_run,
+                    force,
+                }),
             }))
         }
         "run" => {
             let (flags, positional) = split_flags(rest);
             if positional.is_empty() {
-                return Parsed::Unknown("usage: /skill run <name> [KEY=VALUE...]".to_string());
+                return Parsed::Usage("usage: /skill run <name> [KEY=VALUE...]".to_string());
             }
             let name = positional[0].clone();
             let skill_args = positional[1..].to_vec();
@@ -1653,9 +2812,7 @@ fn parse_skill(args: &[String]) -> Parsed {
         "edit" => {
             let (flags, positional) = split_flags(rest);
             if positional.is_empty() {
-                return Parsed::Unknown(
-                    "usage: /skill edit <name> [--editor <editor>]".to_string(),
-                );
+                return Parsed::Usage("usage: /skill edit <name> [--editor <editor>]".to_string());
             }
             let name = positional[0].clone();
             let editor = flags
@@ -1672,7 +2829,7 @@ fn parse_skill(args: &[String]) -> Parsed {
 
 fn parse_vault(args: &[String]) -> Parsed {
     let Some(action) = args.first() else {
-        return Parsed::Unknown(VAULT_USAGE.to_string());
+        return Parsed::Usage(VAULT_USAGE.to_string());
     };
     let rest = &args[1..];
     match action.as_str() {
@@ -1701,7 +2858,7 @@ fn parse_vault(args: &[String]) -> Parsed {
             Some(name) => Parsed::Run(Verb::Vault(VaultArgs {
                 action: VaultCommand::History { name: name.clone() },
             })),
-            None => Parsed::Unknown("usage: /vault history <name>".to_string()),
+            None => Parsed::Usage("usage: /vault history <name>".to_string()),
         },
         "contradictions" => {
             let (flags, positional) = split_flags(rest);
@@ -1718,7 +2875,7 @@ fn parse_vault(args: &[String]) -> Parsed {
         "forget" => {
             let (flags, positional) = split_flags(rest);
             if positional.is_empty() {
-                return Parsed::Unknown(
+                return Parsed::Usage(
                     "usage: /vault forget <name> [--reason ...] [--apply]".to_string(),
                 );
             }
@@ -1736,7 +2893,7 @@ fn parse_vault(args: &[String]) -> Parsed {
         "correct" => {
             let (flags, positional) = split_flags(rest);
             if positional.is_empty() {
-                return Parsed::Unknown(
+                return Parsed::Usage(
                     "usage: /vault correct <name> [--summary ...] [--reason ...]".to_string(),
                 );
             }
@@ -1756,7 +2913,7 @@ fn parse_vault(args: &[String]) -> Parsed {
         "recall" => {
             let (flags, positional) = split_flags(rest);
             if positional.is_empty() {
-                return Parsed::Unknown("usage: /vault recall <query>".to_string());
+                return Parsed::Usage("usage: /vault recall <query>".to_string());
             }
             let limit = flags
                 .get("limit")
@@ -1773,7 +2930,7 @@ fn parse_vault(args: &[String]) -> Parsed {
         "link" => {
             let (flags, positional) = split_flags(rest);
             if positional.len() < 3 {
-                return Parsed::Unknown(
+                return Parsed::Usage(
                     "usage: /vault link <source> <target> <kind> [--confidence 1.0] [--reason ...]"
                         .to_string(),
                 );
@@ -1797,7 +2954,7 @@ fn parse_vault(args: &[String]) -> Parsed {
         "unlink" => {
             let (flags, positional) = split_flags(rest);
             if positional.len() < 3 {
-                return Parsed::Unknown(
+                return Parsed::Usage(
                     "usage: /vault unlink <source> <target> <kind> [--reason ...]".to_string(),
                 );
             }
@@ -1816,7 +2973,7 @@ fn parse_vault(args: &[String]) -> Parsed {
         "search" => {
             let (flags, positional) = split_flags(rest);
             if positional.is_empty() {
-                return Parsed::Unknown("usage: /vault search <query>".to_string());
+                return Parsed::Usage("usage: /vault search <query>".to_string());
             }
             Parsed::Run(Verb::Vault(VaultArgs {
                 action: VaultCommand::Search {
@@ -1920,7 +3077,7 @@ fn parse_vault(args: &[String]) -> Parsed {
                 .cloned()
                 .or_else(|| positional.first().cloned())
             else {
-                return Parsed::Unknown("usage: /vault backup <file>".to_string());
+                return Parsed::Usage("usage: /vault backup <file>".to_string());
             };
             Parsed::Run(Verb::Vault(VaultArgs {
                 action: VaultCommand::Backup {
@@ -1938,7 +3095,7 @@ fn parse_vault(args: &[String]) -> Parsed {
                 .cloned()
                 .or_else(|| positional.first().cloned())
             else {
-                return Parsed::Unknown("usage: /vault restore <file>".to_string());
+                return Parsed::Usage("usage: /vault restore <file>".to_string());
             };
             Parsed::Run(Verb::Vault(VaultArgs {
                 action: VaultCommand::Restore {
@@ -1964,7 +3121,7 @@ fn parse_vault(args: &[String]) -> Parsed {
         "merge" => {
             let (flags, positional) = split_flags(rest);
             if positional.len() < 2 {
-                return Parsed::Unknown(
+                return Parsed::Usage(
                     "usage: /vault merge <from> <into> [--reason ...]".to_string(),
                 );
             }
@@ -2022,12 +3179,12 @@ fn parse_vault(args: &[String]) -> Parsed {
                     at: None,
                 },
             })),
-            None => Parsed::Unknown("usage: /vault explain <name> [--at WHEN]".to_string()),
+            None => Parsed::Usage("usage: /vault explain <name> [--at WHEN]".to_string()),
         },
         "graph" => {
             let (flags, positional) = split_flags(rest);
             let Some(name) = positional.first() else {
-                return Parsed::Unknown("usage: /vault graph <name> [--depth 2]".to_string());
+                return Parsed::Usage("usage: /vault graph <name> [--depth 2]".to_string());
             };
             Parsed::Run(Verb::Vault(VaultArgs {
                 action: VaultCommand::Graph {
@@ -2048,10 +3205,10 @@ fn parse_vault(args: &[String]) -> Parsed {
 fn parse_remember(rest: &[String]) -> Parsed {
     let mut iter = rest.iter();
     let Some(name) = iter.next() else {
-        return Parsed::Unknown("usage: /vault remember <name> [--kind K] <fact…>".to_string());
+        return Parsed::Usage("usage: /vault remember <name> [--kind K] <fact…>".to_string());
     };
     if name.starts_with("--") {
-        return Parsed::Unknown("usage: /vault remember <name> [--kind K] <fact…>".to_string());
+        return Parsed::Usage("usage: /vault remember <name> [--kind K] <fact…>".to_string());
     }
     let mut kind = "fact".to_string();
     let mut confidence = None;
@@ -2076,7 +3233,7 @@ fn parse_remember(rest: &[String]) -> Parsed {
         }
     }
     if text.is_empty() {
-        return Parsed::Unknown("the fact is empty: /vault remember <name> <fact…>".to_string());
+        return Parsed::Usage("the fact is empty: /vault remember <name> <fact…>".to_string());
     }
     Parsed::Run(Verb::Vault(VaultArgs {
         action: VaultCommand::Remember {
@@ -2094,7 +3251,7 @@ fn parse_remember(rest: &[String]) -> Parsed {
 
 fn parse_kg(args: &[String]) -> Parsed {
     let Some(action) = args.first() else {
-        return Parsed::Unknown(KG_USAGE.to_string());
+        return Parsed::Usage(KG_USAGE.to_string());
     };
     let rest = &args[1..];
     match action.as_str() {
@@ -2113,7 +3270,7 @@ fn parse_kg(args: &[String]) -> Parsed {
         "impact" => {
             let (flags, positional) = split_flags(rest);
             if positional.is_empty() {
-                return Parsed::Unknown("usage: /kg impact <symbol>".to_string());
+                return Parsed::Usage("usage: /kg impact <symbol>".to_string());
             }
             let depth = flags
                 .get("depth")
@@ -2129,7 +3286,7 @@ fn parse_kg(args: &[String]) -> Parsed {
         "search" => {
             let (flags, positional) = split_flags(rest);
             if positional.is_empty() {
-                return Parsed::Unknown("usage: /kg search <query>".to_string());
+                return Parsed::Usage("usage: /kg search <query>".to_string());
             }
             let limit = flags
                 .get("limit")
@@ -2148,12 +3305,12 @@ fn parse_kg(args: &[String]) -> Parsed {
                     symbol: symbol.clone(),
                 },
             })),
-            None => Parsed::Unknown("usage: /kg explore <symbol>".to_string()),
+            None => Parsed::Usage("usage: /kg explore <symbol>".to_string()),
         },
         "refs" => {
             let (flags, positional) = split_flags(rest);
             if positional.is_empty() {
-                return Parsed::Unknown("usage: /kg refs <symbol>".to_string());
+                return Parsed::Usage("usage: /kg refs <symbol>".to_string());
             }
             Parsed::Run(Verb::Kg(KgArgs {
                 action: KgCommand::Refs {
@@ -2168,7 +3325,7 @@ fn parse_kg(args: &[String]) -> Parsed {
         "callers" => {
             let (flags, positional) = split_flags(rest);
             if positional.is_empty() {
-                return Parsed::Unknown("usage: /kg callers <symbol>".to_string());
+                return Parsed::Usage("usage: /kg callers <symbol>".to_string());
             }
             Parsed::Run(Verb::Kg(KgArgs {
                 action: KgCommand::Callers {
@@ -2183,7 +3340,7 @@ fn parse_kg(args: &[String]) -> Parsed {
         "callees" => {
             let (flags, positional) = split_flags(rest);
             if positional.is_empty() {
-                return Parsed::Unknown("usage: /kg callees <symbol>".to_string());
+                return Parsed::Usage("usage: /kg callees <symbol>".to_string());
             }
             Parsed::Run(Verb::Kg(KgArgs {
                 action: KgCommand::Callees {
@@ -2201,7 +3358,7 @@ fn parse_kg(args: &[String]) -> Parsed {
                     symbol: symbol.clone(),
                 },
             })),
-            None => Parsed::Unknown("usage: /kg def <symbol>".to_string()),
+            None => Parsed::Usage("usage: /kg def <symbol>".to_string()),
         },
         "diff-impact" => {
             let (flags, _) = split_flags(rest);
@@ -2214,7 +3371,7 @@ fn parse_kg(args: &[String]) -> Parsed {
         "callpath" => {
             let (_, positional) = split_flags(rest);
             if positional.len() < 2 {
-                return Parsed::Unknown("usage: /kg callpath <from> <to>".to_string());
+                return Parsed::Usage("usage: /kg callpath <from> <to>".to_string());
             }
             Parsed::Run(Verb::Kg(KgArgs {
                 action: KgCommand::Callpath {
@@ -2227,13 +3384,13 @@ fn parse_kg(args: &[String]) -> Parsed {
             Some(file) => Parsed::Run(Verb::Kg(KgArgs {
                 action: KgCommand::Outline { file: file.clone() },
             })),
-            None => Parsed::Unknown("usage: /kg outline <file>".to_string()),
+            None => Parsed::Usage("usage: /kg outline <file>".to_string()),
         },
         "tree" => match rest.first() {
             Some(dir) => Parsed::Run(Verb::Kg(KgArgs {
                 action: KgCommand::Tree { dir: dir.clone() },
             })),
-            None => Parsed::Unknown("usage: /kg tree <dir>".to_string()),
+            None => Parsed::Usage("usage: /kg tree <dir>".to_string()),
         },
         "review" => {
             let (flags, _) = split_flags(rest);
@@ -2244,7 +3401,7 @@ fn parse_kg(args: &[String]) -> Parsed {
             // tree because the revision was missing is the wrong answer.
             let base = flags.get("base").cloned();
             if base.as_deref() == Some("true") {
-                return Parsed::Unknown("usage: /kg review [--staged | --base <rev>]".to_string());
+                return Parsed::Usage("usage: /kg review [--staged | --base <rev>]".to_string());
             }
             Parsed::Run(Verb::Kg(KgArgs {
                 action: KgCommand::Review {
@@ -2259,13 +3416,13 @@ fn parse_kg(args: &[String]) -> Parsed {
                     symbol: symbol.clone(),
                 },
             })),
-            None => Parsed::Unknown("usage: /kg tests-for <symbol>".to_string()),
+            None => Parsed::Usage("usage: /kg tests-for <symbol>".to_string()),
         },
         "owners" => match rest.first() {
             Some(path) => Parsed::Run(Verb::Kg(KgArgs {
                 action: KgCommand::Owners { path: path.clone() },
             })),
-            None => Parsed::Unknown("usage: /kg owners <path>".to_string()),
+            None => Parsed::Usage("usage: /kg owners <path>".to_string()),
         },
         "dead-code" => Parsed::Run(Verb::Kg(KgArgs {
             action: KgCommand::DeadCode,
@@ -2283,12 +3440,12 @@ fn parse_kg(args: &[String]) -> Parsed {
             Some(file) => Parsed::Run(Verb::Kg(KgArgs {
                 action: KgCommand::Deps { file: file.clone() },
             })),
-            None => Parsed::Unknown("usage: /kg deps <file>".to_string()),
+            None => Parsed::Usage("usage: /kg deps <file>".to_string()),
         },
         "query" => {
             let (_, positional) = split_flags(rest);
             if positional.is_empty() {
-                return Parsed::Unknown("usage: /kg query <expr>".to_string());
+                return Parsed::Usage("usage: /kg query <expr>".to_string());
             }
             Parsed::Run(Verb::Kg(KgArgs {
                 action: KgCommand::Query {
@@ -2316,14 +3473,14 @@ fn parse_kg(args: &[String]) -> Parsed {
 
 fn parse_worktree(args: &[String]) -> Parsed {
     let Some(action) = args.first() else {
-        return Parsed::Unknown("usage: /worktree create|list|clean|diff ...".to_string());
+        return Parsed::Usage("usage: /worktree create|list|clean|diff ...".to_string());
     };
     let rest = &args[1..];
     match action.as_str() {
         "create" => {
             let (flags, positional) = split_flags(rest);
             let Some(name) = positional.first() else {
-                return Parsed::Unknown(
+                return Parsed::Usage(
                     "usage: /worktree create <name> [--branch B] [--base B]".to_string(),
                 );
             };
@@ -2347,11 +3504,15 @@ fn parse_worktree(args: &[String]) -> Parsed {
         "clean" => {
             let (flags, positional) = split_flags(rest);
             let Some(name) = positional.first() else {
-                return Parsed::Unknown("usage: /worktree clean <name> [--force]".to_string());
+                return Parsed::Usage(
+                    "usage: /worktree clean <name> [--force] [--yes] [--dry-run]".to_string(),
+                );
             };
             Parsed::Run(Verb::Worktree(WorktreeArgs {
                 action: WorktreeCommand::Clean(WorktreeCleanArgs {
                     name: name.clone(),
+                    yes: flags.contains_key("yes"),
+                    dry_run: flags.contains_key("dry-run"),
                     force: flags.contains_key("force"),
                     json: flags.contains_key("json"),
                 }),
@@ -2360,7 +3521,7 @@ fn parse_worktree(args: &[String]) -> Parsed {
         "diff" => {
             let (flags, positional) = split_flags(rest);
             let Some(from) = positional.first() else {
-                return Parsed::Unknown("usage: /worktree diff <from> [to] [paths...]".to_string());
+                return Parsed::Usage("usage: /worktree diff <from> [to] [paths...]".to_string());
             };
             Parsed::Run(Verb::Worktree(WorktreeArgs {
                 action: WorktreeCommand::Diff(WorktreeDiffArgs {
@@ -2371,7 +3532,7 @@ fn parse_worktree(args: &[String]) -> Parsed {
                 }),
             }))
         }
-        other => Parsed::Unknown(format!(
+        other => Parsed::Usage(format!(
             "unknown worktree command {other:?}\nusage: /worktree create|list|clean|diff"
         )),
     }
@@ -2380,7 +3541,7 @@ fn parse_worktree(args: &[String]) -> Parsed {
 fn parse_batch(args: &[String]) -> Parsed {
     let (flags, positional) = split_flags(args);
     if positional.is_empty() {
-        return Parsed::Unknown(
+        return Parsed::Usage(
             "usage: /batch <task> [--workers N] [--command \"cmd args\"]".to_string(),
         );
     }
@@ -2411,7 +3572,7 @@ fn parse_batch(args: &[String]) -> Parsed {
 fn parse_parallel(args: &[String]) -> Parsed {
     let (flags, positional) = split_flags(args);
     let Some(command) = positional.first() else {
-        return Parsed::Unknown(
+        return Parsed::Usage(
             "usage: /parallel <command> [targets...] [--max-concurrent N]".to_string(),
         );
     };
@@ -2432,13 +3593,13 @@ fn parse_parallel(args: &[String]) -> Parsed {
 
 fn parse_automation(args: &[String]) -> Parsed {
     let Some(group) = args.first() else {
-        return Parsed::Unknown("usage: /automation hooks|action|ci ...".to_string());
+        return Parsed::Usage("usage: /automation hooks|action|ci ...".to_string());
     };
     let rest = &args[1..];
     match group.as_str() {
         "hooks" => {
             if rest.first().map(String::as_str) != Some("install") {
-                return Parsed::Unknown("usage: /automation hooks install [--force]".to_string());
+                return Parsed::Usage("usage: /automation hooks install [--force]".to_string());
             }
             let (flags, _) = split_flags(&rest[1..]);
             Parsed::Run(Verb::Automation(AutomationArgs {
@@ -2452,7 +3613,7 @@ fn parse_automation(args: &[String]) -> Parsed {
         }
         "action" => {
             if rest.first().map(String::as_str) != Some("init") {
-                return Parsed::Unknown("usage: /automation action init [--name N]".to_string());
+                return Parsed::Usage("usage: /automation action init [--name N]".to_string());
             }
             let (flags, _) = split_flags(&rest[1..]);
             Parsed::Run(Verb::Automation(AutomationArgs {
@@ -2492,9 +3653,9 @@ fn parse_automation(args: &[String]) -> Parsed {
                     }),
                 }))
             }
-            _ => Parsed::Unknown("usage: /automation ci detect|index".to_string()),
+            _ => Parsed::Usage("usage: /automation ci detect|index".to_string()),
         },
-        other => Parsed::Unknown(format!(
+        other => Parsed::Usage(format!(
             "unknown automation group {other:?}\nusage: /automation hooks|action|ci"
         )),
     }
@@ -2549,9 +3710,13 @@ fn parse_mcp(args: &[String]) -> Parsed {
         Some("doctor") => Parsed::Run(Verb::Mcp(McpArgs {
             action: McpCommand::Doctor,
         })),
-        Some("token") => Parsed::Run(Verb::Mcp(McpArgs {
-            action: McpCommand::Token { json: false },
-        })),
+        // Minting prints a bearer into the transcript, and the transcript is
+        // a durable record: the token would outlive its own expiry in the
+        // session log. Terminal-only by default (D26).
+        Some("token") => Parsed::Info(
+            "`mcp token` mints a bearer and prints it — run it in a terminal:\n  memnoth mcp token"
+                .to_string(),
+        ),
         Some("list") => Parsed::Run(Verb::Mcp(McpArgs {
             action: McpCommand::List,
         })),
@@ -2569,7 +3734,7 @@ fn parse_mcp(args: &[String]) -> Parsed {
              stdio pipe; run them from a shell:\n  memnoth mcp serve"
                 .to_string(),
         ),
-        _ => Parsed::Unknown("usage: /mcp <doctor|token|list|test>".to_string()),
+        _ => Parsed::Usage("usage: /mcp <doctor|token|list|test>".to_string()),
     }
 }
 
@@ -2599,7 +3764,7 @@ fn parse_projects(args: &[String]) -> Parsed {
                         json: false,
                     }),
                 })),
-                None => Parsed::Unknown(PROJECTS_USAGE.to_string()),
+                None => Parsed::Usage(PROJECTS_USAGE.to_string()),
             }
         }
         "rename" => {
@@ -2612,20 +3777,20 @@ fn parse_projects(args: &[String]) -> Parsed {
                         json: false,
                     }),
                 })),
-                _ => Parsed::Unknown(PROJECTS_USAGE.to_string()),
+                _ => Parsed::Usage(PROJECTS_USAGE.to_string()),
             }
         }
         "delete" => {
             let (flags, positional) = split_flags(rest);
             let Some(id) = positional.first() else {
-                return Parsed::Unknown(PROJECTS_USAGE.to_string());
+                return Parsed::Usage(PROJECTS_USAGE.to_string());
             };
             if !flags.contains_key("yes") {
                 // Deleting asks a yes/no question on stdin, and the session already
                 // owns the terminal: the prompt would be unanswerable, or worse,
                 // answered by whatever key was pressed next. Here the answer is a
                 // flag the person types on purpose.
-                return Parsed::Unknown(
+                return Parsed::Usage(
                     "deleting a project asks for confirmation, and this session owns the \
                      terminal — answer it by typing the flag:\n  /projects delete <id> --yes"
                         .to_string(),
@@ -2669,7 +3834,7 @@ fn parse_projects(args: &[String]) -> Parsed {
                         json: false,
                     }),
                 })),
-                None => Parsed::Unknown(PROJECTS_USAGE.to_string()),
+                None => Parsed::Usage(PROJECTS_USAGE.to_string()),
             }
         }
         other => Parsed::Unknown(format!(
@@ -2722,18 +3887,23 @@ fn parse_keys(args: &[String]) -> Parsed {
             }
         }
         "revoke" => match rest.first() {
-            Some(id) => Parsed::Run(Verb::Keys(KeysArgs {
-                action: KeysCommand::Revoke(KeysRevokeArgs {
-                    id: id.clone(),
-                    json: false,
-                }),
-            })),
-            None => Parsed::Unknown(KEYS_USAGE.to_string()),
+            Some(id) => {
+                let (flags, _) = split_flags(rest);
+                Parsed::Run(Verb::Keys(KeysArgs {
+                    action: KeysCommand::Revoke(KeysRevokeArgs {
+                        id: id.clone(),
+                        yes: flags.contains_key("yes"),
+                        dry_run: flags.contains_key("dry-run"),
+                        json: false,
+                    }),
+                }))
+            }
+            None => Parsed::Usage(KEYS_USAGE.to_string()),
         },
         "revoke-all" => {
             let (flags, _) = split_flags(rest);
             if !flags.contains_key("yes") {
-                return Parsed::Unknown(
+                return Parsed::Usage(
                     "revoking every key asks for confirmation, and this session owns the \
                      terminal — answer it by typing the flag:\n  /keys revoke-all --yes"
                         .to_string(),
@@ -2779,7 +3949,7 @@ fn parse_org(args: &[String]) -> Parsed {
                     json: false,
                 }),
             })),
-            None => Parsed::Unknown(ORG_USAGE.to_string()),
+            None => Parsed::Usage(ORG_USAGE.to_string()),
         },
         "members" => Parsed::Run(Verb::Org(OrgArgs {
             action: OrgCommand::Members(OrgMembersArgs { json: false }),
@@ -2794,7 +3964,7 @@ fn parse_org(args: &[String]) -> Parsed {
                         json: false,
                     }),
                 })),
-                None => Parsed::Unknown(ORG_USAGE.to_string()),
+                None => Parsed::Usage(ORG_USAGE.to_string()),
             }
         }
         "set-role" => {
@@ -2807,7 +3977,7 @@ fn parse_org(args: &[String]) -> Parsed {
                         json: false,
                     }),
                 })),
-                _ => Parsed::Unknown(ORG_USAGE.to_string()),
+                _ => Parsed::Usage(ORG_USAGE.to_string()),
             }
         }
         "remove-member" => match rest.first() {
@@ -2817,7 +3987,7 @@ fn parse_org(args: &[String]) -> Parsed {
                     json: false,
                 }),
             })),
-            None => Parsed::Unknown(ORG_USAGE.to_string()),
+            None => Parsed::Usage(ORG_USAGE.to_string()),
         },
         "invites" => Parsed::Run(Verb::Org(OrgArgs {
             action: OrgCommand::Invites(OrgInvitesArgs { json: false }),
@@ -2838,7 +4008,7 @@ fn parse_org(args: &[String]) -> Parsed {
                     json: false,
                 }),
             })),
-            None => Parsed::Unknown(ORG_USAGE.to_string()),
+            None => Parsed::Usage(ORG_USAGE.to_string()),
         },
         other => Parsed::Unknown(format!("unknown org command {other:?}\n{ORG_USAGE}")),
     }
@@ -2867,7 +4037,7 @@ fn parse_teams(args: &[String]) -> Parsed {
                     json: false,
                 }),
             })),
-            None => Parsed::Unknown(TEAMS_USAGE.to_string()),
+            None => Parsed::Usage(TEAMS_USAGE.to_string()),
         },
         "members" => match rest.first() {
             Some(id) => Parsed::Run(Verb::Teams(TeamsArgs {
@@ -2884,8 +4054,135 @@ fn parse_teams(args: &[String]) -> Parsed {
             Some(code) => Parsed::Run(Verb::Teams(TeamsArgs {
                 action: TeamsCommand::Join(TeamsJoinArgs { code: code.clone() }),
             })),
-            None => Parsed::Unknown(TEAMS_USAGE.to_string()),
+            None => Parsed::Usage(TEAMS_USAGE.to_string()),
         },
+        "claim" => match rest.first() {
+            Some(task_id) => Parsed::Run(Verb::Teams(TeamsArgs {
+                action: TeamsCommand::Claim(TeamClaimArgs {
+                    task_id: task_id.clone(),
+                }),
+            })),
+            None => Parsed::Usage("usage: /teams claim <task-id>".to_string()),
+        },
+        "release" => match rest.first() {
+            Some(task_id) => Parsed::Run(Verb::Teams(TeamsArgs {
+                action: TeamsCommand::Release(TeamReleaseArgs {
+                    task_id: task_id.clone(),
+                }),
+            })),
+            None => Parsed::Usage("usage: /teams release <task-id>".to_string()),
+        },
+        "tasks" => {
+            let (flags, _) = split_flags(rest);
+            Parsed::Run(Verb::Teams(TeamsArgs {
+                action: TeamsCommand::Tasks(TeamTasksArgs {
+                    pending: flags.contains_key("pending"),
+                    in_progress: flags.contains_key("in-progress"),
+                    done: flags.contains_key("done"),
+                    json: flags.contains_key("json"),
+                }),
+            }))
+        }
+        "inbox" => {
+            let (flags, _) = split_flags(rest);
+            Parsed::Run(Verb::Teams(TeamsArgs {
+                action: TeamsCommand::Inbox(TeamInboxArgs {
+                    broadcast: flags.contains_key("broadcast"),
+                    ack: flags.contains_key("ack"),
+                    json: flags.contains_key("json"),
+                }),
+            }))
+        }
+        "presence" => {
+            let (flags, _) = split_flags(rest);
+            Parsed::Run(Verb::Teams(TeamsArgs {
+                action: TeamsCommand::Presence(TeamPresenceArgs {
+                    stale: flags.contains_key("stale"),
+                    sync: flags.contains_key("sync"),
+                    json: flags.contains_key("json"),
+                }),
+            }))
+        }
+        "lock" => match rest.first() {
+            Some(path) => {
+                let (flags, _) = split_flags(rest);
+                Parsed::Run(Verb::Teams(TeamsArgs {
+                    action: TeamsCommand::Lock(TeamLockArgs {
+                        path: path.clone(),
+                        ttl: flags
+                            .get("ttl")
+                            .and_then(|value| value.parse().ok())
+                            .unwrap_or(3600),
+                        json: flags.contains_key("json"),
+                    }),
+                }))
+            }
+            None => Parsed::Usage("usage: /teams lock <path>".to_string()),
+        },
+        "handoff" => match (rest.first(), rest.get(1)) {
+            (Some(task_id), Some(target)) => Parsed::Run(Verb::Teams(TeamsArgs {
+                action: TeamsCommand::Handoff(TeamHandoffArgs {
+                    task_id: task_id.clone(),
+                    target: target.clone(),
+                    message: rest.get(2).cloned(),
+                    json: false,
+                }),
+            })),
+            _ => Parsed::Usage("usage: /teams handoff <task-id> <target>".to_string()),
+        },
+        "review" => match (rest.first(), rest.get(1)) {
+            (Some(task_id), Some(reviewer)) => Parsed::Run(Verb::Teams(TeamsArgs {
+                action: TeamsCommand::Review(TeamReviewArgs {
+                    task_id: task_id.clone(),
+                    reviewer: reviewer.clone(),
+                    message: rest.get(2).cloned(),
+                    json: false,
+                }),
+            })),
+            _ => Parsed::Usage("usage: /teams review <task-id> <reviewer>".to_string()),
+        },
+        "audit" => {
+            let (flags, _) = split_flags(rest);
+            Parsed::Run(Verb::Teams(TeamsArgs {
+                action: TeamsCommand::Audit(TeamAuditArgs {
+                    range: flags
+                        .get("range")
+                        .cloned()
+                        .unwrap_or_else(|| "7d".to_string()),
+                    session: flags.get("session").cloned(),
+                    json: flags.contains_key("json"),
+                }),
+            }))
+        }
+        "namespace" => Parsed::Run(Verb::Teams(TeamsArgs {
+            action: TeamsCommand::Namespace(TeamsNamespaceArgs {
+                action: rest.first().cloned(),
+            }),
+        })),
+        "provenance" => Parsed::Run(Verb::Teams(TeamsArgs {
+            action: TeamsCommand::Provenance(TeamsProvenanceArgs { limit: None }),
+        })),
+        "disputed" => Parsed::Run(Verb::Teams(TeamsArgs {
+            action: TeamsCommand::Disputed(TeamsDisputedArgs {}),
+        })),
+        "enforce" => Parsed::Run(Verb::Teams(TeamsArgs {
+            action: TeamsCommand::Enforce(TeamsEnforceArgs {}),
+        })),
+        "import-export" => {
+            let (flags, _) = split_flags(rest);
+            Parsed::Run(Verb::Teams(TeamsArgs {
+                action: TeamsCommand::ImportExport(TeamsImportExportArgs {
+                    from_claude: flags.get("from-claude").cloned(),
+                    from_codex: flags.get("from-codex").cloned(),
+                    from_omp: flags.get("from-omp").cloned(),
+                    export: flags.get("export").cloned(),
+                    format: flags
+                        .get("format")
+                        .cloned()
+                        .unwrap_or_else(|| "markdown".to_string()),
+                }),
+            }))
+        }
         other => Parsed::Unknown(format!("unknown teams command {other:?}\n{TEAMS_USAGE}")),
     }
 }
@@ -3119,9 +4416,9 @@ mod tests {
 
     #[test]
     fn a_typo_names_the_command_it_almost_typed() {
-        assert!(matches!(parse_line("/stas"), Parsed::Unknown(ref message)
-            if message.contains("did you mean /stats")));
-        assert!(!matches!(parse_line("/stats"), Parsed::Unknown(_)));
+        assert!(matches!(parse_line("/sesion"), Parsed::Unknown(ref message)
+            if message.contains("did you mean /session")));
+        assert!(!matches!(parse_line("/session"), Parsed::Unknown(_)));
         assert!(matches!(parse_line("/palette"), Parsed::PaletteOverlay));
     }
 
@@ -3194,7 +4491,7 @@ mod tests {
         // flag has to be typed, and asking without it must say so.
         assert!(matches!(
             parse_line("/projects delete pr-1"),
-            Parsed::Unknown(ref message) if message.contains("--yes")
+            Parsed::Usage(ref message) if message.contains("--yes")
         ));
         assert!(matches!(
             parse_line("/projects delete pr-1 --yes"),
@@ -3293,7 +4590,7 @@ mod tests {
     fn remember_refuses_a_line_with_no_fact() {
         assert!(matches!(
             parse_line("/vault remember auth --kind decision"),
-            Parsed::Unknown(_)
+            Parsed::Usage(_)
         ));
     }
 
@@ -3388,6 +4685,243 @@ mod tests {
             app.input, "draft",
             "the draft comes back, not an empty line"
         );
+    }
+
+    #[test]
+    fn streamed_pieces_coalesce_into_one_live_entry_each() {
+        let mut app = App::new("s", false);
+        for piece in ["one ", "two ", "three"] {
+            app.append_stream_delta(piece);
+        }
+        for piece in ["plan ", "check"] {
+            app.append_reasoning_delta(piece);
+        }
+        let answers: Vec<&Entry> = app
+            .entries
+            .iter()
+            .filter(|entry| entry.role == EntryRole::Answer)
+            .collect();
+        assert_eq!(answers.len(), 1, "one entry per turn");
+        assert_eq!(answers[0].text, "one two three");
+        assert!(answers[0].live);
+        let thinking: Vec<&Entry> = app
+            .entries
+            .iter()
+            .filter(|entry| entry.role == EntryRole::Thinking)
+            .collect();
+        assert_eq!(thinking.len(), 1);
+        assert_eq!(thinking[0].text, "plan check");
+        assert!(
+            !thinking[0].expanded,
+            "collapsed while thinking: header plus tail"
+        );
+        // The live collapsed form is the header plus the last three lines.
+        let visual = app.visual_lines(96);
+        let body: Vec<String> = visual
+            .iter()
+            .filter(|(role, _, header)| *role == EntryRole::Thinking && !*header)
+            .map(|(_, line, _)| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        assert_eq!(body, vec!["plan check".to_string()]);
+        app.collapse_thinking();
+        assert!(
+            !app.entries
+                .iter()
+                .find(|e| e.role == EntryRole::Thinking)
+                .unwrap()
+                .expanded
+        );
+        app.finish_stream();
+        assert!(
+            !app.entries
+                .iter()
+                .find(|e| e.role == EntryRole::Answer)
+                .unwrap()
+                .live
+        );
+        // The visual form: a collapsed block is one header line.
+        let visual = app.visual_lines(72);
+        let headers: Vec<_> = visual
+            .iter()
+            .filter(|(role, _, header)| *role == EntryRole::Thinking && *header)
+            .collect();
+        assert_eq!(headers.len(), 1);
+    }
+
+    #[test]
+    fn a_live_thinking_block_shows_a_three_line_tail_until_expanded() {
+        // The collapsed stream view is a fixed-height window at the end of
+        // the reasoning, not the whole of it: a preview that grows and
+        // shrinks with the token count makes the screen jump.
+        let mut app = App::new("s", false);
+        app.append_reasoning_delta("first line\nsecond line\nthird line\nfourth line\nfifth line");
+        // A fresh block is collapsed and live: the tail, not the whole.
+        let visual = app.visual_lines(96);
+        let body: Vec<String> = visual
+            .iter()
+            .filter(|(role, _, header)| *role == EntryRole::Thinking && !*header)
+            .map(|(_, line, _)| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        assert_eq!(body.len(), 3, "the tail is three lines: {body:?}");
+        assert_eq!(body[2], "fifth line");
+
+        // Expanded, the whole block shows.
+        app.toggle_thinking();
+        let visual = app.visual_lines(96);
+        let body: Vec<String> = visual
+            .iter()
+            .filter(|(role, _, header)| *role == EntryRole::Thinking && !*header)
+            .map(|(_, line, _)| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        assert_eq!(body.len(), 5);
+
+        // Settled and collapsed: the header is the whole block again.
+        app.toggle_thinking();
+        app.finish_stream();
+        let visual = app.visual_lines(96);
+        let body: Vec<String> = visual
+            .iter()
+            .filter(|(role, _, header)| *role == EntryRole::Thinking && !*header)
+            .map(|(_, line, _)| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(body.is_empty(), "the settled block is one row: {body:?}");
+    }
+
+    #[test]
+    fn tool_calls_split_the_answer_into_chronological_segments() {
+        let mut app = App::new("s", false);
+        app.append_stream_delta("first part");
+        app.push_tool("kg search x");
+        app.append_stream_delta("second part");
+        let answers: Vec<usize> = app
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.role == EntryRole::Answer)
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(answers.len(), 2, "text after the tools is its own segment");
+        assert_eq!(app.stream_answer_first, Some(answers[0]));
+        assert_eq!(app.stream_answer, Some(answers[1]));
+        // The tool row sits between the two segments, in the order it happened.
+        assert!(answers[0] < 1 && answers[1] > 1);
+        assert_eq!(app.entries[1].role, EntryRole::Tool);
+    }
+
+    #[test]
+    fn a_stream_delta_never_yanks_the_reader_back_to_the_bottom() {
+        let mut app = App::new("s", false);
+        app.follow = false;
+        app.scroll = 0;
+        app.append_stream_delta("a token");
+        app.append_stream_delta("more tokens");
+        assert!(!app.follow, "scrolling up to read must survive the stream");
+        assert_eq!(app.scroll, 0);
+    }
+
+    #[test]
+    fn the_pace_line_reads_like_the_other_agents() {
+        assert_eq!(
+            turn_stats(17_000, 24_000, 94, Some(1_700), 3).as_deref(),
+            // Cost and tools compete for the fourth slot; money wins.
+            Some("17s · 5.5 tps · ↑24k ↓94 · $0.0017")
+        );
+        assert_eq!(
+            turn_stats(17_000, 24_000, 94, None, 3).as_deref(),
+            Some("17s · 5.5 tps · ↑24k ↓94 · 3 tools")
+        );
+        assert_eq!(
+            turn_stats(17_000, 24_000, 94, None, 0).as_deref(),
+            Some("17s · 5.5 tps · ↑24k ↓94")
+        );
+        assert_eq!(
+            turn_stats(30_000, 5_000, 500, Some(120_000), 1).as_deref(),
+            Some("30s · 16.7 tps · ↑5k ↓500 · $0.120")
+        );
+        assert_eq!(
+            turn_stats(0, 0, 0, None, 0),
+            None,
+            "an unpriced turn says nothing"
+        );
+        assert_eq!(
+            turn_stats(90_000, 812, 1_500, None, 0).as_deref(),
+            Some("1m 30s · 16.7 tps · ↑812 ↓1.5k")
+        );
+    }
+
+    #[test]
+    fn the_pace_line_follows_its_answer() {
+        let mut app = App::new("s", false);
+        app.append_stream_delta("the answer");
+        let index = app.stream_answer.unwrap();
+        app.entries[index].stats = Some("17s · 5.5 tps · ↑24k ↓94".to_string());
+        app.finish_stream();
+        let visual = app.visual_lines(96);
+        let texts: Vec<String> = visual
+            .iter()
+            .map(|(_, line, _)| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        let position = texts
+            .iter()
+            .position(|text| text == "the answer")
+            .expect("the answer renders");
+        assert_eq!(texts[position + 1], "17s · 5.5 tps · ↑24k ↓94");
+    }
+
+    #[test]
+    fn a_running_tool_row_reports_its_age() {
+        let mut app = App::new("s", false);
+        app.push_tool("kg search x");
+        let visual = app.visual_lines(72);
+        let text: String = visual
+            .iter()
+            .map(|(_, line, _)| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("0s"), "{text}");
+        app.resolve_tools(0);
+        let visual = app.visual_lines(72);
+        let text: String = visual
+            .iter()
+            .map(|(_, line, _)| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!text.contains("0s"), "resolved rows stop ageing: {text}");
     }
 
     #[test]
@@ -3601,7 +5135,7 @@ mod tests {
         // how a person answers it here.
         assert!(matches!(
             parse_line("/projects delete abc"),
-            Parsed::Unknown(ref message) if message.contains("--yes")
+            Parsed::Usage(ref message) if message.contains("--yes")
         ));
         assert!(matches!(
             parse_line("/projects delete abc --yes"),
@@ -3611,7 +5145,7 @@ mod tests {
         ));
         assert!(matches!(
             parse_line("/keys revoke-all"),
-            Parsed::Unknown(ref message) if message.contains("--yes")
+            Parsed::Usage(ref message) if message.contains("--yes")
         ));
         assert!(matches!(
             parse_line("/keys revoke-all --yes"),
@@ -3700,5 +5234,23 @@ mod update_parse_tests {
         };
         assert_eq!(args.channel.as_deref(), Some("beta"));
         assert!(!args.check);
+    }
+}
+
+/// Every command in the registry must resolve through the session parser
+/// when typed without arguments. A row that the session cannot run is a
+/// defect: `mn docs`, completions, and the palette all describe a command
+/// the user cannot reach.
+#[test]
+fn every_registry_command_without_arguments_resolves() {
+    let registry = memnoth_command::build_p0_registry().build();
+    for spec in registry.all() {
+        let command = format!("/{}", spec.cli_path.join(" "));
+        assert!(
+            !matches!(parse_line(&command), Parsed::Unknown(_)),
+            "registry command {:?} (cli_path {:?}) is not reachable from the session",
+            spec.id,
+            spec.cli_path
+        );
     }
 }
