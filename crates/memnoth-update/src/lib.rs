@@ -53,6 +53,79 @@ pub enum UpdateError {
     NewBinaryFailed(String),
 }
 
+/// Where release bytes come from.
+///
+/// Production serves a release over HTTPS; a release cut on this machine lives
+/// in a directory shaped exactly the same way. Both hide behind one type so the
+/// download, the verification and the swap are one code path: testing an
+/// upgrade locally exercises what a person's machine will run, not a rehearsal
+/// of it.
+///
+/// `MEMNOTH_UPDATE_BASE` decides which: an `http(s)://` URL is remote, anything
+/// else (a path, or `file://…`) is a dist root on disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Source {
+    Remote(String),
+    Local(PathBuf),
+}
+
+impl Source {
+    /// Read a dist root spec.
+    pub fn parse(spec: &str) -> Source {
+        let trimmed = spec.trim().trim_end_matches('/');
+        if let Some(path) = trimmed.strip_prefix("file://") {
+            return Source::Local(PathBuf::from(path));
+        }
+        if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+            return Source::Remote(trimmed.to_string());
+        }
+        Source::Local(PathBuf::from(trimmed))
+    }
+
+    /// Where this source is, for a message a person reads.
+    pub fn describe(&self) -> String {
+        match self {
+            Source::Remote(url) => url.clone(),
+            Source::Local(path) => path.display().to_string(),
+        }
+    }
+
+    /// Read `<root>/<relative>` into memory.
+    pub fn read(&self, relative: &str) -> Result<Vec<u8>> {
+        match self {
+            Source::Remote(root) => {
+                let url = format!("{}/{relative}", root.trim_end_matches('/'));
+                let response = reqwest::blocking::Client::new()
+                    .get(&url)
+                    .header("Accept", "application/json")
+                    .send()?
+                    .error_for_status()?;
+                Ok(response.bytes()?.to_vec())
+            }
+            Source::Local(root) => {
+                let path = root.join(relative);
+                fs::read(&path).with_context(|| format!("reading {}", path.display()))
+            }
+        }
+    }
+
+    /// Copy `<root>/<relative>` to `dest`.
+    pub fn fetch_to(&self, relative: &str, dest: &Path) -> Result<()> {
+        match self {
+            Source::Remote(root) => {
+                let url = format!("{}/{relative}", root.trim_end_matches('/'));
+                download_file(&url, dest)
+            }
+            Source::Local(root) => {
+                let path = root.join(relative);
+                fs::copy(&path, dest)
+                    .with_context(|| format!("copying {} to {}", path.display(), dest.display()))?;
+                Ok(())
+            }
+        }
+    }
+}
+
 /// Release channel for update checks.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -111,6 +184,19 @@ pub struct Signatures {
     pub cosign: Option<String>,
 }
 
+/// Where to find the official uninstaller for this release.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Uninstall {
+    pub url: String,
+}
+
+/// A previously published release that can still be installed by name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreviousVersion {
+    pub version: String,
+    pub url: String,
+}
+
 /// Release manifest from the distribution server.
 #[serde_as]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,6 +207,10 @@ pub struct Manifest {
     #[serde(default)]
     pub checksums: Checksums,
     pub signatures: Signatures,
+    #[serde(default)]
+    pub uninstall: Option<Uninstall>,
+    #[serde(default)]
+    pub previous_versions: Vec<PreviousVersion>,
     #[serde_as(as = "DisplayFromStr")]
     pub published_at: DateTime<Utc>,
     pub notes: Option<String>,
@@ -179,7 +269,10 @@ impl Default for UpdateConfig {
             minisign_pubkey: compiled_in_pubkey(),
             cosign_pubkey: None,
             channel: Channel::Stable,
-            current_version: "0.1.0-beta.1".to_string(),
+            // The build knows which version it is; a literal here goes stale on
+            // the next release and makes every machine think it is a beta
+            // behind itself.
+            current_version: env!("CARGO_PKG_VERSION").to_string(),
             passive_disabled: false,
             quiet: false,
         }
@@ -229,23 +322,15 @@ pub fn resolve_dist_url(config: &UpdateConfig, _channel: Channel) -> String {
 
 /// Fetch one release directory's manifest (`v0.2.0`, `latest`).
 pub fn fetch_manifest_at(base: &str, dir: &str) -> Result<Manifest> {
-    let url = format!("{}/{dir}/manifest.json", base.trim_end_matches('/'));
-    fetch_manifest_url(&url)
+    let source = Source::parse(&format!("{}/{dir}", base.trim_end_matches('/')));
+    let bytes = source.read("manifest.json")?;
+    serde_json::from_slice(&bytes)
+        .with_context(|| format!("{} does not hold a release manifest", source.describe()))
 }
 
-fn fetch_manifest_url(url: &str) -> Result<Manifest> {
-    let client = reqwest::blocking::Client::new();
-    let response = client
-        .get(url)
-        .header("Accept", "application/json")
-        .send()?
-        .error_for_status()?;
-    Ok(response.json()?)
-}
-
-/// Fetch the manifest from the distribution server.
-pub fn fetch_manifest(config: &UpdateConfig, channel: Channel) -> Result<Manifest> {
-    fetch_manifest_url(&resolve_dist_url(config, channel))
+/// Fetch the manifest a channel's release root serves.
+pub fn fetch_manifest(config: &UpdateConfig, _channel: Channel) -> Result<Manifest> {
+    fetch_manifest_at(&config.dist_base_url, "latest")
 }
 
 /// Verify SHA-256 checksum of a file.
@@ -379,8 +464,8 @@ pub fn check_version_policy(current: &str, manifest_version: &str, explicit: boo
 ///
 /// This is the update's only real proof that the artifact is the program it
 /// claims to be, and it happens *before* the swap. Verifying afterwards would
-/// mean the broken binary is already in place, and "roll back" would then have
-/// to replace a running executable on Windows, which cannot be done.
+/// mean the broken binary is already in place, and the way back would be a
+/// rollback instead of a refusal.
 pub fn verify_new_binary(new_exe: &Path, expected_version: &str) -> Result<()> {
     let output = process::Command::new(new_exe)
         .arg("--version")
@@ -417,25 +502,60 @@ pub fn download_file(url: &str, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Perform atomic swap of binary on Unix (rename).
+/// Where the binary an update replaced is kept, so a rollback has something to
+/// restore.
+///
+/// One name on every platform: `<exe>.old` next to the executable. It is a
+/// file the updater owns, and `mn update --rollback` is the only thing that
+/// moves it back.
+pub fn backup_path(current_exe: &Path) -> PathBuf {
+    let name = current_exe
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "memnoth".to_string());
+    current_exe.with_file_name(format!("{name}.old"))
+}
+
+/// Perform atomic swap of binary on Unix, keeping the replaced binary.
 #[cfg(unix)]
 pub fn atomic_swap_unix(current_exe: &Path, new_exe: &Path) -> Result<()> {
-    // On Unix, rename(2) is atomic when source and dest are on same filesystem
+    // Rename the installed binary aside first: a rollback needs the bytes, and
+    // a rename that overwrote them would be a one-way door.
+    let backup = backup_path(current_exe);
+    let _ = fs::remove_file(&backup);
+    fs::rename(current_exe, &backup)
+        .with_context(|| format!("Failed to keep {}", current_exe.display()))?;
+    // rename(2) is atomic when source and dest are on the same filesystem.
     fs::rename(new_exe, current_exe)
         .with_context(|| format!("Failed to atomically replace {}", current_exe.display()))?;
     Ok(())
 }
 
 /// Perform atomic swap of binary on Windows (rename running exe to .old then move new).
+///
+/// Windows refuses to write over a running image, but it does allow the image
+/// file to be *renamed*: the running process keeps its handle and the name is
+/// free for the new build. So an update installs while a session is open, and
+/// that session finishes on the build it started with.
 #[cfg(windows)]
 pub fn atomic_swap_windows(current_exe: &Path, new_exe: &Path) -> Result<()> {
-    // On Windows, we can't overwrite a running executable.
-    // Strategy: rename current to .old, move new into place.
-    let old_path = current_exe.with_extension("exe.old");
+    let old_path = backup_path(current_exe);
 
-    // Remove any existing .old file
-    if old_path.exists() {
-        fs::remove_file(&old_path)?;
+    // A previous update may have left a `.old` that is still mapped by another
+    // running copy. Failing here would refuse a perfectly good update over a
+    // file nobody is reading, so the stale one is moved aside instead.
+    if old_path.exists() && fs::remove_file(&old_path).is_err() {
+        let aside = current_exe.with_file_name(format!(
+            "{}.{}",
+            old_path.file_name().unwrap_or_default().to_string_lossy(),
+            Utc::now().timestamp_millis()
+        ));
+        fs::rename(&old_path, aside).with_context(|| {
+            format!(
+                "cannot clear the previous backup {} (it is in use)",
+                old_path.display()
+            )
+        })?;
     }
 
     // Rename current exe to .old
@@ -446,10 +566,9 @@ pub fn atomic_swap_windows(current_exe: &Path, new_exe: &Path) -> Result<()> {
     fs::rename(new_exe, current_exe)
         .with_context(|| format!("Failed to move new exe to {}", current_exe.display()))?;
 
-    // Schedule .old for deletion on next boot (best effort)
-    let _ = std::process::Command::new("cmd")
-        .args(["/C", "del", "/F", "/Q", &old_path.to_string_lossy()])
-        .spawn();
+    // The previous binary stays at `backup_path` rather than being deleted: a
+    // release that answers `--version` can still be wrong for the machine, and
+    // `mn update --rollback` is the way back.
 
     Ok(())
 }
@@ -469,6 +588,88 @@ pub fn atomic_swap(current_exe: &Path, new_exe: &Path) -> Result<()> {
         // Fallback for other platforms
         fs::rename(new_exe, current_exe)?;
         Ok(())
+    }
+}
+
+/// Restore the binary the last update replaced.
+///
+/// Unix renames the backup over the running executable, which the kernel
+/// allows. Windows cannot replace a running image, so the move is handed to a
+/// short-lived shell that waits for this process to exit. The returned path is
+/// the backup either way; the caller prints what it is about to do so nobody
+/// has to guess when the swap lands.
+pub fn rollback_binary(current_exe: &Path) -> Result<PathBuf> {
+    let backup = backup_path(current_exe);
+    if !backup.exists() {
+        bail!(
+            "no previous binary at {} — nothing to roll back to",
+            backup.display()
+        );
+    }
+
+    #[cfg(unix)]
+    {
+        fs::rename(&backup, current_exe)
+            .with_context(|| format!("Failed to restore {}", current_exe.display()))?;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+
+        // `ping` is the portable sleep on a stock Windows install.
+        std::process::Command::new("cmd")
+            .arg("/C")
+            .raw_arg(format!(
+                "ping -n 3 127.0.0.1 >NUL & move /Y \"{}\" \"{}\"",
+                backup.display(),
+                current_exe.display()
+            ))
+            .spawn()
+            .with_context(|| "Failed to schedule the rollback".to_string())?;
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        fs::rename(&backup, current_exe)?;
+    }
+
+    Ok(backup)
+}
+
+#[cfg(test)]
+mod rollback_tests {
+    use super::*;
+
+    fn temp_exe(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("memnoth-rollback-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("temp dir");
+        dir.join("memnoth.exe")
+    }
+
+    #[test]
+    fn a_rollback_without_a_backup_says_so() {
+        let exe = temp_exe("missing");
+        fs::write(&exe, b"current").expect("write current");
+        let error = rollback_binary(&exe).expect_err("no backup exists");
+        assert!(
+            error.to_string().contains("nothing to roll back to"),
+            "{error}"
+        );
+        let _ = fs::remove_dir_all(exe.parent().expect("parent"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_rollback_restores_the_previous_binary() {
+        let exe = temp_exe("restore");
+        fs::write(&exe, b"new").expect("write new");
+        fs::write(backup_path(&exe), b"old").expect("write backup");
+
+        rollback_binary(&exe).expect("rollback");
+
+        assert_eq!(fs::read(&exe).expect("read restored"), b"old");
+        let _ = fs::remove_dir_all(exe.parent().expect("parent"));
     }
 }
 
@@ -576,32 +777,30 @@ pub fn save_cache(cache: &UpdateCache) -> Result<()> {
     Ok(())
 }
 
-/// Check if passive update notification should be shown.
+/// Whether a passive check may speak.
+///
+/// `opted_out` is the environment's answer (`NO_UPDATE_NOTIFIER`, `CI`) passed
+/// in rather than read here: a rule that decides whether to interrupt someone
+/// is worth a test, and a test that mutates this process's environment is a
+/// race against every other test in the binary.
+///
+/// The window is a day. Ten launches in an afternoon ask the release host once
+/// and tell the person once; a check that has not had its turn says nothing and
+/// writes nothing.
+pub fn wants_notification(config: &UpdateConfig, cache: &UpdateCache, opted_out: bool) -> bool {
+    if config.passive_disabled || config.quiet || opted_out {
+        return false;
+    }
+    Utc::now() - cache.last_check >= Duration::hours(24)
+}
+
+/// [`wants_notification`] against this process's environment.
 pub fn should_notify(config: &UpdateConfig, cache: &UpdateCache) -> bool {
-    if config.passive_disabled || config.quiet {
-        return false;
-    }
-
-    // Check environment variables
-    if std::env::var("NO_UPDATE_NOTIFIER").is_ok() {
-        return false;
-    }
-    if std::env::var("CI").is_ok() {
-        return false;
-    }
-
-    // Check if 24 hours have passed since last check
-    let now = Utc::now();
-    if now - cache.last_check < Duration::hours(24) {
-        return false;
-    }
-
-    // Check if we already showed notification for this version
-    if cache.notification_shown && cache.latest_version.as_ref() == Some(&config.current_version) {
-        return false;
-    }
-
-    true
+    wants_notification(
+        config,
+        cache,
+        std::env::var("NO_UPDATE_NOTIFIER").is_ok() || std::env::var("CI").is_ok(),
+    )
 }
 
 /// Perform a full update check (active).
@@ -664,12 +863,36 @@ pub fn apply_update(
     artifact_dir: &str,
     no_verify: bool,
 ) -> Result<()> {
+    let current_exe = std::env::current_exe()?;
+    apply_update_to(
+        &current_exe,
+        config,
+        manifest,
+        explicit_version,
+        artifact_dir,
+        no_verify,
+    )
+}
+
+/// [`apply_update`] against a named install.
+///
+/// The running executable is the one thing an update cannot test against, so
+/// the swap is written against a path and the wrapper supplies the real one.
+/// That is what lets a staged release be installed onto a copy — download,
+/// checksum, `--version`, swap and the kept previous bytes — instead of
+/// rehearsing it on the binary that is answering.
+pub fn apply_update_to(
+    current_exe: &Path,
+    config: &UpdateConfig,
+    manifest: &Manifest,
+    explicit_version: bool,
+    artifact_dir: &str,
+    no_verify: bool,
+) -> Result<()> {
     // Detect managed install
     if let Some(manager) = detect_managed_install() {
         bail!(UpdateError::ManagedInstall { manager });
     }
-
-    let current_exe = std::env::current_exe()?;
 
     // Published artifact names are full target triples; the short
     // `<arch>-<os>` spelling is accepted for hand-written manifests but is not
@@ -681,13 +904,13 @@ pub fn apply_update(
         .iter()
         .find(|t| t.triple == wanted || t.triple == short)
         .ok_or_else(|| anyhow!("no release artifact for target: {wanted}"))?;
+    let source = Source::parse(&config.dist_base_url);
 
     // A manifest that would walk this machine backwards is refused before a
     // byte of the artifact is sent.
     check_version_policy(&config.current_version, &manifest.version, explicit_version)?;
 
-    let base = config.dist_base_url.trim_end_matches('/');
-    let download_url = format!("{base}/{artifact_dir}/{}", target.filename);
+    let artifact = format!("{artifact_dir}/{}", target.filename);
 
     let temp_dir = std::env::temp_dir();
 
@@ -706,15 +929,14 @@ pub fn apply_update(
         // the checksum file is fetched and checked first: a signature over a
         // list of hashes is only worth something if the hash used below came
         // from it.
-        let sums_url = format!("{base}/SHA256SUMS");
         let sums_path = temp_dir.join(format!("memnoth-update-{}.SHA256SUMS", process::id()));
-        download_file(&sums_url, &sums_path)?;
+        source.fetch_to("SHA256SUMS", &sums_path)?;
         let signatures = verify_signatures(&sums_path, manifest, config);
         let _ = fs::remove_file(&sums_path);
         signatures?;
     }
 
-    download_file(&download_url, &archive)?;
+    source.fetch_to(&artifact, &archive)?;
 
     // The digest for *this* platform, not the first one in the manifest.
     let expected = if !target.sha256.is_empty() {
@@ -746,9 +968,9 @@ pub fn apply_update(
     };
 
     // Prove the artifact runs and is the version it claims, before it replaces
-    // anything. On Windows there is no way back after the swap: the running
-    // executable cannot be renamed.
-    if let Err(error) = install_verified_binary(&current_exe, &binary, &manifest.version) {
+    // anything: a broken build that answers the wrong version is cheap to
+    // refuse here and expensive to discover after a restart.
+    if let Err(error) = install_verified_binary(current_exe, &binary, &manifest.version) {
         let _ = fs::remove_file(&archive);
         let _ = fs::remove_dir_all(&unpack_dir);
         return Err(error);
@@ -958,6 +1180,8 @@ mod tests {
                 minisign: Some("sig123".to_string()),
                 cosign: None,
             },
+            uninstall: None,
+            previous_versions: Vec::new(),
             published_at: Utc::now(),
             notes: Some("Release notes".to_string()),
         };
@@ -1006,6 +1230,8 @@ mod tests {
                 minisign: None,
                 cosign: None,
             },
+            uninstall: None,
+            previous_versions: Vec::new(),
             published_at: Utc::now(),
             notes: Some("Test release".to_string()),
         };
@@ -1057,6 +1283,8 @@ mod tests {
                 sha256: "abc123".to_string(),
             },
             signatures,
+            uninstall: None,
+            previous_versions: Vec::new(),
             published_at: Utc::now(),
             notes: None,
         }
@@ -1192,5 +1420,77 @@ mod tests {
         // Test that the managed install detection logic works
         // We can't easily test the actual argv[0] but we can test the function doesn't panic
         let _ = detect_managed_install();
+    }
+
+    fn cache_checked(days_ago: i64) -> UpdateCache {
+        UpdateCache {
+            last_check: Utc::now() - Duration::days(days_ago),
+            latest_version: Some("9.9.9".to_string()),
+            latest_channel: Some(Channel::Stable),
+            notification_shown: true,
+        }
+    }
+
+    #[test]
+    fn a_check_that_has_not_had_its_day_says_nothing() {
+        let config = UpdateConfig {
+            current_version: "0.0.0".to_string(),
+            ..UpdateConfig::default()
+        };
+        assert!(!wants_notification(&config, &cache_checked(0), false));
+        assert!(wants_notification(&config, &cache_checked(2), false));
+    }
+
+    #[test]
+    fn an_opt_out_outranks_an_available_release() {
+        let config = UpdateConfig {
+            current_version: "0.0.0".to_string(),
+            ..UpdateConfig::default()
+        };
+        // `NO_UPDATE_NOTIFIER` and `CI` both arrive as this flag.
+        assert!(!wants_notification(&config, &cache_checked(30), true));
+    }
+
+    #[test]
+    fn quiet_and_disabled_are_not_the_same_as_interested() {
+        let cache = cache_checked(30);
+        let quiet = UpdateConfig {
+            quiet: true,
+            ..UpdateConfig::default()
+        };
+        let disabled = UpdateConfig {
+            passive_disabled: true,
+            ..UpdateConfig::default()
+        };
+        assert!(!wants_notification(&quiet, &cache, false));
+        assert!(!wants_notification(&disabled, &cache, false));
+    }
+
+    #[test]
+    fn a_base_is_remote_only_when_it_names_a_scheme() {
+        assert_eq!(
+            Source::parse("https://releases.example/dist"),
+            Source::Remote("https://releases.example/dist".to_string())
+        );
+        // A Windows path has a colon too, so "contains a colon" would read this
+        // as a protocol and then try to fetch `E:/dist/latest/manifest.json`
+        // over the network.
+        assert_eq!(
+            Source::parse("E:/dist"),
+            Source::Local(PathBuf::from("E:/dist"))
+        );
+        assert_eq!(
+            Source::parse("file:///tmp/dist"),
+            Source::Local(PathBuf::from("/tmp/dist"))
+        );
+    }
+
+    #[test]
+    fn the_default_config_is_this_build() {
+        // A literal version here would make every release a beta behind itself.
+        assert_eq!(
+            UpdateConfig::default().current_version,
+            env!("CARGO_PKG_VERSION")
+        );
     }
 }
