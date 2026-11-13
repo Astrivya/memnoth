@@ -11,7 +11,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::cloud_ingest;
 use anyhow::{Context, Result};
 use memnoth_harness_api::{ApiEvent, ApiRequest, ClientFrame, ServerFrame, api_socket_path};
 use memnoth_transport::Stream;
@@ -117,21 +116,12 @@ impl AgentBridge {
                 })
                 .collect()
         };
-        for (id, handle, idle) in candidates {
+        for (_id, handle, idle) in candidates {
             let reason = format!(
                 "reaped after {}ms idle (MEMNOTH_MCP_AGENT_TTL_MS={})",
                 idle.as_millis(),
                 self.ttl.as_millis()
             );
-            // Best-effort cloud ingest: notify the dashboard of the reaped session.
-            let transcript_len = handle
-                .events
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .transcript
-                .len() as i64;
-            let tokens = transcript_len / 4;
-            cloud_ingest::session_closed(&id, tokens, 0, 0);
             handle.close(Some(reason));
         }
     }
@@ -189,17 +179,6 @@ impl AgentBridge {
             }));
         }
         handle.close(Some("closed via agent_session_close".to_string()));
-
-        // Best-effort cloud ingest: notify the dashboard the session is done.
-        let transcript_len = handle
-            .events
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .transcript
-            .len() as i64;
-        let tokens = transcript_len / 4; // rough proxy: 4 chars ≈ 1 token
-        cloud_ingest::session_closed(&session, tokens, 0, 0);
-
         Ok(json!({
             "session_id": session,
             "closed": true,
@@ -261,15 +240,6 @@ impl AgentBridge {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .insert(session_id.clone(), Arc::clone(&handle));
-
-        // Best-effort cloud ingest: notify the dashboard of the new session.
-        let model = self
-            .model
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clone()
-            .unwrap_or_default();
-        cloud_ingest::session_created(&session_id, &cwd, &model);
 
         Ok(json!({
             "session_id": session_id,
@@ -399,12 +369,6 @@ impl AgentBridge {
         let log = handle.events.lock().unwrap_or_else(|p| p.into_inner());
         let start = log.entries.len().saturating_sub(tail_n);
         let events: Vec<Value> = log.entries[start..].iter().map(event_summary).collect();
-        let transcript_len = log.transcript.len() as i64;
-
-        // Best-effort cloud ingest: update the dashboard with current stats.
-        let tokens = transcript_len / 4; // rough proxy
-        cloud_ingest::session_updated(&session, tokens, 0, 0);
-
         Ok(json!({
             "session_id": session,
             "grid": {"cols": handle.cols, "rows": handle.rows},
@@ -451,9 +415,7 @@ impl AgentBridge {
                 model.clone()
             }
         };
-        // Best-effort cloud ingest: update model in the dashboard.
         *self.model.lock().unwrap_or_else(|p| p.into_inner()) = Some(effective.clone());
-        cloud_ingest::session_created(&session, "", &effective);
 
         Ok(json!({
             "session_id": session,
@@ -748,6 +710,12 @@ fn event_kind(event: &ApiEvent) -> &'static str {
         ApiEvent::SessionClosed { .. } => "session_closed",
         ApiEvent::SessionRenamed { .. } => "session_renamed",
         ApiEvent::Unknown => "unknown",
+        ApiEvent::SuiteStarted { .. } => "suite_started",
+        ApiEvent::SuiteProgress { .. } => "suite_progress",
+        ApiEvent::TaskVerified { .. } => "task_verified",
+        ApiEvent::LeakageFlag { .. } => "leakage_flag",
+        ApiEvent::SuiteCompleted { .. } => "suite_completed",
+        ApiEvent::SuiteResult { .. } => "suite_result",
     }
 }
 

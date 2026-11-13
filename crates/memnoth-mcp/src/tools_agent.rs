@@ -156,6 +156,36 @@ pub fn tool_definitions() -> Vec<Value> {
             READ_ONLY,
             vault_top_schema(),
         ),
+        typed_tool(
+            "vault_proposals",
+            "Team vault proposals: beliefs proposed by agents and teammates awaiting acceptance. Read-only view of the unattended half of the team vault — proposals are not beliefs until a person accepts them. Use to see what the team is considering before it lands in the vault.",
+            &[opt(
+                "status",
+                "string",
+                "Filter by status: proposed, accepted, rejected, expired (default: all)",
+            )],
+            READ_ONLY,
+            vault_proposals_schema(),
+        ),
+        tool(
+            "mem_search_team",
+            "Search the shared team vault by relevance",
+            &[req(
+                "query",
+                "string",
+                "Search text matched against entity names and summaries",
+            )],
+            READ_ONLY,
+        ),
+        tool(
+            "vault_asof_team",
+            "Team vault belief state at a point in time",
+            &[
+                req("name", "string", "Entity name"),
+                opt("at", "integer", "Epoch millis; defaults to now"),
+            ],
+            READ_ONLY,
+        ),
     ]
 }
 
@@ -179,8 +209,9 @@ fn vault_history_schema() -> Value {
                 "description": "Every version of the entity, oldest first, each with its validity window and change reason"
             },
             "count": {"type": "integer", "description": "Number of versions returned"},
+            "unattributed_facts": {"type": "integer", "description": "Facts in the chain whose author nobody recorded"},
         }),
-        &["entity", "versions", "count"],
+        &["entity", "versions", "count", "unattributed_facts"],
     )
 }
 
@@ -250,6 +281,20 @@ fn vault_top_schema() -> Value {
             "note": {"type": "string", "description": "How the ranking is computed"},
         }),
         &["top", "note"],
+    )
+}
+fn vault_proposals_schema() -> Value {
+    output_object(
+        json!({
+            "proposals": {
+                "type": "array",
+                "items": {"type": "object"},
+                "description": "Each proposal: a belief proposed by an agent or teammate awaiting acceptance"
+            },
+            "count": {"type": "integer"},
+            "waiting": {"type": "integer", "description": "Proposals still in 'proposed' status"},
+        }),
+        &["proposals", "count", "waiting"],
     )
 }
 
@@ -579,12 +624,11 @@ fn entity_chain(engine: &MemoryEngine, name: &str) -> Result<Vec<Value>> {
 
 pub(crate) fn vault_history(engine: &MemoryEngine, args: &Value) -> Result<Value> {
     let name = arg_str(args, "name")?;
-    let chain = entity_chain(engine, &name)?;
-    Ok(json!({
-        "entity": name,
-        "versions": chain,
-        "count": chain.len(),
-    }))
+    // Delegate to the engine's temporal history so every surface returns the
+    // same shape: each version carries its `chain` of facts with the source →
+    // date → author provenance chain. A missing source is reported as null
+    // with "source" named in `unknown`, never invented.
+    memnoth_engine::entity_history(engine, &name)
 }
 
 pub(crate) fn vault_asof(engine: &MemoryEngine, args: &Value, now: i64) -> Result<Value> {
@@ -617,19 +661,37 @@ pub(crate) fn vault_asof(engine: &MemoryEngine, args: &Value, now: i64) -> Resul
     let mut facts = Vec::new();
     let mut rels = Vec::new();
     if entity_id > 0 {
-        if let Ok(obs) = engine.observations_for(entity_id, as_of) {
-            facts = obs
-                .into_iter()
-                .map(
-                    |o| json!({ "content": o.content, "kind": o.kind, "confidence": o.confidence }),
-                )
-                .collect();
+        // Facts believed at `as_of`, each carrying `recorded_at` and
+        // `provenance` (`{"user","agent"}`) — same shape the CLI's vault
+        // history returns so a fact's provenance is identical whichever
+        // surface reads it.
+        if let Ok(mut stmt) = engine.connection().prepare(
+            "SELECT content, kind, confidence, valid_from, recorded_at, provenance \
+                 FROM observations WHERE entity_id = ?1 AND valid_from <= ?2 \
+                   AND (valid_to IS NULL OR valid_to > ?2) \
+                   AND (invalid_at IS NULL OR invalid_at > ?2) \
+                 ORDER BY valid_from, id",
+        ) && let Ok(rows) = stmt.query_map(params![entity_id, as_of], |r| {
+            let provenance: String = r.get(5)?;
+            Ok(json!({
+                "content": r.get::<_, String>(0)?,
+                "kind": r.get::<_, String>(1)?,
+                "confidence": r.get::<_, f64>(2)?,
+                "valid_from": r.get::<_, i64>(3)?,
+                "recorded_at": r.get::<_, Option<i64>>(4)?,
+                "provenance": serde_json::from_str::<Value>(&provenance)
+                    .unwrap_or(Value::Null),
+            }))
+        }) {
+            for row in rows {
+                facts.push(row?);
+            }
         }
         if let Ok(out) = engine.outgoing_relations(entity_id, as_of) {
             rels = out
-                .into_iter()
-                .map(|r| json!({ "target_id": r.target_id, "kind": r.kind, "confidence": r.confidence }))
-                .collect();
+                    .into_iter()
+                    .map(|r| json!({ "target_id": r.target_id, "kind": r.kind, "confidence": r.confidence }))
+                    .collect();
         }
     }
     Ok(json!({
@@ -640,6 +702,44 @@ pub(crate) fn vault_asof(engine: &MemoryEngine, args: &Value, now: i64) -> Resul
         "facts": facts,
         "relations": rels,
         "note": if believed.is_empty() { "entity was not believed at this instant" } else { "" },
+    }))
+}
+
+/// The team's unattended queue: beliefs proposed by agents and teammates that
+/// no person has accepted yet.
+///
+/// This reads the `proposals` table, never `observations` — that separation is
+/// what makes "not a belief until accepted" structural rather than a policy a
+/// caller can forget. `waiting` counts what still needs a decision, so a queue
+/// filtered to `accepted` truthfully reports no work waiting rather than
+/// hiding the rest.
+///
+/// An unknown `status` is an error, not a silent empty list: a host that typos
+/// `proposed` must not read "the team proposed nothing" from the answer.
+pub(crate) fn vault_proposals(engine: &MemoryEngine, args: &Value, now: i64) -> Result<Value> {
+    const STATUSES: [&str; 4] = ["proposed", "accepted", "rejected", "expired"];
+    let raw = arg_str(args, "status").ok();
+    let status = raw
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if let Some(status) = status
+        && !STATUSES.contains(&status)
+    {
+        anyhow::bail!(
+            "status must be one of proposed, accepted, rejected, expired; got '{status}'"
+        );
+    }
+    let rows = engine.list_proposals(status, now)?;
+    let waiting = rows.iter().filter(|row| row.status == "proposed").count();
+    let proposals: Vec<Value> = rows
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(json!({
+        "proposals": proposals,
+        "count": proposals.len(),
+        "waiting": waiting,
     }))
 }
 
@@ -837,4 +937,59 @@ pub(crate) fn vault_contradictions(engine: &MemoryEngine, args: &Value) -> Resul
         "count": contradicted.len(),
         "guidance": "previous versions carry the change_reason; treat current belief with caution where contradictions exist",
     }))
+}
+
+/// Search the shared team vault: same shape as `mem_search` but reads the
+/// team namespace path configured by `mcp add --team`.
+pub(crate) fn mem_search_team(engine: &MemoryEngine, query: &str) -> Result<Value> {
+    let conn = engine.connection();
+    // Access counters live in `access_stats`, joined — never-read entities
+    // count as zero rather than erroring the whole search.
+    let mut stmt = conn.prepare(
+        "SELECT e.name, e.kind, e.summary, e.confidence FROM entities e \
+         LEFT JOIN access_stats a ON a.entity_id = e.id \
+         WHERE e.name LIKE ?1 OR e.summary LIKE ?1 \
+         ORDER BY COALESCE(a.access_count, 0) DESC LIMIT 20",
+    )?;
+    let rows = stmt.query_map(params![format!("%{query}%")], |r| {
+        Ok(json!({
+            "name": r.get::<_, String>(0)?,
+            "kind": r.get::<_, String>(1)?,
+            "summary": r.get::<_, Option<String>>(2)?,
+            "confidence": r.get::<_, f64>(3)?,
+        }))
+    })?;
+    let mut hits = Vec::new();
+    for row in rows {
+        hits.push(row?);
+    }
+    Ok(json!({
+        "query": query,
+        "scope": "team",
+        "hits": hits,
+    }))
+}
+
+/// Team vault belief state at a point in time: same as `vault_asof` but for
+/// the team namespace.
+pub(crate) fn vault_asof_team(engine: &MemoryEngine, name: &str, at_ms: i64) -> Result<Value> {
+    let conn = engine.connection();
+    // Versions are keyed by `entity_id`; the name lives on the entity row.
+    let mut stmt = conn.prepare(
+        "SELECT v.snapshot, v.valid_from, v.valid_to FROM entity_versions v \
+         JOIN entities e ON e.id = v.entity_id \
+         WHERE e.name = ?1 AND v.valid_from <= ?2 AND (v.valid_to IS NULL OR v.valid_to > ?2) \
+         ORDER BY v.valid_from DESC LIMIT 1",
+    )?;
+    let row = stmt.query_row(params![name, at_ms], |r| {
+        let snapshot: String = r.get(0)?;
+        let parsed: Value = serde_json::from_str(&snapshot).unwrap_or(Value::Null);
+        Ok(json!({
+            "entity": name,
+            "at": at_ms,
+            "scope": "team",
+            "belief": parsed,
+        }))
+    })?;
+    Ok(row)
 }

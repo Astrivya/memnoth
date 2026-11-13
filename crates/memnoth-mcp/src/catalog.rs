@@ -9,7 +9,9 @@ use serde_json::Value;
 
 use crate::{
     Annotations, READ_ONLY, WRITE, coord_join_schema, coord_ok_schema, coord_task_create_schema,
-    one_of, opt, opt_list, req, tool, typed_tool,
+    kg_callees_schema, kg_changes_schema, kg_dead_schema, kg_def_schema, kg_explore_schema,
+    kg_impact_schema, kg_index_schema, kg_refs_schema, kg_search_schema, kg_status_schema,
+    kg_trace_schema, one_of, opt, opt_list, req, tool, typed_tool,
 };
 
 pub(crate) fn tool_definitions() -> Vec<Value> {
@@ -352,7 +354,7 @@ pub(crate) fn tool_definitions() -> Vec<Value> {
             ],
             READ_ONLY,
         ),
-        tool(
+        typed_tool(
             "kg_index",
             "(Re)index a workspace into the code graph; omit incremental for full index, or pass a relative file path for a single-file refresh. When the workspace holds several codebases the result lists them — pass codebases to index only some. Symbols are also embedded when the server has an embedding runtime, so kg_search can rank with FTS+vector RRF; pass embed:false to skip that for this run.",
             &[
@@ -382,8 +384,9 @@ pub(crate) fn tool_definitions() -> Vec<Value> {
                 idempotent: false,
                 open_world: true,
             },
+            kg_index_schema(),
         ),
-        tool(
+        typed_tool(
             "kg_impact",
             "Blast radius: direct and transitive callers of a symbol in the code graph. Use BEFORE a refactor or risky change to see what your edit would break.",
             &[
@@ -405,8 +408,9 @@ pub(crate) fn tool_definitions() -> Vec<Value> {
                 ),
             ],
             READ_ONLY,
+            kg_impact_schema(),
         ),
-        tool(
+        typed_tool(
             "kg_trace",
             "Paginated mentions of one symbol, one page at a time with a cursor. For the full picture including definitions and snippets, prefer kg_explore; use kg_trace when a symbol has more mentions than fit in one answer.",
             &[
@@ -432,8 +436,9 @@ pub(crate) fn tool_definitions() -> Vec<Value> {
                 ),
             ],
             READ_ONLY,
+            kg_trace_schema(),
         ),
-        tool(
+        typed_tool(
             "kg_callees",
             "What one symbol calls: the mentions inside its own declaration body, each with the source line that names them. The mirror of kg_impact (who calls this) — call it before changing a signature, to see the call sites the edit has to keep working. Mention-shaped, not resolved edges: a name in a comment inside the body counts, a same-named local in another body does not. Answers supported=false on a bundled graph that does not record which declaration a mention sits in, and names what to ask instead.",
             &[
@@ -450,8 +455,9 @@ pub(crate) fn tool_definitions() -> Vec<Value> {
                 opt("limit", "integer", "Maximum callees to return (default 50)"),
             ],
             READ_ONLY,
+            kg_callees_schema(),
         ),
-        tool(
+        typed_tool(
             "kg_def",
             "The declaration of a symbol: file, line and snippet, with resolved=false when nothing declares that name. The cheap spelling check before kg_impact, kg_refs or kg_callees; use kg_explore when you want every declaration of the name together with its mentions and the flow among them.",
             &[
@@ -467,8 +473,9 @@ pub(crate) fn tool_definitions() -> Vec<Value> {
                 ),
             ],
             READ_ONLY,
+            kg_def_schema(),
         ),
-        tool(
+        typed_tool(
             "kg_refs",
             "Every textual mention of a symbol: file, line, the source line itself, and `container` — the declaration the mention sits in. This is the plain 'where is this used' list; kg_impact walks higher-order callers to a depth, and kg_trace pages a mention set larger than one answer with a cursor. Mentions, not resolved call edges.",
             &[
@@ -489,8 +496,9 @@ pub(crate) fn tool_definitions() -> Vec<Value> {
                 ),
             ],
             READ_ONLY,
+            kg_refs_schema(),
         ),
-        tool(
+        typed_tool(
             "kg_status",
             "Code graph staleness and generation counters for a workspace",
             &[
@@ -506,8 +514,9 @@ pub(crate) fn tool_definitions() -> Vec<Value> {
                 ),
             ],
             READ_ONLY,
+            kg_status_schema(),
         ),
-        tool(
+        typed_tool(
             "kg_explore",
             "PRIMARY CODE TOOL — call FIRST for almost any code question OR before an edit: how does X work, architecture, a bug, where/what is X, surveying an area, or the symbols you are about to change. Returns the verbatim line-numbered source of the relevant symbols grouped by file in ONE capped call (Read-equivalent — treat the shown source as already Read; do NOT re-open those files), plus the call-path flow among them and staleness info. Query can be a natural-language question OR a bag of symbol/file names. Usually the ONLY call you need — far fewer tokens and round-trips than a grep/read loop.",
             &[
@@ -523,8 +532,9 @@ pub(crate) fn tool_definitions() -> Vec<Value> {
                 ),
             ],
             READ_ONLY,
+            kg_explore_schema(),
         ),
-        tool(
+        typed_tool(
             "kg_search",
             "Symbol search over the code graph: qname, kind, file, start line, signature. Uses FTS+vector hybrid RRF when embeddings are available (vector_ranked=true), plain FTS otherwise. Use when you want a compact ranked list of matching symbols BEFORE deciding what to read in full (kg_explore returns sources; kg_search returns the index).",
             &[
@@ -546,6 +556,7 @@ pub(crate) fn tool_definitions() -> Vec<Value> {
                 ),
             ],
             READ_ONLY,
+            kg_search_schema(),
         ),
         tool(
             "kg_coverage",
@@ -581,7 +592,7 @@ pub(crate) fn tool_definitions() -> Vec<Value> {
             ],
             READ_ONLY,
         ),
-        tool(
+        typed_tool(
             "kg_dead",
             "Dead exports: declarations of a public kind that no other file mentions, using the same rule as `memnoth kg dead-code`. A mention is textual, so a dynamic import or a string-built name does not count as a use.",
             &[
@@ -597,6 +608,7 @@ pub(crate) fn tool_definitions() -> Vec<Value> {
                 ),
             ],
             READ_ONLY,
+            kg_dead_schema(),
         ),
         tool(
             "kg_unresolved",
@@ -628,7 +640,7 @@ pub(crate) fn tool_definitions() -> Vec<Value> {
             ],
             READ_ONLY,
         ),
-        tool(
+        typed_tool(
             "kg_changes",
             "Git-diff impact: maps uncommitted changes (git diff --name-only) to the declarations they define, then reports how many files mention each one — the reachable surface of your in-progress edit. Use BEFORE committing or pushing.",
             &[
@@ -645,6 +657,7 @@ pub(crate) fn tool_definitions() -> Vec<Value> {
                 ),
             ],
             READ_ONLY,
+            kg_changes_schema(),
         ),
         // The three engine capabilities that had no agent surface at all. The
         // graph could answer "what services exist", "what can an untrusted entry

@@ -21,6 +21,17 @@ use crate::report_kg_index_progress;
 /// `mem_ingest` *does* need the vault, which is why its worker opens a second
 /// connection to the same file instead of borrowing the server's.
 pub(crate) fn run_kg_index(args: &Value) -> Result<Value> {
+    // The registry dispatches this tool directly rather than through
+    // `kg_tools::call`, so the shared `supported` envelope is stamped here too.
+    run_kg_index_inner(args).map(|mut answer| {
+        if let Some(object) = answer.as_object_mut() {
+            object.entry("supported").or_insert(serde_json::json!(true));
+        }
+        answer
+    })
+}
+
+fn run_kg_index_inner(args: &Value) -> Result<Value> {
     let workspace = workspace_arg(args)?;
     // `kg_index` used to build a second graph (`kg.db`) beside the one
     // `memnoth kg index` writes (`graph.db`), so indexing from an agent left the

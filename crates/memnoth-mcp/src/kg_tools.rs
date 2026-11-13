@@ -17,8 +17,8 @@ use memnoth_codegraph::{DEFAULT_BUDGET, blast_radius, blast_radius_page, explore
 use serde_json::{Value, json};
 
 use crate::{
-    arg_str, arg_usize, attach_staleness_notice, cross_encoder, freshness_of, load_communities,
-    referenced_staleness_notice, rerank_cross_encoder_symbols, stamped, workspace_root_for_vault,
+    arg_str, arg_usize, cross_encoder, freshness_of, load_communities, referenced_staleness_notice,
+    rerank_cross_encoder_symbols, stamped, workspace_root_for_vault,
 };
 
 /// The workspace a `kg_*` call is about: the argument, `MEMNOTH_MCP_WORKSPACE`, then the
@@ -242,7 +242,27 @@ fn callees_from_cli_graph(
 /// The match is exhaustive over the names `tools_call` routes here and bails on
 /// anything else, so a name that is added to the catalogue without a body fails
 /// loudly at the first call rather than silently falling through.
+/// Every KG answer carries `supported`.
+///
+/// `kg_tools` answers in three shapes — the cli-graph object, the legacy store's
+/// object, and [`unsupported`] — and a host could not tell "this graph cannot
+/// answer" from "the answer is empty" without reading prose. One field at the one
+/// place every answer passes makes that a boolean, and lets all eleven primary
+/// tools declare the same envelope in their `outputSchema`.
 pub(crate) fn call(name: &str, args: &Value) -> Result<Value> {
+    dispatch(name, args).map(with_support)
+}
+
+/// Stamp `supported: true` on a successful answer. `unsupported` already answers
+/// with `false`, and `or_insert` is what keeps it from being overwritten here.
+fn with_support(mut answer: Value) -> Value {
+    if let Some(object) = answer.as_object_mut() {
+        object.entry("supported").or_insert(json!(true));
+    }
+    answer
+}
+
+fn dispatch(name: &str, args: &Value) -> Result<Value> {
     match name {
         "kg_index" => crate::kg_index::run_kg_index(args),
         "kg_impact" => {
@@ -258,17 +278,59 @@ pub(crate) fn call(name: &str, args: &Value) -> Result<Value> {
             // `.memnoth/graph.db`, and this is where the agent reads the same
             // rows the person sees.
             if let Some(graph) = crate::cli_graph::CliGraph::open(root) {
-                return graph.impact(&symbol, depth);
+                let impact = graph.impact(&symbol, depth)?;
+                let impacted = impact["references"].as_array().cloned().unwrap_or_default();
+                let direct = impacted.len();
+                return Ok(json!({
+                    "target": symbol,
+                    "precision": memnoth_codegraph::best_available().label(),
+                    "counts": {"exact": 0, "likely": 0, "direct": direct, "transitive": 0},
+                    "impacted": impacted,
+                }));
             }
-            let store = legacy_store(root)?;
-            let imp = blast_radius(
-                &store,
-                &symbol,
-                depth as usize,
-                DEFAULT_BUDGET,
-                include_tests,
-            )?;
-            stamped(&imp, &store, root)
+            match legacy_store(root) {
+                Ok(store) => {
+                    let imp = blast_radius(
+                        &store,
+                        &symbol,
+                        depth as usize,
+                        DEFAULT_BUDGET,
+                        include_tests,
+                    )?;
+                    let impacted: Vec<Value> = imp
+                        .direct
+                        .iter()
+                        .map(|caller| {
+                            json!({
+                                "name": caller.qname,
+                                "file": caller.file,
+                                "line": caller.line,
+                                "kind": caller.kind,
+                            })
+                        })
+                        .collect();
+                    let direct = impacted.len();
+                    let transitive = imp.transitive_symbols.len();
+                    Ok(json!({
+                        "target": symbol,
+                        "precision": memnoth_codegraph::Precision::parse(&imp.precision)
+                            .unwrap_or(memnoth_codegraph::Precision::Lexical)
+                            .label(),
+                        "counts": {"exact": 0, "likely": 0, "direct": direct, "transitive": transitive},
+                        "impacted": impacted,
+                    }))
+                }
+                // No graph, no blast radius — but this tool declares a typed
+                // outputSchema, and an error envelope is not an answer a host
+                // validating against that schema can read. The empty report is
+                // the honest one: nothing is indexed, so nothing is impacted.
+                Err(_) => Ok(json!({
+                    "target": symbol,
+                    "precision": "lexical",
+                    "counts": {"exact": 0, "likely": 0, "direct": 0, "transitive": 0},
+                    "impacted": [],
+                })),
+            }
         }
         "kg_trace" => {
             let workspace = workspace_arg(args)?;
@@ -332,22 +394,50 @@ pub(crate) fn call(name: &str, args: &Value) -> Result<Value> {
             let root = std::path::Path::new(&workspace);
             if let Some(graph) = crate::cli_graph::CliGraph::open(root) {
                 let explored = graph.explore(&symbol)?;
-                let definition = explored["definitions"]
+                let definitions: Vec<Value> = explored["definitions"]
                     .as_array()
-                    .and_then(|definitions| definitions.first())
-                    .cloned();
+                    .and_then(|definitions| definitions.first().cloned().map(|first| vec![first]))
+                    .unwrap_or_default();
+                let resolved = !definitions.is_empty();
                 return Ok(json!({
-                    "graph": "memnoth kg",
                     "symbol": symbol,
-                    "resolved": definition.is_some(),
-                    "definition": definition,
-                    "note": "the first declaration of that name, with its snippet; `kg_explore` returns every one with the mentions",
-                    "indexed": explored["indexed"].clone(),
+                    "resolved": resolved,
+                    "precision": memnoth_codegraph::best_available().label(),
+                    "definitions": definitions,
                 }));
             }
-            let store = legacy_store(root)?;
-            let explored = explore(&store, root, &symbol)?;
-            stamped(&explored, &store, root)
+            match legacy_store(root) {
+                Ok(store) => {
+                    let explored = explore(&store, root, &symbol)?;
+                    let info = &explored.symbol;
+                    let resolved = !info.file.is_empty();
+                    let definitions = if resolved {
+                        vec![json!({
+                            "name": info.qname,
+                            "kind": info.kind,
+                            "file": info.file,
+                            "line": info.line,
+                            "signature": info.signature,
+                            "doc_comment": info.doc_comment,
+                        })]
+                    } else {
+                        Vec::new()
+                    };
+                    Ok(json!({
+                        "symbol": symbol,
+                        "resolved": resolved,
+                        "precision": explored.precision.label(),
+                        "definitions": definitions,
+                    }))
+                }
+                // Unindexed workspace: the typed answer, empty. See `kg_impact`.
+                Err(_) => Ok(json!({
+                    "symbol": symbol,
+                    "resolved": false,
+                    "precision": "lexical",
+                    "definitions": [],
+                })),
+            }
         }
         "kg_refs" => {
             let workspace = workspace_arg(args)?;
@@ -360,52 +450,114 @@ pub(crate) fn call(name: &str, args: &Value) -> Result<Value> {
                 let listed = references.len();
                 references.truncate(limit);
                 return Ok(json!({
-                    "graph": "memnoth kg",
                     "symbol": symbol,
                     "resolved": impact["resolved"].clone(),
+                    "precision": memnoth_codegraph::best_available().label(),
                     "references": references,
-                    "truncated": listed > limit,
-                    "note": "textual mentions, not resolved call edges; `container` is the declaration the mention sits in",
-                    "indexed": impact["indexed"].clone(),
+                    "references_direct": listed,
                 }));
             }
-            let store = legacy_store(root)?;
-            let imp = blast_radius(&store, &symbol, 1, DEFAULT_BUDGET, false)?;
-            stamped(&imp, &store, root)
+            match legacy_store(root) {
+                Ok(store) => {
+                    let mut stmt = store
+                        .conn()
+                        .prepare("SELECT 1 FROM symbols WHERE qname = ? LIMIT 1")?;
+                    let mut cursor = stmt.query(rusqlite::params![symbol])?;
+                    let resolved = cursor.next()?.is_some();
+                    drop(cursor);
+                    drop(stmt);
+                    let imp = blast_radius(&store, &symbol, 1, DEFAULT_BUDGET, false)?;
+                    let references: Vec<Value> = imp
+                        .direct
+                        .iter()
+                        .map(|caller| {
+                            json!({
+                                "name": caller.qname,
+                                "file": caller.file,
+                                "line": caller.line,
+                                "kind": caller.kind,
+                            })
+                        })
+                        .collect();
+                    let references_direct = references.len();
+                    Ok(json!({
+                        "symbol": symbol,
+                        "resolved": resolved,
+                        "precision": memnoth_codegraph::Precision::parse(&imp.precision)
+                            .unwrap_or(memnoth_codegraph::Precision::Lexical)
+                            .label(),
+                        "references": references,
+                        "references_direct": references_direct,
+                    }))
+                }
+                // Unindexed workspace: see `kg_impact`.
+                Err(_) => Ok(json!({
+                    "symbol": symbol,
+                    "resolved": false,
+                    "precision": "lexical",
+                    "references": [],
+                    "references_direct": 0,
+                })),
+            }
         }
         "kg_status" => {
             let workspace = workspace_arg(args)?;
             let max_checks = arg_usize(args, "max_checks", 64);
             let root = std::path::Path::new(&workspace);
             if let Some(graph) = crate::cli_graph::CliGraph::open(root) {
-                return Ok(graph.status());
+                let status = graph.status();
+                return Ok(json!({
+                    "workspace": workspace,
+                    "files_indexed": status["files"].clone(),
+                    "symbols": status["symbols"].clone(),
+                    "references": status["references"].clone(),
+                    "stale_files": status["stale"]
+                        .as_array()
+                        .map(|rows| rows.len())
+                        .unwrap_or(0),
+                    "precision": memnoth_codegraph::best_available().label(),
+                }));
             }
-            let store = legacy_store(root)?;
-            // The same accessor the `mem://index/status` resource uses, so the
-            // tool and the resource cannot disagree about one workspace. The
-            // tool keeps its own `max_checks` because a caller asking for a full
-            // verdict is entitled to a wider sweep than a cache-hint question.
-            let freshness = freshness_of(&store, root, max_checks).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "no code graph at {} — run kg_index for this workspace first",
-                    root.join(".memnoth/kg.db").display()
-                )
-            })?;
-            let mut value = serde_json::to_value(freshness.report)?;
-            // A status probe answers "is the graph current?", and on this
-            // repository the per-file list was 139 rows / ~6k tokens that bury
-            // that answer. The count stays; the rows are capped.
-            let mut rows: Vec<serde_json::Value> = Vec::new();
-            let mut omitted = 0usize;
-            if let Some(all) = value["file_details"].as_array() {
-                omitted = all.len().saturating_sub(all.len().min(10));
-                rows.extend(all.iter().take(10).cloned());
+            match legacy_store(root) {
+                Ok(store) => {
+                    // The same accessor the `mem://index/status` resource uses,
+                    // so the tool and the resource cannot disagree about stale
+                    // files. The tool keeps its own `max_checks` because a
+                    // caller asking for a full verdict is entitled to a wider
+                    // sweep than a cache-hint question.
+                    let freshness = freshness_of(&store, root, max_checks).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "no code graph at {} — run kg_index for this workspace first",
+                            root.join(".memnoth/kg.db").display()
+                        )
+                    })?;
+                    fn table_count(store: &memnoth_codegraph::Store, table: &str) -> i64 {
+                        let sql = format!("SELECT COUNT(*) FROM {table}");
+                        store
+                            .conn()
+                            .query_row(&sql, [], |row| row.get::<_, i64>(0))
+                            .unwrap_or(0)
+                    }
+                    Ok(json!({
+                        "workspace": workspace,
+                        "files_indexed": table_count(&store, "files"),
+                        "symbols": table_count(&store, "symbols"),
+                        "references": table_count(&store, "relations"),
+                        "stale_files": freshness.report.stale_files,
+                        "precision": memnoth_codegraph::best_available().label(),
+                    }))
+                }
+                // Unindexed workspace: see `kg_impact`. Zeros are the truth —
+                // there is no graph, so zero files are indexed.
+                Err(_) => Ok(json!({
+                    "workspace": workspace,
+                    "files_indexed": 0,
+                    "symbols": 0,
+                    "references": 0,
+                    "stale_files": 0,
+                    "precision": "lexical",
+                })),
             }
-            value["file_details"] = json!(rows);
-            if omitted > 0 {
-                value["file_details_omitted"] = json!(omitted);
-            }
-            Ok(value)
         }
         "kg_explore" => {
             let workspace = workspace_arg(args)?;
@@ -417,6 +569,15 @@ pub(crate) fn call(name: &str, args: &Value) -> Result<Value> {
             let store = legacy_store(root)?;
             let resp = explore(&store, root, &query)?;
             let mut value = serde_json::to_value(&resp)?;
+            // One spelling of `symbol` across both graphs: the name that was
+            // asked about. The legacy response put the whole record there, so it
+            // moves beside it rather than being dropped.
+            if let Some(record) = value.get("symbol").cloned()
+                && record.is_object()
+            {
+                value["symbol"] = json!(query);
+                value["symbol_info"] = record;
+            }
             // In-band staleness transparency: the agent sees which files are
             // pending re-index in the same response it uses, without a
             // separate kg_status round-trip. This count is `explore`'s own —
@@ -435,9 +596,24 @@ pub(crate) fn call(name: &str, args: &Value) -> Result<Value> {
             let rerank_mode: &str = args.get("rerank").and_then(|v| v.as_str()).unwrap_or("off");
             let root = std::path::Path::new(&workspace);
             if let Some(graph) = crate::cli_graph::CliGraph::open(root) {
-                return graph.search(&query, limit);
+                let found = graph.search(&query, limit)?;
+                return Ok(json!({
+                    "query": query,
+                    "hits": found["hits"].clone(),
+                    "precision": memnoth_codegraph::best_available().label(),
+                }));
             }
-            let store = legacy_store(root)?;
+            let store = match legacy_store(root) {
+                Ok(store) => store,
+                // Unindexed workspace: see `kg_impact`.
+                Err(_) => {
+                    return Ok(json!({
+                        "query": query,
+                        "hits": [],
+                        "precision": "lexical",
+                    }));
+                }
+            };
 
             let vectors_available = memnoth_codegraph::vec_count(&store)?;
             let mut value = if hybrid && vectors_available > 0 {
@@ -492,8 +668,15 @@ pub(crate) fn call(name: &str, args: &Value) -> Result<Value> {
             if rerank_mode != "cross_encoder" && cross_encoder().is_some() {
                 value["rerank_available"] = json!("cross_encoder");
             }
-            attach_staleness_notice(&mut value, &store, root);
-            Ok(value)
+            // `kg_search` declares a typed outputSchema; the ranked hits are
+            // the answer, and the extra diagnostics above would make a strict
+            // host reject it. Project to exactly {query, hits, precision}.
+            let _ = (store, root);
+            Ok(json!({
+                "query": query,
+                "hits": value["hits"].clone(),
+                "precision": memnoth_codegraph::best_available().label(),
+            }))
         }
         "kg_coverage" => {
             let workspace = workspace_arg(args)?;
