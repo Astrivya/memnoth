@@ -102,6 +102,8 @@ pub struct Provider {
     pub requires_api_key: bool,
     /// Environment variable name for the API key
     pub api_key_env_var: &'static str,
+    /// Default model context window in tokens
+    pub context_window: u32,
 }
 
 fn serialize_capabilities<S>(caps: &&'static [Capability], ser: S) -> Result<S::Ok, S::Error>
@@ -175,6 +177,7 @@ pub const KNOWN_PROVIDERS: &[Provider] = &[
         pricing_url: "https://openai.com/pricing",
         requires_api_key: true,
         api_key_env_var: "OPENAI_API_KEY",
+        context_window: 128_000,
     },
     Provider {
         name: "anthropic",
@@ -198,6 +201,7 @@ pub const KNOWN_PROVIDERS: &[Provider] = &[
         pricing_url: "https://www.anthropic.com/pricing",
         requires_api_key: true,
         api_key_env_var: "ANTHROPIC_API_KEY",
+        context_window: 200_000,
     },
     Provider {
         name: "deepseek",
@@ -214,6 +218,7 @@ pub const KNOWN_PROVIDERS: &[Provider] = &[
         pricing_url: "https://www.deepseek.com/pricing",
         requires_api_key: true,
         api_key_env_var: "DEEPSEEK_API_KEY",
+        context_window: 64_000,
     },
     Provider {
         name: "kilo",
@@ -242,6 +247,7 @@ pub const KNOWN_PROVIDERS: &[Provider] = &[
         pricing_url: "https://kilo.ai/docs/gateway",
         requires_api_key: true,
         api_key_env_var: "KILO_API_KEY",
+        context_window: 128_000,
     },
     Provider {
         name: "google",
@@ -267,6 +273,7 @@ pub const KNOWN_PROVIDERS: &[Provider] = &[
         pricing_url: "https://ai.google.dev/pricing",
         requires_api_key: true,
         api_key_env_var: "GOOGLE_API_KEY",
+        context_window: 1_000_000,
     },
     Provider {
         name: "cohere",
@@ -291,6 +298,7 @@ pub const KNOWN_PROVIDERS: &[Provider] = &[
         pricing_url: "https://cohere.com/pricing",
         requires_api_key: true,
         api_key_env_var: "COHERE_API_KEY",
+        context_window: 128_000,
     },
     Provider {
         name: "mistral",
@@ -315,6 +323,7 @@ pub const KNOWN_PROVIDERS: &[Provider] = &[
         pricing_url: "https://mistral.ai/pricing",
         requires_api_key: true,
         api_key_env_var: "MISTRAL_API_KEY",
+        context_window: 128_000,
     },
     Provider {
         name: "groq",
@@ -338,6 +347,7 @@ pub const KNOWN_PROVIDERS: &[Provider] = &[
         pricing_url: "https://groq.com/pricing",
         requires_api_key: true,
         api_key_env_var: "GROQ_API_KEY",
+        context_window: 131_072,
     },
     Provider {
         name: "together",
@@ -364,6 +374,7 @@ pub const KNOWN_PROVIDERS: &[Provider] = &[
         pricing_url: "https://www.together.ai/pricing",
         requires_api_key: true,
         api_key_env_var: "TOGETHER_API_KEY",
+        context_window: 128_000,
     },
     Provider {
         name: "perplexity",
@@ -385,6 +396,7 @@ pub const KNOWN_PROVIDERS: &[Provider] = &[
         pricing_url: "https://www.perplexity.ai/pricing",
         requires_api_key: true,
         api_key_env_var: "PERPLEXITY_API_KEY",
+        context_window: 128_000,
     },
     Provider {
         name: "openrouter",
@@ -413,6 +425,7 @@ pub const KNOWN_PROVIDERS: &[Provider] = &[
         pricing_url: "https://openrouter.ai/pricing",
         requires_api_key: true,
         api_key_env_var: "OPENROUTER_API_KEY",
+        context_window: 128_000,
     },
     Provider {
         name: "fireworks",
@@ -438,6 +451,7 @@ pub const KNOWN_PROVIDERS: &[Provider] = &[
         pricing_url: "https://fireworks.ai/pricing",
         requires_api_key: true,
         api_key_env_var: "FIREWORKS_API_KEY",
+        context_window: 128_000,
     },
     Provider {
         name: "replicate",
@@ -462,6 +476,7 @@ pub const KNOWN_PROVIDERS: &[Provider] = &[
         pricing_url: "https://replicate.com/pricing",
         requires_api_key: true,
         api_key_env_var: "REPLICATE_API_KEY",
+        context_window: 128_000,
     },
 ];
 
@@ -470,6 +485,14 @@ pub fn provider_by_name(name: &str) -> Option<&'static Provider> {
     KNOWN_PROVIDERS
         .iter()
         .find(|p| p.name.eq_ignore_ascii_case(name))
+}
+/// Returns the default context window for a model, if it is listed in any
+/// provider's default model list.
+pub fn context_window_for(model: &str) -> Option<u32> {
+    KNOWN_PROVIDERS
+        .iter()
+        .find(|p| p.default_models.contains(&model))
+        .map(|p| p.context_window)
 }
 
 /// Returns all providers that support a given capability.
