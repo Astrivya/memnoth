@@ -88,19 +88,22 @@ impl Palette {
         if self.filter.is_empty() {
             self.config.items.iter().collect()
         } else {
-            self.config
-                .items
-                .iter()
-                .filter(|item| {
-                    item.command
-                        .to_lowercase()
-                        .contains(&self.filter.to_lowercase())
-                        || item
-                            .description
-                            .to_lowercase()
-                            .contains(&self.filter.to_lowercase())
-                })
-                .collect()
+            // One rank: the same fuzzy scorer the `/` dropdown uses. A
+            // substring test here and a fuzzy one there meant the same query
+            // produced two different orders. A command whose *name* matches
+            // comes first: someone typing `help` means `/help`, not the row
+            // whose description happens to contain those letters in order.
+            let needle = self.filter.to_lowercase();
+            let mut by_command: Vec<&PaletteItem> = Vec::new();
+            let mut by_description: Vec<&PaletteItem> = Vec::new();
+            for item in &self.config.items {
+                if fuzzy_match(&item.command.to_lowercase(), &needle).is_some() {
+                    by_command.push(item);
+                } else if fuzzy_match(&item.description.to_lowercase(), &needle).is_some() {
+                    by_description.push(item);
+                }
+            }
+            by_command.into_iter().chain(by_description).collect()
         }
     }
 
@@ -324,6 +327,26 @@ impl Default for PaletteConfig {
             footer_hint: "enter select · ↑↓ navigate · type to filter · esc close".to_string(),
         }
     }
+}
+
+/// Fuzzy-match `needle` against `haystack`, returning the positions the
+/// needle landed on when every one of its characters appears in order.
+///
+/// One scorer for every surface that offers a command. It lived in the TUI,
+/// where the palette could not reach it, so `Palette` fell back to a
+/// substring test and the two surfaces ranked the same query differently.
+pub fn fuzzy_match(haystack: &str, needle: &str) -> Option<Vec<usize>> {
+    let mut hits = Vec::with_capacity(needle.len());
+    let mut wanted = needle.chars();
+    let mut next = wanted.next();
+    for (index, ch) in haystack.chars().enumerate() {
+        let Some(want) = next else { break };
+        if ch == want {
+            hits.push(index);
+            next = wanted.next();
+        }
+    }
+    if next.is_some() { None } else { Some(hits) }
 }
 
 #[cfg(test)]
