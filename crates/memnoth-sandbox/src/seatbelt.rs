@@ -81,6 +81,9 @@ pub fn profile(plan: &BackendPlan, workspace: &Path) -> anyhow::Result<String> {
     }
 
     if plan.restrict_network {
+        // All-or-nothing: the kernel cannot name a host. A policy of
+        // `allowlist` therefore denies every socket here and lets a listed host
+        // through only in the tool layer, which asks `egress::decide` first.
         text.push_str("(deny network*)\n");
     } else {
         text.push_str("(allow network*)\n");
@@ -180,6 +183,11 @@ pub fn confine(plan: &BackendPlan, workspace: &Path, argv: &[String]) -> Confine
     }
 }
 
+/// Whether `sandbox-exec` can start a profile here, for `doctor`.
+pub fn probe_available() -> Result<(), String> {
+    probe()
+}
+
 /// Whether `sandbox-exec` can actually start a confined process here, once.
 ///
 /// Presence on `PATH` is not the same as usable: a profile that does not
@@ -233,6 +241,7 @@ mod tests {
             deny_globs: Vec::new(),
             default_read: true,
             restrict_network: true,
+            network: crate::backend::NetworkPolicy::Off,
         }
     }
 

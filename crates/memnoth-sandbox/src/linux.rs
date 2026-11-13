@@ -17,10 +17,13 @@
 //! - the child dies with us (`--die-with-parent`) and starts no session, so a
 //!   backgrounded grandchild cannot outlive the turn that spawned it.
 //!
-//! **Not** enforced, and the caller must not claim it: syscall filtering. There
-//! is no seccomp filter and no Landlock layer here, so a kernel exploit inside
-//! the namespace is out of scope, as is anything `bwrap` itself cannot express
-//! (device nodes other than the `--dev` set, for instance).
+//! **Not** applied by this function: syscall filtering. There is no Landlock
+//! layer here, and the seccomp filter is *built* by [`crate::seccomp`] and can be
+//! installed by [`install_seccomp_in_child`] in a `pre_exec` hook — but installing
+//! it needs a child that has forked and not yet exec'd, and this module returns
+//! an argv instead of forking. Until a caller runs that hook, the filter is a
+//! plan: `doctor` therefore describes the filesystem view as enforced and names
+//! seccomp as a separate, uninstalled layer.
 //!
 //! ## Why the probe
 //!
@@ -81,6 +84,23 @@ pub fn confine(plan: &BackendPlan, workspace: &Path, argv: &[String]) -> Confine
             reason: format!("{error:#}"),
         },
     }
+}
+
+/// Install the sandbox seccomp filter in the calling process.
+///
+/// Call this from a `pre_exec` hook: it must run in the child after `fork` and
+/// before `execve`, which is the one point this crate cannot own because it does
+/// not spawn the child. Installing it anywhere else filters the wrong process.
+///
+/// On a target with no syscall table the install is refused, and the caller must
+/// treat that as "no syscall layer" rather than as a successful no-op.
+pub fn install_seccomp_in_child() -> anyhow::Result<()> {
+    crate::seccomp::install(&crate::seccomp::Filter::sandbox())
+}
+
+/// Whether `bwrap` can start a namespace here, for `doctor`.
+pub fn probe_available() -> Result<(), String> {
+    probe()
 }
 
 /// The `bwrap` argv for one plan. Pure, so every platform can test it.
@@ -252,6 +272,11 @@ mod tests {
             deny_globs: vec![],
             default_read: true,
             restrict_network,
+            network: if restrict_network {
+                crate::backend::NetworkPolicy::Off
+            } else {
+                crate::backend::NetworkPolicy::Open
+            },
         }
     }
 
