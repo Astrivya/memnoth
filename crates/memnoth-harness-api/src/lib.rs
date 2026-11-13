@@ -410,9 +410,8 @@ pub mod security;
 // who wants the module path instead.
 pub use fuzz::{
     DiffHunk, DiffLine, FuzzConfig, SyncEntry, SyncManifest, extract_frontmatter,
-    merge_sync_manifests, normalize_provider_base_url, parse_unified_diff,
-    provider_chat_url, provider_models_url, round_trip_client_frame, round_trip_frontmatter,
-    round_trip_server_frame,
+    merge_sync_manifests, normalize_provider_base_url, parse_unified_diff, provider_chat_url,
+    provider_models_url, round_trip_client_frame, round_trip_frontmatter, round_trip_server_frame,
 };
 
 #[cfg(test)]

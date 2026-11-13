@@ -36,7 +36,6 @@ name = "memnoth"
 path = "src/lib.rs"
 
 [dependencies]
-atty = "0.2"
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 sha2 = "0.10"
@@ -55,9 +54,9 @@ clap_mangen = "0.2"
 crossterm = "0.28"
 dirs = "6"
 flate2 = "1"
-memnoth-command = { path = "crates/memnoth-command" }
-memnoth-codegraph = { path = "crates/memnoth-codegraph" }
-memnoth-update = { path = "crates/memnoth-update" }
+memnoth-command = { version = "0.1.0-beta.2", path = "crates/memnoth-command" }
+memnoth-codegraph = { version = "0.1.0-beta.2", path = "crates/memnoth-codegraph" }
+memnoth-update = { version = "0.1.0-beta.2", path = "crates/memnoth-update" }
 ratatui = "0.29"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = [
@@ -66,32 +65,32 @@ reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls",
     "rustls-tls-native-roots",
 ] }
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"] }
 uuid = { version = "1", features = ["v4"] }
 walkdir = "2"
-memnoth-capability = { path = "crates/memnoth-capability" }
-memnoth-context = { path = "crates/memnoth-context" }
-memnoth-coord = { path = "crates/memnoth-coord" }
-memnoth-engine = { path = "crates/memnoth-engine" }
-memnoth-harness-api = { path = "crates/memnoth-harness-api" }
-memnoth-transport = { path = "crates/memnoth-transport" }
-memnoth-mcp-client = { path = "crates/memnoth-mcp-client" }
-memnoth-sandbox = { path = "crates/memnoth-sandbox" }
-memnoth-search = { path = "crates/memnoth-search" }
-memnoth-agent = { path = "crates/memnoth-agent" }
-memnoth-session = { path = "crates/memnoth-session" }
-memnoth-cloud-client = { path = "crates/memnoth-cloud-client" }
-memnoth-ui = { path = "crates/memnoth-ui" }
-memnoth-auth = { path = "crates/memnoth-auth" }
-memnoth-provider-config = { path = "crates/memnoth-provider-config" }
-memnoth-lsp = { path = "crates/memnoth-lsp" }
-memnoth-provider-registry = { path = "crates/memnoth-provider-registry" }
-memnoth-skills = { path = "crates/memnoth-skills" }
-memnoth-worktree = { path = "crates/memnoth-worktree" }
+memnoth-capability = { version = "0.1.0-beta.2", path = "crates/memnoth-capability" }
+memnoth-context = { version = "0.1.0-beta.2", path = "crates/memnoth-context" }
+memnoth-coord = { version = "0.1.0-beta.2", path = "crates/memnoth-coord" }
+memnoth-engine = { version = "0.1.0-beta.2", path = "crates/memnoth-engine" }
+memnoth-harness-api = { version = "0.1.0-beta.2", path = "crates/memnoth-harness-api" }
+memnoth-transport = { version = "0.1.0-beta.2", path = "crates/memnoth-transport" }
+memnoth-mcp-client = { version = "0.1.0-beta.2", path = "crates/memnoth-mcp-client" }
+memnoth-sandbox = { version = "0.1.0-beta.2", path = "crates/memnoth-sandbox" }
+memnoth-search = { version = "0.1.0-beta.2", path = "crates/memnoth-search" }
+memnoth-agent = { version = "0.1.0-beta.2", path = "crates/memnoth-agent" }
+memnoth-session = { version = "0.1.0-beta.2", path = "crates/memnoth-session" }
+memnoth-cloud-client = { version = "0.1.0-beta.2", path = "crates/memnoth-cloud-client" }
+memnoth-ui = { version = "0.1.0-beta.2", path = "crates/memnoth-ui" }
+memnoth-auth = { version = "0.1.0-beta.2", path = "crates/memnoth-auth" }
+memnoth-provider-config = { version = "0.1.0-beta.2", path = "crates/memnoth-provider-config" }
+memnoth-lsp = { version = "0.1.0-beta.2", path = "crates/memnoth-lsp" }
+memnoth-provider-registry = { version = "0.1.0-beta.2", path = "crates/memnoth-provider-registry" }
+memnoth-skills = { version = "0.1.0-beta.2", path = "crates/memnoth-skills" }
+memnoth-worktree = { version = "0.1.0-beta.2", path = "crates/memnoth-worktree" }
 axum = "0.8"
 notify = "8"
 tower-http = { version = "0.6", features = ["cors"] }
@@ -101,7 +100,7 @@ tempfile = "3"
 # tests/update_local_release.rs stages a release the way dist.sh does and then
 # installs it onto a copy of the binary, so the archive reader under test is the
 # updater's own rather than a second packaging path.
-zip = "2"
+zip = "9"
 tower = { version = "0.5", features = ["util"] }
 # tests/tui_pty.rs runs the real binary behind an 80x24 pty: ConPTY on Windows,
 # forkpty on unix. vt100 parses the byte stream back into a screen.

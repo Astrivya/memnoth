@@ -272,7 +272,7 @@ fn trace_pages_mentions_and_the_cursor_moves() {
     for line in 1..=5 {
         conn.execute(
             "INSERT INTO refs (name, path, line, container) VALUES ('run', ?1, ?2, NULL)",
-            rusqlite::params![format!("src/use_{line}.rs"), line],
+            rusqlite::params![format!("src/use_{line}.rs"), line as i64],
         )
         .unwrap();
     }
@@ -320,7 +320,7 @@ fn the_advertised_page_size_is_the_one_trace_page_honours() {
     for line in 1..=(MAX_REFERENCES + 25) {
         conn.execute(
             "INSERT INTO refs (name, path, line, container) VALUES ('wide', ?1, ?2, NULL)",
-            rusqlite::params![format!("src/use_{line}.rs"), line],
+            rusqlite::params![format!("src/use_{line}.rs"), line as i64],
         )
         .unwrap();
     }

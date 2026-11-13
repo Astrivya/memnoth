@@ -11,9 +11,9 @@ name = "memnoth_skills"
 path = "src/lib.rs"
 
 [dependencies]
-memnoth-command = { path = "../memnoth-command" }
-memnoth-capability = { path = "../memnoth-capability" }
-memnoth-context = { path = "../memnoth-context" }
+memnoth-command = { version = "0.1.0-beta.2", path = "../memnoth-command" }
+memnoth-capability = { version = "0.1.0-beta.2", path = "../memnoth-capability" }
+memnoth-context = { version = "0.1.0-beta.2", path = "../memnoth-context" }
 regex = "1"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }

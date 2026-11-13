@@ -258,8 +258,20 @@ impl Overlay for AgentDeck {
 
     fn on_open(&mut self, app: &mut App) {
         self.refresh(app);
-        self.selected = 0;
-        self.list_state.select(Some(0));
+        // The deck opens on the newest run: Alt+A is how you inspect the
+        // delegation you just made, not the session itself. With rows in spawn
+        // order the newest is the last row in flat view, and selecting by
+        // spawn_seq covers the tree view too, where depth decides position.
+        let newest = self.children.iter().map(|child| child.spawn_seq).max();
+        if let Some(newest) = newest
+            && let Some(index) = self
+                .ordered()
+                .iter()
+                .position(|child| child.spawn_seq == newest)
+        {
+            self.selected = index;
+        }
+        self.list_state.select(Some(self.selected));
     }
 
     fn on_tick(&mut self, app: &mut App) {

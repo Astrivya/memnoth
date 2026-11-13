@@ -56,11 +56,16 @@ impl AgentStatus {
 ///
 /// The Deck and the Trace both draw this list; neither invents a row. An empty
 /// roster means nothing has been delegated, and the screens say so.
+///
+/// Rows are in spawn order, not registry order: the delegator stores nodes in
+/// a HashMap, so an unsorted roster put a random run at index 0 and the Deck
+/// opened on the session or the child by a per-process coin flip. Both the
+/// deck and the trace select from this one list, so stability belongs here.
 pub fn roster(app: &crate::tui::app::App) -> Vec<ChildInfo> {
     let Some(delegator) = app.delegator.as_ref() else {
         return Vec::new();
     };
-    delegator
+    let mut roster: Vec<ChildInfo> = delegator
         .nodes()
         .into_iter()
         .map(|node| {
@@ -91,7 +96,9 @@ pub fn roster(app: &crate::tui::app::App) -> Vec<ChildInfo> {
                 unread: true,
             }
         })
-        .collect()
+        .collect();
+    roster.sort_by_key(|child| child.spawn_seq);
+    roster
 }
 
 /// One child agent in the deck.

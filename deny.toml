@@ -1,27 +1,33 @@
 # cargo-deny policy for the memnoth workspace.
 #
 # Only licences are a hard gate today: a copyleft or unlicensed dependency
-# would change what this Apache-2.0 product can ship, so those fail the build.
-# Advisories, bans and sources are warnings until the baseline is clean — a
-# known-unmaintained crate the team has accepted must not keep CI red forever,
-# but it must be visible every run, so warnings (not silence) carry it.
+# would change what this Apache-2.0 product can ship, so anything not in the
+# allow list is denied. Advisories, bans and sources are warnings until the
+# advisory baseline is clean — a known-unmaintained crate the team has
+# accepted must not keep CI red forever, but it must be visible every run, so
+# warnings (not silence) carry it.
+#
+# Schema targeted at cargo-deny 0.20.x (what `cargo install cargo-deny
+# --locked` ships). 0.20 removed the old `vulnerability`/`notice`/`severity-
+# threshold` levels and the `unlicensed`/`copyleft`/`default` license keys
+# (see cargo-deny#611): a vulnerability advisory is always an error, and a
+# license is denied unless it is explicitly allowed or excepted.
 
 [graph]
 
 [advisories]
-vulnerability = "warn"
-unmaintained = "warn"
-unsound = "warn"
-notice = "warn"
+# A scope decides which crates a class of advisory can fail on, not a
+# level: "workspace" is direct dependencies of workspace crates, "all"
+# includes the whole transitive graph. Unsound direct deps are the ones a
+# version bump can fix, so they are the hard gate; the rest is report-only.
+unsound = "workspace"
+unmaintained = "workspace"
 
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
 
 [licenses]
-unlicensed = "deny"
-copyleft = "deny"
-default = "allow"
 allow = [
   "Apache-2.0",
   "MIT",
@@ -35,6 +41,13 @@ allow = [
   "OpenSSL",
   "CC0-1.0",
   "Unlicense",
+  # bzip2 (via zip 9's bzip2 feature): a permissive BSD-style license,
+  # in the same class as Zlib; only a redistribution disclaimer.
+  "bzip2-1.0.6",
+  # webpki-roots: Mozilla's root certificate bundle, shipped under a
+  # permissive data license. It names the trust anchors our TLS stack
+  # validates against; there is no copyleft in it.
+  "CDLA-Permissive-2.0",
 ]
 
 [sources]

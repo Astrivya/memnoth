@@ -445,26 +445,26 @@ impl Store {
 
     /// Generation counter for the store.
     pub fn generation(&self) -> Result<u64> {
-        let row: u64 = self
+        let row: i64 = self
             .conn
             .query_row("SELECT COUNT(*) FROM symbols", [], |r| r.get(0))?;
-        Ok(row)
+        Ok(row as u64)
     }
 
     /// Live edge count.
     pub fn live_edge_count(&self) -> Result<u64> {
-        let row: u64 = self
+        let row: i64 = self
             .conn
             .query_row("SELECT COUNT(*) FROM relations", [], |r| r.get(0))?;
-        Ok(row)
+        Ok(row as u64)
     }
 
     /// Symbol count.
     pub fn symbol_count(&self) -> Result<u64> {
-        let row: u64 = self
+        let row: i64 = self
             .conn
             .query_row("SELECT COUNT(*) FROM symbols", [], |r| r.get(0))?;
-        Ok(row)
+        Ok(row as u64)
     }
 }
 
@@ -541,7 +541,7 @@ pub fn update_file(store: &mut Store, root: &Path, file: &str) -> Result<IndexRe
     for (qname, kind, span_start, span_end, signature) in symbols {
         store.conn.execute(
             "INSERT OR REPLACE INTO symbols (qname, kind, file_path, span_start, span_end, signature) VALUES (?, ?, ?, ?, ?, ?)",
-            params![qname, kind, file, span_start, span_end, signature],
+            params![qname, kind, file, span_start as i64, span_end as i64, signature],
         )?;
         report.symbols_extracted += 1;
     }
@@ -908,8 +908,8 @@ pub fn snippet(store: &Store, root: &Path, qname: &str) -> Result<Option<SymbolI
 
     if let Some(row) = cursor.next()? {
         let file_path: String = row.get(0)?;
-        let span_start: usize = row.get(1)?;
-        let span_end: usize = row.get(2)?;
+        let span_start: usize = row.get::<_, i64>(1)? as usize;
+        let span_end: usize = row.get::<_, i64>(2)? as usize;
 
         let full_path = root.join(&file_path);
         let content = std::fs::read_to_string(&full_path)
@@ -965,14 +965,14 @@ pub fn blast_radius(
     let mut stmt = store.conn.prepare(
         "SELECT s.qname, s.file_path, s.span_start FROM relations r JOIN symbols s ON r.source_id = s.id WHERE r.target_id = ? LIMIT ?"
     )?;
-    let mut cursor = stmt.query(params![target_id, limit])?;
+    let mut cursor = stmt.query(params![target_id, limit as i64])?;
 
     let mut direct = Vec::new();
     while let Some(row) = cursor.next()? {
         direct.push(Caller {
             qname: row.get(0)?,
             file: row.get(1)?,
-            line: row.get(2)?,
+            line: row.get::<_, i64>(2)? as usize,
             rel_path: row.get(1)?,
             kind: "symbol".to_string(),
         });
@@ -1024,9 +1024,9 @@ pub fn explore(store: &Store, _root: &Path, qname: &str) -> Result<ExploreResult
             kind: row.get(2)?,
             file: row.get(3)?,
             rel_path: row.get(3)?,
-            line: row.get(4)?,
-            start_line: row.get(4)?,
-            end_line: row.get(4)?,
+            line: row.get::<_, i64>(4)? as usize,
+            start_line: row.get::<_, i64>(4)? as usize,
+            end_line: row.get::<_, i64>(4)? as usize,
             signature: row.get(5)?,
             doc_comment: row.get(6)?,
             source: String::new(),
@@ -1041,7 +1041,7 @@ pub fn explore(store: &Store, _root: &Path, qname: &str) -> Result<ExploreResult
             callers.push(Caller {
                 qname: row.get(0)?,
                 file: row.get(1)?,
-                line: row.get(2)?,
+                line: row.get::<_, i64>(2)? as usize,
                 rel_path: row.get(1)?,
                 kind: "symbol".to_string(),
             });
@@ -1056,7 +1056,7 @@ pub fn explore(store: &Store, _root: &Path, qname: &str) -> Result<ExploreResult
             callees.push(Callee {
                 qname: row.get(0)?,
                 file: row.get(1)?,
-                line: row.get(2)?,
+                line: row.get::<_, i64>(2)? as usize,
             });
         }
 
@@ -1148,7 +1148,7 @@ pub fn search_symbols(store: &Store, query: &str, limit: usize) -> Result<Vec<Sc
     let mut stmt = store
         .conn
         .prepare("SELECT id, qname FROM symbols WHERE qname LIKE ? LIMIT ?")?;
-    let mut cursor = stmt.query(params![format!("%{}%", query), limit])?;
+    let mut cursor = stmt.query(params![format!("%{}%", query), limit as i64])?;
     while let Some(row) = cursor.next()? {
         let id: i64 = row.get(0)?;
         let qname: String = row.get(1)?;

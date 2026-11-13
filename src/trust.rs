@@ -617,10 +617,9 @@ fn draw_detail(out: &mut impl Write, body: usize, color: bool) -> Result<()> {
          hooks and MCP configuration that decide what is allowed to run. It reads \
          none of them before you answer yes."
             .to_string(),
-        format!(
-            "The answer is stored in {store} and keyed by the canonical path, so a \
-             symlink cannot point somewhere else."
-        ),
+        "The answer is stored in the file below, keyed by the canonical path, so a \
+         symlink cannot point somewhere else."
+            .to_string(),
         "Home, a filesystem root, a network share and a removable volume are trusted \
          for one session only, because trusting them would mean trusting everything \
          below them."
@@ -632,6 +631,23 @@ fn draw_detail(out: &mut impl Write, body: usize, color: bool) -> Result<()> {
         }
         writeln!(out)?;
     }
+    // The store itself gets a path bar, not a word in prose: wrap_words keeps
+    // a word longer than the line whole (a path cut in half is worse than an
+    // overlong line), and a state dir under a long temp root beat width 56
+    // on macOS once the test drew with the real path.
+    for (index, line) in wrap_path(&store, body.saturating_sub(2)).iter().enumerate() {
+        if index == 0 {
+            writeln!(
+                out,
+                "  {} {}",
+                paint("▎", Ink::Accent, color),
+                paint(line, Ink::Bold, color)
+            )?;
+        } else {
+            writeln!(out, "    {}", paint(line, Ink::Bold, color))?;
+        }
+    }
+    writeln!(out)?;
     for line in wrap_words(sandbox_line(), body) {
         writeln!(out, "  {}", paint(&line, Ink::Dim, color))?;
     }

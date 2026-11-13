@@ -2,6 +2,7 @@
 name = "memnoth-sandbox"
 version = "0.1.0-beta.2"
 edition = "2024"
+license = "Apache-2.0"
 publish = false
 
 # Lane W10 (sandbox): OS-aware sandbox profiles, fail-closed deny-globs,

@@ -20,10 +20,10 @@ thiserror = "1"
 indexmap = "2"
 regex = "1"
 ctor = "1"
-memnoth-command-macros = { path = "../memnoth-command-macros" }
+memnoth-command-macros = { version = "0.1.0-beta.2", path = "../memnoth-command-macros" }
 
 # Workspace dependencies
-memnoth-capability = { path = "../memnoth-capability" }
+memnoth-capability = { version = "0.1.0-beta.2", path = "../memnoth-capability" }
 
 [dev-dependencies]
 tempfile = "3"

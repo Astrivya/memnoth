@@ -12,7 +12,7 @@ publish = false
 keyring = "4"
 regex = "1"
 chrono = { version = "0.4", features = ["clock", "std"] }
-memnoth-engine = { path = "../memnoth-engine" }
+memnoth-engine = { version = "0.1.0-beta.2", path = "../memnoth-engine" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"

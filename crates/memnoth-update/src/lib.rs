@@ -982,9 +982,9 @@ pub fn apply_update_to(
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&current_exe)?.permissions();
+        let mut perms = fs::metadata(current_exe)?.permissions();
         perms.set_mode(0o755);
-        fs::set_permissions(&current_exe, perms)?;
+        fs::set_permissions(current_exe, perms)?;
     }
 
     Ok(())
@@ -1016,7 +1016,7 @@ fn extract_binary(archive: &Path, dir: &Path) -> Result<PathBuf> {
             zip::ZipArchive::new(file).with_context(|| format!("opening {}", archive.display()))?;
         for index in 0..zip.len() {
             let mut entry = zip.by_index(index)?;
-            let path = PathBuf::from(entry.name());
+            let path = PathBuf::from(entry.name()?.into_owned());
             if !is_binary(&path) {
                 continue;
             }

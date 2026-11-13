@@ -19,8 +19,8 @@ walkdir = "2"
 dirs = "6"
 thiserror = "1"
 
-memnoth-command = { path = "../memnoth-command" }
-memnoth-capability = { path = "../memnoth-capability" }
-memnoth-skills = { path = "../memnoth-skills" }
+memnoth-command = { version = "0.1.0-beta.2", path = "../memnoth-command" }
+memnoth-capability = { version = "0.1.0-beta.2", path = "../memnoth-capability" }
+memnoth-skills = { version = "0.1.0-beta.2", path = "../memnoth-skills" }
 [dev-dependencies]
 tempfile = "3"

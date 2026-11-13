@@ -106,8 +106,11 @@ jobs:
       # behaviour the CLI is a thin shell over is tested in those crates.
       # `--locked` also fails here when Cargo.lock drifts from a manifest.
       # The output lands in the job summary: a red step that names no failing
-      # test is where a morning used to go.
+      # test is where a morning used to go. Pinned to bash: `set -o pipefail`
+      # is not PowerShell, and windows-latest runs run: steps in pwsh, so the
+      # step died before cargo did and the job reported failure for nothing.
       - name: Run cargo test --workspace --locked
+        shell: bash
         run: |
           set -o pipefail
           cargo test --workspace --locked 2>&1 | tee test-output.log
@@ -187,6 +190,12 @@ jobs:
     name: fuzz (cargo-fuzz targets)
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    # rust-toolchain.toml pins the workspace to 1.98.0 (stable), and rustup
+    # honours it over the nightly installed above: every fuzz step ran the
+    # stable rustc and `-Zsanitizer` is rejected on stable. RUSTUP_TOOLCHAIN
+    # outranks the toolchain file, so the whole job runs on nightly.
+    env:
+      RUSTUP_TOOLCHAIN: nightly
     steps:
       - uses: actions/checkout@v4
 
@@ -258,7 +267,20 @@ jobs:
       # check reads the same RustSec database. The npm half of this job used
       # to point at `../web` — a second repository that cannot exist in this
       # checkout — so it never ran; the web repo audits its own tree.
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      #
+      # The cargo-deny-action met rust-toolchain.toml's 1.98.0 pin inside a
+      # docker image without it (it demands a musl toolchain it never
+      # installed), so cargo-deny runs as a host binary here, on the stable
+      # toolchain the step above already put in place.
+      # Pinned: the deny.toml schema turned over between 0.18 (the docker
+      # action's image) and 0.20 (the registry's latest), and an install
+      # that silently follows `latest` would re-break the policy without a
+      # line of ours changing.
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked --version 0.20.2
+
+      - name: cargo deny check
+        run: cargo deny check --all-features --workspace 2>&1 | tee deny-output.log
 
       # Everything but licenses is report-only until the advisory baseline
       # is clean: `deny.toml` records the allow-list and the reason.
@@ -296,13 +318,23 @@ jobs:
             echo "::notice::No provider key configured: MTS/TRS benches are skipped, KG still runs."
           fi
 
+      # The bench spawns `memnoth ask` for every task (bench.rs reads
+      # MEMNOTH_BIN, defaulting to a PATH lookup): the built binary is not on
+      # PATH in a fresh checkout, so this died with "spawn memnoth ask: No
+      # such file or directory" before any task ran.
       - name: Run MTS-60 bench
         if: steps.providerkeys.outputs.have == 'true'
+        env:
+          MEMNOTH_BIN: ./target/debug/memnoth
         run: ./target/debug/memnoth bench run --suite mts --n 3 --fail-below 0.5 --json -o ci/mts-result.json
 
       - name: Run TRS bench
         if: steps.providerkeys.outputs.have == 'true'
+        env:
+          MEMNOTH_BIN: ./target/debug/memnoth
         run: ./target/debug/memnoth bench run --suite trs --n 3 --fail-below 0.5 --json -o ci/trs-result.json
 
       - name: Run KG bench
+        env:
+          MEMNOTH_BIN: ./target/debug/memnoth
         run: ./target/debug/memnoth bench run --suite kg --n 3 --fail-below 0.0 --json -o ci/kg-result.json

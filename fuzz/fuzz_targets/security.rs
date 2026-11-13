@@ -19,7 +19,8 @@ fuzz_target!(|data: &[u8]| {
     let _ = memnoth_harness_api::security::safe_join(base, Path::new(text));
 
     // Zip-slip: entry disposition against a destination must be safe.
-    let _ = memnoth_harness_api::security::zip_entry_disposition(Path::new("/dest"), Path::new(text));
+    let _ =
+        memnoth_harness_api::security::zip_entry_disposition(Path::new("/dest"), Path::new(text));
 
     // Command injection: argument validation must reject metacharacters.
     let _ = memnoth_harness_api::security::validate_command_args(&[text]);

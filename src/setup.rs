@@ -434,7 +434,9 @@ fn run_sandbox_step(ctx: &AppContext, state: &mut SetupState) -> Result<()> {
 }
 
 fn confirm_simple(prompt: &str) -> bool {
-    if !atty::is(atty::Stream::Stdin) {
+    // std::io::IsTerminal since Rust 1.70; the atty crate is unmaintained and
+    // carries an unfixed unsoundness advisory (RUSTSEC-2021-0145).
+    if !std::io::IsTerminal::is_terminal(&io::stdin()) {
         return false; // Non-interactive, default to no
     }
 
