@@ -242,7 +242,7 @@ fn render_limits(org: &OrgInfo, credits: Option<&CreditsResponse>) -> String {
     // similar: numbers this deployment has no source for. Saying nothing is the
     // only honest option until the control plane reports a limit.
     out.push_str("\nThis deployment reports no request or token rate limits.\n");
-    out.push_str("Monitor usage: `mn usage`\n");
+    out.push_str("Monitor usage: `mn billing`\n");
 
     out
 }
