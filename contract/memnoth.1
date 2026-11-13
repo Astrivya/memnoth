@@ -4,7 +4,7 @@
 .SH NAME
 memnoth \- Terminal agent, bi\-temporal vault, code graph and MCP server
 .SH SYNOPSIS
-\fBmemnoth\fR [\fB\-\-root\fR] [\fB\-\-vault\fR] [\fB\-\-namespace\fR] [\fB\-\-json\fR] [\fB\-\-quiet\fR] [\fB\-\-resume\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fIsubcommands\fR]
+\fBmemnoth\fR [\fB\-\-root\fR] [\fB\-\-vault\fR] [\fB\-\-namespace\fR] [\fB\-\-json\fR] [\fB\-\-quiet\fR] [\fB\-\-trust\-folder\fR] [\fB\-\-resume\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fIsubcommands\fR]
 .SH DESCRIPTION
 One binary for the whole local product.
 .PP
@@ -25,6 +25,9 @@ Machine\-readable output: one JSON envelope on stdout
 .TP
 \fB\-\-quiet\fR
 Suppress progress lines; keep the answer
+.TP
+\fB\-\-trust\-folder\fR
+Trust this folder without asking first
 .TP
 \fB\-\-resume\fR \fI<NAME>\fR
 Resume the named session instead of starting a new one

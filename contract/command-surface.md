@@ -4,6 +4,92 @@ Version: 0.1.0-beta.2
 
 ---
 
+## ACP
+
+### `memnoth acp`
+
+Agent Communication Protocol server mode
+
+**Examples:**
+
+```bash
+memnoth acp
+```
+
+**Overlay:** `None` | **Danger:** `Safe` | **Auth:** `None`
+
+---
+
+## AGENTS
+
+### `memnoth agents list`
+
+List headless agents in the coordination room
+
+**Examples:**
+
+```bash
+memnoth agents list
+```
+
+**Overlay:** `None` | **Danger:** `Safe` | **Auth:** `None`
+
+---
+
+### `memnoth agents run`
+
+Run a headless agent task
+
+**Examples:**
+
+```bash
+memnoth agents run index the workspace
+```
+
+**Required arguments:**
+
+- `--task` (string) — Task description
+
+**Overlay:** `None` | **Danger:** `LocalWrite` | **Auth:** `None`
+
+---
+
+### `memnoth agents result`
+
+Show the result of an agent run
+
+**Examples:**
+
+```bash
+memnoth agents result w-abc123
+```
+
+**Required arguments:**
+
+- `--id` (string) — Worker id
+
+**Overlay:** `None` | **Danger:** `Safe` | **Auth:** `None`
+
+---
+
+### `memnoth agents unpack`
+
+Unpack an agent's result artifacts
+
+**Examples:**
+
+```bash
+memnoth agents unpack w-abc123
+```
+
+**Required arguments:**
+
+- `--id` (string) — Worker id
+
+**Overlay:** `None` | **Danger:** `Safe` | **Auth:** `None`
+
+---
+
 ## AUDIT
 
 ### `memnoth audit show`
@@ -259,6 +345,42 @@ memnoth billing limits
 
 ---
 
+## BTW
+
+### `memnoth btw`
+
+Side question; not persisted in the transcript
+
+**Examples:**
+
+```bash
+memnoth btw <question>
+```
+
+**Required arguments:**
+
+- `--question` (string) — The side question
+
+**Overlay:** `None` | **Danger:** `Safe` | **Auth:** `None`
+
+---
+
+## BUDGET
+
+### `memnoth budget`
+
+Show token budget usage
+
+**Examples:**
+
+```bash
+memnoth budget
+```
+
+**Overlay:** `None` | **Danger:** `Safe` | **Auth:** `None`
+
+---
+
 ## CLOUD
 
 ### `memnoth cloud login`
@@ -344,24 +466,6 @@ memnoth cloud profile default
 
 ---
 
-### `memnoth cloud usage`
-
-Show cloud usage and billing summary
-
-**Examples:**
-
-```bash
-memnoth cloud usage --period month
-```
-
-**Optional arguments:**
-
-- `--period` (enum) — Usage period: day, week, month (default: "month")
-
-**Overlay:** `None` | **Danger:** `Safe` | **Auth:** `Cloud`
-
----
-
 ### `memnoth cloud billing`
 
 Manage cloud billing and payment methods
@@ -373,6 +477,82 @@ memnoth cloud billing
 ```
 
 **Overlay:** `None` | **Danger:** `CloudWrite` | **Auth:** `Cloud`
+
+---
+
+## CODE
+
+### `memnoth why`
+
+Why this code is like this: belief, code, and supersession chain
+
+**Examples:**
+
+```bash
+memnoth why rate_limit
+```
+
+```bash
+memnoth why rate_limit --at 2026-09-01
+```
+
+**Required arguments:**
+
+- `--symbol` (string) — Symbol to explain
+
+**Optional arguments:**
+
+- `--at` (string) — Read the vault as it stood at WHEN (default: "")
+
+**Overlay:** `None` | **Danger:** `Safe` | **Auth:** `None`
+
+---
+
+### `memnoth impact`
+
+What breaks if this changes: exact and likely callers, tests
+
+**Aliases:** `kg.impact`
+
+**Examples:**
+
+```bash
+memnoth impact rate_limit
+```
+
+```bash
+memnoth impact --diff
+```
+
+**Required arguments:**
+
+- `--symbol` (string) — Symbol or file whose blast radius to measure
+
+**Optional arguments:**
+
+- `--depth` (string) — How many reference hops to follow (default: "2")
+
+**Overlay:** `None` | **Danger:** `Safe` | **Auth:** `None`
+
+---
+
+## COMPACT
+
+### `memnoth compact`
+
+Compact context, keeping exact facts
+
+**Examples:**
+
+```bash
+memnoth compact
+```
+
+**Optional arguments:**
+
+- `--focus` (string) — What to focus the compaction on
+
+**Overlay:** `None` | **Danger:** `Safe` | **Auth:** `None`
 
 ---
 
@@ -511,6 +691,27 @@ memnoth version --json
 
 ---
 
+### `memnoth bench`
+
+Run proof benchmarks (MTS-60, TRS, KG)
+
+Run a pinned model against a committed task suite N times and report a 95% bootstrap confidence interval. Outputs a scoreboard JSON and an ablation matrix.
+
+**Examples:**
+
+```bash
+memnoth bench run --suite mts --json
+```
+
+**Optional arguments:**
+
+- `--suite` (string) — Benchmark suite: mts, trs, kg (default: "mts")
+- `--json` (bool) — Output as JSON (default: false)
+
+**Overlay:** `None` | **Danger:** `Safe` | **Auth:** `None`
+
+---
+
 ### `memnoth help`
 
 Print help, including hidden verbs with --all
@@ -565,6 +766,27 @@ memnoth schema --check --output docs/cli/schema.json
 
 ---
 
+## DELEGATION
+
+### `memnoth delegate`
+
+Delegate a task to a scoped subagent
+
+**Examples:**
+
+```bash
+memnoth delegate scout map auth entry points
+```
+
+**Required arguments:**
+
+- `--name` (string) — Agent name
+- `--task` (string) — Task description
+
+**Overlay:** `Fullscreen` | **Danger:** `Safe` | **Auth:** `None`
+
+---
+
 ## DIAGNOSTICS
 
 ### `memnoth doctor`
@@ -576,6 +798,50 @@ Report what is wired: paths, versions, profiles, clients
 ```bash
 memnoth doctor
 ```
+
+**Overlay:** `None` | **Danger:** `Safe` | **Auth:** `None`
+
+---
+
+### `memnoth drift`
+
+Beliefs contradicted by current code/config/tests
+
+**Examples:**
+
+```bash
+memnoth drift
+```
+
+```bash
+memnoth drift --since 2026-01-01
+```
+
+**Optional arguments:**
+
+- `--since` (string) — Only show contradictions since WHEN (default: "")
+
+**Overlay:** `None` | **Danger:** `Safe` | **Auth:** `None`
+
+---
+
+### `memnoth simulate`
+
+Dry-run plan with zero writes
+
+**Examples:**
+
+```bash
+memnoth simulate rename foo to bar
+```
+
+```bash
+memnoth simulate modify src/main.rs
+```
+
+**Required arguments:**
+
+- `--change` (string) — Change to simulate: file path, symbol, or description
 
 **Overlay:** `None` | **Danger:** `Safe` | **Auth:** `None`
 
@@ -607,6 +873,118 @@ memnoth docs
 
 - `--output` (string) — Output file path (default: stdout) (default: "")
 - `--check` (bool) — Compare --output against the registry; exit non-zero when stale (default: false)
+
+**Overlay:** `None` | **Danger:** `Safe` | **Auth:** `None`
+
+---
+
+## EXPORT
+
+### `memnoth export`
+
+Export session transcript with tool calls and receipts
+
+**Examples:**
+
+```bash
+memnoth export
+```
+
+**Optional arguments:**
+
+- `--path` (string) — Where to write the export
+
+**Overlay:** `None` | **Danger:** `Safe` | **Auth:** `None`
+
+---
+
+## EXTENSION
+
+### `memnoth extension`
+
+Extension management: new, list, uninstall, doctor
+
+**Examples:**
+
+```bash
+memnoth extension list
+```
+
+**Optional arguments:**
+
+- `--action` (string) — Subcommand: new, list, uninstall, doctor
+
+**Overlay:** `None` | **Danger:** `Safe` | **Auth:** `None`
+
+---
+
+## GOAL
+
+### `memnoth goal`
+
+Set or show the session goal condition
+
+**Examples:**
+
+```bash
+memnoth goal
+```
+
+**Optional arguments:**
+
+- `--condition` (string) — The completion condition to set
+
+**Overlay:** `None` | **Danger:** `Safe` | **Auth:** `None`
+
+---
+
+## HANDOFF
+
+### `memnoth handoff`
+
+Bundle a session for transfer to another machine
+
+**Examples:**
+
+```bash
+memnoth handoff
+```
+
+**Optional arguments:**
+
+- `--path` (string) — Where to write the bundle
+
+**Overlay:** `None` | **Danger:** `Safe` | **Auth:** `None`
+
+---
+
+## HOME
+
+### `memnoth brief`
+
+Session brief: primary action, pulse facts, quickstart
+
+**Examples:**
+
+```bash
+memnoth brief
+```
+
+**Overlay:** `Fullscreen` | **Danger:** `Safe` | **Auth:** `None`
+
+---
+
+## KEYMAP
+
+### `memnoth keymap`
+
+View and remap key bindings
+
+**Examples:**
+
+```bash
+memnoth keymap
+```
 
 **Overlay:** `None` | **Danger:** `Safe` | **Auth:** `None`
 
@@ -663,6 +1041,11 @@ memnoth keys revoke key_123
 
 - `--id` (string) — Key id, as `mn keys list` reports it
 
+**Optional arguments:**
+
+- `--yes` (bool) — Answer yes without asking (default: false)
+- `--dry_run` (bool) — Show what would be revoked without revoking anything (default: false)
+
 **Overlay:** `Confirm` | **Danger:** `Destructive` | **Auth:** `Cloud`
 
 ---
@@ -680,6 +1063,7 @@ memnoth keys revoke-all --yes
 **Optional arguments:**
 
 - `--yes` (bool) — Revoke every key without asking for confirmation (default: false)
+- `--dry_run` (bool) — Count the live keys; revoke nothing (default: false)
 
 **Overlay:** `Confirm` | **Danger:** `Destructive` | **Auth:** `Cloud`
 
@@ -872,44 +1256,91 @@ memnoth mcp selftest
 
 ---
 
-## MODELS
+## MEMORY
 
-### `memnoth models list`
+### `memnoth lineage`
 
-List available models from the cloud
+Trace source to belief to decision to code, every edge dated
 
-**Examples:**
-
-```bash
-memnoth models list --connected
-```
-
-**Optional arguments:**
-
-- `--provider` (string) — Filter by provider name (default: "")
-- `--connected` (bool) — Only show models from configured providers (default: false)
-- `--format` (enum) — Output format: table, wide, json (default: "table")
-- `--compare` (string) — Compare two models side-by-side (comma-separated IDs) (default: "")
-
-**Overlay:** `None` | **Danger:** `Safe` | **Auth:** `Cloud`
-
----
-
-### `memnoth models use`
-
-Set default model (persisted to config)
+**Aliases:** `vault.explain`
 
 **Examples:**
 
 ```bash
-memnoth models use claude-sonnet-4-5
+memnoth lineage rate_limit
 ```
 
 **Required arguments:**
 
-- `--id` (string) — Model ID to set as default
+- `--entity` (string) — Entity whose provenance to trace
 
-**Overlay:** `None` | **Danger:** `LocalWrite` | **Auth:** `None`
+**Optional arguments:**
+
+- `--depth` (string) — How many relation hops to follow (default: "3")
+
+**Overlay:** `None` | **Danger:** `Safe` | **Auth:** `None`
+
+---
+
+### `memnoth why`
+
+Why this code is like this: belief, code, and supersession chain
+
+**Examples:**
+
+```bash
+memnoth why rate_limit
+```
+
+```bash
+memnoth why rate_limit --at 2026-09-01
+```
+
+**Required arguments:**
+
+- `--symbol` (string) — Symbol to explain
+
+**Optional arguments:**
+
+- `--at` (string) — Read the vault as it stood at WHEN (default: "")
+
+**Overlay:** `None` | **Danger:** `Safe` | **Auth:** `None`
+
+---
+
+## MERGE
+
+### `memnoth merge`
+
+Merge a child branch, surfacing belief conflicts
+
+**Examples:**
+
+```bash
+memnoth merge <branch>
+```
+
+**Required arguments:**
+
+- `--branch` (string) — The branch to merge in
+
+**Overlay:** `None` | **Danger:** `Safe` | **Auth:** `None`
+
+---
+
+## ONBOARDING
+
+### `memnoth onboarding`
+
+Replayable first-run onboarding card
+
+**Examples:**
+
+```bash
+memnoth onboarding
+```
+
+**Overlay:** `None` | **Danger:** `Safe` | **Auth:** `None`
 
 ---
 
@@ -1074,6 +1505,29 @@ memnoth org withdraw inv_1
 
 ---
 
+## PLAN
+
+### `memnoth plan`
+
+Set or show the session plan
+
+**Examples:**
+
+```bash
+memnoth plan
+```
+
+**Optional arguments:**
+
+- `--name` (string) — Session name
+- `--enable` (bool) — Enable plan mode (default: false)
+- `--disable` (bool) — Disable plan mode (default: false)
+- `--json` (bool) — Output as JSON (default: false)
+
+**Overlay:** `None` | **Danger:** `Safe` | **Auth:** `None`
+
+---
+
 ## PRIVACY
 
 ### `memnoth telemetry status`
@@ -1134,7 +1588,7 @@ memnoth privacy status
 
 ### `memnoth privacy on`
 
-Enable telemetry collection (default: on)
+Enable telemetry collection (default: off)
 
 **Examples:**
 
@@ -1194,46 +1648,6 @@ memnoth privacy show-data
 
 ## PRODUCT
 
-### `memnoth usage`
-
-Show usage and costs, with local reconciliation
-
-**Examples:**
-
-```bash
-memnoth usage --range 7d
-```
-
-**Optional arguments:**
-
-- `--by` (string) — Group by: day, model, project (default: "")
-- `--since` (string) — Since date (YYYY-MM-DD) (default: "")
-- `--range` (string) — Time range: 7d, 30d, 90d, 365d (default: "30d")
-
-**Overlay:** `None` | **Danger:** `Safe` | **Auth:** `Cloud`
-
----
-
-### `memnoth stats`
-
-Show usage statistics with local reconciliation
-
-**Examples:**
-
-```bash
-memnoth stats --by model
-```
-
-**Optional arguments:**
-
-- `--by` (string) — Group by: day, model, project (default: "")
-- `--since` (string) — Since date (YYYY-MM-DD) (default: "")
-- `--range` (string) — Time range: 7d, 30d, 90d, 365d (default: "30d")
-
-**Overlay:** `None` | **Danger:** `Safe` | **Auth:** `Cloud`
-
----
-
 ### `memnoth update`
 
 Check for and apply updates
@@ -1285,7 +1699,9 @@ memnoth uninstall --keep-state
 
 **Optional arguments:**
 
-- `--keep-state` (bool) — Keep configuration and state files (default: false)
+- `--keep_state` (bool) — Keep configuration and state files (default: false)
+- `--yes` (bool) — Answer yes without asking (default: false)
+- `--dry_run` (bool) — Show what would be uninstalled without uninstalling (default: false)
 
 **Overlay:** `Confirm` | **Danger:** `Destructive` | **Auth:** `None`
 
@@ -1443,6 +1859,20 @@ memnoth watch --once
 - `--debounce` (integer) — Debounce interval in milliseconds (default: 500)
 - `--vault-changes` (bool) — Also watch vault files for changes (default: false)
 - `--once` (bool) — Run once and exit (no continuous watch) (default: false)
+
+**Overlay:** `None` | **Danger:** `LocalWrite` | **Auth:** `None`
+
+---
+
+### `memnoth demo`
+
+Offline vault demo: decision, believed-at, superseded-by, source/commit, both contradiction sides
+
+**Examples:**
+
+```bash
+memnoth demo
+```
 
 **Overlay:** `None` | **Danger:** `LocalWrite` | **Auth:** `None`
 
@@ -1656,6 +2086,22 @@ memnoth connect test
 
 ---
 
+## RECAP
+
+### `memnoth recap`
+
+One-line session summary
+
+**Examples:**
+
+```bash
+memnoth recap
+```
+
+**Overlay:** `None` | **Danger:** `Safe` | **Auth:** `None`
+
+---
+
 ## RECEIPT
 
 ### `memnoth receipt write`
@@ -1707,6 +2153,82 @@ memnoth receipt verify
 **Optional arguments:**
 
 - `--commit` (string) — Revision to measure, show or verify; defaults to HEAD (default: "")
+
+**Overlay:** `None` | **Danger:** `Safe` | **Auth:** `None`
+
+---
+
+## RECEIPTS
+
+### `memnoth receipt`
+
+Show and verify a turn receipt
+
+**Examples:**
+
+```bash
+memnoth receipt --verify
+```
+
+**Optional arguments:**
+
+- `--turn` (string) — Turn number (default: "last")
+
+**Overlay:** `Fullscreen` | **Danger:** `Safe` | **Auth:** `None`
+
+---
+
+## REDO
+
+### `memnoth redo`
+
+Redo the last undone turn
+
+**Examples:**
+
+```bash
+memnoth redo
+```
+
+**Overlay:** `None` | **Danger:** `Safe` | **Auth:** `None`
+
+---
+
+## RENAME
+
+### `memnoth rename`
+
+Rename the current session, keeping its id and path
+
+**Examples:**
+
+```bash
+memnoth rename <name>
+```
+
+**Required arguments:**
+
+- `--name` (string) — The new session name
+
+**Overlay:** `None` | **Danger:** `Safe` | **Auth:** `None`
+
+---
+
+## SANDBOX
+
+### `memnoth sandbox`
+
+Run a command in the sandbox, or set the sandbox up
+
+**Examples:**
+
+```bash
+memnoth sandbox setup
+```
+
+**Required arguments:**
+
+- `--command` (string) — Subcommand: test <cmd> or setup
 
 **Overlay:** `None` | **Danger:** `Safe` | **Auth:** `None`
 
@@ -1824,6 +2346,77 @@ memnoth printf 'hello\n' | ask --output-format json
 
 ---
 
+## SIGNATURE
+
+### `memnoth checkpoint`
+
+Snapshot code, conversation, and vault metadata
+
+**Examples:**
+
+```bash
+memnoth checkpoint --name pre-change
+```
+
+**Optional arguments:**
+
+- `--name` (string) — Checkpoint name (default: "ckpt-auto")
+
+**Overlay:** `Fullscreen` | **Danger:** `Safe` | **Auth:** `None`
+
+---
+
+### `memnoth delegate`
+
+Delegate a task to a scoped subagent
+
+**Examples:**
+
+```bash
+memnoth delegate scout map auth entry points
+```
+
+**Required arguments:**
+
+- `--name` (string) — Agent name
+- `--task` (string) — Task description
+
+**Overlay:** `Fullscreen` | **Danger:** `Safe` | **Auth:** `None`
+
+---
+
+### `memnoth receipt`
+
+Show and verify a turn receipt
+
+**Examples:**
+
+```bash
+memnoth receipt --verify
+```
+
+**Optional arguments:**
+
+- `--turn` (string) — Turn number (default: "last")
+
+**Overlay:** `Fullscreen` | **Danger:** `Safe` | **Auth:** `None`
+
+---
+
+### `memnoth brief`
+
+Session brief: primary action, pulse facts, quickstart
+
+**Examples:**
+
+```bash
+memnoth brief
+```
+
+**Overlay:** `Fullscreen` | **Danger:** `Safe` | **Auth:** `None`
+
+---
+
 ## SKILL
 
 ### `memnoth skills add`
@@ -1884,6 +2477,8 @@ memnoth skill remove deploy-check
 **Optional arguments:**
 
 - `--force` (bool) — Force removal without confirmation (default: false)
+- `--yes` (bool) — Answer yes without asking (default: false)
+- `--dry_run` (bool) — Show what would be removed without removing anything (default: false)
 
 **Overlay:** `Confirm` | **Danger:** `Destructive` | **Auth:** `None`
 
@@ -2251,6 +2846,26 @@ memnoth teams audit --range 7d
 
 ---
 
+## TRUST
+
+### `memnoth trust`
+
+Trust: list trusted folders, or forget one
+
+**Examples:**
+
+```bash
+memnoth trust list
+```
+
+**Optional arguments:**
+
+- `--action` (string) — Subcommand: list or forget <path>
+
+**Overlay:** `None` | **Danger:** `Safe` | **Auth:** `None`
+
+---
+
 ## UI
 
 ### `memnoth set-theme`
@@ -2286,6 +2901,22 @@ memnoth set-screen-reader plain
 - `--mode` (enum) — Mode: off or plain
 
 **Overlay:** `None` | **Danger:** `LocalWrite` | **Auth:** `None`
+
+---
+
+## UNDO
+
+### `memnoth undo`
+
+Undo the last turn (conversation only)
+
+**Examples:**
+
+```bash
+memnoth undo
+```
+
+**Overlay:** `None` | **Danger:** `Safe` | **Auth:** `None`
 
 ---
 
@@ -2483,8 +3114,32 @@ memnoth worktree clean spike
 **Optional arguments:**
 
 - `--force` (bool) — Force removal even with uncommitted changes (default: false)
+- `--yes` (bool) — Answer yes without asking (default: false)
+- `--dry_run` (bool) — Show what would be removed without removing anything (default: false)
 
 **Overlay:** `Confirm` | **Danger:** `Destructive` | **Auth:** `None`
+
+---
+
+### `memnoth worktree finish`
+
+End a run: clean its worktree on success, keep it on failure
+
+**Examples:**
+
+```bash
+memnoth worktree finish run-42 --outcome failed
+```
+
+**Required arguments:**
+
+- `--run_id` (string) — Run id (the worktree directory name)
+
+**Optional arguments:**
+
+- `--outcome` (string) — success or failed (default: "success")
+
+**Overlay:** `None` | **Danger:** `LocalWrite` | **Auth:** `None`
 
 ---
 

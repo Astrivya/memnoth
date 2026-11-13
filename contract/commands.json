@@ -1,5 +1,5 @@
 {
-  "command_count": 131,
+  "command_count": 160,
   "commands": [
     {
       "cli_path": [
@@ -1523,6 +1523,361 @@
     },
     {
       "cli_path": [
+        "drift"
+      ],
+      "handler": "drift",
+      "id": "drift",
+      "json_output": true,
+      "min_version": null,
+      "related": [
+        "vault.contradictions",
+        "kg.search"
+      ],
+      "slash": {
+        "aliases": [],
+        "auth": "none",
+        "categories": [
+          "diagnostics"
+        ],
+        "danger": "safe",
+        "deprecated": null,
+        "description": "Beliefs contradicted by current code/config/tests",
+        "examples": [
+          "drift",
+          "drift --since 2026-01-01"
+        ],
+        "hidden": true,
+        "long_description": null,
+        "name": "drift",
+        "overlay": "none",
+        "palette": "drift [--since WHEN]",
+        "params": [
+          {
+            "default": "",
+            "deprecated": null,
+            "description": "Only show contradictions since WHEN",
+            "env": null,
+            "hidden": false,
+            "long": null,
+            "name": "since",
+            "param_type": {
+              "completions": null,
+              "pattern": null,
+              "type": "string"
+            },
+            "position": null,
+            "positional": false,
+            "required": false,
+            "short": null
+          }
+        ],
+        "profile": null
+      },
+      "streaming": false,
+      "tags": [
+        "drift",
+        "diagnostics"
+      ],
+      "timeout_secs": null
+    },
+    {
+      "cli_path": [
+        "simulate"
+      ],
+      "handler": "simulate",
+      "id": "simulate",
+      "json_output": true,
+      "min_version": null,
+      "related": [
+        "kg.impact",
+        "sandbox.check"
+      ],
+      "slash": {
+        "aliases": [],
+        "auth": "none",
+        "categories": [
+          "diagnostics"
+        ],
+        "danger": "safe",
+        "deprecated": null,
+        "description": "Dry-run plan with zero writes",
+        "examples": [
+          "simulate rename foo to bar",
+          "simulate modify src/main.rs"
+        ],
+        "hidden": true,
+        "long_description": null,
+        "name": "simulate",
+        "overlay": "none",
+        "palette": "simulate <change>",
+        "params": [
+          {
+            "default": null,
+            "deprecated": null,
+            "description": "Change to simulate: file path, symbol, or description",
+            "env": null,
+            "hidden": false,
+            "long": null,
+            "name": "change",
+            "param_type": {
+              "completions": null,
+              "pattern": null,
+              "type": "string"
+            },
+            "position": null,
+            "positional": false,
+            "required": true,
+            "short": null
+          }
+        ],
+        "profile": null
+      },
+      "streaming": false,
+      "tags": [
+        "simulate",
+        "diagnostics"
+      ],
+      "timeout_secs": null
+    },
+    {
+      "cli_path": [
+        "lineage"
+      ],
+      "handler": "lineage",
+      "id": "lineage",
+      "json_output": true,
+      "min_version": null,
+      "related": [
+        "vault.history",
+        "report.receipt"
+      ],
+      "slash": {
+        "aliases": [
+          "vault.explain"
+        ],
+        "auth": "none",
+        "categories": [
+          "memory"
+        ],
+        "danger": "safe",
+        "deprecated": null,
+        "description": "Trace source to belief to decision to code, every edge dated",
+        "examples": [
+          "lineage rate_limit"
+        ],
+        "hidden": true,
+        "long_description": null,
+        "name": "lineage",
+        "overlay": "none",
+        "palette": "lineage <entity> [--depth N]",
+        "params": [
+          {
+            "default": null,
+            "deprecated": null,
+            "description": "Entity whose provenance to trace",
+            "env": null,
+            "hidden": false,
+            "long": null,
+            "name": "entity",
+            "param_type": {
+              "completions": null,
+              "pattern": null,
+              "type": "string"
+            },
+            "position": null,
+            "positional": false,
+            "required": true,
+            "short": null
+          },
+          {
+            "default": "3",
+            "deprecated": null,
+            "description": "How many relation hops to follow",
+            "env": null,
+            "hidden": false,
+            "long": null,
+            "name": "depth",
+            "param_type": {
+              "completions": null,
+              "pattern": null,
+              "type": "string"
+            },
+            "position": null,
+            "positional": false,
+            "required": false,
+            "short": null
+          }
+        ],
+        "profile": null
+      },
+      "streaming": false,
+      "tags": [
+        "lineage",
+        "memory"
+      ],
+      "timeout_secs": null
+    },
+    {
+      "cli_path": [
+        "why"
+      ],
+      "handler": "why",
+      "id": "why",
+      "json_output": true,
+      "min_version": null,
+      "related": [
+        "lineage",
+        "vault.asof",
+        "vault.history"
+      ],
+      "slash": {
+        "aliases": [],
+        "auth": "none",
+        "categories": [
+          "memory",
+          "code"
+        ],
+        "danger": "safe",
+        "deprecated": null,
+        "description": "Why this code is like this: belief, code, and supersession chain",
+        "examples": [
+          "why rate_limit",
+          "why rate_limit --at 2026-09-01"
+        ],
+        "hidden": true,
+        "long_description": null,
+        "name": "why",
+        "overlay": "none",
+        "palette": "why <symbol> [--at WHEN]",
+        "params": [
+          {
+            "default": null,
+            "deprecated": null,
+            "description": "Symbol to explain",
+            "env": null,
+            "hidden": false,
+            "long": null,
+            "name": "symbol",
+            "param_type": {
+              "completions": null,
+              "pattern": null,
+              "type": "string"
+            },
+            "position": null,
+            "positional": false,
+            "required": true,
+            "short": null
+          },
+          {
+            "default": "",
+            "deprecated": null,
+            "description": "Read the vault as it stood at WHEN",
+            "env": null,
+            "hidden": false,
+            "long": null,
+            "name": "at",
+            "param_type": {
+              "completions": null,
+              "pattern": null,
+              "type": "string"
+            },
+            "position": null,
+            "positional": false,
+            "required": false,
+            "short": null
+          }
+        ],
+        "profile": null
+      },
+      "streaming": false,
+      "tags": [
+        "why",
+        "memory",
+        "code"
+      ],
+      "timeout_secs": null
+    },
+    {
+      "cli_path": [
+        "impact"
+      ],
+      "handler": "impact",
+      "id": "impact",
+      "json_output": true,
+      "min_version": null,
+      "related": [
+        "kg.impact",
+        "kg.tests-for"
+      ],
+      "slash": {
+        "aliases": [
+          "kg.impact"
+        ],
+        "auth": "none",
+        "categories": [
+          "code"
+        ],
+        "danger": "safe",
+        "deprecated": null,
+        "description": "What breaks if this changes: exact and likely callers, tests",
+        "examples": [
+          "impact rate_limit",
+          "impact --diff"
+        ],
+        "hidden": true,
+        "long_description": null,
+        "name": "impact",
+        "overlay": "none",
+        "palette": "impact <symbol> [--depth N] [--diff]",
+        "params": [
+          {
+            "default": null,
+            "deprecated": null,
+            "description": "Symbol or file whose blast radius to measure",
+            "env": null,
+            "hidden": false,
+            "long": null,
+            "name": "symbol",
+            "param_type": {
+              "completions": null,
+              "pattern": null,
+              "type": "string"
+            },
+            "position": null,
+            "positional": false,
+            "required": true,
+            "short": null
+          },
+          {
+            "default": "2",
+            "deprecated": null,
+            "description": "How many reference hops to follow",
+            "env": null,
+            "hidden": false,
+            "long": null,
+            "name": "depth",
+            "param_type": {
+              "completions": null,
+              "pattern": null,
+              "type": "string"
+            },
+            "position": null,
+            "positional": false,
+            "required": false,
+            "short": null
+          }
+        ],
+        "profile": null
+      },
+      "streaming": false,
+      "tags": [
+        "impact",
+        "code"
+      ],
+      "timeout_secs": null
+    },
+    {
+      "cli_path": [
         "cloud",
         "login"
       ],
@@ -1796,76 +2151,13 @@
     {
       "cli_path": [
         "cloud",
-        "usage"
-      ],
-      "handler": "cloud_usage",
-      "id": "cloud.usage",
-      "json_output": true,
-      "min_version": null,
-      "related": [
-        "cloud.billing"
-      ],
-      "slash": {
-        "aliases": [],
-        "auth": "cloud",
-        "categories": [
-          "cloud"
-        ],
-        "danger": "safe",
-        "deprecated": null,
-        "description": "Show cloud usage and billing summary",
-        "examples": [
-          "cloud usage --period month"
-        ],
-        "hidden": true,
-        "long_description": null,
-        "name": "usage",
-        "overlay": "none",
-        "palette": "usage",
-        "params": [
-          {
-            "default": "month",
-            "deprecated": null,
-            "description": "Usage period: day, week, month",
-            "env": null,
-            "hidden": false,
-            "long": null,
-            "name": "period",
-            "param_type": {
-              "choices": [
-                "day",
-                "week",
-                "month"
-              ],
-              "type": "enum"
-            },
-            "position": null,
-            "positional": false,
-            "required": false,
-            "short": null
-          }
-        ],
-        "profile": null
-      },
-      "streaming": false,
-      "tags": [
-        "cloud",
-        "billing"
-      ],
-      "timeout_secs": null
-    },
-    {
-      "cli_path": [
-        "cloud",
         "billing"
       ],
       "handler": "cloud_billing",
       "id": "cloud.billing",
       "json_output": true,
       "min_version": null,
-      "related": [
-        "cloud.usage"
-      ],
+      "related": [],
       "slash": {
         "aliases": [],
         "auth": "cloud",
@@ -1883,7 +2175,7 @@
         "long_description": null,
         "name": "billing",
         "overlay": "none",
-        "palette": "credits",
+        "palette": null,
         "params": [],
         "profile": null
       },
@@ -2469,6 +2761,78 @@
     },
     {
       "cli_path": [
+        "bench"
+      ],
+      "handler": "bench",
+      "id": "bench",
+      "json_output": true,
+      "min_version": null,
+      "related": [
+        "version"
+      ],
+      "slash": {
+        "aliases": [],
+        "auth": "none",
+        "categories": [
+          "config"
+        ],
+        "danger": "safe",
+        "deprecated": null,
+        "description": "Run proof benchmarks (MTS-60, TRS, KG)",
+        "examples": [
+          "bench run --suite mts --json"
+        ],
+        "hidden": true,
+        "long_description": "Run a pinned model against a committed task suite N times and report a 95% bootstrap confidence interval. Outputs a scoreboard JSON and an ablation matrix.",
+        "name": "bench",
+        "overlay": "none",
+        "palette": null,
+        "params": [
+          {
+            "default": "mts",
+            "deprecated": null,
+            "description": "Benchmark suite: mts, trs, kg",
+            "env": null,
+            "hidden": false,
+            "long": null,
+            "name": "suite",
+            "param_type": {
+              "completions": null,
+              "pattern": null,
+              "type": "string"
+            },
+            "position": null,
+            "positional": false,
+            "required": false,
+            "short": null
+          },
+          {
+            "default": false,
+            "deprecated": null,
+            "description": "Output as JSON",
+            "env": null,
+            "hidden": false,
+            "long": null,
+            "name": "json",
+            "param_type": {
+              "type": "boolean"
+            },
+            "position": null,
+            "positional": false,
+            "required": false,
+            "short": null
+          }
+        ],
+        "profile": null
+      },
+      "streaming": false,
+      "tags": [
+        "proof"
+      ],
+      "timeout_secs": null
+    },
+    {
+      "cli_path": [
         "help"
       ],
       "handler": "help",
@@ -2811,190 +3175,6 @@
     },
     {
       "cli_path": [
-        "usage"
-      ],
-      "handler": "usage_show",
-      "id": "usage.show",
-      "json_output": true,
-      "min_version": null,
-      "related": [
-        "stats.show"
-      ],
-      "slash": {
-        "aliases": [],
-        "auth": "cloud",
-        "categories": [
-          "product"
-        ],
-        "danger": "safe",
-        "deprecated": null,
-        "description": "Show usage and costs, with local reconciliation",
-        "examples": [
-          "usage --range 7d"
-        ],
-        "hidden": true,
-        "long_description": null,
-        "name": "usage",
-        "overlay": "none",
-        "palette": null,
-        "params": [
-          {
-            "default": "",
-            "deprecated": null,
-            "description": "Group by: day, model, project",
-            "env": null,
-            "hidden": false,
-            "long": null,
-            "name": "by",
-            "param_type": {
-              "completions": null,
-              "pattern": null,
-              "type": "string"
-            },
-            "position": null,
-            "positional": false,
-            "required": false,
-            "short": null
-          },
-          {
-            "default": "",
-            "deprecated": null,
-            "description": "Since date (YYYY-MM-DD)",
-            "env": null,
-            "hidden": false,
-            "long": null,
-            "name": "since",
-            "param_type": {
-              "completions": null,
-              "pattern": null,
-              "type": "string"
-            },
-            "position": null,
-            "positional": false,
-            "required": false,
-            "short": null
-          },
-          {
-            "default": "30d",
-            "deprecated": null,
-            "description": "Time range: 7d, 30d, 90d, 365d",
-            "env": null,
-            "hidden": false,
-            "long": null,
-            "name": "range",
-            "param_type": {
-              "completions": null,
-              "pattern": null,
-              "type": "string"
-            },
-            "position": null,
-            "positional": false,
-            "required": false,
-            "short": null
-          }
-        ],
-        "profile": null
-      },
-      "streaming": false,
-      "tags": [
-        "usage"
-      ],
-      "timeout_secs": null
-    },
-    {
-      "cli_path": [
-        "stats"
-      ],
-      "handler": "stats_show",
-      "id": "stats.show",
-      "json_output": true,
-      "min_version": null,
-      "related": [
-        "usage.show"
-      ],
-      "slash": {
-        "aliases": [],
-        "auth": "cloud",
-        "categories": [
-          "product"
-        ],
-        "danger": "safe",
-        "deprecated": null,
-        "description": "Show usage statistics with local reconciliation",
-        "examples": [
-          "stats --by model"
-        ],
-        "hidden": true,
-        "long_description": null,
-        "name": "stats",
-        "overlay": "none",
-        "palette": null,
-        "params": [
-          {
-            "default": "",
-            "deprecated": null,
-            "description": "Group by: day, model, project",
-            "env": null,
-            "hidden": false,
-            "long": null,
-            "name": "by",
-            "param_type": {
-              "completions": null,
-              "pattern": null,
-              "type": "string"
-            },
-            "position": null,
-            "positional": false,
-            "required": false,
-            "short": null
-          },
-          {
-            "default": "",
-            "deprecated": null,
-            "description": "Since date (YYYY-MM-DD)",
-            "env": null,
-            "hidden": false,
-            "long": null,
-            "name": "since",
-            "param_type": {
-              "completions": null,
-              "pattern": null,
-              "type": "string"
-            },
-            "position": null,
-            "positional": false,
-            "required": false,
-            "short": null
-          },
-          {
-            "default": "30d",
-            "deprecated": null,
-            "description": "Time range: 7d, 30d, 90d, 365d",
-            "env": null,
-            "hidden": false,
-            "long": null,
-            "name": "range",
-            "param_type": {
-              "completions": null,
-              "pattern": null,
-              "type": "string"
-            },
-            "position": null,
-            "positional": false,
-            "required": false,
-            "short": null
-          }
-        ],
-        "profile": null
-      },
-      "streaming": false,
-      "tags": [
-        "usage"
-      ],
-      "timeout_secs": null
-    },
-    {
-      "cli_path": [
         "update"
       ],
       "handler": "update",
@@ -3188,7 +3368,39 @@
             "env": null,
             "hidden": false,
             "long": null,
-            "name": "keep-state",
+            "name": "keep_state",
+            "param_type": {
+              "type": "boolean"
+            },
+            "position": null,
+            "positional": false,
+            "required": false,
+            "short": null
+          },
+          {
+            "default": false,
+            "deprecated": null,
+            "description": "Answer yes without asking",
+            "env": null,
+            "hidden": false,
+            "long": null,
+            "name": "yes",
+            "param_type": {
+              "type": "boolean"
+            },
+            "position": null,
+            "positional": false,
+            "required": false,
+            "short": null
+          },
+          {
+            "default": false,
+            "deprecated": null,
+            "description": "Show what would be uninstalled without uninstalling",
+            "env": null,
+            "hidden": false,
+            "long": null,
+            "name": "dry_run",
             "param_type": {
               "type": "boolean"
             },
@@ -3793,6 +4005,219 @@
     },
     {
       "cli_path": [
+        "agents",
+        "list"
+      ],
+      "handler": "agents_list",
+      "id": "agents.list",
+      "json_output": true,
+      "min_version": null,
+      "related": [
+        "agents.run",
+        "agents.result"
+      ],
+      "slash": {
+        "aliases": [],
+        "auth": "none",
+        "categories": [
+          "agents"
+        ],
+        "danger": "safe",
+        "deprecated": null,
+        "description": "List headless agents in the coordination room",
+        "examples": [
+          "agents list"
+        ],
+        "hidden": true,
+        "long_description": null,
+        "name": "agents list",
+        "overlay": "none",
+        "palette": null,
+        "params": [],
+        "profile": null
+      },
+      "streaming": false,
+      "tags": [
+        "agents"
+      ],
+      "timeout_secs": null
+    },
+    {
+      "cli_path": [
+        "agents",
+        "run"
+      ],
+      "handler": "agents_run",
+      "id": "agents.run",
+      "json_output": true,
+      "min_version": null,
+      "related": [
+        "agents.result",
+        "agents.list"
+      ],
+      "slash": {
+        "aliases": [],
+        "auth": "none",
+        "categories": [
+          "agents"
+        ],
+        "danger": "local_write",
+        "deprecated": null,
+        "description": "Run a headless agent task",
+        "examples": [
+          "agents run index the workspace"
+        ],
+        "hidden": true,
+        "long_description": null,
+        "name": "agents run",
+        "overlay": "none",
+        "palette": null,
+        "params": [
+          {
+            "default": null,
+            "deprecated": null,
+            "description": "Task description",
+            "env": null,
+            "hidden": false,
+            "long": null,
+            "name": "task",
+            "param_type": {
+              "completions": null,
+              "pattern": null,
+              "type": "string"
+            },
+            "position": 0,
+            "positional": true,
+            "required": true,
+            "short": null
+          }
+        ],
+        "profile": null
+      },
+      "streaming": false,
+      "tags": [
+        "agents"
+      ],
+      "timeout_secs": null
+    },
+    {
+      "cli_path": [
+        "agents",
+        "result"
+      ],
+      "handler": "agents_result",
+      "id": "agents.result",
+      "json_output": true,
+      "min_version": null,
+      "related": [
+        "agents.run",
+        "agents.unpack"
+      ],
+      "slash": {
+        "aliases": [],
+        "auth": "none",
+        "categories": [
+          "agents"
+        ],
+        "danger": "safe",
+        "deprecated": null,
+        "description": "Show the result of an agent run",
+        "examples": [
+          "agents result w-abc123"
+        ],
+        "hidden": true,
+        "long_description": null,
+        "name": "agents result",
+        "overlay": "none",
+        "palette": null,
+        "params": [
+          {
+            "default": null,
+            "deprecated": null,
+            "description": "Worker id",
+            "env": null,
+            "hidden": false,
+            "long": null,
+            "name": "id",
+            "param_type": {
+              "completions": null,
+              "pattern": null,
+              "type": "string"
+            },
+            "position": 0,
+            "positional": true,
+            "required": true,
+            "short": null
+          }
+        ],
+        "profile": null
+      },
+      "streaming": false,
+      "tags": [
+        "agents"
+      ],
+      "timeout_secs": null
+    },
+    {
+      "cli_path": [
+        "agents",
+        "unpack"
+      ],
+      "handler": "agents_unpack",
+      "id": "agents.unpack",
+      "json_output": true,
+      "min_version": null,
+      "related": [
+        "agents.result",
+        "agents.list"
+      ],
+      "slash": {
+        "aliases": [],
+        "auth": "none",
+        "categories": [
+          "agents"
+        ],
+        "danger": "safe",
+        "deprecated": null,
+        "description": "Unpack an agent's result artifacts",
+        "examples": [
+          "agents unpack w-abc123"
+        ],
+        "hidden": true,
+        "long_description": null,
+        "name": "agents unpack",
+        "overlay": "none",
+        "palette": null,
+        "params": [
+          {
+            "default": null,
+            "deprecated": null,
+            "description": "Worker id",
+            "env": null,
+            "hidden": false,
+            "long": null,
+            "name": "id",
+            "param_type": {
+              "completions": null,
+              "pattern": null,
+              "type": "string"
+            },
+            "position": 0,
+            "positional": true,
+            "required": true,
+            "short": null
+          }
+        ],
+        "profile": null
+      },
+      "streaming": false,
+      "tags": [
+        "agents"
+      ],
+      "timeout_secs": null
+    },
+    {
+      "cli_path": [
         "auth",
         "login"
       ],
@@ -4194,7 +4619,7 @@
         ],
         "danger": "local_write",
         "deprecated": null,
-        "description": "Enable telemetry collection (default: on)",
+        "description": "Enable telemetry collection (default: off)",
         "examples": [
           "privacy on"
         ],
@@ -4989,6 +5414,114 @@
             "positional": false,
             "required": false,
             "short": "f"
+          },
+          {
+            "default": false,
+            "deprecated": null,
+            "description": "Answer yes without asking",
+            "env": null,
+            "hidden": false,
+            "long": null,
+            "name": "yes",
+            "param_type": {
+              "type": "boolean"
+            },
+            "position": null,
+            "positional": false,
+            "required": false,
+            "short": null
+          },
+          {
+            "default": false,
+            "deprecated": null,
+            "description": "Show what would be removed without removing anything",
+            "env": null,
+            "hidden": false,
+            "long": null,
+            "name": "dry_run",
+            "param_type": {
+              "type": "boolean"
+            },
+            "position": null,
+            "positional": false,
+            "required": false,
+            "short": null
+          }
+        ],
+        "profile": null
+      },
+      "streaming": false,
+      "tags": [
+        "worktree"
+      ],
+      "timeout_secs": null
+    },
+    {
+      "cli_path": [
+        "worktree",
+        "finish"
+      ],
+      "handler": "worktree_finish",
+      "id": "worktree.finish",
+      "json_output": true,
+      "min_version": null,
+      "related": [
+        "worktree.prune",
+        "worktree.clean"
+      ],
+      "slash": {
+        "aliases": [],
+        "auth": "none",
+        "categories": [
+          "worktree"
+        ],
+        "danger": "local_write",
+        "deprecated": null,
+        "description": "End a run: clean its worktree on success, keep it on failure",
+        "examples": [
+          "worktree finish run-42 --outcome failed"
+        ],
+        "hidden": true,
+        "long_description": null,
+        "name": "finish",
+        "overlay": "none",
+        "palette": null,
+        "params": [
+          {
+            "default": null,
+            "deprecated": null,
+            "description": "Run id (the worktree directory name)",
+            "env": null,
+            "hidden": false,
+            "long": null,
+            "name": "run_id",
+            "param_type": {
+              "completions": null,
+              "pattern": null,
+              "type": "string"
+            },
+            "position": 0,
+            "positional": true,
+            "required": true,
+            "short": null
+          },
+          {
+            "default": "success",
+            "deprecated": null,
+            "description": "success or failed",
+            "env": null,
+            "hidden": false,
+            "long": null,
+            "name": "outcome",
+            "param_type": {
+              "completions": null,
+              "pattern": null,
+              "type": "string"
+            },
+            "position": null,
+            "positional": false,
+            "required": false,
+            "short": null
           }
         ],
         "profile": null
@@ -5304,6 +5837,38 @@
             "positional": false,
             "required": false,
             "short": "f"
+          },
+          {
+            "default": false,
+            "deprecated": null,
+            "description": "Answer yes without asking",
+            "env": null,
+            "hidden": false,
+            "long": null,
+            "name": "yes",
+            "param_type": {
+              "type": "boolean"
+            },
+            "position": null,
+            "positional": false,
+            "required": false,
+            "short": null
+          },
+          {
+            "default": false,
+            "deprecated": null,
+            "description": "Show what would be removed without removing anything",
+            "env": null,
+            "hidden": false,
+            "long": null,
+            "name": "dry_run",
+            "param_type": {
+              "type": "boolean"
+            },
+            "position": null,
+            "positional": false,
+            "required": false,
+            "short": null
           }
         ],
         "profile": null
@@ -6366,97 +6931,81 @@
     },
     {
       "cli_path": [
-        "models",
-        "list"
+        "demo"
       ],
-      "handler": "models_list",
-      "id": "models.list",
+      "handler": "demo",
+      "id": "demo",
       "json_output": true,
       "min_version": null,
       "related": [
-        "models.use"
+        "vault.remember",
+        "vault.correct"
       ],
       "slash": {
         "aliases": [],
-        "auth": "cloud",
+        "auth": "none",
         "categories": [
-          "models"
+          "product"
         ],
-        "danger": "safe",
+        "danger": "local_write",
         "deprecated": null,
-        "description": "List available models from the cloud",
+        "description": "Offline vault demo: decision, believed-at, superseded-by, source/commit, both contradiction sides",
         "examples": [
-          "models list --connected"
+          "demo"
         ],
         "hidden": true,
         "long_description": null,
-        "name": "list",
+        "name": "demo",
         "overlay": "none",
+        "palette": null,
+        "params": [],
+        "profile": null
+      },
+      "streaming": false,
+      "tags": [
+        "product"
+      ],
+      "timeout_secs": null
+    },
+    {
+      "cli_path": [
+        "checkpoint"
+      ],
+      "handler": "checkpoint",
+      "id": "checkpoint",
+      "json_output": false,
+      "min_version": null,
+      "related": [
+        "undo",
+        "redo",
+        "receipt"
+      ],
+      "slash": {
+        "aliases": [],
+        "auth": "none",
+        "categories": [
+          "signature"
+        ],
+        "danger": "safe",
+        "deprecated": null,
+        "description": "Snapshot code, conversation, and vault metadata",
+        "examples": [
+          "checkpoint --name pre-change"
+        ],
+        "hidden": true,
+        "long_description": null,
+        "name": "checkpoint",
+        "overlay": "fullscreen",
         "palette": null,
         "params": [
           {
-            "default": "",
+            "default": "ckpt-auto",
             "deprecated": null,
-            "description": "Filter by provider name",
+            "description": "Checkpoint name",
             "env": null,
             "hidden": false,
             "long": null,
-            "name": "provider",
-            "param_type": {
-              "completions": null,
-              "pattern": null,
-              "type": "string"
-            },
-            "position": null,
-            "positional": false,
-            "required": false,
-            "short": null
-          },
-          {
-            "default": false,
-            "deprecated": null,
-            "description": "Only show models from configured providers",
-            "env": null,
-            "hidden": false,
-            "long": null,
-            "name": "connected",
-            "param_type": {
-              "type": "boolean"
-            },
-            "position": null,
-            "positional": false,
-            "required": false,
-            "short": null
-          },
-          {
-            "default": "table",
-            "deprecated": null,
-            "description": "Output format: table, wide, json",
-            "env": null,
-            "hidden": false,
-            "long": null,
-            "name": "format",
-            "param_type": {
-              "choices": [
-                "table",
-                "wide",
-                "json"
-              ],
-              "type": "enum"
-            },
-            "position": null,
-            "positional": false,
-            "required": false,
-            "short": null
-          },
-          {
-            "default": "",
-            "deprecated": null,
-            "description": "Compare two models side-by-side (comma-separated IDs)",
-            "env": null,
-            "hidden": false,
-            "long": null,
-            "name": "compare",
+            "name": "name",
             "param_type": {
               "completions": null,
               "pattern": null,
@@ -6472,55 +7021,75 @@
       },
       "streaming": false,
       "tags": [
-        "models"
+        "signature",
+        "checkpoint"
       ],
       "timeout_secs": null
     },
     {
       "cli_path": [
-        "models",
-        "use"
+        "delegate"
       ],
-      "handler": "models_use",
-      "id": "models.use",
-      "json_output": true,
+      "handler": "delegate",
+      "id": "delegate",
+      "json_output": false,
       "min_version": null,
       "related": [
-        "models.list"
+        "merge",
+        "handoff"
       ],
       "slash": {
         "aliases": [],
         "auth": "none",
         "categories": [
-          "models"
+          "signature",
+          "delegation"
         ],
-        "danger": "local_write",
+        "danger": "safe",
         "deprecated": null,
-        "description": "Set default model (persisted to config)",
+        "description": "Delegate a task to a scoped subagent",
         "examples": [
-          "models use claude-sonnet-4-5"
+          "delegate scout map auth entry points"
         ],
         "hidden": true,
         "long_description": null,
-        "name": "use",
-        "overlay": "none",
+        "name": "delegate",
+        "overlay": "fullscreen",
         "palette": null,
         "params": [
           {
             "default": null,
             "deprecated": null,
-            "description": "Model ID to set as default",
+            "description": "Agent name",
             "env": null,
             "hidden": false,
             "long": null,
-            "name": "id",
+            "name": "name",
             "param_type": {
               "completions": null,
               "pattern": null,
               "type": "string"
             },
-            "position": 0,
-            "positional": true,
+            "position": null,
+            "positional": false,
+            "required": true,
+            "short": "n"
+          },
+          {
+            "default": null,
+            "deprecated": null,
+            "description": "Task description",
+            "env": null,
+            "hidden": false,
+            "long": null,
+            "name": "task",
+            "param_type": {
+              "completions": null,
+              "pattern": null,
+              "type": "string"
+            },
+            "position": null,
+            "positional": false,
             "required": true,
             "short": null
           }
@@ -6529,7 +7098,106 @@
       },
       "streaming": false,
       "tags": [
-        "models"
+        "signature",
+        "delegate"
+      ],
+      "timeout_secs": null
+    },
+    {
+      "cli_path": [
+        "receipt"
+      ],
+      "handler": "receipt",
+      "id": "receipt",
+      "json_output": true,
+      "min_version": null,
+      "related": [
+        "lineage",
+        "audit"
+      ],
+      "slash": {
+        "aliases": [],
+        "auth": "none",
+        "categories": [
+          "signature",
+          "receipts"
+        ],
+        "danger": "safe",
+        "deprecated": null,
+        "description": "Show and verify a turn receipt",
+        "examples": [
+          "receipt --verify"
+        ],
+        "hidden": true,
+        "long_description": null,
+        "name": "receipt",
+        "overlay": "fullscreen",
+        "palette": null,
+        "params": [
+          {
+            "default": "last",
+            "deprecated": null,
+            "description": "Turn number",
+            "env": null,
+            "hidden": false,
+            "long": null,
+            "name": "turn",
+            "param_type": {
+              "completions": null,
+              "pattern": null,
+              "type": "string"
+            },
+            "position": null,
+            "positional": false,
+            "required": false,
+            "short": null
+          }
+        ],
+        "profile": null
+      },
+      "streaming": false,
+      "tags": [
+        "signature",
+        "receipt"
+      ],
+      "timeout_secs": null
+    },
+    {
+      "cli_path": [
+        "brief"
+      ],
+      "handler": "brief",
+      "id": "brief",
+      "json_output": false,
+      "min_version": null,
+      "related": [
+        "status"
+      ],
+      "slash": {
+        "aliases": [],
+        "auth": "none",
+        "categories": [
+          "signature",
+          "home"
+        ],
+        "danger": "safe",
+        "deprecated": null,
+        "description": "Session brief: primary action, pulse facts, quickstart",
+        "examples": [
+          "brief"
+        ],
+        "hidden": true,
+        "long_description": null,
+        "name": "brief",
+        "overlay": "fullscreen",
+        "palette": null,
+        "params": [],
+        "profile": null
+      },
+      "streaming": false,
+      "tags": [
+        "signature",
+        "brief"
       ],
       "timeout_secs": null
     },
@@ -6734,6 +7402,38 @@
             "positional": true,
             "required": true,
             "short": null
+          },
+          {
+            "default": false,
+            "deprecated": null,
+            "description": "Answer yes without asking",
+            "env": null,
+            "hidden": false,
+            "long": null,
+            "name": "yes",
+            "param_type": {
+              "type": "boolean"
+            },
+            "position": null,
+            "positional": false,
+            "required": false,
+            "short": null
+          },
+          {
+            "default": false,
+            "deprecated": null,
+            "description": "Show what would be revoked without revoking anything",
+            "env": null,
+            "hidden": false,
+            "long": null,
+            "name": "dry_run",
+            "param_type": {
+              "type": "boolean"
+            },
+            "position": null,
+            "positional": false,
+            "required": false,
+            "short": null
           }
         ],
         "profile": null
@@ -6782,6 +7482,22 @@
             "hidden": false,
             "long": null,
             "name": "yes",
+            "param_type": {
+              "type": "boolean"
+            },
+            "position": null,
+            "positional": false,
+            "required": false,
+            "short": null
+          },
+          {
+            "default": false,
+            "deprecated": null,
+            "description": "Count the live keys; revoke nothing",
+            "env": null,
+            "hidden": false,
+            "long": null,
+            "name": "dry_run",
             "param_type": {
               "type": "boolean"
             },
@@ -8653,6 +9369,929 @@
       "streaming": false,
       "tags": [
         "teams"
+      ],
+      "timeout_secs": null
+    },
+    {
+      "cli_path": [
+        "undo"
+      ],
+      "handler": "undo",
+      "id": "undo",
+      "json_output": true,
+      "min_version": null,
+      "related": [
+        "redo"
+      ],
+      "slash": {
+        "aliases": [],
+        "auth": "none",
+        "categories": [
+          "undo"
+        ],
+        "danger": "safe",
+        "deprecated": null,
+        "description": "Undo the last turn (conversation only)",
+        "examples": [
+          "undo"
+        ],
+        "hidden": true,
+        "long_description": null,
+        "name": "undo",
+        "overlay": "none",
+        "palette": null,
+        "params": [],
+        "profile": null
+      },
+      "streaming": false,
+      "tags": [
+        "undo"
+      ],
+      "timeout_secs": null
+    },
+    {
+      "cli_path": [
+        "redo"
+      ],
+      "handler": "redo",
+      "id": "redo",
+      "json_output": true,
+      "min_version": null,
+      "related": [
+        "undo"
+      ],
+      "slash": {
+        "aliases": [],
+        "auth": "none",
+        "categories": [
+          "redo"
+        ],
+        "danger": "safe",
+        "deprecated": null,
+        "description": "Redo the last undone turn",
+        "examples": [
+          "redo"
+        ],
+        "hidden": true,
+        "long_description": null,
+        "name": "redo",
+        "overlay": "none",
+        "palette": null,
+        "params": [],
+        "profile": null
+      },
+      "streaming": false,
+      "tags": [
+        "redo"
+      ],
+      "timeout_secs": null
+    },
+    {
+      "cli_path": [
+        "merge"
+      ],
+      "handler": "merge",
+      "id": "merge",
+      "json_output": true,
+      "min_version": null,
+      "related": [
+        "handoff"
+      ],
+      "slash": {
+        "aliases": [],
+        "auth": "none",
+        "categories": [
+          "merge"
+        ],
+        "danger": "safe",
+        "deprecated": null,
+        "description": "Merge a child branch, surfacing belief conflicts",
+        "examples": [
+          "merge <branch>"
+        ],
+        "hidden": true,
+        "long_description": null,
+        "name": "merge",
+        "overlay": "none",
+        "palette": null,
+        "params": [
+          {
+            "default": null,
+            "deprecated": null,
+            "description": "The branch to merge in",
+            "env": null,
+            "hidden": false,
+            "long": null,
+            "name": "branch",
+            "param_type": {
+              "completions": null,
+              "pattern": null,
+              "type": "string"
+            },
+            "position": null,
+            "positional": false,
+            "required": true,
+            "short": null
+          }
+        ],
+        "profile": null
+      },
+      "streaming": false,
+      "tags": [
+        "merge"
+      ],
+      "timeout_secs": null
+    },
+    {
+      "cli_path": [
+        "handoff"
+      ],
+      "handler": "handoff",
+      "id": "handoff",
+      "json_output": true,
+      "min_version": null,
+      "related": [
+        "merge"
+      ],
+      "slash": {
+        "aliases": [],
+        "auth": "none",
+        "categories": [
+          "handoff"
+        ],
+        "danger": "safe",
+        "deprecated": null,
+        "description": "Bundle a session for transfer to another machine",
+        "examples": [
+          "handoff"
+        ],
+        "hidden": true,
+        "long_description": null,
+        "name": "handoff",
+        "overlay": "none",
+        "palette": null,
+        "params": [
+          {
+            "default": null,
+            "deprecated": null,
+            "description": "Where to write the bundle",
+            "env": null,
+            "hidden": false,
+            "long": null,
+            "name": "path",
+            "param_type": {
+              "completions": null,
+              "pattern": null,
+              "type": "string"
+            },
+            "position": null,
+            "positional": false,
+            "required": false,
+            "short": null
+          }
+        ],
+        "profile": null
+      },
+      "streaming": false,
+      "tags": [
+        "handoff"
+      ],
+      "timeout_secs": null
+    },
+    {
+      "cli_path": [
+        "compact"
+      ],
+      "handler": "compact",
+      "id": "compact",
+      "json_output": true,
+      "min_version": null,
+      "related": [
+        "recap"
+      ],
+      "slash": {
+        "aliases": [],
+        "auth": "none",
+        "categories": [
+          "compact"
+        ],
+        "danger": "safe",
+        "deprecated": null,
+        "description": "Compact context, keeping exact facts",
+        "examples": [
+          "compact"
+        ],
+        "hidden": true,
+        "long_description": null,
+        "name": "compact",
+        "overlay": "none",
+        "palette": null,
+        "params": [
+          {
+            "default": null,
+            "deprecated": null,
+            "description": "What to focus the compaction on",
+            "env": null,
+            "hidden": false,
+            "long": null,
+            "name": "focus",
+            "param_type": {
+              "completions": null,
+              "pattern": null,
+              "type": "string"
+            },
+            "position": null,
+            "positional": false,
+            "required": false,
+            "short": null
+          }
+        ],
+        "profile": null
+      },
+      "streaming": false,
+      "tags": [
+        "compact"
+      ],
+      "timeout_secs": null
+    },
+    {
+      "cli_path": [
+        "btw"
+      ],
+      "handler": "btw",
+      "id": "btw",
+      "json_output": true,
+      "min_version": null,
+      "related": [
+        "ask"
+      ],
+      "slash": {
+        "aliases": [],
+        "auth": "none",
+        "categories": [
+          "btw"
+        ],
+        "danger": "safe",
+        "deprecated": null,
+        "description": "Side question; not persisted in the transcript",
+        "examples": [
+          "btw <question>"
+        ],
+        "hidden": true,
+        "long_description": null,
+        "name": "btw",
+        "overlay": "none",
+        "palette": null,
+        "params": [
+          {
+            "default": null,
+            "deprecated": null,
+            "description": "The side question",
+            "env": null,
+            "hidden": false,
+            "long": null,
+            "name": "question",
+            "param_type": {
+              "completions": null,
+              "pattern": null,
+              "type": "string"
+            },
+            "position": null,
+            "positional": false,
+            "required": true,
+            "short": null
+          }
+        ],
+        "profile": null
+      },
+      "streaming": false,
+      "tags": [
+        "btw"
+      ],
+      "timeout_secs": null
+    },
+    {
+      "cli_path": [
+        "recap"
+      ],
+      "handler": "recap",
+      "id": "recap",
+      "json_output": true,
+      "min_version": null,
+      "related": [
+        "compact"
+      ],
+      "slash": {
+        "aliases": [],
+        "auth": "none",
+        "categories": [
+          "recap"
+        ],
+        "danger": "safe",
+        "deprecated": null,
+        "description": "One-line session summary",
+        "examples": [
+          "recap"
+        ],
+        "hidden": true,
+        "long_description": null,
+        "name": "recap",
+        "overlay": "none",
+        "palette": null,
+        "params": [],
+        "profile": null
+      },
+      "streaming": false,
+      "tags": [
+        "recap"
+      ],
+      "timeout_secs": null
+    },
+    {
+      "cli_path": [
+        "export"
+      ],
+      "handler": "export",
+      "id": "export",
+      "json_output": true,
+      "min_version": null,
+      "related": [
+        "handoff"
+      ],
+      "slash": {
+        "aliases": [],
+        "auth": "none",
+        "categories": [
+          "export"
+        ],
+        "danger": "safe",
+        "deprecated": null,
+        "description": "Export session transcript with tool calls and receipts",
+        "examples": [
+          "export"
+        ],
+        "hidden": true,
+        "long_description": null,
+        "name": "export",
+        "overlay": "none",
+        "palette": null,
+        "params": [
+          {
+            "default": null,
+            "deprecated": null,
+            "description": "Where to write the export",
+            "env": null,
+            "hidden": false,
+            "long": null,
+            "name": "path",
+            "param_type": {
+              "completions": null,
+              "pattern": null,
+              "type": "string"
+            },
+            "position": null,
+            "positional": false,
+            "required": false,
+            "short": null
+          }
+        ],
+        "profile": null
+      },
+      "streaming": false,
+      "tags": [
+        "export"
+      ],
+      "timeout_secs": null
+    },
+    {
+      "cli_path": [
+        "rename"
+      ],
+      "handler": "rename",
+      "id": "rename",
+      "json_output": true,
+      "min_version": null,
+      "related": [
+        "session"
+      ],
+      "slash": {
+        "aliases": [],
+        "auth": "none",
+        "categories": [
+          "rename"
+        ],
+        "danger": "safe",
+        "deprecated": null,
+        "description": "Rename the current session, keeping its id and path",
+        "examples": [
+          "rename <name>"
+        ],
+        "hidden": true,
+        "long_description": null,
+        "name": "rename",
+        "overlay": "none",
+        "palette": null,
+        "params": [
+          {
+            "default": null,
+            "deprecated": null,
+            "description": "The new session name",
+            "env": null,
+            "hidden": false,
+            "long": null,
+            "name": "name",
+            "param_type": {
+              "completions": null,
+              "pattern": null,
+              "type": "string"
+            },
+            "position": null,
+            "positional": false,
+            "required": true,
+            "short": null
+          }
+        ],
+        "profile": null
+      },
+      "streaming": false,
+      "tags": [
+        "rename"
+      ],
+      "timeout_secs": null
+    },
+    {
+      "cli_path": [
+        "keymap"
+      ],
+      "handler": "keymap",
+      "id": "keymap",
+      "json_output": true,
+      "min_version": null,
+      "related": [
+        "brief"
+      ],
+      "slash": {
+        "aliases": [],
+        "auth": "none",
+        "categories": [
+          "keymap"
+        ],
+        "danger": "safe",
+        "deprecated": null,
+        "description": "View and remap key bindings",
+        "examples": [
+          "keymap"
+        ],
+        "hidden": true,
+        "long_description": null,
+        "name": "keymap",
+        "overlay": "none",
+        "palette": null,
+        "params": [],
+        "profile": null
+      },
+      "streaming": false,
+      "tags": [
+        "keymap"
+      ],
+      "timeout_secs": null
+    },
+    {
+      "cli_path": [
+        "onboarding"
+      ],
+      "handler": "onboarding",
+      "id": "onboarding",
+      "json_output": true,
+      "min_version": null,
+      "related": [
+        "brief"
+      ],
+      "slash": {
+        "aliases": [],
+        "auth": "none",
+        "categories": [
+          "onboarding"
+        ],
+        "danger": "safe",
+        "deprecated": null,
+        "description": "Replayable first-run onboarding card",
+        "examples": [
+          "onboarding"
+        ],
+        "hidden": true,
+        "long_description": null,
+        "name": "onboarding",
+        "overlay": "none",
+        "palette": null,
+        "params": [],
+        "profile": null
+      },
+      "streaming": false,
+      "tags": [
+        "onboarding"
+      ],
+      "timeout_secs": null
+    },
+    {
+      "cli_path": [
+        "acp"
+      ],
+      "handler": "acp",
+      "id": "acp",
+      "json_output": true,
+      "min_version": null,
+      "related": [
+        "mcp"
+      ],
+      "slash": {
+        "aliases": [],
+        "auth": "none",
+        "categories": [
+          "acp"
+        ],
+        "danger": "safe",
+        "deprecated": null,
+        "description": "Agent Communication Protocol server mode",
+        "examples": [
+          "acp"
+        ],
+        "hidden": true,
+        "long_description": null,
+        "name": "acp",
+        "overlay": "none",
+        "palette": null,
+        "params": [],
+        "profile": null
+      },
+      "streaming": false,
+      "tags": [
+        "acp"
+      ],
+      "timeout_secs": null
+    },
+    {
+      "cli_path": [
+        "extension"
+      ],
+      "handler": "extension",
+      "id": "extension",
+      "json_output": true,
+      "min_version": null,
+      "related": [
+        "skills"
+      ],
+      "slash": {
+        "aliases": [],
+        "auth": "none",
+        "categories": [
+          "extension"
+        ],
+        "danger": "safe",
+        "deprecated": null,
+        "description": "Extension management: new, list, uninstall, doctor",
+        "examples": [
+          "extension list"
+        ],
+        "hidden": true,
+        "long_description": null,
+        "name": "extension",
+        "overlay": "none",
+        "palette": null,
+        "params": [
+          {
+            "default": null,
+            "deprecated": null,
+            "description": "Subcommand: new, list, uninstall, doctor",
+            "env": null,
+            "hidden": false,
+            "long": null,
+            "name": "action",
+            "param_type": {
+              "completions": null,
+              "pattern": null,
+              "type": "string"
+            },
+            "position": null,
+            "positional": false,
+            "required": false,
+            "short": null
+          }
+        ],
+        "profile": null
+      },
+      "streaming": false,
+      "tags": [
+        "extension"
+      ],
+      "timeout_secs": null
+    },
+    {
+      "cli_path": [
+        "plan"
+      ],
+      "handler": "plan",
+      "id": "plan",
+      "json_output": true,
+      "min_version": null,
+      "related": [
+        "goal"
+      ],
+      "slash": {
+        "aliases": [],
+        "auth": "none",
+        "categories": [
+          "plan"
+        ],
+        "danger": "safe",
+        "deprecated": null,
+        "description": "Set or show the session plan",
+        "examples": [
+          "plan"
+        ],
+        "hidden": true,
+        "long_description": null,
+        "name": "plan",
+        "overlay": "none",
+        "palette": null,
+        "params": [
+          {
+            "default": null,
+            "deprecated": null,
+            "description": "Session name",
+            "env": null,
+            "hidden": false,
+            "long": null,
+            "name": "name",
+            "param_type": {
+              "completions": null,
+              "pattern": null,
+              "type": "string"
+            },
+            "position": null,
+            "positional": false,
+            "required": false,
+            "short": null
+          },
+          {
+            "default": false,
+            "deprecated": null,
+            "description": "Enable plan mode",
+            "env": null,
+            "hidden": false,
+            "long": null,
+            "name": "enable",
+            "param_type": {
+              "type": "boolean"
+            },
+            "position": null,
+            "positional": false,
+            "required": false,
+            "short": null
+          },
+          {
+            "default": false,
+            "deprecated": null,
+            "description": "Disable plan mode",
+            "env": null,
+            "hidden": false,
+            "long": null,
+            "name": "disable",
+            "param_type": {
+              "type": "boolean"
+            },
+            "position": null,
+            "positional": false,
+            "required": false,
+            "short": null
+          },
+          {
+            "default": false,
+            "deprecated": null,
+            "description": "Output as JSON",
+            "env": null,
+            "hidden": false,
+            "long": null,
+            "name": "json",
+            "param_type": {
+              "type": "boolean"
+            },
+            "position": null,
+            "positional": false,
+            "required": false,
+            "short": null
+          }
+        ],
+        "profile": null
+      },
+      "streaming": false,
+      "tags": [
+        "plan"
+      ],
+      "timeout_secs": null
+    },
+    {
+      "cli_path": [
+        "goal"
+      ],
+      "handler": "goal",
+      "id": "goal",
+      "json_output": true,
+      "min_version": null,
+      "related": [
+        "plan"
+      ],
+      "slash": {
+        "aliases": [],
+        "auth": "none",
+        "categories": [
+          "goal"
+        ],
+        "danger": "safe",
+        "deprecated": null,
+        "description": "Set or show the session goal condition",
+        "examples": [
+          "goal"
+        ],
+        "hidden": true,
+        "long_description": null,
+        "name": "goal",
+        "overlay": "none",
+        "palette": null,
+        "params": [
+          {
+            "default": null,
+            "deprecated": null,
+            "description": "The completion condition to set",
+            "env": null,
+            "hidden": false,
+            "long": null,
+            "name": "condition",
+            "param_type": {
+              "completions": null,
+              "pattern": null,
+              "type": "string"
+            },
+            "position": null,
+            "positional": false,
+            "required": false,
+            "short": null
+          }
+        ],
+        "profile": null
+      },
+      "streaming": false,
+      "tags": [
+        "goal"
+      ],
+      "timeout_secs": null
+    },
+    {
+      "cli_path": [
+        "sandbox"
+      ],
+      "handler": "sandbox",
+      "id": "sandbox",
+      "json_output": true,
+      "min_version": null,
+      "related": [
+        "trust"
+      ],
+      "slash": {
+        "aliases": [],
+        "auth": "none",
+        "categories": [
+          "sandbox"
+        ],
+        "danger": "safe",
+        "deprecated": null,
+        "description": "Run a command in the sandbox, or set the sandbox up",
+        "examples": [
+          "sandbox setup"
+        ],
+        "hidden": true,
+        "long_description": null,
+        "name": "sandbox",
+        "overlay": "none",
+        "palette": null,
+        "params": [
+          {
+            "default": null,
+            "deprecated": null,
+            "description": "Subcommand: test <cmd> or setup",
+            "env": null,
+            "hidden": false,
+            "long": null,
+            "name": "command",
+            "param_type": {
+              "completions": null,
+              "pattern": null,
+              "type": "string"
+            },
+            "position": null,
+            "positional": false,
+            "required": true,
+            "short": null
+          }
+        ],
+        "profile": null
+      },
+      "streaming": false,
+      "tags": [
+        "sandbox"
+      ],
+      "timeout_secs": null
+    },
+    {
+      "cli_path": [
+        "budget"
+      ],
+      "handler": "budget",
+      "id": "budget",
+      "json_output": true,
+      "min_version": null,
+      "related": [
+        "usage"
+      ],
+      "slash": {
+        "aliases": [],
+        "auth": "none",
+        "categories": [
+          "budget"
+        ],
+        "danger": "safe",
+        "deprecated": null,
+        "description": "Show token budget usage",
+        "examples": [
+          "budget"
+        ],
+        "hidden": true,
+        "long_description": null,
+        "name": "budget",
+        "overlay": "none",
+        "palette": null,
+        "params": [],
+        "profile": null
+      },
+      "streaming": false,
+      "tags": [
+        "budget"
+      ],
+      "timeout_secs": null
+    },
+    {
+      "cli_path": [
+        "trust"
+      ],
+      "handler": "trust",
+      "id": "trust",
+      "json_output": true,
+      "min_version": null,
+      "related": [
+        "sandbox"
+      ],
+      "slash": {
+        "aliases": [],
+        "auth": "none",
+        "categories": [
+          "trust"
+        ],
+        "danger": "safe",
+        "deprecated": null,
+        "description": "Trust: list trusted folders, or forget one",
+        "examples": [
+          "trust list"
+        ],
+        "hidden": true,
+        "long_description": null,
+        "name": "trust",
+        "overlay": "none",
+        "palette": null,
+        "params": [
+          {
+            "default": null,
+            "deprecated": null,
+            "description": "Subcommand: list or forget <path>",
+            "env": null,
+            "hidden": false,
+            "long": null,
+            "name": "action",
+            "param_type": {
+              "completions": null,
+              "pattern": null,
+              "type": "string"
+            },
+            "position": null,
+            "positional": false,
+            "required": false,
+            "short": null
+          }
+        ],
+        "profile": null
+      },
+      "streaming": false,
+      "tags": [
+        "trust"
       ],
       "timeout_secs": null
     }

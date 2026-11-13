@@ -16,6 +16,12 @@ _memnoth() {
             ",$1")
                 cmd="memnoth"
                 ;;
+            memnoth,acp)
+                cmd="memnoth__subcmd__acp"
+                ;;
+            memnoth,agents)
+                cmd="memnoth__subcmd__agents"
+                ;;
             memnoth,ask)
                 cmd="memnoth__subcmd__ask"
                 ;;
@@ -31,11 +37,29 @@ _memnoth() {
             memnoth,batch)
                 cmd="memnoth__subcmd__batch"
                 ;;
+            memnoth,bench)
+                cmd="memnoth__subcmd__bench"
+                ;;
             memnoth,billing)
                 cmd="memnoth__subcmd__billing"
                 ;;
+            memnoth,brief)
+                cmd="memnoth__subcmd__brief"
+                ;;
+            memnoth,btw)
+                cmd="memnoth__subcmd__btw"
+                ;;
+            memnoth,budget)
+                cmd="memnoth__subcmd__budget"
+                ;;
+            memnoth,checkpoint)
+                cmd="memnoth__subcmd__checkpoint"
+                ;;
             memnoth,cloud)
                 cmd="memnoth__subcmd__cloud"
+                ;;
+            memnoth,compact)
+                cmd="memnoth__subcmd__compact"
                 ;;
             memnoth,completion)
                 cmd="memnoth__subcmd__completion"
@@ -46,20 +70,47 @@ _memnoth() {
             memnoth,connect)
                 cmd="memnoth__subcmd__connect"
                 ;;
+            memnoth,delegate)
+                cmd="memnoth__subcmd__delegate"
+                ;;
+            memnoth,demo)
+                cmd="memnoth__subcmd__demo"
+                ;;
             memnoth,docs)
                 cmd="memnoth__subcmd__docs"
                 ;;
             memnoth,doctor)
                 cmd="memnoth__subcmd__doctor"
                 ;;
+            memnoth,drift)
+                cmd="memnoth__subcmd__drift"
+                ;;
+            memnoth,export)
+                cmd="memnoth__subcmd__export"
+                ;;
+            memnoth,extension)
+                cmd="memnoth__subcmd__extension"
+                ;;
             memnoth,feedback)
                 cmd="memnoth__subcmd__feedback"
+                ;;
+            memnoth,goal)
+                cmd="memnoth__subcmd__goal"
+                ;;
+            memnoth,handoff)
+                cmd="memnoth__subcmd__handoff"
                 ;;
             memnoth,help)
                 cmd="memnoth__subcmd__help"
                 ;;
+            memnoth,impact)
+                cmd="memnoth__subcmd__impact"
+                ;;
             memnoth,install)
                 cmd="memnoth__subcmd__install"
+                ;;
+            memnoth,keymap)
+                cmd="memnoth__subcmd__keymap"
                 ;;
             memnoth,keys)
                 cmd="memnoth__subcmd__keys"
@@ -67,11 +118,17 @@ _memnoth() {
             memnoth,kg)
                 cmd="memnoth__subcmd__kg"
                 ;;
+            memnoth,lineage)
+                cmd="memnoth__subcmd__lineage"
+                ;;
             memnoth,mcp)
                 cmd="memnoth__subcmd__mcp"
                 ;;
-            memnoth,models)
-                cmd="memnoth__subcmd__models"
+            memnoth,merge)
+                cmd="memnoth__subcmd__merge"
+                ;;
+            memnoth,onboarding)
+                cmd="memnoth__subcmd__onboarding"
                 ;;
             memnoth,open)
                 cmd="memnoth__subcmd__open"
@@ -82,14 +139,29 @@ _memnoth() {
             memnoth,parallel)
                 cmd="memnoth__subcmd__parallel"
                 ;;
+            memnoth,plan)
+                cmd="memnoth__subcmd__plan"
+                ;;
             memnoth,privacy)
                 cmd="memnoth__subcmd__privacy"
                 ;;
             memnoth,projects)
                 cmd="memnoth__subcmd__projects"
                 ;;
+            memnoth,recap)
+                cmd="memnoth__subcmd__recap"
+                ;;
             memnoth,receipt)
                 cmd="memnoth__subcmd__receipt"
+                ;;
+            memnoth,redo)
+                cmd="memnoth__subcmd__redo"
+                ;;
+            memnoth,rename)
+                cmd="memnoth__subcmd__rename"
+                ;;
+            memnoth,sandbox)
+                cmd="memnoth__subcmd__sandbox"
                 ;;
             memnoth,schema)
                 cmd="memnoth__subcmd__schema"
@@ -109,11 +181,14 @@ _memnoth() {
             memnoth,setup)
                 cmd="memnoth__subcmd__setup"
                 ;;
+            memnoth,simulate)
+                cmd="memnoth__subcmd__simulate"
+                ;;
             memnoth,skills)
                 cmd="memnoth__subcmd__skills"
                 ;;
-            memnoth,stats)
-                cmd="memnoth__subcmd__stats"
+            memnoth,sync)
+                cmd="memnoth__subcmd__sync"
                 ;;
             memnoth,teams)
                 cmd="memnoth__subcmd__teams"
@@ -121,14 +196,17 @@ _memnoth() {
             memnoth,telemetry)
                 cmd="memnoth__subcmd__telemetry"
                 ;;
+            memnoth,trust)
+                cmd="memnoth__subcmd__trust"
+                ;;
+            memnoth,undo)
+                cmd="memnoth__subcmd__undo"
+                ;;
             memnoth,uninstall)
                 cmd="memnoth__subcmd__uninstall"
                 ;;
             memnoth,update)
                 cmd="memnoth__subcmd__update"
-                ;;
-            memnoth,usage)
-                cmd="memnoth__subcmd__usage"
                 ;;
             memnoth,vault)
                 cmd="memnoth__subcmd__vault"
@@ -139,8 +217,23 @@ _memnoth() {
             memnoth,watch)
                 cmd="memnoth__subcmd__watch"
                 ;;
+            memnoth,why)
+                cmd="memnoth__subcmd__why"
+                ;;
             memnoth,worktree)
                 cmd="memnoth__subcmd__worktree"
+                ;;
+            memnoth__subcmd__agents,list)
+                cmd="memnoth__subcmd__agents__subcmd__list"
+                ;;
+            memnoth__subcmd__agents,result)
+                cmd="memnoth__subcmd__agents__subcmd__result"
+                ;;
+            memnoth__subcmd__agents,run)
+                cmd="memnoth__subcmd__agents__subcmd__run"
+                ;;
+            memnoth__subcmd__agents,unpack)
+                cmd="memnoth__subcmd__agents__subcmd__unpack"
                 ;;
             memnoth__subcmd__audit,export)
                 cmd="memnoth__subcmd__audit__subcmd__export"
@@ -196,29 +289,26 @@ _memnoth() {
             memnoth__subcmd__cloud,billing)
                 cmd="memnoth__subcmd__cloud__subcmd__billing"
                 ;;
-            memnoth__subcmd__cloud,credits)
-                cmd="memnoth__subcmd__cloud__subcmd__credits"
+            memnoth__subcmd__cloud,login)
+                cmd="memnoth__subcmd__cloud__subcmd__login"
+                ;;
+            memnoth__subcmd__cloud,logout)
+                cmd="memnoth__subcmd__cloud__subcmd__logout"
                 ;;
             memnoth__subcmd__cloud,profile)
                 cmd="memnoth__subcmd__cloud__subcmd__profile"
                 ;;
+            memnoth__subcmd__cloud,status)
+                cmd="memnoth__subcmd__cloud__subcmd__status"
+                ;;
             memnoth__subcmd__cloud,sync)
                 cmd="memnoth__subcmd__cloud__subcmd__sync"
-                ;;
-            memnoth__subcmd__cloud__subcmd__profile,set)
-                cmd="memnoth__subcmd__cloud__subcmd__profile__subcmd__set"
-                ;;
-            memnoth__subcmd__cloud__subcmd__profile,show)
-                cmd="memnoth__subcmd__cloud__subcmd__profile__subcmd__show"
                 ;;
             memnoth__subcmd__completion,install)
                 cmd="memnoth__subcmd__completion__subcmd__install"
                 ;;
             memnoth__subcmd__completion,show)
                 cmd="memnoth__subcmd__completion__subcmd__show"
-                ;;
-            memnoth__subcmd__config,edit)
-                cmd="memnoth__subcmd__config__subcmd__edit"
                 ;;
             memnoth__subcmd__config,explain)
                 cmd="memnoth__subcmd__config__subcmd__explain"
@@ -259,77 +349,17 @@ _memnoth() {
             memnoth__subcmd__keys,revoke-all)
                 cmd="memnoth__subcmd__keys__subcmd__revoke__subcmd__all"
                 ;;
-            memnoth__subcmd__kg,callees)
-                cmd="memnoth__subcmd__kg__subcmd__callees"
-                ;;
-            memnoth__subcmd__kg,callers)
-                cmd="memnoth__subcmd__kg__subcmd__callers"
-                ;;
-            memnoth__subcmd__kg,callpath)
-                cmd="memnoth__subcmd__kg__subcmd__callpath"
-                ;;
-            memnoth__subcmd__kg,cycles)
-                cmd="memnoth__subcmd__kg__subcmd__cycles"
-                ;;
-            memnoth__subcmd__kg,dead-code)
-                cmd="memnoth__subcmd__kg__subcmd__dead__subcmd__code"
-                ;;
-            memnoth__subcmd__kg,def)
-                cmd="memnoth__subcmd__kg__subcmd__def"
-                ;;
-            memnoth__subcmd__kg,deps)
-                cmd="memnoth__subcmd__kg__subcmd__deps"
-                ;;
-            memnoth__subcmd__kg,diff-impact)
-                cmd="memnoth__subcmd__kg__subcmd__diff__subcmd__impact"
-                ;;
-            memnoth__subcmd__kg,explore)
-                cmd="memnoth__subcmd__kg__subcmd__explore"
-                ;;
-            memnoth__subcmd__kg,hotspots)
-                cmd="memnoth__subcmd__kg__subcmd__hotspots"
-                ;;
             memnoth__subcmd__kg,impact)
                 cmd="memnoth__subcmd__kg__subcmd__impact"
                 ;;
             memnoth__subcmd__kg,index)
                 cmd="memnoth__subcmd__kg__subcmd__index"
                 ;;
-            memnoth__subcmd__kg,outline)
-                cmd="memnoth__subcmd__kg__subcmd__outline"
-                ;;
-            memnoth__subcmd__kg,owners)
-                cmd="memnoth__subcmd__kg__subcmd__owners"
-                ;;
-            memnoth__subcmd__kg,query)
-                cmd="memnoth__subcmd__kg__subcmd__query"
-                ;;
-            memnoth__subcmd__kg,refs)
-                cmd="memnoth__subcmd__kg__subcmd__refs"
-                ;;
-            memnoth__subcmd__kg,review)
-                cmd="memnoth__subcmd__kg__subcmd__review"
-                ;;
             memnoth__subcmd__kg,search)
                 cmd="memnoth__subcmd__kg__subcmd__search"
                 ;;
-            memnoth__subcmd__kg,serve)
-                cmd="memnoth__subcmd__kg__subcmd__serve"
-                ;;
             memnoth__subcmd__kg,status)
                 cmd="memnoth__subcmd__kg__subcmd__status"
-                ;;
-            memnoth__subcmd__kg,tests-for)
-                cmd="memnoth__subcmd__kg__subcmd__tests__subcmd__for"
-                ;;
-            memnoth__subcmd__kg,tree)
-                cmd="memnoth__subcmd__kg__subcmd__tree"
-                ;;
-            memnoth__subcmd__kg,unused-exports)
-                cmd="memnoth__subcmd__kg__subcmd__unused__subcmd__exports"
-                ;;
-            memnoth__subcmd__kg,watch)
-                cmd="memnoth__subcmd__kg__subcmd__watch"
                 ;;
             memnoth__subcmd__mcp,add)
                 cmd="memnoth__subcmd__mcp__subcmd__add"
@@ -340,47 +370,11 @@ _memnoth() {
             memnoth__subcmd__mcp,doctor)
                 cmd="memnoth__subcmd__mcp__subcmd__doctor"
                 ;;
-            memnoth__subcmd__mcp,exposes)
-                cmd="memnoth__subcmd__mcp__subcmd__exposes"
-                ;;
-            memnoth__subcmd__mcp,list)
-                cmd="memnoth__subcmd__mcp__subcmd__list"
-                ;;
-            memnoth__subcmd__mcp,logs)
-                cmd="memnoth__subcmd__mcp__subcmd__logs"
-                ;;
-            memnoth__subcmd__mcp,profile)
-                cmd="memnoth__subcmd__mcp__subcmd__profile"
-                ;;
-            memnoth__subcmd__mcp,remove)
-                cmd="memnoth__subcmd__mcp__subcmd__remove"
-                ;;
-            memnoth__subcmd__mcp,restart)
-                cmd="memnoth__subcmd__mcp__subcmd__restart"
-                ;;
             memnoth__subcmd__mcp,selftest)
                 cmd="memnoth__subcmd__mcp__subcmd__selftest"
                 ;;
             memnoth__subcmd__mcp,serve)
                 cmd="memnoth__subcmd__mcp__subcmd__serve"
-                ;;
-            memnoth__subcmd__mcp,test)
-                cmd="memnoth__subcmd__mcp__subcmd__test"
-                ;;
-            memnoth__subcmd__mcp,token)
-                cmd="memnoth__subcmd__mcp__subcmd__token"
-                ;;
-            memnoth__subcmd__mcp__subcmd__profile,set)
-                cmd="memnoth__subcmd__mcp__subcmd__profile__subcmd__set"
-                ;;
-            memnoth__subcmd__mcp__subcmd__profile,show)
-                cmd="memnoth__subcmd__mcp__subcmd__profile__subcmd__show"
-                ;;
-            memnoth__subcmd__models,list)
-                cmd="memnoth__subcmd__models__subcmd__list"
-                ;;
-            memnoth__subcmd__models,use)
-                cmd="memnoth__subcmd__models__subcmd__use"
                 ;;
             memnoth__subcmd__org,add-member)
                 cmd="memnoth__subcmd__org__subcmd__add__subcmd__member"
@@ -454,23 +448,8 @@ _memnoth() {
             memnoth__subcmd__receipt,write)
                 cmd="memnoth__subcmd__receipt__subcmd__write"
                 ;;
-            memnoth__subcmd__session,attach)
-                cmd="memnoth__subcmd__session__subcmd__attach"
-                ;;
-            memnoth__subcmd__session,effort)
-                cmd="memnoth__subcmd__session__subcmd__effort"
-                ;;
-            memnoth__subcmd__session,exec)
-                cmd="memnoth__subcmd__session__subcmd__exec"
-                ;;
-            memnoth__subcmd__session,handoff)
-                cmd="memnoth__subcmd__session__subcmd__handoff"
-                ;;
             memnoth__subcmd__session,list)
                 cmd="memnoth__subcmd__session__subcmd__list"
-                ;;
-            memnoth__subcmd__session,replay)
-                cmd="memnoth__subcmd__session__subcmd__replay"
                 ;;
             memnoth__subcmd__session,resume)
                 cmd="memnoth__subcmd__session__subcmd__resume"
@@ -498,6 +477,18 @@ _memnoth() {
                 ;;
             memnoth__subcmd__skills,run)
                 cmd="memnoth__subcmd__skills__subcmd__run"
+                ;;
+            memnoth__subcmd__sync,now)
+                cmd="memnoth__subcmd__sync__subcmd__now"
+                ;;
+            memnoth__subcmd__sync,pause)
+                cmd="memnoth__subcmd__sync__subcmd__pause"
+                ;;
+            memnoth__subcmd__sync,restore)
+                cmd="memnoth__subcmd__sync__subcmd__restore"
+                ;;
+            memnoth__subcmd__sync,status)
+                cmd="memnoth__subcmd__sync__subcmd__status"
                 ;;
             memnoth__subcmd__teams,audit)
                 cmd="memnoth__subcmd__teams__subcmd__audit"
@@ -547,101 +538,26 @@ _memnoth() {
             memnoth__subcmd__telemetry,status)
                 cmd="memnoth__subcmd__telemetry__subcmd__status"
                 ;;
-            memnoth__subcmd__vault,approve)
-                cmd="memnoth__subcmd__vault__subcmd__approve"
-                ;;
             memnoth__subcmd__vault,asof)
                 cmd="memnoth__subcmd__vault__subcmd__asof"
-                ;;
-            memnoth__subcmd__vault,audit)
-                cmd="memnoth__subcmd__vault__subcmd__audit"
-                ;;
-            memnoth__subcmd__vault,backup)
-                cmd="memnoth__subcmd__vault__subcmd__backup"
                 ;;
             memnoth__subcmd__vault,contradictions)
                 cmd="memnoth__subcmd__vault__subcmd__contradictions"
                 ;;
-            memnoth__subcmd__vault,correct)
-                cmd="memnoth__subcmd__vault__subcmd__correct"
-                ;;
-            memnoth__subcmd__vault,disputed)
-                cmd="memnoth__subcmd__vault__subcmd__contradictions"
-                ;;
-            memnoth__subcmd__vault,duplicates)
-                cmd="memnoth__subcmd__vault__subcmd__duplicates"
-                ;;
-            memnoth__subcmd__vault,explain)
-                cmd="memnoth__subcmd__vault__subcmd__explain"
-                ;;
-            memnoth__subcmd__vault,export)
-                cmd="memnoth__subcmd__vault__subcmd__export"
-                ;;
-            memnoth__subcmd__vault,forget)
-                cmd="memnoth__subcmd__vault__subcmd__forget"
-                ;;
-            memnoth__subcmd__vault,gc)
-                cmd="memnoth__subcmd__vault__subcmd__gc"
-                ;;
-            memnoth__subcmd__vault,graph)
-                cmd="memnoth__subcmd__vault__subcmd__graph"
-                ;;
             memnoth__subcmd__vault,history)
                 cmd="memnoth__subcmd__vault__subcmd__history"
-                ;;
-            memnoth__subcmd__vault,import)
-                cmd="memnoth__subcmd__vault__subcmd__import"
                 ;;
             memnoth__subcmd__vault,init)
                 cmd="memnoth__subcmd__vault__subcmd__init"
                 ;;
-            memnoth__subcmd__vault,link)
-                cmd="memnoth__subcmd__vault__subcmd__link"
-                ;;
-            memnoth__subcmd__vault,merge)
-                cmd="memnoth__subcmd__vault__subcmd__merge"
-                ;;
-            memnoth__subcmd__vault,proposals)
-                cmd="memnoth__subcmd__vault__subcmd__proposals"
-                ;;
-            memnoth__subcmd__vault,propose)
-                cmd="memnoth__subcmd__vault__subcmd__propose"
-                ;;
-            memnoth__subcmd__vault,prune)
-                cmd="memnoth__subcmd__vault__subcmd__prune"
-                ;;
             memnoth__subcmd__vault,recall)
                 cmd="memnoth__subcmd__vault__subcmd__recall"
-                ;;
-            memnoth__subcmd__vault,reindex)
-                cmd="memnoth__subcmd__vault__subcmd__reindex"
-                ;;
-            memnoth__subcmd__vault,reject)
-                cmd="memnoth__subcmd__vault__subcmd__reject"
                 ;;
             memnoth__subcmd__vault,remember)
                 cmd="memnoth__subcmd__vault__subcmd__remember"
                 ;;
-            memnoth__subcmd__vault,restore)
-                cmd="memnoth__subcmd__vault__subcmd__restore"
-                ;;
-            memnoth__subcmd__vault,search)
-                cmd="memnoth__subcmd__vault__subcmd__search"
-                ;;
-            memnoth__subcmd__vault,stats)
-                cmd="memnoth__subcmd__vault__subcmd__stats"
-                ;;
             memnoth__subcmd__vault,status)
                 cmd="memnoth__subcmd__vault__subcmd__status"
-                ;;
-            memnoth__subcmd__vault,timeline)
-                cmd="memnoth__subcmd__vault__subcmd__timeline"
-                ;;
-            memnoth__subcmd__vault,top)
-                cmd="memnoth__subcmd__vault__subcmd__top"
-                ;;
-            memnoth__subcmd__vault,unlink)
-                cmd="memnoth__subcmd__vault__subcmd__unlink"
                 ;;
             memnoth__subcmd__worktree,clean)
                 cmd="memnoth__subcmd__worktree__subcmd__clean"
@@ -651,6 +567,9 @@ _memnoth() {
                 ;;
             memnoth__subcmd__worktree,diff)
                 cmd="memnoth__subcmd__worktree__subcmd__diff"
+                ;;
+            memnoth__subcmd__worktree,finish)
+                cmd="memnoth__subcmd__worktree__subcmd__finish"
                 ;;
             memnoth__subcmd__worktree,list)
                 cmd="memnoth__subcmd__worktree__subcmd__list"
@@ -662,8 +581,188 @@ _memnoth() {
 
     case "${cmd}" in
         memnoth)
-            opts="-h -V --root --vault --namespace --json --quiet --resume --help --version session ask vault kg mcp models usage stats auth teams config cloud update install uninstall setup completion doctor version help schema receipt audit telemetry privacy billing projects keys org open skills set-theme set-screen-reader feedback connect automation worktree batch parallel docs serve watch"
+            opts="-h -V --root --vault --namespace --json --quiet --resume --help --version session vault kg mcp doctor drift simulate lineage why impact cloud sync config ask version bench help schema completion docs update install uninstall setup open serve batch parallel agents auth telemetry privacy audit receipt set-theme set-screen-reader worktree skills billing connect feedback automation watch demo checkpoint delegate brief keys projects org teams undo redo merge handoff compact btw recap export rename keymap onboarding acp extension plan goal sandbox budget trust"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --root)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --vault)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --namespace)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --resume)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        memnoth__subcmd__acp)
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --root)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --vault)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --namespace)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --resume)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        memnoth__subcmd__agents)
+            opts="-h --root --vault --namespace --json --quiet --resume --help list run result unpack"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --root)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --vault)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --namespace)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --resume)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        memnoth__subcmd__agents__subcmd__list)
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --root)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --vault)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --namespace)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --resume)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        memnoth__subcmd__agents__subcmd__result)
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --root)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --vault)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --namespace)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --resume)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        memnoth__subcmd__agents__subcmd__run)
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --root)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --vault)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --namespace)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --resume)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        memnoth__subcmd__agents__subcmd__unpack)
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
@@ -764,7 +863,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__audit__subcmd__export)
-            opts="-h --out --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --out --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -798,7 +897,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__audit__subcmd__show)
-            opts="-h --limit --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --limit --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -832,7 +931,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__audit__subcmd__verify)
-            opts="-h --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1084,7 +1183,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__automation__subcmd__action__subcmd__init)
-            opts="-h --name --kg-index --sync --force --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --name --kg-index --sync --force --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1148,7 +1247,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__automation__subcmd__ci__subcmd__detect)
-            opts="-h --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1178,7 +1277,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__automation__subcmd__ci__subcmd__index)
-            opts="-h --full --no-embed --sync --force --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --full --no-embed --sync --force --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1238,7 +1337,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__automation__subcmd__hooks__subcmd__install)
-            opts="-h --force --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --force --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1268,7 +1367,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__batch)
-            opts="-w -h --workers --command --claim-glob --claim-ttl --workdir --format --json --root --vault --namespace --quiet --resume --help"
+            opts="-w -h --workers --command --claim-glob --claim-ttl --workdir --format --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1299,6 +1398,40 @@ _memnoth() {
                     return 0
                     ;;
                 --format)
+                    COMPREPLY=($(compgen -W "text json" -- "${cur}"))
+                    return 0
+                    ;;
+                --root)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --vault)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --namespace)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --resume)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        memnoth__subcmd__bench)
+            opts="-h --suite --json --root --vault --namespace --quiet --resume --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --suite)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1356,7 +1489,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__billing__subcmd__invoices)
-            opts="-h --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1386,7 +1519,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__billing__subcmd__limits)
-            opts="-h --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1416,7 +1549,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__billing__subcmd__plan)
-            opts="-h --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1445,8 +1578,136 @@ _memnoth() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        memnoth__subcmd__brief)
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --root)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --vault)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --namespace)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --resume)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        memnoth__subcmd__btw)
+            opts="-h --question --root --vault --namespace --json --quiet --resume --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --question)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --root)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --vault)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --namespace)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --resume)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        memnoth__subcmd__budget)
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --root)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --vault)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --namespace)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --resume)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        memnoth__subcmd__checkpoint)
+            opts="-h --name --root --vault --namespace --json --quiet --resume --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --name)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --root)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --vault)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --namespace)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --resume)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         memnoth__subcmd__cloud)
-            opts="-h --root --vault --namespace --json --quiet --resume --help sync profile billing credits"
+            opts="-h --root --vault --namespace --json --quiet --resume --help login logout status sync profile billing"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1476,7 +1737,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__cloud__subcmd__billing)
-            opts="-h --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1505,8 +1766,42 @@ _memnoth() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        memnoth__subcmd__cloud__subcmd__credits)
-            opts="-h --json --root --vault --namespace --quiet --resume --help"
+        memnoth__subcmd__cloud__subcmd__login)
+            opts="-h --provider --root --vault --namespace --json --quiet --resume --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --provider)
+                    COMPREPLY=($(compgen -W "github zitadel oidc" -- "${cur}"))
+                    return 0
+                    ;;
+                --root)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --vault)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --namespace)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --resume)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        memnoth__subcmd__cloud__subcmd__logout)
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1536,7 +1831,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__cloud__subcmd__profile)
-            opts="-h --root --vault --namespace --json --quiet --resume --help show set"
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1565,39 +1860,9 @@ _memnoth() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        memnoth__subcmd__cloud__subcmd__profile__subcmd__set)
-            opts="-h --json --root --vault --namespace --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__cloud__subcmd__profile__subcmd__show)
-            opts="-h --json --root --vault --namespace --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+        memnoth__subcmd__cloud__subcmd__status)
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
@@ -1626,12 +1891,50 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__cloud__subcmd__sync)
-            opts="-h --dry-run --watch --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --full --direction --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
+                --direction)
+                    COMPREPLY=($(compgen -W "up down both" -- "${cur}"))
+                    return 0
+                    ;;
+                --root)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --vault)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --namespace)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --resume)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        memnoth__subcmd__compact)
+            opts="-h --focus --root --vault --namespace --json --quiet --resume --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --focus)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
                 --root)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
@@ -1656,7 +1959,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__completion)
-            opts="-h --root --vault --namespace --json --quiet --resume --help show install"
+            opts="-h --root --vault --namespace --json --quiet --resume --help install show"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1686,18 +1989,18 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__completion__subcmd__install)
-            opts="-s -h --shell --json --root --vault --namespace --quiet --resume --help"
+            opts="-s -h --shell --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
                 --shell)
-                    COMPREPLY=($(compgen -f "${cur}"))
+                    COMPREPLY=($(compgen -W "bash zsh fish powershell" -- "${cur}"))
                     return 0
                     ;;
                 -s)
-                    COMPREPLY=($(compgen -f "${cur}"))
+                    COMPREPLY=($(compgen -W "bash zsh fish powershell" -- "${cur}"))
                     return 0
                     ;;
                 --root)
@@ -1724,26 +2027,18 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__completion__subcmd__show)
-            opts="-s -o -h --shell --output --check --json --root --vault --namespace --quiet --resume --help"
+            opts="-s -h --shell --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
                 --shell)
-                    COMPREPLY=($(compgen -f "${cur}"))
+                    COMPREPLY=($(compgen -W "bash zsh fish powershell" -- "${cur}"))
                     return 0
                     ;;
                 -s)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --output)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                -o)
-                    COMPREPLY=($(compgen -f "${cur}"))
+                    COMPREPLY=($(compgen -W "bash zsh fish powershell" -- "${cur}"))
                     return 0
                     ;;
                 --root)
@@ -1770,7 +2065,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__config)
-            opts="-h --root --vault --namespace --json --quiet --resume --help get set list edit explain"
+            opts="-h --root --vault --namespace --json --quiet --resume --help get set list explain"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1799,38 +2094,8 @@ _memnoth() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        memnoth__subcmd__config__subcmd__edit)
-            opts="-h --json --root --vault --namespace --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
         memnoth__subcmd__config__subcmd__explain)
-            opts="-h --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1860,7 +2125,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__config__subcmd__get)
-            opts="-h --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1890,7 +2155,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__config__subcmd__list)
-            opts="-h --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1920,7 +2185,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__config__subcmd__set)
-            opts="-h --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1980,7 +2245,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__connect__subcmd__add)
-            opts="-h --provider --api-key --base-url --model --non-interactive --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --provider --api-key --base-url --model --non-interactive --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2026,7 +2291,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__connect__subcmd__list)
-            opts="-h --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2056,7 +2321,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__connect__subcmd__remove)
-            opts="-h --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2086,7 +2351,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__connect__subcmd__test)
-            opts="-h --provider --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --provider --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2119,8 +2384,80 @@ _memnoth() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        memnoth__subcmd__delegate)
+            opts="-n -h --name --task --root --vault --namespace --json --quiet --resume --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --name)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -n)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --task)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --root)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --vault)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --namespace)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --resume)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        memnoth__subcmd__demo)
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --root)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --vault)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --namespace)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --resume)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         memnoth__subcmd__docs)
-            opts="-o -h --output --man --check --root --vault --namespace --json --quiet --resume --help"
+            opts="-o -h --output --check --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2158,13 +2495,111 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__doctor)
-            opts="-h --fix --yes --dry-run --bundle --root --vault --namespace --json --quiet --resume --help"
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --bundle)
+                --root)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --vault)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --namespace)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --resume)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        memnoth__subcmd__drift)
+            opts="-h --since --root --vault --namespace --json --quiet --resume --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --since)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --root)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --vault)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --namespace)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --resume)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        memnoth__subcmd__export)
+            opts="-h --path --root --vault --namespace --json --quiet --resume --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --path)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --root)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --vault)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --namespace)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --resume)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        memnoth__subcmd__extension)
+            opts="-h --action --root --vault --namespace --json --quiet --resume --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --action)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -2255,8 +2690,148 @@ _memnoth() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        memnoth__subcmd__goal)
+            opts="-h --condition --root --vault --namespace --json --quiet --resume --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --condition)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --root)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --vault)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --namespace)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --resume)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        memnoth__subcmd__handoff)
+            opts="-h --path --root --vault --namespace --json --quiet --resume --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --path)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --root)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --vault)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --namespace)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --resume)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         memnoth__subcmd__help)
-            opts="-h --all --root --vault --namespace --json --quiet --resume --help"
+            opts="-h --verb --all --root --vault --namespace --json --quiet --resume --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --verb)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --root)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --vault)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --namespace)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --resume)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        memnoth__subcmd__impact)
+            opts="-h --symbol --depth --root --vault --namespace --json --quiet --resume --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --symbol)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --depth)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --root)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --vault)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --namespace)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --resume)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        memnoth__subcmd__install)
+            opts="-h --force --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2285,8 +2860,8 @@ _memnoth() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        memnoth__subcmd__install)
-            opts="-h --force --root --vault --namespace --json --quiet --resume --help"
+        memnoth__subcmd__keymap)
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2346,7 +2921,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__keys__subcmd__create)
-            opts="-h --name --scope --project --expires-in-days --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --name --scope --project --expires-in-days --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2357,7 +2932,7 @@ _memnoth() {
                     return 0
                     ;;
                 --scope)
-                    COMPREPLY=($(compgen -f "${cur}"))
+                    COMPREPLY=($(compgen -W "read write admin" -- "${cur}"))
                     return 0
                     ;;
                 --project)
@@ -2392,7 +2967,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__keys__subcmd__list)
-            opts="-h --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2422,7 +2997,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__keys__subcmd__revoke)
-            opts="-h --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --yes --dry-run --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2452,7 +3027,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__keys__subcmd__revoke__subcmd__all)
-            opts="-h --yes --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --yes --dry-run --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2482,7 +3057,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__kg)
-            opts="-h --root --vault --namespace --json --quiet --resume --help index status impact search explore refs callers callees def diff-impact callpath outline tree review tests-for owners dead-code cycles hotspots unused-exports deps watch query serve"
+            opts="-h --root --vault --namespace --json --quiet --resume --help index status impact search"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2511,322 +3086,18 @@ _memnoth() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        memnoth__subcmd__kg__subcmd__callees)
-            opts="-h --limit --root --vault --namespace --json --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --limit)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__kg__subcmd__callers)
-            opts="-h --limit --root --vault --namespace --json --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --limit)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__kg__subcmd__callpath)
-            opts="-h --root --vault --namespace --json --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__kg__subcmd__cycles)
-            opts="-h --root --vault --namespace --json --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__kg__subcmd__dead__subcmd__code)
-            opts="-h --root --vault --namespace --json --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__kg__subcmd__def)
-            opts="-h --root --vault --namespace --json --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__kg__subcmd__deps)
-            opts="-h --root --vault --namespace --json --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__kg__subcmd__diff__subcmd__impact)
-            opts="-h --staged --root --vault --namespace --json --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__kg__subcmd__explore)
-            opts="-h --root --vault --namespace --json --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__kg__subcmd__hotspots)
-            opts="-h --root --vault --namespace --json --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
         memnoth__subcmd__kg__subcmd__impact)
-            opts="-h --depth --root --vault --namespace --json --quiet --resume --help"
+            opts="-d -h --depth --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
                 --depth)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -d)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -2854,170 +3125,12 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__kg__subcmd__index)
-            opts="-h --full --no-embed --root --vault --namespace --json --quiet --resume --help"
+            opts="-f -h --full --no-embed --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__kg__subcmd__outline)
-            opts="-h --root --vault --namespace --json --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__kg__subcmd__owners)
-            opts="-h --root --vault --namespace --json --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__kg__subcmd__query)
-            opts="-h --root --vault --namespace --json --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__kg__subcmd__refs)
-            opts="-h --limit --root --vault --namespace --json --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --limit)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__kg__subcmd__review)
-            opts="-h --staged --base --root --vault --namespace --json --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --base)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
                 --root)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
@@ -3042,7 +3155,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__kg__subcmd__search)
-            opts="-h --limit --root --vault --namespace --json --quiet --resume --help"
+            opts="-l -h --limit --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -3052,37 +3165,7 @@ _memnoth() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__kg__subcmd__serve)
-            opts="-h --port --root --vault --namespace --json --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --port)
+                -l)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -3139,103 +3222,21 @@ _memnoth() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        memnoth__subcmd__kg__subcmd__tests__subcmd__for)
-            opts="-h --root --vault --namespace --json --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+        memnoth__subcmd__lineage)
+            opts="-h --entity --depth --root --vault --namespace --json --quiet --resume --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --root)
+                --entity)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --vault)
+                --depth)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__kg__subcmd__tree)
-            opts="-h --root --vault --namespace --json --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__kg__subcmd__unused__subcmd__exports)
-            opts="-h --root --vault --namespace --json --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__kg__subcmd__watch)
-            opts="-h --root --vault --namespace --json --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
                 --root)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
@@ -3260,7 +3261,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__mcp)
-            opts="-h --root --vault --namespace --json --quiet --resume --help serve doctor add call selftest remove list test token logs profile exposes restart"
+            opts="-h --root --vault --namespace --json --quiet --resume --help serve doctor add call selftest"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -3290,7 +3291,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__mcp__subcmd__add)
-            opts="-h --clients --profile --url --token --dry-run --root --vault --namespace --json --quiet --resume --help"
+            opts="-c -h --clients --profile --url --token --local --allow-writes --dry-run --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -3300,8 +3301,12 @@ _memnoth() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --profile)
+                -c)
                     COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --profile)
+                    COMPREPLY=($(compgen -W "micro memory coord code full agent" -- "${cur}"))
                     return 0
                     ;;
                 --url)
@@ -3403,262 +3408,6 @@ _memnoth() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        memnoth__subcmd__mcp__subcmd__exposes)
-            opts="-h --json --root --vault --namespace --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__mcp__subcmd__list)
-            opts="-h --root --vault --namespace --json --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__mcp__subcmd__logs)
-            opts="-h --session --tail --json --root --vault --namespace --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --session)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --tail)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__mcp__subcmd__profile)
-            opts="-h --root --vault --namespace --json --quiet --resume --help show set"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__mcp__subcmd__profile__subcmd__set)
-            opts="-h --root --vault --namespace --json --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__mcp__subcmd__profile__subcmd__show)
-            opts="-h --json --root --vault --namespace --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__mcp__subcmd__remove)
-            opts="-h --clients --token --dry-run --root --vault --namespace --json --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --clients)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__mcp__subcmd__restart)
-            opts="-h --server --force --root --vault --namespace --json --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --server)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
         memnoth__subcmd__mcp__subcmd__selftest)
             opts="-h --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
@@ -3701,7 +3450,7 @@ _memnoth() {
                     return 0
                     ;;
                 --profile)
-                    COMPREPLY=($(compgen -f "${cur}"))
+                    COMPREPLY=($(compgen -W "micro memory coord code full agent" -- "${cur}"))
                     return 0
                     ;;
                 --root)
@@ -3727,18 +3476,14 @@ _memnoth() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        memnoth__subcmd__mcp__subcmd__test)
-            opts="-h --tool --profile --root --vault --namespace --json --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+        memnoth__subcmd__merge)
+            opts="-h --branch --root --vault --namespace --json --quiet --resume --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --tool)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --profile)
+                --branch)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -3765,38 +3510,8 @@ _memnoth() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        memnoth__subcmd__mcp__subcmd__token)
-            opts="-h --json --root --vault --namespace --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__models)
-            opts="-h --root --vault --namespace --json --quiet --resume --help list use"
+        memnoth__subcmd__onboarding)
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -3825,80 +3540,8 @@ _memnoth() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        memnoth__subcmd__models__subcmd__list)
-            opts="-h --provider --connected --json --format --compare --root --vault --namespace --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --provider)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --format)
-                    COMPREPLY=($(compgen -W "table wide json" -- "${cur}"))
-                    return 0
-                    ;;
-                --compare)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__models__subcmd__use)
-            opts="-h --root --vault --namespace --json --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
         memnoth__subcmd__open)
-            opts="-h --project-id --session-id --no-browser --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --project-id --session-id --no-browser --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -3966,14 +3609,14 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__org__subcmd__add__subcmd__member)
-            opts="-h --role --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --role --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
                 --role)
-                    COMPREPLY=($(compgen -f "${cur}"))
+                    COMPREPLY=($(compgen -W "owner admin member" -- "${cur}"))
                     return 0
                     ;;
                 --root)
@@ -4000,14 +3643,14 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__org__subcmd__invite)
-            opts="-h --role --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --role --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
                 --role)
-                    COMPREPLY=($(compgen -f "${cur}"))
+                    COMPREPLY=($(compgen -W "admin member" -- "${cur}"))
                     return 0
                     ;;
                 --root)
@@ -4034,7 +3677,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__org__subcmd__invites)
-            opts="-h --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -4064,7 +3707,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__org__subcmd__members)
-            opts="-h --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -4094,7 +3737,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__org__subcmd__remove__subcmd__member)
-            opts="-h --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -4124,7 +3767,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__org__subcmd__rename)
-            opts="-h --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -4154,7 +3797,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__org__subcmd__set__subcmd__role)
-            opts="-h --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --root --vault --namespace --json --quiet --resume --help owner admin member"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -4184,7 +3827,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__org__subcmd__show)
-            opts="-h --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -4214,7 +3857,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__org__subcmd__withdraw)
-            opts="-h --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -4244,17 +3887,59 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__parallel)
-            opts="-j -h --max-concurrent --json --root --vault --namespace --quiet --resume --help"
+            opts="-j -h --targets --args --max-concurrent --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
+                --targets)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --args)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
                 --max-concurrent)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
                 -j)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --root)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --vault)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --namespace)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --resume)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        memnoth__subcmd__plan)
+            opts="-h --name --enable --disable --json --root --vault --namespace --quiet --resume --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --name)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -4312,7 +3997,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__privacy__subcmd__mode)
-            opts="-h --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --root --vault --namespace --json --quiet --resume --help metadata-only balanced open"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -4342,7 +4027,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__privacy__subcmd__off)
-            opts="-h --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -4372,7 +4057,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__privacy__subcmd__on)
-            opts="-h --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -4402,7 +4087,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__privacy__subcmd__show__subcmd__data)
-            opts="-h --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -4432,7 +4117,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__privacy__subcmd__status)
-            opts="-h --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -4492,14 +4177,14 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__projects__subcmd__create)
-            opts="-h --visibility --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --visibility --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
                 --visibility)
-                    COMPREPLY=($(compgen -f "${cur}"))
+                    COMPREPLY=($(compgen -W "org restricted" -- "${cur}"))
                     return 0
                     ;;
                 --root)
@@ -4526,7 +4211,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__projects__subcmd__delete)
-            opts="-h --yes --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --yes --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -4556,7 +4241,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__projects__subcmd__file)
-            opts="-h --project --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --project --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -4590,7 +4275,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__projects__subcmd__list)
-            opts="-h --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -4620,7 +4305,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__projects__subcmd__rename)
-            opts="-h --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -4650,7 +4335,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__projects__subcmd__unassigned)
-            opts="-h --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -4680,7 +4365,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__projects__subcmd__use)
-            opts="-h --clear --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --clear --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -4709,8 +4394,8 @@ _memnoth() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        memnoth__subcmd__receipt)
-            opts="-h --root --vault --namespace --json --quiet --resume --help write show verify"
+        memnoth__subcmd__recap)
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -4739,8 +4424,42 @@ _memnoth() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        memnoth__subcmd__receipt)
+            opts="-h --turn --root --vault --namespace --json --quiet --resume --help write show verify"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --turn)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --root)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --vault)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --namespace)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --resume)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         memnoth__subcmd__receipt__subcmd__show)
-            opts="-h --commit --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --commit --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -4774,7 +4493,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__receipt__subcmd__verify)
-            opts="-h --commit --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --commit --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -4808,7 +4527,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__receipt__subcmd__write)
-            opts="-h --commit --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --commit --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -4841,18 +4560,112 @@ _memnoth() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        memnoth__subcmd__redo)
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --root)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --vault)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --namespace)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --resume)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        memnoth__subcmd__rename)
+            opts="-h --name --root --vault --namespace --json --quiet --resume --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --name)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --root)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --vault)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --namespace)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --resume)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        memnoth__subcmd__sandbox)
+            opts="-h --command --root --vault --namespace --json --quiet --resume --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --command)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --root)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --vault)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --namespace)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --resume)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         memnoth__subcmd__schema)
-            opts="-o -h --output --check --root --vault --namespace --json --quiet --resume --help"
+            opts="-h --output --check --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
                 --output)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                -o)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -4880,7 +4693,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__serve)
-            opts="-p -h --port --host --cors --token --graph-path --json --root --vault --namespace --quiet --resume --help"
+            opts="-p -h --port --host --cors --token --graph-path --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -4930,7 +4743,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__session)
-            opts="-h --root --vault --namespace --json --quiet --resume --help start resume list status stop effort replay attach handoff exec"
+            opts="-h --root --vault --namespace --json --quiet --resume --help start resume list status stop"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -4959,235 +4772,7 @@ _memnoth() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        memnoth__subcmd__session__subcmd__attach)
-            opts="-h --output --include-vault --include-kg --json --root --vault --namespace --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --output)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__session__subcmd__effort)
-            opts="-h --name --json --root --vault --namespace --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --name)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__session__subcmd__exec)
-            opts="-h --session --policy --network --write-outside --timeout --json --root --vault --namespace --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --session)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --policy)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --timeout)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__session__subcmd__handoff)
-            opts="-h --name --workspace --json --root --vault --namespace --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --name)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --workspace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
         memnoth__subcmd__session__subcmd__list)
-            opts="-h --json --root --vault --namespace --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__session__subcmd__replay)
-            opts="-h --from-turn --max-turns --model --format --output --diff --root --vault --namespace --json --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --from-turn)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --max-turns)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --model)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --format)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --output)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__session__subcmd__resume)
             opts="-h --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -5217,8 +4802,8 @@ _memnoth() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        memnoth__subcmd__session__subcmd__start)
-            opts="-h --name --resume --model --root --vault --namespace --json --quiet --help"
+        memnoth__subcmd__session__subcmd__resume)
+            opts="-n -h --name --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -5228,11 +4813,7 @@ _memnoth() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --model)
+                -n)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -5248,6 +4829,10 @@ _memnoth() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --resume)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -5255,8 +4840,8 @@ _memnoth() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        memnoth__subcmd__session__subcmd__status)
-            opts="-h --name --json --root --vault --namespace --quiet --resume --help"
+        memnoth__subcmd__session__subcmd__start)
+            opts="-n -h --name --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -5266,6 +4851,40 @@ _memnoth() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                -n)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --root)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --vault)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --namespace)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --resume)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        memnoth__subcmd__session__subcmd__status)
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
                 --root)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
@@ -5290,13 +4909,17 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__session__subcmd__stop)
-            opts="-h --name --force --root --vault --namespace --json --quiet --resume --help"
+            opts="-n -f -h --name --force --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
                 --name)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -n)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -5324,7 +4947,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__set__subcmd__screen__subcmd__reader)
-            opts="-h --root --vault --namespace --json --quiet --resume --help"
+            opts="-h --root --vault --namespace --json --quiet --resume --help off plain"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -5354,7 +4977,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__set__subcmd__theme)
-            opts="-h --root --vault --namespace --json --quiet --resume --help"
+            opts="-h --root --vault --namespace --json --quiet --resume --help default high-contrast no-color"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -5384,13 +5007,47 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__setup)
-            opts="-h --skip --yes --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --skip --yes --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
                 --skip)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --root)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --vault)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --namespace)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --resume)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        memnoth__subcmd__simulate)
+            opts="-h --change --root --vault --namespace --json --quiet --resume --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --change)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -5520,7 +5177,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__skills__subcmd__list)
-            opts="-d -h --detail --tag --json --root --vault --namespace --quiet --resume --help"
+            opts="-d -h --detail --tag --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -5554,7 +5211,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__skills__subcmd__remove)
-            opts="-f -h --force --root --vault --namespace --json --quiet --resume --help"
+            opts="-f -h --force --yes --dry-run --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -5584,7 +5241,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__skills__subcmd__run)
-            opts="-h --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -5613,25 +5270,141 @@ _memnoth() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        memnoth__subcmd__stats)
-            opts="-h --by --since --range --json --root --vault --namespace --quiet --resume --help"
+        memnoth__subcmd__sync)
+            opts="-h --root --vault --namespace --json --quiet --resume --help status now pause restore"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --by)
+                --root)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --since)
+                --vault)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --range)
+                --namespace)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --resume)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        memnoth__subcmd__sync__subcmd__now)
+            opts="-h --phrase --root --vault --namespace --json --quiet --resume --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --phrase)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --root)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --vault)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --namespace)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --resume)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        memnoth__subcmd__sync__subcmd__pause)
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --root)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --vault)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --namespace)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --resume)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        memnoth__subcmd__sync__subcmd__restore)
+            opts="-h --phrase --force --root --vault --namespace --json --quiet --resume --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --phrase)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --root)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --vault)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --namespace)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --resume)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        memnoth__subcmd__sync__subcmd__status)
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
                 --root)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
@@ -5686,7 +5459,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__teams__subcmd__audit)
-            opts="-h --range --session --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --range --session --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -5754,7 +5527,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__teams__subcmd__create)
-            opts="-h --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -5784,7 +5557,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__teams__subcmd__handoff)
-            opts="-h --message --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --message --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -5818,7 +5591,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__teams__subcmd__inbox)
-            opts="-h --broadcast --ack --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --broadcast --ack --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -5878,7 +5651,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__teams__subcmd__list)
-            opts="-h --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -5908,7 +5681,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__teams__subcmd__lock)
-            opts="-h --ttl --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --ttl --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -5942,7 +5715,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__teams__subcmd__members)
-            opts="-h --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -5972,7 +5745,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__teams__subcmd__presence)
-            opts="-h --stale --sync --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --stale --sync --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -6032,7 +5805,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__teams__subcmd__review)
-            opts="-h --message --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --message --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -6066,7 +5839,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__teams__subcmd__tasks)
-            opts="-h --pending --in-progress --done --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --pending --in-progress --done --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -6126,7 +5899,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__telemetry__subcmd__off)
-            opts="-h --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -6156,7 +5929,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__telemetry__subcmd__on)
-            opts="-h --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -6186,7 +5959,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__telemetry__subcmd__status)
-            opts="-h --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -6215,8 +5988,72 @@ _memnoth() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        memnoth__subcmd__trust)
+            opts="-h --action --root --vault --namespace --json --quiet --resume --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --action)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --root)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --vault)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --namespace)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --resume)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        memnoth__subcmd__undo)
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --root)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --vault)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --namespace)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --resume)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         memnoth__subcmd__uninstall)
-            opts="-h --keep-state --root --vault --namespace --json --quiet --resume --help"
+            opts="-h --keep-state --yes --dry-run --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -6283,89 +6120,13 @@ _memnoth() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        memnoth__subcmd__usage)
-            opts="-h --by --since --range --json --root --vault --namespace --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --by)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --since)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --range)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
         memnoth__subcmd__vault)
-            opts="-h --root --vault --namespace --json --quiet --resume --help init status asof history contradictions disputed remember propose proposals approve reject recall forget correct merge duplicates top timeline explain graph link unlink search export import gc prune reindex stats backup restore audit"
+            opts="-h --root --vault --namespace --json --quiet --resume --help init status remember recall asof history contradictions"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__vault__subcmd__approve)
-            opts="-h --by --root --vault --namespace --json --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --by)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
                 --root)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
@@ -6390,7 +6151,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__vault__subcmd__asof)
-            opts="-h --at --name --limit --root --vault --namespace --json --quiet --resume --help"
+            opts="-l -h --at --name --limit --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -6408,79 +6169,7 @@ _memnoth() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__vault__subcmd__audit)
-            opts="-h --limit --kind --json --root --vault --namespace --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --limit)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --kind)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__vault__subcmd__backup)
-            opts="-o -h --output --include-wal --compress --root --vault --namespace --json --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --output)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                -o)
+                -l)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -6541,272 +6230,6 @@ _memnoth() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        memnoth__subcmd__vault__subcmd__correct)
-            opts="-h --new-name --summary --confidence --reason --root --vault --namespace --json --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --new-name)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --summary)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --confidence)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --reason)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__vault__subcmd__duplicates)
-            opts="-h --at --json --root --vault --namespace --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --at)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__vault__subcmd__explain)
-            opts="-h --at --root --vault --namespace --json --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --at)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__vault__subcmd__export)
-            opts="-o -h --output --format --include-history --kind --root --vault --namespace --json --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --output)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                -o)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --format)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --kind)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__vault__subcmd__forget)
-            opts="-h --reason --apply --root --vault --namespace --json --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --reason)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__vault__subcmd__gc)
-            opts="-h --keep --apply --root --vault --namespace --json --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --keep)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__vault__subcmd__graph)
-            opts="-h --depth --at --json --root --vault --namespace --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --depth)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --at)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
         memnoth__subcmd__vault__subcmd__history)
             opts="-h --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
@@ -6814,52 +6237,6 @@ _memnoth() {
                 return 0
             fi
             case "${prev}" in
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__vault__subcmd__import)
-            opts="-i -h --input --format --dry-run --on-conflict --root --vault --namespace --json --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --input)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                -i)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --format)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --on-conflict)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
                 --root)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
@@ -6913,194 +6290,8 @@ _memnoth() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        memnoth__subcmd__vault__subcmd__link)
-            opts="-h --confidence --reason --root --vault --namespace --json --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --confidence)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --reason)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__vault__subcmd__merge)
-            opts="-h --reason --root --vault --namespace --json --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --reason)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__vault__subcmd__proposals)
-            opts="-h --status --json --root --vault --namespace --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --status)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__vault__subcmd__propose)
-            opts="-h --kind --confidence --entity-kind --author --root --vault --namespace --json --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --kind)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --confidence)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --entity-kind)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --author)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__vault__subcmd__prune)
-            opts="-h --keep-days --apply --root --vault --namespace --json --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --keep-days)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
         memnoth__subcmd__vault__subcmd__recall)
-            opts="-h --limit --at --root --vault --namespace --json --quiet --resume --help"
+            opts="-l -h --limit --at --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -7110,75 +6301,11 @@ _memnoth() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                -l)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
                 --at)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__vault__subcmd__reindex)
-            opts="-h --embeddings --full --root --vault --namespace --json --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__vault__subcmd__reject)
-            opts="-h --reason --by --root --vault --namespace --json --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --reason)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --by)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -7206,17 +6333,25 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__vault__subcmd__remember)
-            opts="-h --kind --confidence --entity-kind --author --root --vault --namespace --json --quiet --resume --help"
+            opts="-k -c -h --kind --confidence --entity-kind --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
                 --kind)
-                    COMPREPLY=($(compgen -f "${cur}"))
+                    COMPREPLY=($(compgen -W "fact decision lesson gotcha correction" -- "${cur}"))
+                    return 0
+                    ;;
+                -k)
+                    COMPREPLY=($(compgen -W "fact decision lesson gotcha correction" -- "${cur}"))
                     return 0
                     ;;
                 --confidence)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -c)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -7224,116 +6359,6 @@ _memnoth() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --author)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__vault__subcmd__restore)
-            opts="-i -h --input --verify --force --root --vault --namespace --json --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --input)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                -i)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__vault__subcmd__search)
-            opts="-h --limit --semantic --at --root --vault --namespace --json --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --limit)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --at)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__vault__subcmd__stats)
-            opts="-h --json --growth --root --vault --namespace --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
                 --root)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
@@ -7364,124 +6389,6 @@ _memnoth() {
                 return 0
             fi
             case "${prev}" in
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__vault__subcmd__timeline)
-            opts="-h --limit --at --kind --include-observations --root --vault --namespace --json --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --limit)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --at)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --kind)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__vault__subcmd__top)
-            opts="-h --limit --kind --at --root --vault --namespace --json --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --limit)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --kind)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --at)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --root)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --vault)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --namespace)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --resume)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        memnoth__subcmd__vault__subcmd__unlink)
-            opts="-h --reason --root --vault --namespace --json --quiet --resume --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                --reason)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
                 --root)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
@@ -7536,7 +6443,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__watch)
-            opts="-h --port --debounce --vault-changes --once --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --port --debounce --vault-changes --once --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -7573,8 +6480,46 @@ _memnoth() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        memnoth__subcmd__why)
+            opts="-h --symbol --at --root --vault --namespace --json --quiet --resume --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --symbol)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --at)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --root)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --vault)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --namespace)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --resume)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         memnoth__subcmd__worktree)
-            opts="-h --root --vault --namespace --json --quiet --resume --help create list clean diff"
+            opts="-h --root --vault --namespace --json --quiet --resume --help create list clean finish diff"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -7604,7 +6549,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__worktree__subcmd__clean)
-            opts="-f -h --force --json --root --vault --namespace --quiet --resume --help"
+            opts="-f -h --force --yes --dry-run --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -7634,7 +6579,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__worktree__subcmd__create)
-            opts="-b -h --branch --base --json --root --vault --namespace --quiet --resume --help"
+            opts="-b -h --branch --base --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -7676,7 +6621,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__worktree__subcmd__diff)
-            opts="-h --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -7705,8 +6650,42 @@ _memnoth() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        memnoth__subcmd__worktree__subcmd__finish)
+            opts="-h --outcome --root --vault --namespace --json --quiet --resume --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --outcome)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --root)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --vault)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --namespace)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --resume)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         memnoth__subcmd__worktree__subcmd__list)
-            opts="-h --json --root --vault --namespace --quiet --resume --help"
+            opts="-h --root --vault --namespace --json --quiet --resume --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
