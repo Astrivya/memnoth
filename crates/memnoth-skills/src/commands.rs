@@ -61,7 +61,12 @@ pub struct RemoveArgs {
     /// Name of the skill to remove.
     #[arg(value_name = "NAME")]
     pub name: String,
-
+    /// Remove without asking for confirmation.
+    #[arg(long)]
+    pub yes: bool,
+    /// Report what would be removed; remove nothing.
+    #[arg(long)]
+    pub dry_run: bool,
     /// Force removal without confirmation.
     #[arg(long, short)]
     pub force: bool,
@@ -416,6 +421,13 @@ fn execute_remove(args: RemoveArgs) -> Result<String> {
         return Err(anyhow::anyhow!("Skill '{}' not found", args.name));
     }
 
+    if args.dry_run {
+        return Ok(format!(
+            "Would remove skill '{}'. Nothing was removed.\n",
+            args.name
+        ));
+    }
+
     if !args.force {
         // In a real CLI, we'd prompt for confirmation
         // For now, we'll just require --force
@@ -582,6 +594,8 @@ Hello {{name}}!
         let result = execute_remove(RemoveArgs {
             name: "test-skill".to_string(),
             force: true,
+            dry_run: false,
+            yes: true,
         })
         .unwrap();
         assert!(result.contains("Removed"));

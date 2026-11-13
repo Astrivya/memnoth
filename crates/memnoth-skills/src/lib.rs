@@ -7,12 +7,12 @@
 //! - Slash command exposure in TUI
 
 pub mod commands;
+pub mod extension;
 pub mod frontmatter;
 pub mod registry;
 pub mod template;
-
 use anyhow::Result;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Default skills directory: `$MEMNOTH_SKILLS_DIR`, else `~/.memnoth/skills/`.
 ///
@@ -26,6 +26,38 @@ pub fn default_skills_dir() -> Result<PathBuf> {
     }
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
     Ok(home.join(".memnoth").join("skills"))
+}
+/// Render installed skills as the instruction block a model reads from.
+///
+/// Names each skill and its purpose without inlining its instructions, so the
+/// whole prefix budget is not spent on skills the turn will not use. Returns
+/// `None` when there are no skills to list, so callers can skip an empty slot.
+pub fn skills_block_from(dir: &Path) -> Option<String> {
+    if !dir.is_dir() {
+        return None;
+    }
+    let registry = registry::SkillRegistry::with_dir(dir).ok()?;
+    let skills = registry.list();
+    if skills.is_empty() {
+        return None;
+    }
+    let mut text = String::from(
+        "Installed skills, available through `mn skill run <name>`. Run one only when it fits \
+         the request, and say why:",
+    );
+    for entry in skills {
+        text.push_str(&format!(
+            "\n- {}: {}",
+            entry.frontmatter.metadata.name, entry.frontmatter.metadata.description
+        ));
+    }
+    Some(text)
+}
+
+/// Render installed skills from the default skills directory.
+pub fn skills_block() -> Option<String> {
+    let dir = default_skills_dir().ok()?;
+    skills_block_from(&dir)
 }
 
 pub use commands::{SkillCommand, build_skill_commands, execute_skill_command};
