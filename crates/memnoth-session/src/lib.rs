@@ -80,6 +80,10 @@ pub struct TurnReceipt {
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
     pub cache_write_tokens: u64,
+    /// The full prompt text sent to the provider this turn, so replay can
+    /// reproduce the same prompt bytes byte-for-byte.
+    #[serde(default)]
+    pub prompt: String,
     /// `None` when the model has no configured price. Never zero-by-default: zero would claim
     /// the turn was free.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -89,8 +93,17 @@ pub struct TurnReceipt {
     pub turn_id: Option<usize>,
 }
 
+impl TurnReceipt {
+    /// The prompt bytes this turn sent, or `None` when none were recorded.
+    ///
+    /// A receipt from before the field existed has `prompt: ""`, which means
+    /// "not recorded", not "the empty prompt was sent".
+    pub fn prompt_bytes(&self) -> Option<&str> {
+        (!self.prompt.is_empty()).then_some(self.prompt.as_str())
+    }
+}
+
 /// A checkpoint in the session, marking a point for /rewind and /revert.
-///
 /// Checkpoints are created at turn boundaries and allow the session to be
 /// rewound to a specific turn, or forked from that point.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -265,6 +278,31 @@ impl Session {
     /// The most recent receipt, which is what `/context` shows.
     pub fn last_receipt(&self) -> Option<&TurnReceipt> {
         self.receipts.last()
+    }
+
+    /// The prompt bytes one recorded turn sent, by turn order (0-based).
+    ///
+    /// A receipt written before `prompt` existed — or one whose turn failed
+    /// before a prompt was assembled — has no bytes to reproduce, and that is
+    /// `None` rather than an empty string: "nothing was sent" and "an empty
+    /// prompt was sent" are different answers.
+    pub fn replay_prompt(&self, turn: usize) -> Option<&str> {
+        self.receipts
+            .get(turn)
+            .map(|receipt| receipt.prompt.as_str())
+            .filter(|prompt| !prompt.is_empty())
+    }
+
+    /// Every turn that recorded prompt bytes, oldest first, with its index.
+    ///
+    /// The index is the receipt's own position, so a caller can pair a replayed
+    /// prompt with the turn number the writes and approvals were stamped with.
+    pub fn prompts(&self) -> impl Iterator<Item = (usize, &TurnReceipt, &str)> {
+        self.receipts
+            .iter()
+            .enumerate()
+            .filter(|(_, receipt)| !receipt.prompt.is_empty())
+            .map(|(index, receipt)| (index, receipt, receipt.prompt.as_str()))
     }
 
     /// Total known spend, and how many turns it covers. A turn with no price is excluded rather
@@ -590,6 +628,7 @@ mod tests {
             output_tokens: 20,
             cache_read_tokens: 80,
             cache_write_tokens: 5,
+            prompt: "you are a helpful assistant\n\nwhat is 2+2".into(),
             cost_micros: Some(42),
             turn_id: None,
         });
@@ -681,6 +720,7 @@ mod tests {
             output_tokens: 5,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
+            prompt: String::new(),
             cost_micros: None,
             turn_id: None,
         });
@@ -793,6 +833,7 @@ mod tests {
             output_tokens: 5,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
+            prompt: String::new(),
             cost_micros,
             turn_id: None,
         }
