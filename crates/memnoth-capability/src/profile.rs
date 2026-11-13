@@ -204,6 +204,15 @@ pub const TOOL_PROFILES: &[(&str, &[Profile])] = &[
     ("coord_task_list", &[Profile::Coord, Profile::Full]),
     ("coord_send", &[Profile::Coord, Profile::Full]),
     ("coord_inbox", &[Profile::Coord, Profile::Full]),
+    // The team's unattended queue: beliefs agents and teammates proposed that no
+    // person has accepted yet. Coordination owns it because acceptance is a team
+    // decision; `memory` sits exactly at its 21-tool ceiling, and widening that
+    // ceiling to carry a review queue would trade the memory surface's context
+    // budget for a workflow it does not own.
+    ("vault_proposals", &[Profile::Coord, Profile::Full]),
+    // Team-vault reads: the shared vault a team searches and time-travels.
+    ("mem_search_team", &[Profile::Coord, Profile::Full]),
+    ("vault_asof_team", &[Profile::Coord, Profile::Full]),
 ];
 
 /// One published row: a profile and how many tools it exposes, plus the
@@ -375,8 +384,8 @@ mod tests {
                 ("micro", 4),
                 ("memory", 21),
                 ("code", 26),
-                ("coord", 11),
-                ("full", 51)
+                ("coord", 14),
+                ("full", 54)
             ],
             "a profile changed size: update the published tables with it"
         );
@@ -394,8 +403,8 @@ mod tests {
                 ("micro", 4),
                 ("memory", 21),
                 ("code", 26),
-                ("coord", 11),
-                ("full", 51),
+                ("coord", 14),
+                ("full", 54),
             ],
             "surface_report must match TOOL_PROFILES membership",
         );
