@@ -405,6 +405,16 @@ pub mod benchmarks;
 pub mod fuzz;
 pub mod security;
 
+// The fuzz crate and its targets were written against these names at the
+// crate root, so they are re-exported here and live in `fuzz` for anyone
+// who wants the module path instead.
+pub use fuzz::{
+    DiffHunk, DiffLine, FuzzConfig, SyncEntry, SyncManifest, extract_frontmatter,
+    merge_sync_manifests, normalize_provider_base_url, parse_unified_diff,
+    provider_chat_url, provider_models_url, round_trip_client_frame, round_trip_frontmatter,
+    round_trip_server_frame,
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;

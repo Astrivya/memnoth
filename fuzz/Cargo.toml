@@ -5,6 +5,12 @@ edition = "2024"
 publish = false
 description = "cargo-fuzz targets for memnoth hardening (Phase 8 / W12-04)"
 
+# cargo-fuzz refuses a manifest without this marker when the fuzz crate is
+# also a workspace member: it is what tells cargo-fuzz `this directory is
+# the fuzz crate, whatever else the workspace says`.
+[package.metadata]
+cargo-fuzz = true
+
 [dependencies]
 memnoth-harness-api = { path = "../crates/memnoth-harness-api" }
 anyhow = "1"
@@ -13,6 +19,37 @@ serde_json = "1"
 
 # `fuzz_target!` entry points the libfuzzer engine links against.
 libfuzzer-sys = "0.4"
+
+# Each target is a binary `path`-ed out of `fuzz_targets/`. cargo-fuzz 0.13
+# builds `--bins`, so a target that exists only as a file in `fuzz_targets/`
+# is one `cargo fuzz build` silently skips and `cargo fuzz run` cannot find.
+[[bin]]
+name = "config"
+path = "fuzz_targets/config.rs"
+
+[[bin]]
+name = "diff_parsing"
+path = "fuzz_targets/diff_parsing.rs"
+
+[[bin]]
+name = "frontmatter"
+path = "fuzz_targets/frontmatter.rs"
+
+[[bin]]
+name = "mcp_framing"
+path = "fuzz_targets/mcp_framing.rs"
+
+[[bin]]
+name = "provider_url"
+path = "fuzz_targets/provider_url.rs"
+
+[[bin]]
+name = "security"
+path = "fuzz_targets/security.rs"
+
+[[bin]]
+name = "sync_manifest"
+path = "fuzz_targets/sync_manifest.rs"
 
 [profile.release]
 opt-level = 3
