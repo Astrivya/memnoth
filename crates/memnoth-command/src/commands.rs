@@ -10,7 +10,7 @@
 //! - Kg: code graph (index, status, impact, search)
 //! - Mcp: MCP server and clients (serve, doctor, add, call, selftest)
 //! - Diagnostics: doctor
-//! - Cloud: cloud spine (login, logout, status, sync, profile, usage, billing)
+//! - Cloud: cloud spine (login, logout, status, sync, profile, billing)
 //! - Config: configuration (get, set, list)
 //! - Completion: shell completions (install, show)
 
@@ -797,6 +797,182 @@ pub fn build_p0_registry() -> RegistryBuilder {
             related: vec![],
         })
         .unwrap();
+    builder = builder
+        .command(CommandSpec {
+            id: "drift".into(),
+            cli_path: vec!["drift".into()],
+            slash: SlashSpec {
+                name: "drift".into(),
+                palette: Some("drift [--since WHEN]".into()),
+                description: "Beliefs contradicted by current code/config/tests".into(),
+                long_description: None,
+                params: vec![ParamSpec::string_opt(
+                    "since",
+                    "Only show contradictions since WHEN",
+                    "",
+                )],
+                overlay: OverlayType::None,
+                danger: DangerLevel::Safe,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["diagnostics".into()],
+                aliases: vec![],
+                hidden: true,
+                deprecated: None,
+                examples: vec!["drift".into(), "drift --since 2026-01-01".into()],
+            },
+            handler: "drift".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["drift".into(), "diagnostics".into()],
+            related: vec!["vault.contradictions".into(), "kg.search".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "simulate".into(),
+            cli_path: vec!["simulate".into()],
+            slash: SlashSpec {
+                name: "simulate".into(),
+                palette: Some("simulate <change>".into()),
+                description: "Dry-run plan with zero writes".into(),
+                long_description: None,
+                params: vec![ParamSpec::string(
+                    "change",
+                    "Change to simulate: file path, symbol, or description",
+                )],
+                overlay: OverlayType::None,
+                danger: DangerLevel::Safe,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["diagnostics".into()],
+                aliases: vec![],
+                hidden: true,
+                deprecated: None,
+                examples: vec![
+                    "simulate rename foo to bar".into(),
+                    "simulate modify src/main.rs".into(),
+                ],
+            },
+            handler: "simulate".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["simulate".into(), "diagnostics".into()],
+            related: vec!["kg.impact".into(), "sandbox.check".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "lineage".into(),
+            cli_path: vec!["lineage".into()],
+            slash: SlashSpec {
+                name: "lineage".into(),
+                palette: Some("lineage <entity> [--depth N]".into()),
+                description: "Trace source to belief to decision to code, every edge dated".into(),
+                long_description: None,
+                params: vec![
+                    ParamSpec::string("entity", "Entity whose provenance to trace"),
+                    ParamSpec::string_opt("depth", "How many relation hops to follow", "3"),
+                ],
+                overlay: OverlayType::None,
+                danger: DangerLevel::Safe,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["memory".into()],
+                aliases: vec!["vault.explain".into()],
+                hidden: true,
+                deprecated: None,
+                examples: vec!["lineage rate_limit".into()],
+            },
+            handler: "lineage".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["lineage".into(), "memory".into()],
+            related: vec!["vault.history".into(), "report.receipt".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "why".into(),
+            cli_path: vec!["why".into()],
+            slash: SlashSpec {
+                name: "why".into(),
+                palette: Some("why <symbol> [--at WHEN]".into()),
+                description: "Why this code is like this: belief, code, and supersession chain"
+                    .into(),
+                long_description: None,
+                params: vec![
+                    ParamSpec::string("symbol", "Symbol to explain"),
+                    ParamSpec::string_opt("at", "Read the vault as it stood at WHEN", ""),
+                ],
+                overlay: OverlayType::None,
+                danger: DangerLevel::Safe,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["memory".into(), "code".into()],
+                aliases: vec![],
+                hidden: true,
+                deprecated: None,
+                examples: vec![
+                    "why rate_limit".into(),
+                    "why rate_limit --at 2026-09-01".into(),
+                ],
+            },
+            handler: "why".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["why".into(), "memory".into(), "code".into()],
+            related: vec![
+                "lineage".into(),
+                "vault.asof".into(),
+                "vault.history".into(),
+            ],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "impact".into(),
+            cli_path: vec!["impact".into()],
+            slash: SlashSpec {
+                name: "impact".into(),
+                palette: Some("impact <symbol> [--depth N] [--diff]".into()),
+                description: "What breaks if this changes: exact and likely callers, tests".into(),
+                long_description: None,
+                params: vec![
+                    ParamSpec::string("symbol", "Symbol or file whose blast radius to measure"),
+                    ParamSpec::string_opt("depth", "How many reference hops to follow", "2"),
+                ],
+                overlay: OverlayType::None,
+                danger: DangerLevel::Safe,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["code".into()],
+                aliases: vec!["kg.impact".into()],
+                hidden: true,
+                deprecated: None,
+                examples: vec!["impact rate_limit".into(), "impact --diff".into()],
+            },
+            handler: "impact".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["impact".into(), "code".into()],
+            related: vec!["kg.impact".into(), "kg.tests-for".into()],
+        })
+        .unwrap();
 
     // ── Cloud commands ──────────────────────────────────────────────
 
@@ -965,46 +1141,15 @@ pub fn build_p0_registry() -> RegistryBuilder {
 
     builder = builder
         .command(CommandSpec {
-            id: "cloud.usage".into(),
-            cli_path: vec!["cloud".into(), "usage".into()],
-            slash: SlashSpec {
-                name: "usage".into(),
-                palette: Some("usage".into()),
-                description: "Show cloud usage and billing summary".into(),
-                long_description: None,
-                params: vec![ParamSpec::enum_opt(
-                    "period",
-                    "Usage period: day, week, month",
-                    vec!["day".into(), "week".into(), "month".into()],
-                    "month",
-                )],
-                overlay: OverlayType::None,
-                danger: DangerLevel::Safe,
-                auth: AuthLevel::Cloud,
-                profile: None,
-                categories: vec!["cloud".into()],
-                aliases: vec![],
-                hidden: false,
-                deprecated: None,
-                examples: vec!["cloud usage --period month".into()],
-            },
-            handler: "cloud_usage".into(),
-            json_output: true,
-            streaming: false,
-            timeout_secs: None,
-            min_version: None,
-            tags: vec!["cloud".into(), "billing".into()],
-            related: vec!["cloud.billing".into()],
-        })
-        .unwrap();
-
-    builder = builder
-        .command(CommandSpec {
             id: "cloud.billing".into(),
             cli_path: vec!["cloud".into(), "billing".into()],
             slash: SlashSpec {
                 name: "billing".into(),
-                palette: Some("credits".into()),
+                // The card lives in the console, not in the session: `/credits`
+                // was a CLI-only alias for a cloud balance and is retired with
+                // the rest of the local credit surface (W2-11). `mn cloud
+                // billing` still answers.
+                palette: None,
                 description: "Manage cloud billing and payment methods".into(),
                 long_description: None,
                 params: vec![],
@@ -1024,7 +1169,7 @@ pub fn build_p0_registry() -> RegistryBuilder {
             timeout_secs: None,
             min_version: None,
             tags: vec!["cloud".into(), "billing".into()],
-            related: vec!["cloud.usage".into()],
+            related: vec![],
         })
         .unwrap();
 
@@ -1373,6 +1518,41 @@ pub fn build_p0_registry() -> RegistryBuilder {
 
     builder = builder
         .command(CommandSpec {
+            id: "bench".into(),
+            cli_path: vec!["bench".into()],
+            slash: SlashSpec {
+                name: "bench".into(),
+                palette: None,
+                description: "Run proof benchmarks (MTS-60, TRS, KG)".into(),
+                long_description: Some(
+                    "Run a pinned model against a committed task suite N times and report a 95% bootstrap confidence interval. Outputs a scoreboard JSON and an ablation matrix.".into(),
+                ),
+                params: vec![
+                    ParamSpec::string_opt("suite", "Benchmark suite: mts, trs, kg", "mts"),
+                    ParamSpec::bool("json", "Output as JSON"),
+                ],
+                overlay: OverlayType::None,
+                danger: DangerLevel::Safe,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["config".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["bench run --suite mts --json".into()],
+            },
+            handler: "bench".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["proof".into()],
+            related: vec!["version".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
             id: "help".into(),
             cli_path: vec!["help".into()],
             slash: SlashSpec {
@@ -1582,73 +1762,10 @@ pub fn build_p0_registry() -> RegistryBuilder {
     // completions cannot describe, which is why the gaps were visible as
     // silence rather than as errors.
 
-    builder = builder
-        .command(CommandSpec {
-            id: "usage.show".into(),
-            cli_path: vec!["usage".into()],
-            slash: SlashSpec {
-                name: "usage".into(),
-                palette: None,
-                description: "Show usage and costs, with local reconciliation".into(),
-                long_description: None,
-                params: vec![
-                    ParamSpec::string_opt("by", "Group by: day, model, project", ""),
-                    ParamSpec::string_opt("since", "Since date (YYYY-MM-DD)", ""),
-                    ParamSpec::string_opt("range", "Time range: 7d, 30d, 90d, 365d", "30d"),
-                ],
-                overlay: OverlayType::None,
-                danger: DangerLevel::Safe,
-                auth: AuthLevel::Cloud,
-                profile: None,
-                categories: vec!["product".into()],
-                aliases: vec![],
-                hidden: false,
-                deprecated: None,
-                examples: vec!["usage --range 7d".into()],
-            },
-            handler: "usage_show".into(),
-            json_output: true,
-            streaming: false,
-            timeout_secs: None,
-            min_version: None,
-            tags: vec!["usage".into()],
-            related: vec!["stats.show".into()],
-        })
-        .unwrap();
-
-    builder = builder
-        .command(CommandSpec {
-            id: "stats.show".into(),
-            cli_path: vec!["stats".into()],
-            slash: SlashSpec {
-                name: "stats".into(),
-                palette: None,
-                description: "Show usage statistics with local reconciliation".into(),
-                long_description: None,
-                params: vec![
-                    ParamSpec::string_opt("by", "Group by: day, model, project", ""),
-                    ParamSpec::string_opt("since", "Since date (YYYY-MM-DD)", ""),
-                    ParamSpec::string_opt("range", "Time range: 7d, 30d, 90d, 365d", "30d"),
-                ],
-                overlay: OverlayType::None,
-                danger: DangerLevel::Safe,
-                auth: AuthLevel::Cloud,
-                profile: None,
-                categories: vec!["product".into()],
-                aliases: vec![],
-                hidden: false,
-                deprecated: None,
-                examples: vec!["stats --by model".into()],
-            },
-            handler: "stats_show".into(),
-            json_output: true,
-            streaming: false,
-            timeout_secs: None,
-            min_version: None,
-            tags: vec!["usage".into()],
-            related: vec!["usage.show".into()],
-        })
-        .unwrap();
+    // `usage` and `stats` are retired (W2-11): the credit ledger is a cloud
+    // surface, not a CLI verb. `mn cloud usage` and `mn cloud billing` still
+    // answer, and `POST /api/v1/credits/purchase` is untouched; what is gone is
+    // the local verb that made a second, credit-shaped command line out of it.
 
     builder = builder
         .command(CommandSpec {
@@ -1734,10 +1851,14 @@ pub fn build_p0_registry() -> RegistryBuilder {
                 palette: None,
                 description: "Uninstall memnoth".into(),
                 long_description: None,
-                params: vec![ParamSpec::bool(
-                    "keep-state",
-                    "Keep configuration and state files",
-                )],
+                params: vec![
+                    ParamSpec::bool("keep_state", "Keep configuration and state files"),
+                    ParamSpec::bool("yes", "Answer yes without asking"),
+                    ParamSpec::bool(
+                        "dry_run",
+                        "Show what would be uninstalled without uninstalling",
+                    ),
+                ],
                 overlay: OverlayType::Confirm,
                 danger: DangerLevel::Destructive,
                 auth: AuthLevel::None,
@@ -1960,6 +2081,127 @@ pub fn build_p0_registry() -> RegistryBuilder {
             min_version: None,
             tags: vec!["product".into(), "worktree".into()],
             related: vec!["batch".into(), "worktree".into()],
+        })
+        .unwrap();
+    // ── Headless agents ─────────────────────────────────────────────
+
+    builder = builder
+        .command(CommandSpec {
+            id: "agents.list".into(),
+            cli_path: vec!["agents".into(), "list".into()],
+            slash: SlashSpec {
+                name: "agents list".into(),
+                palette: None,
+                description: "List headless agents in the coordination room".into(),
+                long_description: None,
+                params: vec![],
+                overlay: OverlayType::None,
+                danger: DangerLevel::Safe,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["agents".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["agents list".into()],
+            },
+            handler: "agents_list".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["agents".into()],
+            related: vec!["agents.run".into(), "agents.result".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "agents.run".into(),
+            cli_path: vec!["agents".into(), "run".into()],
+            slash: SlashSpec {
+                name: "agents run".into(),
+                palette: None,
+                description: "Run a headless agent task".into(),
+                long_description: None,
+                params: vec![ParamSpec::string("task", "Task description").positional(0)],
+                overlay: OverlayType::None,
+                danger: DangerLevel::LocalWrite,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["agents".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["agents run index the workspace".into()],
+            },
+            handler: "agents_run".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["agents".into()],
+            related: vec!["agents.result".into(), "agents.list".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "agents.result".into(),
+            cli_path: vec!["agents".into(), "result".into()],
+            slash: SlashSpec {
+                name: "agents result".into(),
+                palette: None,
+                description: "Show the result of an agent run".into(),
+                long_description: None,
+                params: vec![ParamSpec::string("id", "Worker id").positional(0)],
+                overlay: OverlayType::None,
+                danger: DangerLevel::Safe,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["agents".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["agents result w-abc123".into()],
+            },
+            handler: "agents_result".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["agents".into()],
+            related: vec!["agents.run".into(), "agents.unpack".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "agents.unpack".into(),
+            cli_path: vec!["agents".into(), "unpack".into()],
+            slash: SlashSpec {
+                name: "agents unpack".into(),
+                palette: None,
+                description: "Unpack an agent's result artifacts".into(),
+                long_description: None,
+                params: vec![ParamSpec::string("id", "Worker id").positional(0)],
+                overlay: OverlayType::None,
+                danger: DangerLevel::Safe,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["agents".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["agents unpack w-abc123".into()],
+            },
+            handler: "agents_unpack".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["agents".into()],
+            related: vec!["agents.result".into(), "agents.list".into()],
         })
         .unwrap();
 
@@ -2230,7 +2472,7 @@ pub fn build_p0_registry() -> RegistryBuilder {
             slash: SlashSpec {
                 name: "on".into(),
                 palette: None,
-                description: "Enable telemetry collection (default: on)".into(),
+                description: "Enable telemetry collection (default: off)".into(),
                 long_description: None,
                 params: vec![],
                 overlay: OverlayType::None,
@@ -2667,6 +2909,11 @@ pub fn build_p0_registry() -> RegistryBuilder {
                     ParamSpec::string("name", "Worktree name to remove").positional(0),
                     ParamSpec::bool("force", "Force removal even with uncommitted changes")
                         .short('f'),
+                    ParamSpec::bool("yes", "Answer yes without asking"),
+                    ParamSpec::bool(
+                        "dry_run",
+                        "Show what would be removed without removing anything",
+                    ),
                 ],
                 overlay: OverlayType::Confirm,
                 danger: DangerLevel::Destructive,
@@ -2685,6 +2932,40 @@ pub fn build_p0_registry() -> RegistryBuilder {
             min_version: None,
             tags: vec!["worktree".into()],
             related: vec!["worktree.list".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "worktree.finish".into(),
+            cli_path: vec!["worktree".into(), "finish".into()],
+            slash: SlashSpec {
+                name: "finish".into(),
+                palette: None,
+                description: "End a run: clean its worktree on success, keep it on failure".into(),
+                long_description: None,
+                params: vec![
+                    ParamSpec::string("run_id", "Run id (the worktree directory name)")
+                        .positional(0),
+                    ParamSpec::string_opt("outcome", "success or failed", "success"),
+                ],
+                overlay: OverlayType::None,
+                danger: DangerLevel::LocalWrite,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["worktree".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["worktree finish run-42 --outcome failed".into()],
+            },
+            handler: "worktree_finish".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["worktree".into()],
+            related: vec!["worktree.prune".into(), "worktree.clean".into()],
         })
         .unwrap();
 
@@ -2805,6 +3086,11 @@ pub fn build_p0_registry() -> RegistryBuilder {
                 params: vec![
                     ParamSpec::string("name", "Name of the skill to remove").positional(0),
                     ParamSpec::bool("force", "Force removal without confirmation").short('f'),
+                    ParamSpec::bool("yes", "Answer yes without asking"),
+                    ParamSpec::bool(
+                        "dry_run",
+                        "Show what would be removed without removing anything",
+                    ),
                 ],
                 overlay: OverlayType::Confirm,
                 danger: DangerLevel::Destructive,
@@ -3314,6 +3600,37 @@ pub fn build_p0_registry() -> RegistryBuilder {
         })
         .unwrap();
 
+    builder = builder
+        .command(CommandSpec {
+            id: "demo".into(),
+            cli_path: vec!["demo".into()],
+            slash: SlashSpec {
+                name: "demo".into(),
+                palette: None,
+                description:
+                    "Offline vault demo: decision, believed-at, superseded-by, source/commit, both contradiction sides"
+                        .into(),
+                long_description: None,
+                params: vec![],
+                overlay: OverlayType::None,
+                danger: DangerLevel::LocalWrite,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["product".into()],
+                aliases: vec![],
+                hidden: true,
+                deprecated: None,
+                examples: vec!["demo".into()],
+            },
+            handler: "demo".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["product".into()],
+            related: vec!["vault.remember".into(), "vault.correct".into()],
+        })
+        .unwrap();
     // ── Cloud admin surface: models, keys, projects, org, teams ───
     //
     // These are one row per subcommand and share every field except the four
@@ -3321,40 +3638,6 @@ pub fn build_p0_registry() -> RegistryBuilder {
     // come from the verbs' own `-h` output; a spec here that accepted a flag
     // the binary does not would be worse than no spec.
     let cloud = vec![
-        cloud_spec(
-            "models.list",
-            &["models", "list"],
-            "List available models from the cloud",
-            vec![
-                ParamSpec::string_opt("provider", "Filter by provider name", ""),
-                ParamSpec::bool("connected", "Only show models from configured providers"),
-                ParamSpec::enum_opt(
-                    "format",
-                    "Output format: table, wide, json",
-                    vec!["table".into(), "wide".into(), "json".into()],
-                    "table",
-                ),
-                ParamSpec::string_opt(
-                    "compare",
-                    "Compare two models side-by-side (comma-separated IDs)",
-                    "",
-                ),
-            ],
-            DangerLevel::Safe,
-            AuthLevel::Cloud,
-            "models list --connected",
-            &["models.use"],
-        ),
-        cloud_spec(
-            "models.use",
-            &["models", "use"],
-            "Set default model (persisted to config)",
-            vec![ParamSpec::string("id", "Model ID to set as default").positional(0)],
-            DangerLevel::LocalWrite,
-            AuthLevel::None,
-            "models use claude-sonnet-4-5",
-            &["models.list"],
-        ),
         cloud_spec(
             "keys.list",
             &["keys", "list"],
@@ -3393,7 +3676,14 @@ pub fn build_p0_registry() -> RegistryBuilder {
             "keys.revoke",
             &["keys", "revoke"],
             "Revoke one key by id",
-            vec![ParamSpec::string("id", "Key id, as `mn keys list` reports it").positional(0)],
+            vec![
+                ParamSpec::string("id", "Key id, as `mn keys list` reports it").positional(0),
+                ParamSpec::bool("yes", "Answer yes without asking"),
+                ParamSpec::bool(
+                    "dry_run",
+                    "Show what would be revoked without revoking anything",
+                ),
+            ],
             DangerLevel::Destructive,
             AuthLevel::Cloud,
             "keys revoke key_123",
@@ -3403,10 +3693,10 @@ pub fn build_p0_registry() -> RegistryBuilder {
             "keys.revoke-all",
             &["keys", "revoke-all"],
             "Revoke every live key in the org (owner or admin)",
-            vec![ParamSpec::bool(
-                "yes",
-                "Revoke every key without asking for confirmation",
-            )],
+            vec![
+                ParamSpec::bool("yes", "Revoke every key without asking for confirmation"),
+                ParamSpec::bool("dry_run", "Count the live keys; revoke nothing"),
+            ],
             DangerLevel::Destructive,
             AuthLevel::Cloud,
             "keys revoke-all --yes",
@@ -3795,8 +4085,352 @@ pub fn build_p0_registry() -> RegistryBuilder {
             &["audit.show"],
         ),
     ];
-    builder = builder.commands(cloud).unwrap();
+    // ── Signature TUI commands ──────────────────────────────────────
+    // W13: one registry row per signature verb, projected into palette,
+    // slash dropdown, help, and footer.
 
+    builder = builder
+        .command(CommandSpec {
+            id: "checkpoint".into(),
+            cli_path: vec!["checkpoint".into()],
+            slash: SlashSpec {
+                name: "checkpoint".into(),
+                palette: None,
+                description: "Snapshot code, conversation, and vault metadata".into(),
+                long_description: None,
+                params: vec![ParamSpec::string_opt(
+                    "name",
+                    "Checkpoint name",
+                    "ckpt-auto",
+                )],
+                overlay: OverlayType::Fullscreen,
+                danger: DangerLevel::Safe,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["signature".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["checkpoint --name pre-change".into()],
+            },
+            handler: "checkpoint".into(),
+            json_output: false,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["signature".into(), "checkpoint".into()],
+            related: vec!["undo".into(), "redo".into(), "receipt".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "delegate".into(),
+            cli_path: vec!["delegate".into()],
+            slash: SlashSpec {
+                name: "delegate".into(),
+                palette: None,
+                description: "Delegate a task to a scoped subagent".into(),
+                long_description: None,
+                params: vec![
+                    ParamSpec::string("name", "Agent name").short('n'),
+                    ParamSpec::string("task", "Task description"),
+                ],
+                overlay: OverlayType::Fullscreen,
+                danger: DangerLevel::Safe,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["signature".into(), "delegation".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["delegate scout map auth entry points".into()],
+            },
+            handler: "delegate".into(),
+            json_output: false,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["signature".into(), "delegate".into()],
+            related: vec!["merge".into(), "handoff".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "receipt".into(),
+            cli_path: vec!["receipt".into()],
+            slash: SlashSpec {
+                name: "receipt".into(),
+                palette: None,
+                description: "Show and verify a turn receipt".into(),
+                long_description: None,
+                params: vec![ParamSpec::string_opt("turn", "Turn number", "last")],
+                overlay: OverlayType::Fullscreen,
+                danger: DangerLevel::Safe,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["signature".into(), "receipts".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["receipt --verify".into()],
+            },
+            handler: "receipt".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["signature".into(), "receipt".into()],
+            related: vec!["lineage".into(), "audit".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
+            id: "brief".into(),
+            cli_path: vec!["brief".into()],
+            slash: SlashSpec {
+                name: "brief".into(),
+                palette: None,
+                description: "Session brief: primary action, pulse facts, quickstart".into(),
+                long_description: None,
+                params: vec![],
+                overlay: OverlayType::Fullscreen,
+                danger: DangerLevel::Safe,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["signature".into(), "home".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["brief".into()],
+            },
+            handler: "brief".into(),
+            json_output: false,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["signature".into(), "brief".into()],
+            related: vec!["status".into()],
+        })
+        .unwrap();
+
+    builder = builder.commands(cloud).unwrap();
+    // The hidden single-word session verbs: every Verb variant clap parses
+    // needs a row, even the ones that stay out of the public surface.
+    let hidden_verbs = vec![
+        cloud_spec(
+            "undo",
+            &["undo"],
+            "Undo the last turn (conversation only)",
+            vec![],
+            DangerLevel::Safe,
+            AuthLevel::None,
+            "undo",
+            &["redo"],
+        ),
+        cloud_spec(
+            "redo",
+            &["redo"],
+            "Redo the last undone turn",
+            vec![],
+            DangerLevel::Safe,
+            AuthLevel::None,
+            "redo",
+            &["undo"],
+        ),
+        cloud_spec(
+            "merge",
+            &["merge"],
+            "Merge a child branch, surfacing belief conflicts",
+            vec![ParamSpec::string("branch", "The branch to merge in")],
+            DangerLevel::Safe,
+            AuthLevel::None,
+            "merge <branch>",
+            &["handoff"],
+        ),
+        cloud_spec(
+            "handoff",
+            &["handoff"],
+            "Bundle a session for transfer to another machine",
+            vec![ParamSpec {
+                required: false,
+                ..ParamSpec::string("path", "Where to write the bundle")
+            }],
+            DangerLevel::Safe,
+            AuthLevel::None,
+            "handoff",
+            &["merge"],
+        ),
+        cloud_spec(
+            "compact",
+            &["compact"],
+            "Compact context, keeping exact facts",
+            vec![ParamSpec {
+                required: false,
+                ..ParamSpec::string("focus", "What to focus the compaction on")
+            }],
+            DangerLevel::Safe,
+            AuthLevel::None,
+            "compact",
+            &["recap"],
+        ),
+        cloud_spec(
+            "btw",
+            &["btw"],
+            "Side question; not persisted in the transcript",
+            vec![ParamSpec::string("question", "The side question")],
+            DangerLevel::Safe,
+            AuthLevel::None,
+            "btw <question>",
+            &["ask"],
+        ),
+        cloud_spec(
+            "recap",
+            &["recap"],
+            "One-line session summary",
+            vec![],
+            DangerLevel::Safe,
+            AuthLevel::None,
+            "recap",
+            &["compact"],
+        ),
+        cloud_spec(
+            "export",
+            &["export"],
+            "Export session transcript with tool calls and receipts",
+            vec![ParamSpec {
+                required: false,
+                ..ParamSpec::string("path", "Where to write the export")
+            }],
+            DangerLevel::Safe,
+            AuthLevel::None,
+            "export",
+            &["handoff"],
+        ),
+        cloud_spec(
+            "rename",
+            &["rename"],
+            "Rename the current session, keeping its id and path",
+            vec![ParamSpec::string("name", "The new session name")],
+            DangerLevel::Safe,
+            AuthLevel::None,
+            "rename <name>",
+            &["session"],
+        ),
+        cloud_spec(
+            "keymap",
+            &["keymap"],
+            "View and remap key bindings",
+            vec![],
+            DangerLevel::Safe,
+            AuthLevel::None,
+            "keymap",
+            &["brief"],
+        ),
+        cloud_spec(
+            "onboarding",
+            &["onboarding"],
+            "Replayable first-run onboarding card",
+            vec![],
+            DangerLevel::Safe,
+            AuthLevel::None,
+            "onboarding",
+            &["brief"],
+        ),
+        cloud_spec(
+            "acp",
+            &["acp"],
+            "Agent Communication Protocol server mode",
+            vec![],
+            DangerLevel::Safe,
+            AuthLevel::None,
+            "acp",
+            &["mcp"],
+        ),
+        cloud_spec(
+            "extension",
+            &["extension"],
+            "Extension management: new, list, uninstall, doctor",
+            vec![ParamSpec {
+                required: false,
+                ..ParamSpec::string("action", "Subcommand: new, list, uninstall, doctor")
+            }],
+            DangerLevel::Safe,
+            AuthLevel::None,
+            "extension list",
+            &["skills"],
+        ),
+        cloud_spec(
+            "plan",
+            &["plan"],
+            "Set or show the session plan",
+            vec![
+                ParamSpec {
+                    required: false,
+                    ..ParamSpec::string("name", "Session name")
+                },
+                ParamSpec::bool("enable", "Enable plan mode"),
+                ParamSpec::bool("disable", "Disable plan mode"),
+                ParamSpec::bool("json", "Output as JSON"),
+            ],
+            DangerLevel::Safe,
+            AuthLevel::None,
+            "plan",
+            &["goal"],
+        ),
+        cloud_spec(
+            "goal",
+            &["goal"],
+            "Set or show the session goal condition",
+            vec![ParamSpec {
+                required: false,
+                ..ParamSpec::string("condition", "The completion condition to set")
+            }],
+            DangerLevel::Safe,
+            AuthLevel::None,
+            "goal",
+            &["plan"],
+        ),
+        cloud_spec(
+            "sandbox",
+            &["sandbox"],
+            "Run a command in the sandbox, or set the sandbox up",
+            vec![ParamSpec::string(
+                "command",
+                "Subcommand: test <cmd> or setup",
+            )],
+            DangerLevel::Safe,
+            AuthLevel::None,
+            "sandbox setup",
+            &["trust"],
+        ),
+        cloud_spec(
+            "budget",
+            &["budget"],
+            "Show token budget usage",
+            vec![],
+            DangerLevel::Safe,
+            AuthLevel::None,
+            "budget",
+            &["usage"],
+        ),
+        cloud_spec(
+            "trust",
+            &["trust"],
+            "Trust: list trusted folders, or forget one",
+            vec![ParamSpec {
+                required: false,
+                ..ParamSpec::string("action", "Subcommand: list or forget <path>")
+            }],
+            DangerLevel::Safe,
+            AuthLevel::None,
+            "trust list",
+            &["sandbox"],
+        ),
+    ];
+    builder = builder.commands(hidden_verbs).unwrap();
     builder.apply_public_surface()
 }
 
