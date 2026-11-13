@@ -1,15 +1,15 @@
-//! Cloud commands: sync, profile, billing, credits.
+//! Cloud commands: sync, profile, billing.
 
 use anyhow::{Context, Result};
 use serde_json::json;
 
 use crate::cli::{
-    BillingArgs, CloudArgs, CloudCommand, CreditsArgs, ProfileArgs, ProfileCommand, ProfileSetArgs,
+    BillingArgs, CloudArgs, CloudCommand, ProfileArgs, ProfileCommand, ProfileSetArgs,
     ProfileShowArgs, SyncArgs,
 };
 use crate::context::AppContext;
 use crate::output::Outcome;
-use memnoth_cloud_client::{CloudClient, CreditsResponse};
+use memnoth_cloud_client::CloudClient;
 
 /// Run the cloud command.
 pub fn run(ctx: &AppContext, args: &CloudArgs) -> Result<Outcome> {
@@ -19,6 +19,18 @@ pub fn run(ctx: &AppContext, args: &CloudArgs) -> Result<Outcome> {
         CloudCommand::Billing(args) => billing(ctx, args),
         CloudCommand::Credits(args) => credits(ctx, args),
     }
+}
+
+/// `mn cloud credits` — balance, grants and expiry.
+fn credits(ctx: &AppContext, _args: &crate::cli::CreditsArgs) -> Result<Outcome> {
+    let client = get_cloud_client(ctx)?;
+    let credits = client.credits().context("Failed to fetch credits info")?;
+    let data = json!({ "balance_micros": credits.balance_micros });
+    let text = format!(
+        "Credits: ${:.4} USD\n",
+        credits.balance_micros as f64 / 1_000_000.0
+    );
+    Ok(Outcome::new("cloud.credits", text, data))
 }
 
 /// Get authenticated cloud client.
@@ -154,12 +166,17 @@ fn profile_set(ctx: &AppContext, args: &ProfileSetArgs) -> Result<Outcome> {
 
 /// `mn cloud billing` — the credit summary and the org it belongs to.
 ///
-/// There is no `/billing` route: this view is `GET /credits` plus `GET /org`,
-/// the two reads the control plane actually serves.
+/// This view is `GET /credits` plus `GET /org` plus `GET /billing/entitlements`,
+/// the reads the control plane actually serves.
 fn billing(ctx: &AppContext, _args: &BillingArgs) -> Result<Outcome> {
     let client = get_cloud_client(ctx)?;
 
     let credits = client.credits().context("Failed to fetch credits info")?;
+    // Live entitlement round-trip: what this org may do, per the resolver.
+    let entitlements = client
+        .entitlements()
+        .ok()
+        .map(|e| serde_json::to_value(&e).unwrap_or_default());
     // The org is context, not the subject: a failure to read it must not hide
     // the balance, which is what the command was asked for.
     let org = client.org().ok();
@@ -170,14 +187,7 @@ fn billing(ctx: &AppContext, _args: &BillingArgs) -> Result<Outcome> {
             "name": org.name,
             "plan": org.plan,
         })),
-        "credits": {
-            "balance_micros": credits.balance_micros,
-            "burned_micros": credits.burned_micros,
-            "window_days": credits.window_days,
-            "expiring_micros": credits.expiring_micros,
-            "next_expiry_at": credits.next_expiry_at,
-            "demo": credits.demo,
-        },
+        "entitlements": entitlements,
     });
 
     let mut text = format!(
@@ -207,54 +217,4 @@ fn billing(ctx: &AppContext, _args: &BillingArgs) -> Result<Outcome> {
     }
 
     Ok(Outcome::new("cloud.billing", text, data))
-}
-
-/// `mn cloud credits` - GET /api/v1/credits
-fn credits(ctx: &AppContext, _args: &CreditsArgs) -> Result<Outcome> {
-    let client = get_cloud_client(ctx)?;
-
-    let response: CreditsResponse = client.credits().context("Failed to fetch credits info")?;
-
-    let data = json!({
-        "balance_micros": response.balance_micros,
-        "burned_micros": response.burned_micros,
-        "window_days": response.window_days,
-        "expiring_micros": response.expiring_micros,
-        "expiring_grants": response.expiring_grants,
-        "next_expiry_at": response.next_expiry_at,
-        "expiry_warning_days": response.expiry_warning_days,
-        "grants_total": response.grants_total,
-        "ledger_total": response.ledger_total,
-        "unpriced_sessions": response.unpriced_sessions,
-        "demo": response.demo,
-    });
-
-    let mut text = format!(
-        "Credits: ${:.4} USD",
-        response.balance_micros as f64 / 1_000_000.0
-    );
-    if response.window_days > 0 {
-        text.push_str(&format!(
-            "\n  Spent (last {} days): ${:.4}",
-            response.window_days,
-            response.burned_micros as f64 / 1_000_000.0
-        ));
-    }
-    if response.expiring_micros > 0 {
-        text.push_str(&format!(
-            "\n  Expiring within {} days: ${:.4} across {} grant(s)",
-            response.expiry_warning_days,
-            response.expiring_micros as f64 / 1_000_000.0,
-            response.expiring_grants
-        ));
-    }
-    if let Some(date) = &response.next_expiry_at {
-        text.push_str(&format!("\n  Next expiry: {date}"));
-    }
-    text.push_str(&format!(
-        "\n  Grants: {}   Ledger rows: {}",
-        response.grants_total, response.ledger_total
-    ));
-
-    Ok(Outcome::new("cloud.credits", text, data))
 }

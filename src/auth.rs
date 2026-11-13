@@ -720,7 +720,7 @@ pub fn auth_status(ctx: &AppContext, _args: &AuthStatusArgs) -> Result<Outcome> 
     let (live_org, live_limits) = live.unwrap_or((None, None));
 
     let authenticated = whoami.is_some();
-    let (expires_at, expired) = expiry_state(token.as_ref());
+    let (_expires_at, _expired) = expiry_state(token.as_ref());
 
     let data = serde_json::json!({
         "authenticated": authenticated,
@@ -739,14 +739,15 @@ pub fn auth_status(ctx: &AppContext, _args: &AuthStatusArgs) -> Result<Outcome> 
         "limits": live_limits.as_ref().map(|limits| serde_json::json!({
             "workspaces": limits.workspaces,
             "history_days": limits.history_days,
-            "cloud_sessions": limits.cloud_sessions,
             "audit_log": limits.audit_log,
             "sso": limits.sso,
             "scim": limits.scim,
         })),
-        "expires_at": expires_at,
-        "expired": expired,
-        "expires": expiry_text(token.as_ref()),
+        "checkout_url": crate::context::console_url("billing/checkout"),
+        "portal_url": crate::context::console_url("billing/portal"),
+        // The page that shows the plan and sells seats. Named here so a script
+        // never has to reconstruct the console mount by hand.
+        "billing_url": crate::context::console_url("org"),
     });
 
     if !ctx.json {
@@ -773,10 +774,19 @@ pub fn auth_status(ctx: &AppContext, _args: &AuthStatusArgs) -> Result<Outcome> 
                     history_label(limits.history_days)
                 );
             }
+            println!(
+                "Checkout:      {}",
+                crate::context::console_url("billing/checkout")
+            );
+            println!(
+                "Portal:        {}",
+                crate::context::console_url("billing/portal")
+            );
             // Printed even when unknown: a person checking a credential needs
             // to know whether the deadline is missing or merely far away, and a
             // missing line reads as "no expiry at all".
             println!("Expires:       {}", expiry_text(token.as_ref()));
+            println!("Billing:       {}", crate::context::console_url("org"));
         } else {
             println!("Authenticated: no");
         }
