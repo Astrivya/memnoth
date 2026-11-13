@@ -13,13 +13,15 @@
 
 use anyhow::{Result, anyhow};
 use memnoth_update::{
-    Channel, Manifest, UpdateConfig, check_for_update, detect_managed_install, fetch_manifest_at,
+    Channel, Manifest, UpdateConfig, check_for_update, detect_managed_install, fetch_manifest,
+    fetch_manifest_at,
 };
 use std::env;
 use std::fs;
 
 use crate::cli::{InstallArgs, UninstallArgs, UpdateArgs};
-use crate::output::{ErrorOutcome, ExitCode, Outcome};
+use crate::completion::{self, Shell};
+use crate::output::{ErrorOutcome, ExitCode, Outcome, confirm};
 
 /// The installer line this build is published behind.
 const INSTALLER_URL: &str = "https://memnoth.astrivya.ai/install";
@@ -57,6 +59,20 @@ pub fn execute_update(
         None => Channel::Stable,
     };
     let config = config_for(channel);
+
+    if args.rollback {
+        let running = env::current_exe().map_err(|error| {
+            failure(anyhow::Error::msg(format!(
+                "cannot locate the running binary: {error}"
+            )))
+        })?;
+        let restored = memnoth_update::rollback_binary(&running).map_err(failure)?;
+        return Ok(Outcome::text(format!(
+            "Restored {} from {}.\nStart it again to run the previous build.",
+            running.display(),
+            restored.display()
+        )));
+    }
 
     if args.check {
         return check_update(&config);
@@ -106,10 +122,51 @@ pub fn execute_install(
 }
 
 /// Execute uninstall verb.
+///
+/// Removes the local binaries and shell completions, and removes config.
+/// Vault data (`~/.memnoth` — vault.db, sessions, audit logs, coord.db) is
+/// always preserved, regardless of `--keep-state`.
 pub fn execute_uninstall(
-    _ctx: &crate::context::AppContext,
+    ctx: &crate::context::AppContext,
     args: &UninstallArgs,
 ) -> Result<Outcome, ErrorOutcome> {
+    // Ask before anything else. A remote uninstaller URL, a managed-install
+    // error, or a local removal are all answers to a destructive request; with
+    // no terminal there is nobody to ask, so a piped run refuses with exit 2
+    // instead of blocking or proceeding.
+    // A dry run removes nothing, so it never asks: treating it like `--yes`
+    // here keeps `uninstall --dry-run` usable from a pipe.
+    if !confirm(
+        "Uninstall memnoth from this machine? Your vault and sessions are kept.",
+        args.yes || args.dry_run,
+    )? {
+        return Ok(Outcome::new(
+            "uninstall",
+            "Cancelled; nothing was removed.
+",
+            serde_json::json!({ "cancelled": true }),
+        ));
+    }
+
+    let config = config_for(Channel::Stable);
+
+    // The release's own uninstall page, if one is published, is the official
+    // route. Offer it before doing anything local.
+    if let Ok(manifest) = fetch_manifest(&config, config.channel)
+        && let Some(uninstall) = &manifest.uninstall
+        && !uninstall.url.is_empty()
+    {
+        return Ok(Outcome::new(
+            "uninstall",
+            format!(
+                "Official uninstaller: {}\n\nRun it to remove memnoth, \
+                         or continue below to remove the local binaries.",
+                uninstall.url
+            ),
+            serde_json::json!({"uninstall_url": uninstall.url}),
+        ));
+    }
+
     let current_exe = env::current_exe().map_err(failure)?;
 
     if let Some(manager) = detect_managed_install() {
@@ -117,6 +174,60 @@ pub fn execute_uninstall(
             "memnoth is managed by {}. Use {} to uninstall.",
             manager, manager
         )));
+    }
+
+    if args.dry_run {
+        let exe_path = current_exe.clone();
+        let install_dir = exe_path
+            .parent()
+            .ok_or_else(|| ErrorOutcome::usage("Could not determine install directory"))?;
+        let suffix = env::consts::EXE_SUFFIX;
+        let mut would_remove: Vec<String> = Vec::new();
+        for name in ["memnoth", "mn"] {
+            let path = install_dir.join(format!("{name}{suffix}"));
+            if path.exists() {
+                would_remove.push(name.to_string());
+            }
+        }
+        for shell in [
+            Shell::Bash,
+            Shell::Zsh,
+            Shell::Fish,
+            Shell::PowerShell,
+            Shell::Elvish,
+        ] {
+            if let Ok(path) = completion::completion_path(shell)
+                && path.exists()
+            {
+                would_remove.push(format!("completion ({shell:?})"));
+            }
+        }
+        if !args.keep_state {
+            let config_path = ctx.home.join("config.toml");
+            if config_path.exists() {
+                would_remove.push("config".to_string());
+            }
+        }
+        let summary = if would_remove.is_empty() {
+            "nothing".to_string()
+        } else {
+            would_remove.join(", ")
+        };
+        return Ok(Outcome::new(
+            "uninstall.dry_run",
+            format!("Would uninstall: {summary}\nNothing was removed.\n"),
+            serde_json::json!({"dry_run": true}),
+        ));
+    }
+
+    let question =
+        "Uninstall memnoth? This removes the binaries and completions. Vault data is preserved.";
+    if !confirm(question, args.yes)? {
+        return Ok(Outcome::new(
+            "uninstall",
+            "Cancelled; nothing was removed.\n",
+            serde_json::json!({"cancelled": true}),
+        ));
     }
 
     let exe_path = current_exe.clone();
@@ -128,31 +239,38 @@ pub fn execute_uninstall(
     // the file is `memnoth.exe`, so looking for `memnoth` removed nothing and
     // then reported success.
     let suffix = env::consts::EXE_SUFFIX;
-    let mut removed = Vec::new();
+    let mut removed: Vec<String> = Vec::new();
     for name in ["memnoth", "mn"] {
         let path = install_dir.join(format!("{name}{suffix}"));
         if path.exists() {
-            fs::remove_file(&path).map_err(failure)?;
-            removed.push(name);
+            remove_installed_binary(&path, &exe_path)?;
+            removed.push(name.to_string());
         }
     }
 
-    if !args.keep_state {
-        for dir in [
-            dirs::data_dir()
-                .or_else(|| dirs::home_dir().map(|h| h.join(".local/share")))
-                .map(|d| d.join("memnoth")),
-            dirs::config_dir()
-                .or_else(|| dirs::home_dir().map(|h| h.join(".config")))
-                .map(|d| d.join("memnoth")),
-        ]
-        .into_iter()
-        .flatten()
+    for shell in [
+        Shell::Bash,
+        Shell::Zsh,
+        Shell::Fish,
+        Shell::PowerShell,
+        Shell::Elvish,
+    ] {
+        if let Ok(path) = completion::completion_path(shell)
+            && path.exists()
         {
-            if dir.exists() {
-                fs::remove_dir_all(&dir).map_err(failure)?;
-                removed.push("state directory");
-            }
+            fs::remove_file(&path).map_err(failure)?;
+            removed.push(format!("completion ({shell:?})"));
+        }
+    }
+
+    // The vault (`ctx.home` — `~/.memnoth`) holds vault.db, sessions,
+    // audit logs and coord.db. Only config.toml is removed; vault data is
+    // always preserved, regardless of --keep-state.
+    if !args.keep_state {
+        let config_path = ctx.home.join("config.toml");
+        if config_path.exists() {
+            fs::remove_file(&config_path).map_err(failure)?;
+            removed.push("config".to_string());
         }
     }
 
@@ -167,21 +285,58 @@ pub fn execute_uninstall(
     )))
 }
 
+/// Remove one installed binary. The running executable cannot be deleted on
+/// Windows (the image is locked), so deleting *this* process's own file goes
+/// through the same post-exit helper the update rollback uses: a short-lived
+/// shell that waits for us to exit and then deletes it. Every other file is a
+/// plain remove.
+fn remove_installed_binary(
+    path: &std::path::Path,
+    running: &std::path::Path,
+) -> Result<(), ErrorOutcome> {
+    #[cfg(windows)]
+    if path == running {
+        use std::os::windows::process::CommandExt;
+        std::process::Command::new("cmd")
+            .arg("/C")
+            .raw_arg(format!(
+                "ping -n 3 127.0.0.1 >NUL & del /F \"{}\"",
+                path.display()
+            ))
+            .spawn()
+            .map_err(|error| failure(anyhow::Error::from(error)))?;
+        return Ok(());
+    }
+    fs::remove_file(path).map_err(failure)
+}
+
 fn check_update(config: &UpdateConfig) -> Result<Outcome, ErrorOutcome> {
     match check_for_update(config) {
-        Ok(result) if result.update_available => Ok(Outcome::text(format!(
-            "Update available: {} → {} (channel: {})\nPublished: {}\n\n{}\n\n\
-             Run `memnoth update` to install it.",
-            config.current_version,
-            result.manifest.version,
-            result.manifest.channel.dist_subdir(),
-            result.manifest.published_at.format("%Y-%m-%d %H:%M UTC"),
-            result
-                .manifest
-                .notes
-                .as_deref()
-                .unwrap_or("No release notes")
-        ))),
+        Ok(result) if result.update_available => {
+            let manifest = &result.manifest;
+            let mut previous = String::new();
+            if !manifest.previous_versions.is_empty() {
+                previous = format!(
+                    "\n\nPrevious versions still available:\n{}",
+                    manifest
+                        .previous_versions
+                        .iter()
+                        .map(|p| format!("  {} → {}", p.version, p.url))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                );
+            }
+            Ok(Outcome::text(format!(
+                "Update available: {} → {} (channel: {})\nPublished: {}\n\n{}{}\n\n\
+                 Run `memnoth update` to install it.",
+                config.current_version,
+                manifest.version,
+                manifest.channel.dist_subdir(),
+                manifest.published_at.format("%Y-%m-%d %H:%M UTC"),
+                manifest.notes.as_deref().unwrap_or("No release notes"),
+                previous
+            )))
+        }
         Ok(_) => Ok(Outcome::text(format!(
             "memnoth {} is up to date (channel: {})",
             config.current_version,
@@ -270,9 +425,62 @@ fn apply(
     )))
 }
 
+/// One sentence about a newer release, for a screen that has already opened.
+///
+/// `None` for every reason there is nothing to say: an opted-out machine, an
+/// install a package manager owns, a release host that cannot be reached, and
+/// the ordinary case of being current. A launch is never slower or noisier
+/// because of this, and the day-long cache in [`memnoth_update::passive_check`]
+/// is what keeps it from asking the network on every start.
+///
+/// `MEMNOTH_UPDATE_BASE` decides where the answer comes from, so a release
+/// staged in a directory on this machine exercises the same path a published
+/// one does.
+pub fn passive_notice(channel: Channel) -> Option<String> {
+    let config = config_for(channel);
+    // A managed install is not ours to replace: the package manager would put
+    // its copy back, so the notice would be advice nobody can take.
+    if detect_managed_install().is_some() {
+        return None;
+    }
+    let found = memnoth_update::passive_check(&config).ok()??;
+    if !found.update_available {
+        return None;
+    }
+    Some(notice_text(
+        &found.current_version.to_string(),
+        &found.latest_version.to_string(),
+    ))
+}
+
+/// The sentence a session shows when a newer release exists.
+///
+/// Three facts, in the order a person needs them: which build is newer, which
+/// one is running, and what happens if they say yes. It deliberately offers no
+/// `[y]` key: the update downloads and swaps while they keep working, so
+/// "install now" would be a question with no cost either way.
+fn notice_text(current: &str, latest: &str) -> String {
+    format!(
+        "memnoth {latest} is available — this build is {current}.\n\
+         /update installs it in the background; this session keeps running, and the \
+         new build is what starts next time."
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_notice_names_both_versions_and_the_door_to_use() {
+        let text = notice_text("0.1.0-beta.2", "0.1.0-beta.3");
+        assert!(text.contains("0.1.0-beta.3"), "{text}");
+        assert!(text.contains("0.1.0-beta.2"), "{text}");
+        assert!(text.contains("/update"), "{text}");
+        // It must not claim the session is replaced under the person's hands.
+        assert!(text.contains("keeps running"), "{text}");
+        assert!(text.contains("next time"), "{text}");
+    }
 
     #[test]
     fn test_channel_parse() {
@@ -291,6 +499,7 @@ mod tests {
             channel: None,
             version: Some("0.1.0-beta.1".to_string()),
             no_verify: false,
+            rollback: false,
         };
         assert_eq!(args.version.as_deref(), Some("0.1.0-beta.1"));
         assert_eq!("v0.1.0-beta.1".trim_start_matches('v'), "0.1.0-beta.1");
