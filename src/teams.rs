@@ -18,21 +18,13 @@ use anyhow::{Context, Result};
 use crate::context::AppContext;
 use crate::output::Outcome;
 use memnoth_cloud_client::{
-    AcceptInviteResponse, CloudClient, Team, TeamDetail, TeamMember, TeamProject, TeamsResponse,
+    AcceptInviteResponse, Team, TeamDetail, TeamMember, TeamProject, TeamsResponse,
 };
 use serde_json::{Value, json};
 
 /// Run the `mn teams join` command.
 pub fn join(ctx: &AppContext, args: &crate::cli::TeamsJoinArgs) -> Result<Outcome> {
-    let base_url = get_base_url(ctx)?;
-    let mut client =
-        CloudClient::with_base_url(&base_url).context("failed to create cloud client")?;
-
-    // Get auth token from credential store (synchronous)
-    let token = memnoth_auth::account_key_sync()
-        .ok_or_else(|| anyhow::anyhow!("not authenticated; run `mn auth login` first"))?;
-
-    client.set_auth_token(token);
+    let client = crate::cloud::signed_in_client(ctx)?;
 
     let response: AcceptInviteResponse = client
         .accept_invite(&args.code)
@@ -272,13 +264,6 @@ fn team_project_json(project: &TeamProject) -> Value {
         "level": project.level,
     })
 }
-
-/// Get the base URL for the cloud API.
-fn get_base_url(_ctx: &AppContext) -> Result<String> {
-    Ok(std::env::var("MEMNOTH_CLOUD_URL")
-        .unwrap_or_else(|_| "https://memnoth.astrivya.ai/api/v1".to_string()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

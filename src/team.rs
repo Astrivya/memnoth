@@ -8,9 +8,12 @@
 //! - `mn team handoff` — hand off tasks to team members
 //! - `mn team review` — request code reviews
 //! - `mn audit` — audit team activity
+//! - `mn team namespace` — show/set the org's shared vault namespace
+//! - `mn team provenance` — show who recorded each belief in the shared vault
+//! - `mn team disputed` — show contradictions in the shared vault
+//! - `mn team seats` — show paid seat usage and remaining seats
 
 use anyhow::{Context, Result};
-use memnoth_cloud_client::CloudClient;
 use memnoth_coord::{ClaimResult, Coord, SessionStatus, TaskRow, TaskStatus, WorkerRow};
 use serde_json::{Value, json};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -42,9 +45,9 @@ fn get_session_id(coord: &Coord, ctx: &AppContext) -> Result<String> {
     let name = current_user();
     let pid = std::process::id();
     let project_root = ctx.root.to_string_lossy().to_string();
-    let id = stable_session_id(&name, &ctx.home);
+    let _id = stable_session_id(&name, &ctx.home);
     coord
-        .join_stable(&id, &name, pid, &project_root)
+        .join(&name, pid as i32, &project_root)
         .context("failed to join coordination room")
 }
 
@@ -92,25 +95,6 @@ fn current_user() -> String {
 /// does not expose yet (releasing a task claim, and the audit reads).
 fn coord_connection(ctx: &AppContext) -> Result<rusqlite::Connection> {
     rusqlite::Connection::open(coord_db_path(ctx)).context("failed to open coordination database")
-}
-
-/// Get the cloud client with auth token.
-fn get_cloud_client(ctx: &AppContext) -> Result<CloudClient> {
-    let base_url = get_base_url(ctx)?;
-    let mut client =
-        CloudClient::with_base_url(&base_url).context("failed to create cloud client")?;
-
-    let token = memnoth_auth::account_key_sync()
-        .ok_or_else(|| anyhow::anyhow!("not authenticated; run `mn auth login` first"))?;
-
-    client.set_auth_token(token);
-    Ok(client)
-}
-
-/// Get the base URL for the cloud API.
-fn get_base_url(_ctx: &AppContext) -> Result<String> {
-    Ok(std::env::var("MEMNOTH_CLOUD_URL")
-        .unwrap_or_else(|_| "https://memnoth.astrivya.ai/api/v1".to_string()))
 }
 
 /// Parse a time range string (e.g., "24h", "7d", "30d") into milliseconds.
@@ -292,7 +276,7 @@ pub fn inbox(ctx: &AppContext, args: &crate::cli::TeamInboxArgs) -> Result<Outco
                     m.id,
                     m.from_session,
                     m.body,
-                    if m.acked { "(acked)" } else { "" }
+                    if m.acked_at.is_some() { "(acked)" } else { "" }
                 ))
                 .collect::<Vec<_>>()
                 .join("\n")
@@ -306,7 +290,7 @@ pub fn inbox(ctx: &AppContext, args: &crate::cli::TeamInboxArgs) -> Result<Outco
             "to_session": m.to_session,
             "body": m.body,
             "created_at": m.created_at,
-            "acked": m.acked,
+            "acked": m.acked_at.is_some(),
         })).collect::<Vec<_>>(),
         "count": messages.len(),
     });
@@ -319,11 +303,6 @@ pub fn presence(ctx: &AppContext, args: &crate::cli::TeamPresenceArgs) -> Result
     let coord = open_coord(ctx)?;
     let _session_id = get_session_id(&coord, ctx)?;
 
-    // Clean up expired claims and stale sessions
-    coord
-        .cleanup_expired()
-        .context("failed to cleanup expired")?;
-
     let mut sessions = coord.status().context("failed to get status")?;
 
     // Filter stale if requested
@@ -333,40 +312,19 @@ pub fn presence(ctx: &AppContext, args: &crate::cli::TeamPresenceArgs) -> Result
 
     // Sync with cloud if requested
     let mut cloud_synced = false;
-    let mut cloud_sessions: Vec<Value> = Vec::new();
     if args.sync
-        && let Ok(client) = get_cloud_client(ctx)
+        && let Ok(client) = crate::cloud::signed_in_client(ctx)
     {
         // The cloud API reports the authenticated credential and nothing more:
         // `/api/v1/me` is the token's view of itself — subject, org scope and
         // roles — because a key is not a user profile. So the subject stands in
         // for the name and there is no email here to fall back on.
-        if let Ok(me) = client.me() {
+        if client.me().is_ok() {
             cloud_synced = true;
-            let role = if me.role.is_empty() {
-                me.roles
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| "member".to_string())
-            } else {
-                me.role.clone()
-            };
-            let subject = me.sub.clone().unwrap_or_else(|| "unknown".to_string());
-            let name = me
-                .sub
-                .clone()
-                .or_else(|| me.org.clone())
-                .unwrap_or_else(|| "unknown".to_string());
-            cloud_sessions = vec![json!({
-                "user_id": subject,
-                "name": name,
-                "role": role,
-                "online": true,
-            })];
         }
     }
 
-    let text = if sessions.is_empty() && cloud_sessions.is_empty() {
+    let text = if sessions.is_empty() {
         "No active sessions".to_string()
     } else {
         let mut parts = Vec::new();
@@ -392,26 +350,6 @@ pub fn presence(ctx: &AppContext, args: &crate::cli::TeamPresenceArgs) -> Result
                     .join("\n")
             ));
         }
-        if !cloud_sessions.is_empty() {
-            parts.push(format!(
-                "Cloud members ({}):\n{}",
-                cloud_sessions.len(),
-                cloud_sessions
-                    .iter()
-                    .map(|m| format!(
-                        "  {} ({}) {}",
-                        m.get("name").and_then(|v| v.as_str()).unwrap_or("unknown"),
-                        m.get("user_id").and_then(|v| v.as_str()).unwrap_or(""),
-                        if m.get("online").and_then(|v| v.as_bool()).unwrap_or(false) {
-                            "🟢"
-                        } else {
-                            "⚪"
-                        }
-                    ))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            ));
-        }
         parts.join("\n\n")
     };
 
@@ -426,7 +364,6 @@ pub fn presence(ctx: &AppContext, args: &crate::cli::TeamPresenceArgs) -> Result
             "active_claims": s.active_claims,
         })).collect::<Vec<_>>(),
         "cloud_synced": cloud_synced,
-        "cloud_members": cloud_sessions,
     });
 
     Ok(Outcome::new("team.presence", text, data))
@@ -680,4 +617,209 @@ pub fn audit(ctx: &AppContext, args: &crate::cli::TeamAuditArgs) -> Result<Outco
     });
 
     Ok(Outcome::new("team.audit", text, data))
+}
+/* ----------------------------------- seats ---------------------------------- */
+
+/// `mn team seats` — show paid seat usage and whether more members can be added.
+///
+/// Reads the seat ceiling from the control plane and compares it against the
+/// committed member count. This is the gate every team write passes before it
+/// may admit someone new.
+fn seats(ctx: &AppContext) -> Result<Outcome> {
+    let client = crate::cloud::signed_in_client(ctx)?;
+    let org = client.org()?;
+    let remaining = org.seats.saturating_sub(org.seats_used);
+    let text = if org.seats > 0 {
+        format!(
+            "Seats: {} of {} used ({} remaining). Plan: {}.\n{}",
+            org.seats_used,
+            org.seats,
+            remaining,
+            org.plan,
+            if remaining == 0 {
+                "Seat ceiling reached: `mn org add-member` will refuse until seats are added."
+            } else {
+                "Seat capacity available."
+            }
+        )
+    } else {
+        format!(
+            "Seats: {} used (no seat count reported on this plan). Plan: {}.\nSeat enforcement inactive.",
+            org.seats_used, org.plan
+        )
+    };
+    let data = json!({
+        "seats": org.seats,
+        "seats_used": org.seats_used,
+        "seats_remaining": remaining,
+        "plan": org.plan,
+        "can_add_member": org.seats == 0 || remaining > 0,
+    });
+    Ok(Outcome::new("team.seats", text, data))
+}
+
+/* --------------------------------- namespace -------------------------------- */
+
+/// `mn team namespace` — show or set the shared vault namespace for this org.
+///
+/// All team members who open this namespace share one vault file. Beliefs
+/// recorded here carry the author who recorded them, so attribution is never
+/// ambiguous.
+fn namespace(ctx: &AppContext, action: Option<&str>) -> Result<Outcome> {
+    match action {
+        None | Some("show") => {
+            let text = format!(
+                "Shared vault namespace: {}\nVault path: {}\n",
+                ctx.namespace,
+                ctx.vault_path.display()
+            );
+            let data = json!({
+                "namespace": ctx.namespace,
+                "vault_path": ctx.vault_path.display().to_string(),
+            });
+            Ok(Outcome::new("team.namespace", text, data))
+        }
+        Some("set") => Err(anyhow::anyhow!("usage: mn team namespace set <name>")),
+        Some(_name) => {
+            let name = match action {
+                Some("set") => {
+                    return Err(anyhow::anyhow!("usage: mn team namespace set <name>"));
+                }
+                Some(n) => n.to_string(),
+                None => unreachable!(),
+            };
+            memnoth_engine::validate_namespace(&name)?;
+            let config_path = ctx.config_path.clone();
+            let mut config = crate::context::Config::load(&config_path)?;
+            config.namespace = Some(name.clone());
+            config.save(&config_path)?;
+            let text = format!(
+                "Shared vault namespace set to {name}. Team members who open this \
+                 namespace share one vault file.\n"
+            );
+            let data = json!({ "namespace": name });
+            Ok(Outcome::new("team.namespace.set", text, data))
+        }
+    }
+}
+
+/* --------------------------------- provenance ------------------------------- */
+
+/// `mn team provenance` — show who recorded each belief in the shared vault.
+///
+/// Every belief in a shared vault carries an author. This command lists the
+/// current beliefs with their authors so attribution is never ambiguous.
+fn provenance(ctx: &AppContext, limit: Option<usize>) -> Result<Outcome> {
+    let engine = crate::vault::open_existing(ctx)?;
+    let now = crate::session::now_ms();
+    let entities = engine.entities_as_of(now)?;
+    let limit = limit.unwrap_or(50);
+    let mut rows: Vec<Value> = Vec::new();
+    for entity in entities.into_iter().take(limit) {
+        let facts = memnoth_engine::vault_history::current_facts(&engine, entity.id, now)
+            .unwrap_or_default();
+        for fact in facts {
+            rows.push(json!({
+                "entity": entity.name,
+                "fact": fact["fact"],
+                "author": fact["author"],
+                "agent": fact["agent"],
+                "source": fact["source"],
+                "recorded_at": fact["date"],
+                "kind": fact["kind"],
+                "confidence": fact["confidence"],
+            }));
+        }
+    }
+    rows.sort_by(|a, b| {
+        b["recorded_at"]
+            .as_i64()
+            .unwrap_or(0)
+            .cmp(&a["recorded_at"].as_i64().unwrap_or(0))
+    });
+    let text = if rows.is_empty() {
+        "No beliefs in the shared vault yet.\n".to_string()
+    } else {
+        let mut out = String::from("Entity | Author | Recorded | Kind\n");
+        out.push_str("-------|--------|----------|----\n");
+        for row in &rows {
+            out.push_str(&format!(
+                "{} | {} | {} | {}\n",
+                row["entity"], row["author"], row["recorded_at"], row["kind"]
+            ));
+        }
+        out
+    };
+    let data = json!({ "beliefs": rows });
+    Ok(Outcome::new("team.provenance", text, data))
+}
+
+/* --------------------------------- disputed --------------------------------- */
+
+/// `mn team disputed` — show contradictions in the shared vault.
+///
+/// A contradiction is two beliefs about the same entity that cannot both be
+/// true. Both sides are shown with their authors and dates so nobody is
+/// silently averaged away.
+fn disputed(ctx: &AppContext) -> Result<Outcome> {
+    let engine = crate::vault::open_existing(ctx)?;
+    let report = memnoth_engine::vault_contradictions_all(&engine)?;
+    let pairs = report["contradictions"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let text = if pairs.is_empty() {
+        "No contradictions in the shared vault.\n".to_string()
+    } else {
+        let mut out = String::from("Source | Target | Kind | Reason\n");
+        out.push_str("-------|--------|------|--------\n");
+        for pair in &pairs {
+            out.push_str(&format!(
+                "{} | {} | {} | {}\n",
+                pair["source"], pair["target"], pair["kind"], pair["reason"]
+            ));
+        }
+        out
+    };
+    let data = report;
+    Ok(Outcome::new("team.disputed", text, data))
+}
+
+/* ------------------------------ seat enforcement ---------------------------- */
+
+/// Check that the org has a paid seat available before admitting someone.
+///
+/// Returns `Ok(())` when a seat is free, or an `Err` naming the upgrade path
+/// when every seat is taken. Every team write that adds a person must call
+/// this first.
+pub fn enforce_seat(ctx: &AppContext) -> Result<()> {
+    let client = crate::cloud::signed_in_client(ctx)?;
+    let org = client.org()?;
+    if org.seats > 0 && org.seats_used >= org.seats {
+        return Err(anyhow::anyhow!(
+            "all {} seat(s) on this plan are taken; add a seat to bring someone else in",
+            org.seats
+        ));
+    }
+    Ok(())
+}
+/// `mn team enforce` — verify seat availability before admitting a member.
+pub fn enforce(ctx: &AppContext) -> Result<Outcome> {
+    enforce_seat(ctx)?;
+    seats(ctx)
+}
+
+/// `mn team namespace` — show or set the shared vault namespace for this org.
+pub fn team_namespace(ctx: &AppContext, action: Option<&str>) -> Result<Outcome> {
+    namespace(ctx, action)
+}
+
+/// `mn team provenance` — show who recorded each belief in the shared vault.
+pub fn team_provenance(ctx: &AppContext, limit: Option<usize>) -> Result<Outcome> {
+    provenance(ctx, limit)
+}
+
+/// `mn team disputed` — show contradictions in the shared vault.
+pub fn team_disputed(ctx: &AppContext) -> Result<Outcome> {
+    disputed(ctx)
 }

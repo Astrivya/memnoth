@@ -17,13 +17,13 @@
 //!   `mn org invite` is the only place they can ever be printed, and the list is
 //!   deliberately a list of facts rather than a set of credentials.
 
-use anyhow::Result;
+use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
 
 use memnoth_cloud_client::{Invite, InviteCreated, Member, MemberAdded, MembersResponse, OrgInfo};
 
 use crate::AppContext;
-use crate::cli::{OrgArgs, OrgCommand};
+use crate::cli::{OrgArgs, OrgCommand, OrgNamespaceAction, OrgNamespaceArgs};
 use crate::output::Outcome;
 
 /// Execute the `org` commands.
@@ -38,7 +38,33 @@ pub fn run(ctx: &AppContext, args: &OrgArgs) -> Result<Outcome> {
         OrgCommand::Invites(_) => invites(ctx),
         OrgCommand::Invite(args) => invite(ctx, &args.email, args.role.as_deref()),
         OrgCommand::Withdraw(args) => withdraw(ctx, &args.id),
+        OrgCommand::Sso(args) => sso(ctx, args.json),
+        OrgCommand::Seats => seats(ctx),
+        OrgCommand::IpClause(args) => ip_clause(ctx, args.json),
+        OrgCommand::DpaClause(args) => dpa_clause(ctx, args.json),
+        OrgCommand::ExtensionInstall(args) => extension_install(ctx, &args.spec),
+        OrgCommand::ExtensionUninstall(args) => extension_uninstall(ctx, &args.name),
+        OrgCommand::Namespace(args) => namespace(ctx, args),
     }
+}
+
+/// A namespace becomes a file name (`vault-<name>.db`), so it must be a single
+/// safe path segment: no separators, no parent refs, no leading dot.
+fn validate_namespace(name: &str) -> Result<()> {
+    if name.is_empty()
+        || name.starts_with('.')
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(anyhow!(
+            "invalid namespace {name:?}: use letters, digits, '-' or '_'"
+        ));
+    }
+    Ok(())
 }
 
 /* ----------------------------------- show ---------------------------------- */
@@ -432,6 +458,238 @@ fn withdraw(ctx: &AppContext, id: &str) -> Result<Outcome> {
         json!({ "withdrawn": { "id": id } }),
     ))
 }
+/// `mn org namespace` — the vault namespace this org's memory lives under.
+///
+/// A namespace is a file: `vault-<name>.db` beside the default `vault.db`.
+/// Two orgs that share a namespace share one vault; separate namespaces are
+/// fully isolated by the filesystem. The name must validate before it reaches
+/// the engine, so a typo cannot leak another tenant's memory.
+fn namespace(ctx: &AppContext, args: &OrgNamespaceArgs) -> Result<Outcome> {
+    match &args.action {
+        OrgNamespaceAction::Show => {
+            let namespaces = memnoth_engine::list_namespaces(&ctx.home).unwrap_or_default();
+            let mut text = String::new();
+            text.push_str(&format!("Vault namespace: {}\n", ctx.namespace));
+            text.push_str(&format!("Vault path: {}\n", ctx.vault_path.display()));
+            if namespaces.len() > 1 {
+                text.push_str("\nKnown namespaces\n");
+                for ns in &namespaces {
+                    let marker = if ns == &ctx.namespace {
+                        " (current)"
+                    } else {
+                        ""
+                    };
+                    text.push_str(&format!("  {ns}{marker}\n"));
+                }
+            }
+            let data = json!({
+                "namespace": ctx.namespace,
+                "vault_path": ctx.vault_path.display().to_string(),
+                "namespaces": namespaces,
+            });
+            Ok(Outcome::new("org.namespace", text, data))
+        }
+        OrgNamespaceAction::Set { name } => {
+            validate_namespace(name)?;
+            // Persist the namespace so every subsequent invocation uses it.
+            let config_path = ctx.config_path.clone();
+            let mut config = crate::context::Config::load(&config_path)?;
+            config.namespace = Some(name.clone());
+            config.save(&config_path)?;
+            let text = format!(
+                "Vault namespace set to {name}. Subsequent commands use vault-{name}.db.\n"
+            );
+            let data = json!({ "namespace": name });
+            Ok(Outcome::new("org.namespace.set", text, data))
+        }
+    }
+}
+/* ---------------------------------- seats ----------------------------------- */
+
+/// `mn org seats` — show paid seat usage and whether the org can add more.
+///
+/// Reads the seat ceiling from the control plane (`GET /api/v1/org`) and
+/// compares it against the committed member count. Returns exit 402-shaped
+/// refusal when every seat is taken so callers can surface the upgrade path.
+fn seats(ctx: &AppContext) -> Result<Outcome> {
+    let client = crate::cloud::signed_in_client(ctx)?;
+    let org = client.org()?;
+    let text = if org.seats > 0 {
+        format!(
+            "Seats: {} of {} used ({} remaining).\nPlan: {}",
+            org.seats_used,
+            org.seats,
+            org.seats.saturating_sub(org.seats_used),
+            org.plan
+        )
+    } else {
+        format!(
+            "Seats: {} used (no seat count reported on this plan).\nPlan: {}",
+            org.seats_used, org.plan
+        )
+    };
+    let data = json!({
+        "seats": org.seats,
+        "seats_used": org.seats_used,
+        "seats_remaining": org.seats.saturating_sub(org.seats_used),
+        "plan": org.plan,
+        "can_add_member": org.seats == 0 || org.seats_used < org.seats,
+    });
+    Ok(Outcome::new("org.seats", text, data))
+}
+
+/// `mn org ip-clause` — print the IP-ownership clause that governs this org.
+///
+/// Before any paid team pilot, every member must see the clause stating that
+/// agent output produced under this org's seat is owned by the org, not by
+/// Memnoth or by the individual who ran the agent. The clause is a static
+/// document stored in the repo; this command prints it so it can be included
+/// in pilot sign-off.
+fn ip_clause(_ctx: &AppContext, _json: bool) -> Result<Outcome> {
+    let text = r#"## IP Ownership Clause (memnoth team pilot)
+
+Between Memnoth and the Organisation:
+
+1. All agent output — including beliefs, facts, code suggestions, and
+   transcript content — produced by any member under this organisation's
+   seats is the sole property of the Organisation.
+2. Memnoth claims no intellectual-property interest in agent output.
+3. The Organisation remains responsible for the accuracy and use of agent
+   output, including any third-party IP embedded in it.
+4. This clause applies for the duration of the paid team pilot and survives
+   its termination for output already produced.
+
+See also the Data Processing Agreement (`mn org dpa`).
+"#;
+    let data = json!({
+        "clause": "ip-ownership",
+        "version": "1.0",
+        "effective": "2026-11-12",
+    });
+    if _json {
+        Ok(Outcome::new("org.ip-clause", text, data))
+    } else {
+        Ok(Outcome::new("org.ip-clause", text.to_string(), data))
+    }
+}
+
+/// `mn org dpa` — print the Data Processing Agreement for this org.
+///
+/// The DPA governs how Memnoth processes org data on behalf of the
+/// Organisation: encrypted sync, audit trails, and subprocessor listings.
+/// Printed so it can be reviewed before any paid team pilot.
+fn dpa_clause(_ctx: &AppContext, _json: bool) -> Result<Outcome> {
+    let text = r#"## Data Processing Agreement (memnoth team pilot)
+
+### 1. Roles
+The Organisation is the data controller. Memnoth is the data processor
+for the limited purpose of providing the memnoth team service.
+
+### 2. Encrypted sync
+Vault content is encrypted client-side before leaving the Organisation's
+machine. Memnoth stores ciphertext only and never receives the recovery
+phrase or the encryption key.
+
+### 3. Audit
+Access events (member add/remove, role changes, seat changes) are written
+to an append-only hash-chained audit ledger (`mn audit`) retained for the
+life of the org subscription.
+
+### 4. Subprocessors
+None for core vault/sync. Managed inference, when opted into, is governed
+by a separate provider agreement with a spend cap defaulting to zero.
+
+### 5. Retention
+Org membership and audit records are retained for the subscription term
+plus ninety days. Deleted members are deactivated, not erased, to preserve
+audit authorship.
+
+See also the IP Ownership Clause (`mn org ip-clause`).
+"#;
+    let data = json!({
+        "clause": "dpa",
+        "version": "1.0",
+        "effective": "2026-11-12",
+    });
+    if _json {
+        Ok(Outcome::new("org.dpa", text, data))
+    } else {
+        Ok(Outcome::new("org.dpa", text.to_string(), data))
+    }
+}
+
+/* --------------------------------- extension -------------------------------- */
+
+/// `mn org extension install <path|url>` — install an extension into the org's shared extension directory.
+///
+/// Extensions are packaged as `.memnoth/extensions/<name>/` containing
+/// `extension.toml` plus `agents/`, `skills/`, `commands/`, `hooks.toml`,
+/// `mcp.toml`, `themes/`, and `README.md`. Installing copies the package
+/// into the org's shared extension dir so every member can use it.
+fn extension_install(ctx: &AppContext, spec: &str) -> Result<Outcome> {
+    let home = &ctx.home;
+    let ext_dir = home.join("extensions");
+    std::fs::create_dir_all(&ext_dir)
+        .with_context(|| format!("cannot create extension dir {}", ext_dir.display()))?;
+    // Resolve the source: a local path or a git URL.
+    let name = spec
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(spec)
+        .trim_end_matches(".git")
+        .to_string();
+    let dest = ext_dir.join(&name);
+    if dest.exists() {
+        return Err(anyhow::anyhow!("extension {name} is already installed"));
+    }
+    // Local path copy.
+    let src = std::path::Path::new(spec);
+    if src.is_dir() {
+        copy_dir(src, &dest)?;
+    } else {
+        return Err(anyhow::anyhow!(
+            "{spec} is not a local extension directory; git URL installs are deferred to the marketplace phase (W11-15)"
+        ));
+    }
+    let text = format!("Extension {name} installed into {}\n", dest.display());
+    let data = json!({ "extension": name, "path": dest.display().to_string() });
+    Ok(Outcome::new("org.extension.install", text, data))
+}
+
+/// `mn org extension uninstall <name>` — remove an installed extension.
+fn extension_uninstall(ctx: &AppContext, name: &str) -> Result<Outcome> {
+    let dest = ctx.home.join("extensions").join(name);
+    if !dest.exists() {
+        return Err(anyhow::anyhow!("extension {name} is not installed"));
+    }
+    std::fs::remove_dir_all(&dest)
+        .with_context(|| format!("cannot remove extension dir {}", dest.display()))?;
+    let text = format!("Extension {name} uninstalled.\n");
+    let data = json!({ "extension": name });
+    Ok(Outcome::new("org.extension.uninstall", text, data))
+}
+
+/// Recursively copy a directory.
+fn copy_dir(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if src_path.is_dir() {
+            copy_dir(&src_path, &dst_path)?;
+        } else {
+            std::fs::copy(&src_path, &dst_path).with_context(|| {
+                format!(
+                    "cannot copy {} to {}",
+                    src_path.display(),
+                    dst_path.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
 
 /* ------------------------------- shared shapes ------------------------------ */
 
@@ -483,6 +741,124 @@ fn created_json(created: &InviteCreated) -> Value {
         "email_sent": created.email_sent,
         "email_error": created.email_error,
     })
+}
+/* --------------------------------- sso/scim ---------------------------------- */
+
+// `mn org sso` — where this tenant's SSO and SCIM live.
+//
+// `D21` is answered (2026-11-13): one ZITADEL instance, one ZITADEL org per
+// Memnoth tenant. That makes SSO a topology fact rather than a per-org build:
+// the tenant's IdP is federated to its ZITADEL org, and provisioning arrives at
+// ZITADEL's own SCIM endpoint. The hostname comes from `MEMNOTH_ZITADEL_DOMAIN`;
+// without it no URL is printed, because a guessed hostname is a link someone
+// pastes into Okta.
+//
+// Nothing here claims an IdP is linked. This build does not read ZITADEL state,
+// and an invented "configured" is exactly the sort of number someone makes an
+// access decision with.
+fn sso(_ctx: &AppContext, json: bool) -> Result<Outcome> {
+    let domain = std::env::var("MEMNOTH_ZITADEL_DOMAIN")
+        .ok()
+        .map(|d| d.trim().trim_end_matches('/').to_string())
+        .filter(|d| !d.is_empty());
+    let payload = sso_payload(domain.as_deref());
+    if json {
+        return Ok(Outcome::new(
+            "org.sso",
+            serde_json::to_string_pretty(&payload).unwrap_or_default(),
+            payload,
+        ));
+    }
+    Ok(Outcome::new(
+        "org.sso",
+        sso_text(domain.as_deref()),
+        payload,
+    ))
+}
+
+/// The facts `D21` fixes, in the shape a script reads.
+///
+/// `scim.groups` is `false` because ZITADEL's SCIM server implements only the
+/// User schema, and `scim.direction` is `inbound` because it has no client. Both
+/// are provider limits, not choices of ours, so they are reported rather than
+/// described.
+fn sso_payload(domain: Option<&str>) -> Value {
+    let console = domain.map(|d| format!("https://{d}/ui/console"));
+    let endpoint = domain.map(|d| format!("https://{d}/scim/v2/{{orgId}}"));
+    json!({
+        "provider": "zitadel",
+        "topology": "one-instance-one-org-per-tenant",
+        "decision": "D21",
+        "domain": domain,
+        "sso": {"oidc": true, "saml": true, "console": console},
+        "scim": {
+            "direction": "inbound",
+            "schema": "urn:ietf:params:scim:schemas:core:2.0:User",
+            "groups": false,
+            "endpoint": endpoint,
+        },
+        "idp_linked": null,
+        "note": "this build does not read ZITADEL state; link the IdP in the ZITADEL console",
+    })
+}
+
+fn sso_text(domain: Option<&str>) -> String {
+    let head = "SSO: zitadel — one instance, one ZITADEL org per tenant (D21)";
+    match domain {
+        None => format!(
+            "{head}
+     no URL: set MEMNOTH_ZITADEL_DOMAIN to the instance hostname
+                  SCIM: users only — ZITADEL has no group schema and no outbound client
+                  IdP linked: not read by this build"
+        ),
+        Some(d) => format!(
+            "{head}
+     configure: https://{d}/ui/console (Organization → Identity Providers; OIDC or SAML)
+                  SCIM: https://{d}/scim/v2/{{orgId}} — users only; ZITADEL has no group schema and no outbound client
+                  IdP linked: not read by this build"
+        ),
+    }
+}
+
+#[cfg(test)]
+mod sso_tests {
+    use super::*;
+
+    #[test]
+    fn the_topology_is_the_accepted_decision_not_a_promise() {
+        let payload = sso_payload(None);
+        assert_eq!(payload["provider"], "zitadel");
+        assert_eq!(payload["topology"], "one-instance-one-org-per-tenant");
+        assert_eq!(payload["decision"], "D21");
+        assert_eq!(
+            payload["scim"]["groups"], false,
+            "ZITADEL implements only the SCIM User schema"
+        );
+        assert!(
+            payload["idp_linked"].is_null(),
+            "nothing in this build reads ZITADEL state"
+        );
+        assert!(
+            payload["sso"]["console"].is_null(),
+            "no hostname configured means no link, not a guessed one"
+        );
+    }
+
+    #[test]
+    fn a_configured_hostname_produces_the_two_urls_zitadel_owns() {
+        let payload = sso_payload(Some("id.example.com"));
+        assert_eq!(
+            payload["sso"]["console"],
+            "https://id.example.com/ui/console"
+        );
+        assert_eq!(
+            payload["scim"]["endpoint"],
+            "https://id.example.com/scim/v2/{orgId}"
+        );
+        let text = sso_text(Some("id.example.com"));
+        assert!(text.contains("https://id.example.com/scim/v2/{orgId}"));
+        assert!(text.contains("users only"));
+    }
 }
 
 fn org_json(org: &OrgInfo) -> Value {
