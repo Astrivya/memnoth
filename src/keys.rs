@@ -65,6 +65,46 @@ fn create_key(ctx: &AppContext, args: &crate::cli::KeysCreateArgs) -> Result<Out
 
 /// `mn keys revoke <id>` — one key, now.
 fn revoke_key(ctx: &AppContext, args: &crate::cli::KeysRevokeArgs) -> Result<Outcome> {
+    if args.dry_run {
+        let client = crate::cloud::signed_in_client(ctx)?;
+        let response = client.api_keys()?;
+        let live = response
+            .keys
+            .iter()
+            .find(|key| key.id == args.id)
+            .map(|key| key.revoked_at.is_none());
+        return Ok(Outcome::new(
+            "keys.revoke",
+            match live {
+                Some(true) => format!("Would revoke key {}. Nothing was revoked.\n", args.id),
+                Some(false) => {
+                    format!("Key {} is already revoked. Nothing was revoked.\n", args.id)
+                }
+                None => format!("Key {} not found. Nothing was revoked.\n", args.id),
+            },
+            json!({
+                "dry_run": true,
+                "would_revoke": live.unwrap_or(false),
+                "revoked": 0,
+                "id": args.id,
+            }),
+        ));
+    }
+
+    let question = format!(
+        "Revoke key {}? The key dies immediately and every process using it loses access.",
+        args.id
+    );
+    if !confirm(&question, args.yes)? {
+        return Ok(Outcome::new(
+            "keys.revoke",
+            "Cancelled; nothing was revoked.\n",
+            json!({ "cancelled": true, "revoked": 0, "id": args.id }),
+        ));
+    }
+
+    // Ask before signing in or touching the network: a refusal must not depend
+    // on an account, and a piped run must not block on a prompt.
     let client = crate::cloud::signed_in_client(ctx)?;
     let response = client.revoke_key(&args.id)?;
 

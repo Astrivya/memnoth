@@ -8,8 +8,9 @@
 //! 4. MCP — offer to start `mn mcp serve` if the server binary is present.
 //! 5. Provider — offer to configure a model via `mn config set provider.*` if none is configured.
 //! 6. Config — write `~/.memnoth/config.toml` with any changes.
+//! 7. Sandbox — check/enforce sandbox policy and helper setup.
 //!
-//! Each step can be skipped with `--skip vault,graph,auth,mcp,provider,config`.
+//! Each step can be skipped with `--skip vault,graph,auth,mcp,provider,config,sandbox`.
 //! `--yes` accepts all defaults without prompting (for CI).
 
 use anyhow::{Context, Result};
@@ -31,6 +32,7 @@ enum Step {
     Mcp,
     Provider,
     Config,
+    Sandbox,
 }
 
 impl Step {
@@ -42,6 +44,7 @@ impl Step {
             Step::Mcp => "mcp",
             Step::Provider => "provider",
             Step::Config => "config",
+            Step::Sandbox => "sandbox",
         }
     }
 
@@ -53,6 +56,7 @@ impl Step {
             Step::Mcp,
             Step::Provider,
             Step::Config,
+            Step::Sandbox,
         ]
     }
 }
@@ -152,6 +156,11 @@ pub fn run(ctx: &AppContext, args: &crate::cli::SetupArgs) -> Result<Outcome> {
     // Step 6: Config
     if !state.is_skipped(Step::Config) {
         run_config_step(ctx, &mut state)?;
+    }
+
+    // Step 7: Sandbox
+    if !state.is_skipped(Step::Sandbox) {
+        run_sandbox_step(ctx, &mut state)?;
     }
 
     let text = build_summary_text(&state, ctx);
@@ -387,6 +396,43 @@ fn run_config_step(ctx: &AppContext, state: &mut SetupState) -> Result<()> {
     Ok(())
 }
 
+fn run_sandbox_step(ctx: &AppContext, state: &mut SetupState) -> Result<()> {
+    state.print_progress(Step::Sandbox, "checking sandbox policy...");
+
+    // Build the sandbox plan for this workspace to verify enforcement is available.
+    let config = match memnoth_sandbox::profiles::load_sandbox_config(&ctx.root) {
+        Ok(config) => config,
+        Err(error) => {
+            state.print_progress(Step::Sandbox, &format!("policy unreadable: {error:#}"));
+            state.mark_completed(Step::Sandbox);
+            return Ok(());
+        }
+    };
+
+    match memnoth_sandbox::backend::BackendPlan::build(
+        memnoth_sandbox::backend::OsBackend::host(),
+        &memnoth_sandbox::profiles::ProfileName::Workspace,
+        &ctx.root,
+        &config,
+    ) {
+        Ok(plan) => {
+            let report = memnoth_sandbox::status::status(&plan);
+            let line = report.statusline();
+            if report.report.mode == "enforced" {
+                state.print_progress(Step::Sandbox, &format!("enforced ({line})"));
+            } else {
+                state.print_progress(Step::Sandbox, &format!("policy-checked ({line})"));
+            }
+        }
+        Err(error) => {
+            state.print_progress(Step::Sandbox, &format!("plan refused: {error:#}"));
+        }
+    }
+
+    state.mark_completed(Step::Sandbox);
+    Ok(())
+}
+
 fn confirm_simple(prompt: &str) -> bool {
     if !atty::is(atty::Stream::Stdin) {
         return false; // Non-interactive, default to no
@@ -415,7 +461,7 @@ fn build_summary_text(state: &SetupState, ctx: &AppContext) -> String {
         } else {
             "pending"
         };
-        text.push_str(&format!("  {}: {}\n", name, status));
+        text.push_str(&format!("  {name}: {status}\n"));
     }
 
     text.push_str(&format!("\nconfig: {}\n", ctx.config_path.display()));

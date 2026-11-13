@@ -4,26 +4,31 @@
 //! the prompt, and an MCP URL is written into another program's config. Both
 //! are places a typo, a malicious preset or a model suggestion can turn into a
 //! request to this machine or a private network, so both go through here.
-//!
 //! The rule, stated once:
 //!
-//! * **https** is required, except for an explicit loopback endpoint
-//!   (`localhost`, a literal `127.0.0.1`/`::1`), which keeps the local MCP
-//!   server and the test harness working without weakening anything else.
-//! * **Credentials in the URL** are refused; a token belongs in a header.
-//! * **A literal address** must not be private, link-local, multicast,
-//!   unspecified or documentation space. Metadata `169.254.169.254` is
-//!   link-local and is refused with the rest.
-//! * **A domain** is checked again before a request: if it resolves to a
-//!   loopback or private address, the request is refused. The resolution at
-//!   config load is skipped so an offline `doctor` still reports the config.
-//!
-//! Known limit: the resolver is the system one, so DNS rebinding between this
-//! check and the socket is not pinned. Closing that needs a resolver pinned to
-//! the checked addresses; until then, redirects are re-checked per hop and the
-//! first request re-validates.
-
 use std::net::{IpAddr, ToSocketAddrs};
+
+/// Strip proxy environment variables so no outbound request can be routed
+/// through an attacker-controlled proxy to an internal address.
+///
+/// Called once at process start, before anything makes a network call.
+pub fn strip_proxy_env() {
+    for var in [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "no_proxy",
+    ] {
+        // Edition 2024 marks environment mutation unsafe: another thread could
+        // be reading the environment while this runs. This is called once, from
+        // `run`, before any thread or request exists.
+        unsafe { std::env::remove_var(var) };
+    }
+}
 
 /// Validate a URL at config/registration time. Performs no DNS query.
 pub fn validate_configured_url(raw: &str) -> Result<reqwest::Url, String> {
