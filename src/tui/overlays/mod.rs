@@ -4,7 +4,9 @@
 //! and rendering. Overlays are managed as a stack — the top overlay receives
 //! input first, and `Esc` closes the current overlay.
 
-use crossterm::event::KeyEvent;
+pub(crate) mod command_rows;
+
+use crossterm::event::{KeyEvent, MouseEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use std::fmt::Debug;
@@ -41,6 +43,9 @@ pub enum OverlayKind {
     Help,
     Feedback,
     Palette,
+    /// `/onboarding`: the four-move capability card, replayable without
+    /// changing the first-run flag.
+    Onboarding,
     /// `/commands`: the whole registry, grouped, with no row limit.
     Commands,
     Connect,
@@ -53,6 +58,18 @@ pub enum OverlayKind {
     /// The window a list-shaped verb answer opens: rows to walk, and the
     /// buttons that act on them, instead of a table flattened into prose.
     Popover,
+    /// `/agents`: the live child-agent roster.
+    Deck,
+    /// Focus on one child agent: its transcript and composer target chip.
+    Focus,
+    /// `Alt+T`: nested agent tree and timeline of tool calls and model time.
+    Trace,
+    /// `/checkpoints`: the snapshots `/checkpoint` wrote, one row each.
+    Checkpoints,
+    /// `/goal`: the session's stored completion condition.
+    Goal,
+    /// `/plan`: the session's stored plan artifact, read-only.
+    Plan,
 }
 
 /// Trait for all overlays.
@@ -94,6 +111,13 @@ pub trait Overlay: Debug + Send {
 
     /// Handle a key event. Returns an action for the host.
     fn handle_key(&mut self, key: KeyEvent, app: &mut App) -> OverlayAction;
+
+    /// A mouse event the host offers to the top overlay (clicks and the
+    /// wheel). An overlay with nothing clickable returns `None` and the host
+    /// carries on; one that takes it owns the gesture.
+    fn handle_mouse(&mut self, _mouse: MouseEvent, _app: &mut App) -> OverlayAction {
+        OverlayAction::None
+    }
 
     /// Text that arrived in one piece (bracketed paste).
     ///
@@ -202,6 +226,12 @@ impl OverlayStack {
         self.top_mut().map(|overlay| overlay.handle_key(key, app))
     }
 
+    /// A mouse event for the top overlay, if there is one.
+    pub fn handle_mouse(&mut self, mouse: MouseEvent, app: &mut App) -> Option<OverlayAction> {
+        self.top_mut()
+            .map(|overlay| overlay.handle_mouse(mouse, app))
+    }
+
     /// Render all overlays (bottom to top).
     pub fn render(&mut self, frame: &mut Frame, area: Rect, app: &App) {
         for overlay in &mut self.overlays {
@@ -235,6 +265,7 @@ pub fn create_overlay(kind: OverlayKind) -> Box<dyn Overlay> {
         OverlayKind::Help => Box::new(HelpOverlay::new()),
         OverlayKind::Feedback => Box::new(crate::feedback::FeedbackOverlay::new()),
         OverlayKind::Palette => Box::new(PaletteOverlay::new()),
+        OverlayKind::Onboarding => Box::new(OnboardingOverlay::replay()),
         OverlayKind::Commands => Box::new(CommandsOverlay::new()),
         OverlayKind::Connect => Box::new(ConnectOverlay::new()),
         OverlayKind::Permissions => Box::new(PermissionsOverlay::new()),
@@ -243,6 +274,12 @@ pub fn create_overlay(kind: OverlayKind) -> Box<dyn Overlay> {
         OverlayKind::Invite => Box::new(InviteOverlay::new()),
         // Opened with a spec, never bare: `present` is the door for this one.
         OverlayKind::Popover => Box::new(PopoverOverlay::new(Default::default())),
+        OverlayKind::Deck => Box::new(crate::tui::agents::deck::AgentDeck::new()),
+        OverlayKind::Focus => Box::new(crate::tui::agents::focus::AgentFocus::new()),
+        OverlayKind::Trace => Box::new(crate::tui::agents::trace::AgentTrace::new()),
+        OverlayKind::Checkpoints => Box::new(checkpoints::CheckpointsOverlay::new()),
+        OverlayKind::Goal => Box::new(crate::tui::agents::goal::GoalOverlay::new()),
+        OverlayKind::Plan => Box::new(crate::tui::agents::plan::PlanOverlay::new()),
     }
 }
 
@@ -287,8 +324,10 @@ mod context;
 mod diff;
 mod help;
 mod models;
+pub(crate) mod onboarding;
 // Crate-visible because the inline slash dropdown reads the same command list
 // the modal palette does.
+mod checkpoints;
 pub(crate) mod palette;
 mod permissions;
 pub(crate) mod popover;
@@ -307,6 +346,7 @@ pub use context::ContextOverlay;
 pub use diff::DiffOverlay;
 pub use help::HelpOverlay;
 pub use models::ModelsOverlay;
+pub use onboarding::OnboardingOverlay;
 pub use palette::PaletteOverlay;
 pub use permissions::PermissionsOverlay;
 pub use popover::PopoverOverlay;
@@ -314,3 +354,72 @@ pub use rewind::RewindOverlay;
 pub use search::SearchOverlay;
 pub use sessions::SessionsOverlay;
 pub use teams::TeamsOverlay;
+
+#[cfg(test)]
+mod reachability {
+    use super::*;
+    use crate::tui::app::App;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    /// Every overlay the session can open. Kept as one list so a new surface
+    /// has to be added here — and the test below then proves it can be closed.
+    const ALL: &[OverlayKind] = &[
+        OverlayKind::Search,
+        OverlayKind::Context,
+        OverlayKind::Diff,
+        OverlayKind::Rewind,
+        OverlayKind::Sessions,
+        OverlayKind::Models,
+        OverlayKind::Permissions,
+        OverlayKind::Help,
+        OverlayKind::Feedback,
+        OverlayKind::Palette,
+        OverlayKind::Onboarding,
+        OverlayKind::Commands,
+        OverlayKind::Connect,
+        OverlayKind::Teams,
+        OverlayKind::KeyCreate,
+        OverlayKind::Invite,
+        OverlayKind::Deck,
+        OverlayKind::Focus,
+        OverlayKind::Trace,
+        OverlayKind::Checkpoints,
+        OverlayKind::Goal,
+        OverlayKind::Plan,
+    ];
+
+    #[test]
+    fn every_overlay_opens_and_closes_from_the_keyboard() {
+        // W13-15: a surface a keyboard cannot leave is a trap, and one it
+        // cannot reach is invisible. Opening is `show` + `on_open` — the same
+        // pair the host calls when it pushes the overlay.
+        for &kind in ALL {
+            let mut overlay = create_overlay(kind);
+            let mut app = App::new("s", false);
+            overlay.show();
+            overlay.on_open(&mut app);
+            assert!(overlay.is_visible(), "{kind:?} did not become visible");
+            let action =
+                overlay.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut app);
+            assert!(
+                matches!(action, OverlayAction::Close),
+                "{kind:?} ignores Esc, so the keyboard cannot leave it"
+            );
+        }
+    }
+
+    #[test]
+    fn every_overlay_survives_navigation_keys_before_anything_is_loaded() {
+        // A key pressed on an empty list must not panic: several overlays load
+        // their rows asynchronously, and the arrow is the first thing a person
+        // presses while that is still in flight.
+        for &kind in ALL {
+            let mut overlay = create_overlay(kind);
+            let mut app = App::new("s", false);
+            overlay.show();
+            for code in [KeyCode::Down, KeyCode::Up, KeyCode::PageDown, KeyCode::Home] {
+                let _ = overlay.handle_key(KeyEvent::new(code, KeyModifiers::NONE), &mut app);
+            }
+        }
+    }
+}

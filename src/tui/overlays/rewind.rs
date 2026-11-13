@@ -130,6 +130,7 @@ impl RewindOverlay {
                     EntryRole::Info => "info",
                     EntryRole::Tool => "tool",
                     EntryRole::ToolDone => "tool done",
+                    EntryRole::Thinking => "thinking",
                 },
                 text: entry.text.clone(),
             })

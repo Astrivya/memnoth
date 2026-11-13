@@ -24,6 +24,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 
 use crate::context::AppContext;
 use crate::output::ErrorOutcome;
+use crate::provider;
 use crate::tui::app::App;
 use crate::tui::overlays::{Overlay, OverlayAction, OverlayKind};
 
@@ -43,6 +44,10 @@ pub struct ContextOverlay {
     activity: Vec<Activity>,
     /// Why a list is empty, when the reason is worth saying.
     note: Option<String>,
+    /// What the next request would spend, one labelled row per fact: window,
+    /// budget, each admitted slot, each drop with its reason, the prefix hash.
+    /// Rebuilt from the assembler on every open, never cached in the session.
+    prompt: Vec<(String, String)>,
     selected: usize,
     list_state: ListState,
     detail_view: bool,
@@ -53,6 +58,7 @@ pub struct ContextOverlay {
 enum ContextTab {
     Beliefs,
     Activity,
+    Prompt,
 }
 
 /// One entity the vault believes right now.
@@ -83,7 +89,11 @@ impl ContextOverlay {
         let mut state = ListState::default();
         state.select(Some(0));
         Self {
-            tabs: vec![ContextTab::Beliefs, ContextTab::Activity],
+            tabs: vec![
+                ContextTab::Beliefs,
+                ContextTab::Activity,
+                ContextTab::Prompt,
+            ],
             list_state: state,
             ..Default::default()
         }
@@ -133,6 +143,7 @@ impl ContextOverlay {
             ));
         }
 
+        self.prompt = prompt_rows(ctx);
         self.clamp();
     }
 
@@ -140,6 +151,7 @@ impl ContextOverlay {
         match self.tab() {
             ContextTab::Beliefs => self.beliefs.len(),
             ContextTab::Activity => self.activity.len(),
+            ContextTab::Prompt => self.prompt.len(),
         }
     }
 
@@ -165,6 +177,7 @@ impl ContextOverlay {
     fn open_detail(&mut self) {
         self.detail_view = true;
         self.detail_content = match self.tab() {
+            ContextTab::Prompt => prompt_detail(self),
             ContextTab::Beliefs => match self.beliefs.get(self.selected) {
                 Some(belief) => {
                     let mut text = format!(
@@ -205,6 +218,9 @@ impl ContextOverlay {
         match self.tab() {
             ContextTab::Activity => {
                 "no recorded versions — /vault remember records one".to_string()
+            }
+            ContextTab::Prompt => {
+                "the prompt has no slots yet — ask a question, then /context".to_string()
             }
             ContextTab::Beliefs => "nothing is believed right now".to_string(),
         }
@@ -446,6 +462,7 @@ impl Overlay for ContextOverlay {
             .map(|t| match t {
                 ContextTab::Beliefs => "Beliefs",
                 ContextTab::Activity => "Activity",
+                ContextTab::Prompt => "Prompt",
             })
             .collect();
         let tabs = Tabs::new(tab_titles)
@@ -474,6 +491,7 @@ impl Overlay for ContextOverlay {
                         .title(match self.tab() {
                             ContextTab::Beliefs => " Vault Beliefs ",
                             ContextTab::Activity => " Recent Versions ",
+                            ContextTab::Prompt => " Prompt ",
                         }),
                 )
                 .wrap(Wrap { trim: true });
@@ -482,6 +500,7 @@ impl Overlay for ContextOverlay {
             match self.tab() {
                 ContextTab::Beliefs => self.render_beliefs(frame, chunks[1]),
                 ContextTab::Activity => self.render_activity(frame, chunks[1]),
+                ContextTab::Prompt => render_prompt(self, frame, chunks[1]),
             }
         }
 
@@ -498,8 +517,11 @@ impl Overlay for ContextOverlay {
 
     fn help_text(&self) -> Vec<(&'static str, &'static str)> {
         vec![
-            ("/context", "What the vault believes, read from it"),
-            ("Tab / Shift+Tab", "Switch Beliefs / Activity"),
+            (
+                "/context",
+                "What the next request spends, and what the vault believes",
+            ),
+            ("Tab / Shift+Tab", "Switch Beliefs / Activity / Prompt"),
             ("↑/↓", "Move"),
             ("Enter", "Detail"),
             ("R", "Reread the vault"),
@@ -598,6 +620,116 @@ fn ellipsize(text: &str, max: usize) -> String {
     out
 }
 
+/// The prompt report, read from the assembler rather than from a count kept
+/// beside it. Every row is a fact the next request would act on.
+fn prompt_rows(ctx: &AppContext) -> Vec<(String, String)> {
+    let settings = match provider::Settings::load(&ctx.config) {
+        Ok(settings) => settings,
+        Err(error) => {
+            return vec![(
+                "notice".to_string(),
+                format!("cannot resolve the provider: {error}"),
+            )];
+        }
+    };
+    let window = settings.context_window();
+    let budget = settings.prompt_budget();
+    let assembly = provider::assemble_system_prompt_for(&ctx.root, Some(budget));
+    let receipt = &assembly.receipt;
+
+    let mut rows: Vec<(String, String)> = vec![
+        ("window".to_string(), format!("{window} tokens")),
+        ("request budget".to_string(), format!("{budget} tokens")),
+        (
+            "committed".to_string(),
+            format!(
+                "{} tokens · {} pieces",
+                receipt.total_tokens,
+                receipt.pieces.len()
+            ),
+        ),
+    ];
+
+    for piece in &receipt.pieces {
+        let layer = ["Global", "Project", "Session", "Turn"]
+            .get(piece.layer as usize)
+            .copied()
+            .unwrap_or("unknown");
+        rows.push((
+            format!("slot {}", piece.slot),
+            format!("{} tokens · {layer}", piece.tokens),
+        ));
+    }
+
+    // A missing slot is stated, not omitted: the whole point of the screen is
+    // to show what the budget is *not* spending.
+    for slot in [
+        "identity",
+        "policy",
+        "decisions",
+        "session",
+        "memory",
+        "graph",
+        "tools_hint",
+    ] {
+        if !receipt.pieces.iter().any(|piece| piece.slot == slot) {
+            rows.push((
+                format!("slot {slot}"),
+                "not in this prompt — that layer is not wired yet".to_string(),
+            ));
+        }
+    }
+
+    for (slot, reason) in &receipt.dropped {
+        rows.push((format!("dropped {slot}"), format!("{reason:?}")));
+    }
+
+    rows.push((
+        "prefix hash".to_string(),
+        memnoth_context::assemble::hash_label(receipt.prefix_hash),
+    ));
+    rows
+}
+
+fn render_prompt(overlay: &mut ContextOverlay, frame: &mut Frame, area: Rect) {
+    let items: Vec<ListItem> = overlay
+        .prompt
+        .iter()
+        .enumerate()
+        .map(|(index, (name, value))| {
+            let style = if index == overlay.selected {
+                Style::default()
+                    .bg(Color::Blue)
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("{name:<16}"), Style::default().fg(Color::Cyan)),
+                Span::styled(value.clone(), style),
+            ]))
+            .style(style)
+        })
+        .collect();
+
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!(" Prompt ({}) ", overlay.prompt.len())),
+        )
+        .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
+    frame.render_stateful_widget(list, area, &mut overlay.list_state);
+}
+
+fn prompt_detail(overlay: &ContextOverlay) -> String {
+    match overlay.prompt.get(overlay.selected) {
+        Some((name, value)) => format!("{name}\n\n{value}"),
+        None => "nothing selected".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -614,12 +746,16 @@ mod tests {
     }
 
     #[test]
-    fn the_tabs_are_the_two_the_vault_can_answer() {
+    fn every_tab_is_a_local_read() {
         let overlay = ContextOverlay::new();
         assert_eq!(
             overlay.tabs,
-            vec![ContextTab::Beliefs, ContextTab::Activity],
-            "no tab may exist that no local read can fill"
+            vec![
+                ContextTab::Beliefs,
+                ContextTab::Activity,
+                ContextTab::Prompt,
+            ],
+            "no tab may exist that no local read can fill: beliefs and activity come from the vault, prompt from the assembler"
         );
     }
 

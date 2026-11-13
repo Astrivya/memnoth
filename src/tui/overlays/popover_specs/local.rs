@@ -18,11 +18,11 @@ pub(crate) fn spec(command: &str, data: &Value) -> Option<PopoverSpec> {
     match command {
         "session.list" => sessions(data),
         "worktree.list" => worktrees(data),
-        "models.list" => models(data),
+
         "mcp.list" => mcp_clients(data),
         "connect.list" => providers(data),
         "config.list" => config_entries(data),
-        "usage.show" | "stats.show" => spend(data, command),
+
         "team.tasks" => tasks(data),
         "team.inbox" => inbox(data),
         // Deliberately absent: `mcp.test` is one probe, `cloud.credits` and
@@ -137,59 +137,6 @@ fn worktrees(data: &Value) -> Option<PopoverSpec> {
     .rows(rows)
     .button(PopoverButton::run('l', "list", "/worktree list"));
 
-    Some(with_follows(spec, data))
-}
-
-fn models(data: &Value) -> Option<PopoverSpec> {
-    let connected: Vec<String> = data
-        .get("connected_providers")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let rows = list(data, "models")
-        .iter()
-        .map(|model| {
-            let provider = string(model, "provider");
-            let mut detail = Vec::new();
-            if !provider.is_empty() {
-                detail.push(provider.clone());
-            }
-            if let Some(description) = present(model, "description") {
-                detail.push(description);
-            }
-            let mut row = PopoverRow::new(string(model, "name"), detail.join(" · "));
-            if !provider.is_empty() {
-                row.tag = Some(if connected.iter().any(|name| name == &provider) {
-                    "connected".to_string()
-                } else {
-                    "no key".to_string()
-                });
-            }
-            row
-        })
-        .collect::<Vec<_>>();
-
-    if rows.is_empty() {
-        return None;
-    }
-
-    let mut spec = PopoverSpec::new(
-        format!("Models ({})", rows.len()),
-        "from models.list — the model browser is where one is chosen",
-    )
-    .rows(rows)
-    .button(PopoverButton::run('m', "models", "/models"));
-
-    if connected.is_empty() {
-        spec = spec.note("no provider has a key yet — /connect adds one");
-    }
     Some(with_follows(spec, data))
 }
 
@@ -317,127 +264,6 @@ fn config_entries(data: &Value) -> Option<PopoverSpec> {
         ));
     }
     Some(with_follows(spec, data))
-}
-
-/// `usage` and `stats` answer with the same shape, so they get the same window.
-///
-/// The payload carries three lists, and the window used to draw whichever one
-/// was non-empty first: a by-model table hid the leaderboard, which is the only
-/// other place a person appears by name. They are sections here — models, then
-/// people, then the days when both are quiet — because they answer different
-/// questions about the same spend.
-fn spend(data: &Value, command: &str) -> Option<PopoverSpec> {
-    let models = list(data, "models");
-    let people = list(data, "leaderboard");
-    let days = list(data, "series");
-
-    let mut rows: Vec<PopoverRow> = Vec::new();
-    if !models.is_empty() {
-        rows.push(PopoverRow::section(format!("by model ({})", models.len())));
-        rows.extend(models.iter().filter_map(model_row));
-    }
-    if !people.is_empty() {
-        rows.push(PopoverRow::section(format!("by person ({})", people.len())));
-        rows.extend(people.iter().filter_map(person_row));
-    }
-    // Both quiet is still a window worth opening: the daily series is what the
-    // console's chart is drawn from, and it is the one list left to walk.
-    if models.is_empty() && people.is_empty() && !days.is_empty() {
-        rows.push(PopoverRow::section(format!("by day ({})", days.len())));
-        rows.extend(days.iter().filter_map(day_row));
-    }
-
-    if rows.iter().all(|row| row.header) {
-        return None;
-    }
-
-    let mut spec = PopoverSpec::new("Usage", format!("from {command}"))
-        .rows(rows)
-        .button(PopoverButton::open(
-            'u',
-            "console",
-            crate::context::console_url("usage"),
-        ));
-
-    if let Some(totals) = data.get("totals") {
-        let mut parts = Vec::new();
-        if let Some(cost) = totals.get("cost_usd").and_then(Value::as_f64) {
-            parts.push(format!("${cost:.2}"));
-        }
-        if let Some(tasks) = totals.get("tasks").and_then(Value::as_i64) {
-            parts.push(format!("{tasks} tasks"));
-        }
-        if let Some(range) = present(data, "range") {
-            parts.push(range);
-        }
-        if data.get("demo").and_then(Value::as_bool).unwrap_or(false) {
-            parts.push("demo data".to_string());
-        }
-        if !parts.is_empty() {
-            spec = spec.note(parts.join(" · "));
-        }
-    }
-
-    Some(with_follows(spec, data))
-}
-
-/// One model: what it cost and how much of the window it served.
-fn model_row(model: &Value) -> Option<PopoverRow> {
-    let name = string(model, "model");
-    if name.is_empty() {
-        return None;
-    }
-    let mut detail = Vec::new();
-    if let Some(cost) = model.get("cost_usd").and_then(Value::as_f64) {
-        detail.push(format!("${cost:.2}"));
-    }
-    if let Some(tokens) = model.get("tokens").and_then(Value::as_i64) {
-        detail.push(format!("{tokens} tokens"));
-    }
-    let provider = string(model, "provider");
-    if !provider.is_empty() {
-        detail.push(provider);
-    }
-    Some(PopoverRow::new(name, detail.join(" · ")))
-}
-
-/// One person: the org's own leaderboard row, address first because that is
-/// what an administrator acts on.
-fn person_row(person: &Value) -> Option<PopoverRow> {
-    let who = present(person, "email").or_else(|| present(person, "name"))?;
-    let mut detail = Vec::new();
-    if let Some(cost) = person.get("spend_usd").and_then(Value::as_f64) {
-        detail.push(format!("${cost:.2}"));
-    }
-    if let Some(tokens) = person.get("tokens").and_then(Value::as_i64) {
-        detail.push(format!("{tokens} tokens"));
-    }
-    if let Some(tasks) = person.get("tasks").and_then(Value::as_i64) {
-        detail.push(format!("{tasks} tasks"));
-    }
-    Some(PopoverRow::new(who, detail.join(" · ")))
-}
-
-/// One day of the series: the same numbers the console charts.
-fn day_row(day: &Value) -> Option<PopoverRow> {
-    let stamp = present(day, "day")?;
-    let mut detail = Vec::new();
-    let tokens_in = day.get("tokens_in").and_then(Value::as_i64);
-    let tokens_out = day.get("tokens_out").and_then(Value::as_i64);
-    if tokens_in.is_some() || tokens_out.is_some() {
-        detail.push(format!(
-            "{} in · {} out",
-            tokens_in.unwrap_or(0),
-            tokens_out.unwrap_or(0)
-        ));
-    }
-    if let Some(cost) = day.get("cost_usd").and_then(Value::as_f64) {
-        detail.push(format!("${cost:.2}"));
-    }
-    if let Some(tasks) = day.get("tasks").and_then(Value::as_i64) {
-        detail.push(format!("{tasks} tasks"));
-    }
-    Some(PopoverRow::new(stamp, detail.join(" · ")))
 }
 
 fn tasks(data: &Value) -> Option<PopoverSpec> {
@@ -589,70 +415,6 @@ mod tests {
         );
         let keys: Vec<char> = spec.buttons.iter().map(|button| button.key).collect();
         assert!(keys.contains(&'t') && keys.contains(&'d'), "{keys:?}");
-    }
-
-    /// One answer carries both lists; a window that drew either hid half of it.
-    #[test]
-    fn spend_walks_the_models_and_the_people_in_one_window() {
-        let data = json!({
-            "range": "30d",
-            "demo": false,
-            "totals": { "cost_usd": 12.5, "tasks": 40 },
-            "series": [],
-            "leaderboard": [{ "email": "a@b.c", "name": "a", "spend_usd": 1.0, "tokens": 10, "tasks": 1 }],
-            "models": [{ "provider": "anthropic", "model": "opus", "tokens": 1000, "cost_usd": 12.5 }]
-        });
-
-        let spec = spec("usage.show", &data).expect("a window");
-        assert_eq!(spec.title, "Usage");
-        let sections: Vec<&str> = spec
-            .rows
-            .iter()
-            .filter(|row| row.header)
-            .map(|row| row.title.as_str())
-            .collect();
-        assert_eq!(
-            sections,
-            vec!["by model (1)", "by person (1)"],
-            "{sections:?}"
-        );
-
-        let model = spec
-            .rows
-            .iter()
-            .find(|row| row.title == "opus")
-            .expect("the model row");
-        assert!(model.detail.contains("$12.50"), "{}", model.detail);
-        let person = spec
-            .rows
-            .iter()
-            .find(|row| row.title == "a@b.c")
-            .expect("the person row");
-        assert!(person.detail.contains("1 tasks"), "{}", person.detail);
-        assert!(spec.note.as_deref().unwrap_or_default().contains("$12.50"));
-        assert!(spec.buttons.iter().any(|button| button.key == 'u'));
-    }
-
-    /// A window with no models and no people still has the days to walk.
-    #[test]
-    fn a_quiet_spend_window_falls_back_to_the_daily_series() {
-        let data = json!({
-            "range": "7d",
-            "demo": false,
-            "totals": { "cost_usd": 0.5, "tasks": 3 },
-            "series": [{ "day": "2026-11-03", "tokens_in": 1200, "tokens_out": 400, "cost_usd": 0.5, "tasks": 3 }],
-            "leaderboard": [],
-            "models": []
-        });
-
-        let spec = spec("stats.show", &data).expect("a window");
-        assert_eq!(spec.rows[0].title, "by day (1)");
-        assert_eq!(spec.rows[1].title, "2026-11-03");
-        assert!(
-            spec.rows[1].detail.contains("1200 in · 400 out"),
-            "{}",
-            spec.rows[1].detail
-        );
     }
 
     #[test]

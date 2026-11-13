@@ -17,7 +17,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use std::collections::BTreeMap;
 
 use crate::tui::app::App;
-use crate::tui::overlays::palette::{commands, needs_arguments};
+use crate::tui::overlays::palette::{commands, insertable, needs_arguments};
 use crate::tui::overlays::{Overlay, OverlayAction, OverlayKind};
 use crate::tui::slash::display_name;
 use memnoth_ui::palette::PaletteItem;
@@ -243,6 +243,20 @@ impl CommandsOverlay {
                 lines.push(Line::from(line));
             }
             spans[index] = (first, lines.len().saturating_sub(1));
+            if selected {
+                // The selected row explains itself: screen, availability, risk,
+                // what it requires, its parameters, the keys that act on it,
+                // whether it carries a secret, whether it works headless, and
+                // what to check when it fails. Drawn as part of the same block
+                // so the scroll keeps the explanation with the row it explains.
+                for detail in super::command_rows::detail(&item.command) {
+                    lines.push(Line::from(Span::styled(
+                        format!("   {detail}"),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
+                spans[index] = (first, lines.len().saturating_sub(1));
+            }
         }
         (lines, spans)
     }
@@ -320,11 +334,8 @@ impl Overlay for CommandsOverlay {
                     .get(self.selected)
                     .map(|item| (item.command.clone(), needs_arguments(item)));
                 if let Some((command, needs_more)) = chosen {
-                    app.input = if needs_more {
-                        format!("{command} ")
-                    } else {
-                        command
-                    };
+                    let line = insertable(&command);
+                    app.input = if needs_more { format!("{line} ") } else { line };
                     app.cursor = app.input.chars().count();
                     app.pending_submit = !needs_more;
                 }
@@ -399,10 +410,11 @@ impl Overlay for CommandsOverlay {
             inner.height.saturating_sub(2),
         );
 
+        let atlas = super::command_rows::atlas_summary();
         let count = if self.filter.is_empty() {
-            format!(" {} commands", self.total())
+            format!(" {} commands · {atlas}", self.total())
         } else {
-            format!(" {} of {}", self.total(), self.items.len())
+            format!(" {} of {} · {atlas}", self.total(), self.items.len())
         };
         frame.render_widget(
             Paragraph::new(Line::from(vec![
@@ -632,5 +644,63 @@ mod tests {
         // start directly under its heading.
         overlay.selected = 0;
         assert_eq!(spans[0].0, 1, "the heading is line 0, the row is line 1");
+    }
+}
+
+#[cfg(test)]
+mod eighty_by_twenty_four {
+    use super::*;
+    use crate::tui::app::App;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    fn screen(overlay: &mut CommandsOverlay, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let app = App::new("s", false);
+        terminal
+            .draw(|frame| overlay.render(frame, frame.area(), &app))
+            .expect("draw must not fail");
+        let buffer = terminal.backend().buffer();
+        let mut out = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                out.push_str(buffer[(x, y)].symbol());
+            }
+            out.push(char::from(10));
+        }
+        out
+    }
+
+    #[test]
+    fn the_smallest_screen_still_explains_the_selected_command() {
+        // At 80x24 the row under the cursor has to answer "what does this do,
+        // what does it need, does it carry a secret" without being run.
+        let mut overlay = CommandsOverlay::new();
+        overlay.show();
+        let text = screen(&mut overlay, 80, 24);
+        assert!(
+            text.contains("Session"),
+            "the first group is drawn:
+{text}"
+        );
+        assert!(
+            text.contains("availability:"),
+            "no self-explanation:
+{text}"
+        );
+        assert!(
+            text.contains("secret:"),
+            "secret/headless line missing:
+{text}"
+        );
+    }
+
+    #[test]
+    fn a_forty_column_screen_does_not_overflow_or_panic() {
+        let mut overlay = CommandsOverlay::new();
+        overlay.show();
+        let text = screen(&mut overlay, 40, 24);
+        assert!(text.contains("Session"), "{text}");
     }
 }

@@ -10,9 +10,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use memnoth_ui::palette::PaletteItem;
+use memnoth_ui::palette::{PaletteItem, fuzzy_match};
 
-use crate::tui::overlays::palette::{commands, needs_arguments};
+use crate::tui::overlays::palette::{commands, insertable, needs_arguments};
 
 /// How many rows one page key moves. Small enough to stay oriented in a list
 /// this long, large enough to skip a whole group.
@@ -62,22 +62,6 @@ fn tidy_description(command: &str, description: &str) -> String {
         return description[..at].trim_end().to_string();
     }
     description.to_string()
-}
-
-/// Subsequence match: every character of `needle` appears in `haystack`, in
-/// order. Returns the positions, which is what the highlight draws.
-fn fuzzy(haystack: &str, needle: &str) -> Option<Vec<usize>> {
-    let mut hits = Vec::with_capacity(needle.len());
-    let mut wanted = needle.chars();
-    let mut next = wanted.next();
-    for (index, ch) in haystack.chars().enumerate() {
-        let Some(want) = next else { break };
-        if ch == want {
-            hits.push(index);
-            next = wanted.next();
-        }
-    }
-    if next.is_some() { None } else { Some(hits) }
 }
 
 /// How many commands are remembered as recently run. Long enough that ordinary
@@ -143,6 +127,10 @@ pub struct SlashMenu {
     query: String,
     selected: usize,
     items: Vec<PaletteItem>,
+    /// What the command still needs, from the shared projection.
+    /// The per-line parse below stays as a fallback for a line the
+    /// projection does not list.
+    hint: Option<String>,
     /// The command being given arguments, when the line is past its name.
     /// `None` means the dropdown is choosing a command.
     argument: Option<Argument>,
@@ -174,6 +162,7 @@ impl SlashMenu {
             selected: 0,
             items: commands(),
             argument: None,
+            hint: None,
             values: Vec::new(),
             recent: Vec::new(),
             runs: BTreeMap::new(),
@@ -206,7 +195,8 @@ impl SlashMenu {
 
     /// What the command still expects, for the hint under the prompt.
     pub fn needs(&self) -> Option<&str> {
-        self.argument.as_ref()?.needs.as_deref()
+        let argument = self.argument.as_ref()?;
+        self.hint.as_deref().or(argument.needs.as_deref())
     }
 
     /// Whether the list is choosing a command rather than filling in its
@@ -221,6 +211,7 @@ impl SlashMenu {
     pub fn close(&mut self) {
         self.open = false;
         self.argument = None;
+        self.hint = None;
         self.values.clear();
     }
 
@@ -268,6 +259,26 @@ impl SlashMenu {
         };
         let typed = format!("/{rest}");
         let lower = typed.to_lowercase();
+        // One answer to "what does this still need", from the same projection
+        // the palette, `/commands` and help draw.
+        self.hint = crate::tui::overlays::command_rows::argument_hint(&lower);
+
+        // A complete command is not a prefix to narrow. `/models` opens the
+        // model browser, so listing `/models list` and `/models use` under the
+        // line that was just completed says the same thing twice. A row that
+        // matches exactly stays listed: it is what Enter will accept.
+        let exact = self.items.iter().any(|item| item.command == typed);
+        if !exact
+            && !matches!(
+                crate::tui::app::parse_line(&typed),
+                crate::tui::app::Parsed::Unknown(_)
+                    | crate::tui::app::Parsed::Usage(_)
+                    | crate::tui::app::Parsed::Empty
+            )
+        {
+            self.close();
+            return;
+        }
 
         // A line past a command name is that command's arguments. The longest
         // name wins, so `/vault history ` is history's argument and not
@@ -396,32 +407,6 @@ impl SlashMenu {
         longest.clamp(10, 22)
     }
 
-    /// What `Tab` would add to the line, when the highlighted command already
-    /// starts with what is typed. `None` when the match lands in the middle of
-    /// the name: there is no remainder to show, only letters to accept.
-    pub fn ghost(&self) -> Option<String> {
-        let rows = self.rows();
-        let row = rows.get(self.selected_index())?;
-        // In argument mode the value is completed where it is typed, after the
-        // rest of the line rather than after a slash.
-        let typed = match &self.argument {
-            Some(argument) => argument.word.clone(),
-            None => format!("/{}", self.query),
-        };
-        if self.argument.is_some() {
-            if !row.name.to_lowercase().starts_with(&typed.to_lowercase()) {
-                return None;
-            }
-            let rest: String = row.name.chars().skip(typed.chars().count()).collect();
-            return (!rest.is_empty()).then_some(rest);
-        }
-        if !row.name.to_lowercase().starts_with(&typed.to_lowercase()) {
-            return None;
-        }
-        let rest: String = row.name.chars().skip(typed.chars().count()).collect();
-        if rest.is_empty() { None } else { Some(rest) }
-    }
-
     /// The line already spells the highlighted command out, so a one-row list
     /// would only repeat what is on the prompt.
     pub fn exact(&self) -> bool {
@@ -462,7 +447,7 @@ impl SlashMenu {
         let mut hits: Vec<(usize, Vec<usize>)> = Vec::new();
         for (index, item) in self.items.iter().enumerate() {
             let name = display_name(&item.command).to_lowercase();
-            if let Some(found) = fuzzy(&name, &query) {
+            if let Some(found) = fuzzy_match(&name, &query) {
                 hits.push((index, found));
             }
         }
@@ -562,7 +547,7 @@ impl SlashMenu {
         let (command, needs_more) = {
             let matches = self.matches();
             let item = matches.get(self.selected)?;
-            (item.command.clone(), needs_arguments(item))
+            (insertable(&item.command), needs_arguments(item))
         };
         self.close();
         // The space that leaves room for the argument is part of the pick, so
@@ -836,20 +821,9 @@ mod tests {
     }
 
     #[test]
-    fn the_prompt_shows_what_tab_would_add() {
-        let menu = opened("/vau");
-        let ghost = menu.ghost().expect("the name starts with what is typed");
-        assert!(ghost.starts_with("lt "), "{ghost}");
-        // What the prompt reads after the ghost is exactly the command column.
-        assert_eq!(
-            format!("/vau{ghost}"),
-            menu.rows()[menu.selected_index()].name
-        );
-        // A match in the middle has no remainder to show.
-        assert_eq!(opened("/vhi").ghost(), None);
-        // Nothing left to add once the name is typed.
-        assert_eq!(opened("/help").ghost(), None);
+    fn an_exact_line_needs_no_list() {
         assert!(opened("/help").exact(), "the line is the command");
+        assert!(!opened("/vau").exact(), "a prefix is not the command");
     }
 
     #[test]
