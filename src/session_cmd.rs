@@ -172,6 +172,8 @@ pub fn status(ctx: &AppContext, name: Option<&str>, _json: bool) -> Result<Outco
         "receipts": session.receipts.len(),
         "writes": session.writes.len(),
         "checkpoints": session.checkpoints.len(),
+        "trusted": crate::trust::is_trusted(&ctx.root),
+        "root": crate::trust::canonical(&ctx.root).display().to_string(),
         "input_tokens": session.input_tokens,
         "output_tokens": session.output_tokens,
         "spend_micros": spend_micros,
@@ -213,6 +215,21 @@ pub fn status(ctx: &AppContext, name: Option<&str>, _json: bool) -> Result<Outco
         priced_turns,
         path.display()
     );
+
+    // The trust decision this session is running under. A `/status` that omits
+    // it lets someone believe a refused project was somehow trusted, and the
+    // screen and `doctor` would then disagree about the same folder.
+    let text = text
+        + &format!(
+            "
+Trust: {} — {}",
+            if crate::trust::is_trusted(&ctx.root) {
+                "trusted"
+            } else {
+                "not trusted (this session only)"
+            },
+            crate::trust::canonical(&ctx.root).display()
+        );
 
     Ok(Outcome::new("session.status", text, data))
 }
@@ -740,10 +757,18 @@ pub fn exec(
     }
 
     let mut argv = cmd.clone();
-    let confinement = memnoth_sandbox::confine(&plan, &ctx.root, &argv);
-    let (program, args) = match confinement.confined_argv() {
-        Some((program, args)) => (program, args),
-        None => (argv.remove(0), argv),
+    let execution = memnoth_sandbox::prepare(&plan, &ctx.root, &argv);
+    let (program, args, confinement) = match execution {
+        memnoth_sandbox::Execution::Run(confinement) => {
+            let (program, args) = match confinement.confined_argv() {
+                Some((program, args)) => (program, args),
+                None => (argv.remove(0), argv),
+            };
+            (program, args, confinement)
+        }
+        memnoth_sandbox::Execution::Refuse { reason } => {
+            bail!("{reason}");
+        }
     };
 
     let request = json!({
@@ -876,4 +901,177 @@ pub fn exec(
     };
 
     Ok(Outcome::new("session.exec", text, data))
+}
+/// `memnoth session from-claude <path>` — import Claude Code session JSONL.
+pub fn from_claude(ctx: &AppContext, path: &str, name: Option<&str>) -> Result<Outcome> {
+    let source = PathBuf::from(path);
+    if !source.exists() {
+        bail!("Claude Code session file not found: {path}");
+    }
+    let content =
+        std::fs::read_to_string(&source).with_context(|| format!("failed to read {path}"))?;
+    let mut messages: Vec<memnoth_session::Message> = Vec::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let event: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let rtype = event["type"].as_str().unwrap_or("");
+        let role = match rtype {
+            "user" => Role::User,
+            "assistant" => Role::Assistant,
+            "system" => Role::System,
+            _ => Role::User,
+        };
+        let content_text = event["content"].as_str().unwrap_or("").to_string();
+        let at_ms = event["timestamp"].as_i64().unwrap_or(0);
+        messages.push(memnoth_session::Message {
+            role,
+            content: content_text,
+            at_ms,
+        });
+    }
+    import_session(ctx, &messages, name, path)
+}
+
+/// `memnoth session from-codex <path>` — import Codex session JSONL.
+pub fn from_codex(ctx: &AppContext, path: &str, name: Option<&str>) -> Result<Outcome> {
+    let source = PathBuf::from(path);
+    if !source.exists() {
+        bail!("Codex session file not found: {path}");
+    }
+    let content =
+        std::fs::read_to_string(&source).with_context(|| format!("failed to read {path}"))?;
+    let mut messages: Vec<memnoth_session::Message> = Vec::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let event: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let rtype = event["type"].as_str().unwrap_or("");
+        let role = match rtype {
+            "user" => Role::User,
+            "assistant" => Role::Assistant,
+            "system" => Role::System,
+            _ => Role::User,
+        };
+        let content_text = event["content"].as_str().unwrap_or("").to_string();
+        let at_ms = event["timestamp"].as_i64().unwrap_or(0);
+        messages.push(memnoth_session::Message {
+            role,
+            content: content_text,
+            at_ms,
+        });
+    }
+    import_session(ctx, &messages, name, path)
+}
+
+/// `memnoth session from-omp <path>` — import OMP session JSONL.
+pub fn from_omp(ctx: &AppContext, path: &str, name: Option<&str>) -> Result<Outcome> {
+    let source = PathBuf::from(path);
+    if !source.exists() {
+        bail!("OMP session file not found: {path}");
+    }
+    let content =
+        std::fs::read_to_string(&source).with_context(|| format!("failed to read {path}"))?;
+    let mut messages: Vec<memnoth_session::Message> = Vec::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let event: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let role = match event["role"].as_str().unwrap_or("user") {
+            "user" => Role::User,
+            "assistant" => Role::Assistant,
+            "system" => Role::System,
+            "tool" => Role::Tool,
+            _ => Role::User,
+        };
+        let content_text = event["content"].as_str().unwrap_or("").to_string();
+        let at_ms = event["at_ms"].as_i64().unwrap_or(0);
+        messages.push(memnoth_session::Message {
+            role,
+            content: content_text,
+            at_ms,
+        });
+    }
+    import_session(ctx, &messages, name, path)
+}
+
+/// Shared import: write messages into a new OMP session, redacting secrets.
+fn import_session(
+    ctx: &AppContext,
+    messages: &[memnoth_session::Message],
+    name: Option<&str>,
+    source: &str,
+) -> Result<Outcome> {
+    let store = SessionStore::new(&ctx.sessions_dir);
+    let default_name = std::path::Path::new(source)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("imported");
+    let session_name = name.unwrap_or(default_name);
+    let validated = validate_name(session_name)
+        .with_context(|| format!("invalid session name {session_name:?}"))?;
+
+    let mut session = Session::new(crate::session::SESSION_MODEL);
+    session.id = validated.clone();
+
+    // Redact secrets: never persist API keys or tokens in the transcript.
+    for m in messages {
+        let redacted = redact_secret(&m.content);
+        match m.role {
+            Role::User => session.push(Role::User, redacted),
+            Role::Assistant => session.push(Role::Assistant, redacted),
+            Role::System => session.push(Role::System, redacted),
+            Role::Tool => session.push(Role::Tool, redacted),
+        }
+    }
+
+    let save_path = store.save(&session)?;
+    let data = serde_json::json!({
+        "session": validated,
+        "source": source,
+        "messages": messages.len(),
+        "path": save_path.display().to_string(),
+    });
+    Ok(Outcome::new(
+        "session.import",
+        format!(
+            "Imported {} messages into session '{}'",
+            messages.len(),
+            validated
+        ),
+        data,
+    ))
+}
+
+/// Redact secret-bearing strings: anything that looks like an API key or
+/// token is replaced with a reference, never persisted.
+fn redact_secret(text: &str) -> String {
+    let out = text.to_string();
+    // Redact anything that looks like an API key or token
+    let redacted: String = out
+        .split_whitespace()
+        .map(|word| {
+            if (word.starts_with("sk-") || word.starts_with("sk-")) && word.len() > 20 {
+                "[REDACTED]".to_string()
+            } else {
+                word.to_string()
+            }
+        })
+        .collect();
+    redacted
 }
