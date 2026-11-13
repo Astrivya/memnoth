@@ -54,7 +54,9 @@ clap_complete = "4"
 clap_mangen = "0.2"
 crossterm = "0.28"
 dirs = "6"
+flate2 = "1"
 memnoth-command = { path = "crates/memnoth-command" }
+memnoth-codegraph = { path = "crates/memnoth-codegraph" }
 memnoth-update = { path = "crates/memnoth-update" }
 ratatui = "0.29"
 regex = "1"
@@ -75,14 +77,19 @@ memnoth-capability = { path = "crates/memnoth-capability" }
 memnoth-context = { path = "crates/memnoth-context" }
 memnoth-coord = { path = "crates/memnoth-coord" }
 memnoth-engine = { path = "crates/memnoth-engine" }
+memnoth-harness-api = { path = "crates/memnoth-harness-api" }
+memnoth-transport = { path = "crates/memnoth-transport" }
 memnoth-mcp-client = { path = "crates/memnoth-mcp-client" }
 memnoth-sandbox = { path = "crates/memnoth-sandbox" }
 memnoth-search = { path = "crates/memnoth-search" }
+memnoth-agent = { path = "crates/memnoth-agent" }
 memnoth-session = { path = "crates/memnoth-session" }
 memnoth-cloud-client = { path = "crates/memnoth-cloud-client" }
 memnoth-ui = { path = "crates/memnoth-ui" }
 memnoth-auth = { path = "crates/memnoth-auth" }
 memnoth-provider-config = { path = "crates/memnoth-provider-config" }
+memnoth-lsp = { path = "crates/memnoth-lsp" }
+memnoth-provider-registry = { path = "crates/memnoth-provider-registry" }
 memnoth-skills = { path = "crates/memnoth-skills" }
 memnoth-worktree = { path = "crates/memnoth-worktree" }
 axum = "0.8"
@@ -91,25 +98,43 @@ tower-http = { version = "0.6", features = ["cors"] }
 
 [dev-dependencies]
 tempfile = "3"
+# tests/update_local_release.rs stages a release the way dist.sh does and then
+# installs it onto a copy of the binary, so the archive reader under test is the
+# updater's own rather than a second packaging path.
+zip = "2"
 tower = { version = "0.5", features = ["util"] }
+# tests/tui_pty.rs runs the real binary behind an 80x24 pty: ConPTY on Windows,
+# forkpty on unix. vt100 parses the byte stream back into a screen.
+portable-pty = "0.9"
+vt100 = "0.15"
 
+# The agent host starts processes with no console at all; ConPTY's child fails
+# DLL initialisation (0xC0000142) until one exists. tests/tui_pty.rs allocates it.
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
 [workspace]
 resolver = "3"
 members = [
+    "crates/memnoth-agent",
     "crates/memnoth-capability",
     "crates/memnoth-codegraph",
+    "crates/memnoth-command-macros",
     "crates/memnoth-context",
     "crates/memnoth-coord",
     "crates/memnoth-embedding",
+    "crates/memnoth-embedding-wasm",
+    "crates/memnoth-ext",
     "crates/memnoth-engine",
     "crates/memnoth-harness-api",
     "crates/memnoth-ingest",
+    "crates/memnoth-lsp",
     "crates/memnoth-mcp",
     "crates/memnoth-mcp-auth",
     "crates/memnoth-mcp-client",
     "crates/memnoth-protocol-v2",
     "crates/memnoth-sandbox",
     "crates/memnoth-search",
+    "crates/memnoth-transport",
     "crates/memnoth-ui",
     "crates/memnoth-update",
     "crates/memnoth-worktree",
@@ -119,8 +144,13 @@ members = [
     "crates/memnoth-provider-config",
     "crates/memnoth-skills",
     "crates/memnoth-provider-registry",
+    "fuzz",
 ]
-default-members = ["."]
+# The server is part of the product, not an optional extra: a plain `cargo build`
+# must emit `memnoth-mcp` beside `memnoth`, or the CLI's resolver falls through to
+# `PATH` and can find a server from an older install. `default-run` keeps
+# `cargo run` on the CLI itself.
+default-members = [".", "crates/memnoth-mcp"]
 exclude = []
 
 [workspace.package]
