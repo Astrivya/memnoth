@@ -50,7 +50,14 @@ pub fn collect_file_entries(scope: &SearchScope<'_>) -> Vec<FileEntry> {
             continue;
         };
         let path = entry.path();
-        if !path.is_file() {
+        // The walker already knows the file type from the directory read, so
+        // asking the filesystem again costs one `stat` per entry — a hundred
+        // thousand extra round trips on a monorepo.
+        let is_file = match entry.file_type() {
+            Some(kind) => kind.is_file(),
+            None => path.is_file(),
+        };
+        if !is_file {
             continue;
         }
         if let Some(expected_ext) = file_type.as_deref()
