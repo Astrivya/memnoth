@@ -15,6 +15,58 @@ pub struct BuiltSurface {
     /// JSON representation of the built surface.
     pub data: Value,
 }
+/// Registry metadata for a single command.
+///
+/// These fields describe how a command is presented, gated, and supported
+/// across the CLI, TUI, and headless surfaces. They are the single source of
+/// truth for command registry metadata.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct CommandMetadata {
+    /// Unique command identifier (e.g., "vault.init", "kg.impact").
+    pub id: String,
+    /// Whether this is the primary entry point for its capability.
+    pub primary: bool,
+    /// Alternate names the command can be invoked by.
+    pub aliases: Vec<String>,
+    /// Command group the command belongs to.
+    pub group: String,
+    /// Short human-readable summary.
+    pub summary: String,
+    /// Usage line shown in help surfaces.
+    pub usage: String,
+    /// Example invocations.
+    pub examples: Vec<String>,
+    /// Risk level of running the command (e.g., "safe", "caution", "destructive").
+    pub risk: String,
+    /// Surfaces the command is available on (e.g., ["cli", "tui"]).
+    pub modes: Vec<String>,
+    /// Capabilities or commands required before this one can run.
+    pub requires: Vec<String>,
+    /// Screen/surface the command renders on.
+    pub screen: String,
+    /// Availability gate (e.g., "always", "feature:kg").
+    pub availability: String,
+    /// Parameter names the command accepts.
+    pub params: Vec<String>,
+    /// Keybindings that trigger the command.
+    pub keys: Vec<String>,
+    /// Whether the command touches secrets.
+    pub secret: bool,
+    /// Command is only available on the TUI surface.
+    pub tui_only: bool,
+    /// Command is available in headless/CLI mode.
+    pub headless: bool,
+    /// Stability maturity (e.g., "stable", "preview", "experimental").
+    pub stability: String,
+    /// Version the command was introduced in.
+    pub since: String,
+    /// Whether the command is hidden from help surfaces.
+    pub hidden: bool,
+    /// Related command IDs.
+    pub related: Vec<String>,
+    /// Hint shown when the command fails.
+    pub failure_hint: String,
+}
 
 /// Command registry — the single source of truth for all commands.
 #[derive(Debug, Default, Clone)]
@@ -327,6 +379,64 @@ impl CommandRegistry {
         serde_json::json!({
             "version": env!("CARGO_PKG_VERSION"),
             "commands": items,
+        })
+    }
+
+    /// Every row, with the metadata a surface needs to render it.
+    ///
+    /// This is the one projection. The palette, the slash dropdown, `/commands`,
+    /// help, and the footer read this rather than re-deriving a description, a
+    /// risk chip, or an argument hint from a second table. Hidden rows are
+    /// included with the reason they are hidden, so "not in the palette" is a
+    /// decision with an explanation instead of a silently missing command.
+    pub fn build_command_rows(&self) -> Value {
+        let rows: Vec<Value> = self
+            .all()
+            .map(|c| {
+                serde_json::json!({
+                    "id": c.id,
+                    "name": c.name(),
+                    "cli_command": c.cli_command(),
+                    "palette": c.palette_line(),
+                    "description": c.slash.description,
+                    "long_description": c.slash.long_description,
+                    "availability": c.availability(),
+                    "risk": c.risk(),
+                    "screen": c.screen(),
+                    "hidden": c.slash.hidden,
+                    "hidden_reason": if c.slash.hidden {
+                        Some("advanced: run `memnoth help --all` or type the verb")
+                    } else {
+                        None
+                    },
+                    "params": c.slash.params.iter().map(|p| {
+                        serde_json::json!({
+                            "name": p.name,
+                            "description": p.description,
+                            "required": p.required,
+                            "type": p.param_type,
+                            "default": p.default,
+                            "placeholder": match p.default {
+                                Some(ref value) => value.to_string(),
+                                None => format!("<{}>", p.name),
+                            },
+                        })
+                    }).collect::<Vec<_>>(),
+                    "keys": Value::Null,
+                    "secret": c.id.contains("token") || c.id.contains("key"),
+                    "headless": c.headless(),
+                    "failure_hint": c.failure_hint(),
+                    "aliases": c.slash.aliases,
+                    "related": c.related,
+                    "examples": c.slash.examples,
+                })
+            })
+            .collect();
+
+        serde_json::json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "command_count": self.len(),
+            "commands": rows,
         })
     }
 
@@ -826,11 +936,14 @@ mod tests {
             "`memnoth kg impact` should be a leaf"
         );
 
+        // W13-03/W13-13: `/impact` is a primary verb, and `kg impact` stays as
+        // the old spelling until 1.0 plus one minor. Both must project, and
+        // neither may become a second implementation.
         assert!(
             command
                 .get_subcommands()
-                .all(|sub| sub.get_name() != "impact"),
-            "`impact` must not leak to the top level"
+                .any(|sub| sub.get_name() == "impact"),
+            "`impact` is a primary verb missing from the clap projection"
         );
     }
 }
