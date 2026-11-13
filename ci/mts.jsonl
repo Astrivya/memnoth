@@ -1,0 +1,3 @@
+{"id":"mts-001","prompt":"Add a function that reverses a string in place and return its new length.","expected_contains":"len","cost_usd":0.001}
+{"id":"mts-002","prompt":"Write a unit test for a stack push/pop implementation.","expected_contains":"test","cost_usd":0.002}
+{"id":"mts-003","prompt":"Refactor a nested if-else into a match expression.","expected_contains":"match","cost_usd":0.001}

@@ -1,0 +1,16 @@
+{
+  "cold_start_ms": 2113.6,
+  "help_ms": 2100.8,
+  "doctor_ms": 2465.9,
+  "idle_rss_mb": 14.58984375,
+  "tui_frame_ms_budget": 25.0,
+  "tui_frame_test": "a_frame_stays_inside_the_perf_budget (cargo test -p memnoth --lib)",
+  "recall_10k": "cargo bench -p memnoth-engine --bench recall",
+  "tolerance": 0.1,
+  "budgets": {
+    "cold_start_ms": 3500.0,
+    "help_ms": 3500.0,
+    "doctor_ms": 4000.0,
+    "idle_rss_mb": 250.0
+  }
+}

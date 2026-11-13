@@ -1,0 +1,3 @@
+{"id":"kg-001","prompt":"List references to the MemoryEngine symbol.","expected_contains":"MemoryEngine","cost_usd":0.001}
+{"id":"kg-002","prompt":"What files import the vault module?","expected_contains":"vault","cost_usd":0.002}
+{"id":"kg-003","prompt":"Which functions call parse_unified_diff?","expected_contains":"parse_unified_diff","cost_usd":0.001}

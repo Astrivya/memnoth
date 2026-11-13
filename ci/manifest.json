@@ -1,0 +1,18 @@
+{
+  "commit": "42663009e7666040ec7820ee29d47e6e992f4f54",
+  "dataset": "ci/eval-tasks.jsonl",
+  "seed": 20261110,
+  "n": 3,
+  "ci_level": 0.95,
+  "n_bootstrap": 20000,
+  "price_table": {
+    "claude-sonnet-4-5": { "input_per_mtok": 3.00, "output_per_mtok": 15.00 },
+    "o3": { "input_per_mtok": 2.00, "output_per_mtok": 10.00 },
+    "gpt-4.1": { "input_per_mtok": 2.00, "output_per_mtok": 8.00 }
+  },
+  "models": [
+    { "id": "claude-sonnet-4-5", "effort": "medium" },
+    { "id": "o3", "effort": "low" },
+    { "id": "gpt-4.1", "effort": "medium" }
+  ]
+}

@@ -1,0 +1,3 @@
+{"id":"trs-001","prompt":"What decision did we make about the vault schema on 2026-10-01?","expected_contains":"schema","cost_usd":0.001}
+{"id":"trs-002","prompt":"Which belief was superseded and by what?","expected_contains":"superseded","cost_usd":0.002}
+{"id":"trs-003","prompt":"What was the value of the feature flag before the rollback?","expected_contains":"flag","cost_usd":0.001}
