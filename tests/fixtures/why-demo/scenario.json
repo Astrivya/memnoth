@@ -1,0 +1,44 @@
+{
+  "question": "Why is the vault stored in SQLite?",
+  "decision": {
+    "entity": "storage-backend",
+    "belief": "The vault backend is SQLite.",
+    "observation": "decided to use SQLite as the local vault backend",
+    "confidence": 0.9,
+    "days_ago": 2
+  },
+  "superseded_by": {
+    "entity": "storage-backend",
+    "belief": "The vault backend is SQLite with WAL mode.",
+    "observation": "corrected to SQLite with WAL mode so readers and the writer can coexist",
+    "reason": "switched to WAL for concurrent readers",
+    "confidence": 0.95,
+    "days_ago": 1
+  },
+  "source": {
+    "entity": "commit-abc1234",
+    "message": "chore(vault): adopt SQLite as the local vault backend",
+    "relation": "source",
+    "days_ago": 2
+  },
+  "contradiction": {
+    "entity": "storage-format",
+    "relation": "stores",
+    "sides": [
+      {
+        "label": "side A",
+        "target": "format-json",
+        "belief": "format: JSON files on disk",
+        "days_ago": 2,
+        "state": "revoked"
+      },
+      {
+        "label": "side B",
+        "target": "format-sqlite",
+        "belief": "format: one SQLite database",
+        "days_ago": 1,
+        "state": "current"
+      }
+    ]
+  }
+}
