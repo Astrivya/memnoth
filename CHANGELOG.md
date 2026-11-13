@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added - MCP
+
+- `memnoth mcp add --local --db <vault>` registers a local stdio MCP server scoped
+  to one explicit vault path. `--db` also resolves through `MEMNOTH_MCP_DB`.
+  No cloud URL or token is written; the config contains only a local command line.
+- `--allow-writes` opts a local registration into writes; without it the server
+  runs `MEMNOTH_MCP_READ_ONLY=1` and mutating tools are refused before
+  policy/approval. `mem_search`, `vault_asof`, `vault_history` and
+  `vault_contradictions` remain callable in read-only mode.
+
 ## [0.1.0-beta.2] - 2026-11-07
 
 ### Added - Code graph
