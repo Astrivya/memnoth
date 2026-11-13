@@ -92,7 +92,7 @@ impl Coord {
             .ok();
         match row {
             None => {
-                let grant = Self::new_id();
+                let grant = self.new_id();
                 self.conn.execute(
                     "INSERT INTO coord_ops (op_key, holder_session, status, grant, created_at, updated_at)
                      VALUES (?1, ?2, 'pending', ?3, ?4, ?4)",
@@ -111,7 +111,7 @@ impl Coord {
                 };
                 if now - updated_at > ttl {
                     // Expired: reclaim for the new holder (kill -9 recovery).
-                    let new_grant = Self::new_id();
+                    let new_grant = self.new_id();
                     self.conn.execute(
                         "UPDATE coord_ops SET holder_session = ?1, status = 'pending',
                          grant = ?2, updated_at = ?3 WHERE op_key = ?4",

@@ -74,7 +74,7 @@ impl WorkerPool {
     pub fn spawn(&mut self, name: &str, task: &str) -> Result<Worker> {
         let session_id = self.coord.join(
             name,
-            std::process::id(),
+            std::process::id() as i32,
             self.workspace.to_str().unwrap_or(""),
         )?;
         let worker_row = self.coord.worker_create(name, &session_id, task)?;

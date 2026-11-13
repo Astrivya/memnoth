@@ -7,7 +7,6 @@ edition = "2024"
 [dependencies]
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
-# Checkpoints serialise to JSON on disk (continuity.rs), so this is a runtime
-# dependency: the sweep dropped it while that code still needed it.
 serde_json = "1"
 anyhow = "1"
+uuid = { version = "1", features = ["v4"] }
