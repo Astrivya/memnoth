@@ -18,17 +18,20 @@ use tract_hir::internal::{SimplePlan, TractError};
 use tract_hir::prelude::*;
 use tract_onnx::onnx;
 
+/// The loaded, runnable model: `into_runnable` yields an `Arc`.
+type Runnable = std::sync::Arc<SimplePlan<TypedFact, Box<dyn TypedOp>>>;
+
 thread_local! {
-    /// The loaded, runnable model. `into_runnable` yields an `Arc`, stored here
-    /// so ownership crosses the init/run boundary.
-    static MODEL: RefCell<Option<std::sync::Arc<SimplePlan<TypedFact, Box<dyn TypedOp>>>>> = RefCell::new(None);
+    /// The loaded, runnable model, stored here so ownership crosses the
+    /// init/run boundary.
+    static MODEL: RefCell<Option<Runnable>> = const { RefCell::new(None) };
 
     /// Output buffer reused across calls to avoid re-allocation inside the loop.
-    static OUTPUT: RefCell<Vec<f32>> = RefCell::new(Vec::new());
+    static OUTPUT: RefCell<Vec<f32>> = const { RefCell::new(Vec::new()) };
 
     /// Error message from the last failed call, stored as a byte slice in
     /// linear memory. The host reads it back via the error pointer/len exports.
-    static ERROR: RefCell<Vec<u8>> = RefCell::new(Vec::new());
+    static ERROR: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Sentinel: 0 = init not yet called, 1 = model loaded.
@@ -55,8 +58,12 @@ fn make_tensor(data: &[i64], seq_len: usize) -> Result<Tensor, TractError> {
 /// three inputs: `input_ids`, `attention_mask`, and `token_type_ids`.
 /// Input shapes are concretised to `[1, seq_len]` where `seq_len` is fixed
 /// for the lifetime of the instance.
+///
+/// # Safety
+/// `model_bytes` must point to `model_bytes_len` readable bytes in
+/// linear memory, or be null only when `model_bytes_len` is 0.
 #[unsafe(no_mangle)]
-pub extern "C" fn wasm_embed_init(
+pub unsafe extern "C" fn wasm_embed_init(
     model_bytes: *const u8,
     model_bytes_len: usize,
     seq_len: usize,
@@ -68,22 +75,32 @@ pub extern "C" fn wasm_embed_init(
 
     let mut model_slice = unsafe { slice::from_raw_parts(model_bytes, model_bytes_len) };
 
-    let result: Result<std::sync::Arc<SimplePlan<TypedFact, Box<dyn TypedOp>>>, String> = (|| {
-        let mut graph: tract_hir::infer::InferenceModel = onnx()
-            .model_for_read(&mut model_slice)
-            .map_err(|e| format!("model load: {e}"))?;
+    let result: Result<Runnable, String> = (|| {
+        let mut graph: tract_hir::infer::InferenceModel =
+            onnx()
+                .model_for_read(&mut model_slice)
+                .map_err(|e| format!("model load: {e}"))?;
 
         // Concretise input shapes to [1, seq_len] for all declared inputs.
-        let input_outlets = graph.input_outlets().map_err(|e| format!("input outlets: {e}"))?;
+        let input_outlets = graph
+            .input_outlets()
+            .map_err(|e| format!("input outlets: {e}"))?;
         for idx in 0..input_outlets.len() {
             graph = graph
-                .with_input_fact(idx, InferenceFact::dt_shape(DatumType::I64, tvec!(1, seq_len)))
+                .with_input_fact(
+                    idx,
+                    InferenceFact::dt_shape(DatumType::I64, tvec!(1, seq_len)),
+                )
                 .map_err(|e| format!("input fact: {e}"))?;
         }
 
-        let optimized = graph.into_optimized().map_err(|e| format!("optimize: {e}"))?;
+        let optimized = graph
+            .into_optimized()
+            .map_err(|e| format!("optimize: {e}"))?;
 
-        let runnable = optimized.into_runnable().map_err(|e| format!("compile: {e}"))?;
+        let runnable = optimized
+            .into_runnable()
+            .map_err(|e| format!("compile: {e}"))?;
 
         Ok(runnable)
     })();
@@ -112,8 +129,12 @@ pub extern "C" fn wasm_embed_init(
 /// `wasm_embed_init`.
 ///
 /// Returns 0 on success, non-zero on failure.
+///
+/// # Safety
+/// Each input pointer must point to `seq_len` readable `i64` values in
+/// linear memory, or be null (which is rejected before any dereference).
 #[unsafe(no_mangle)]
-pub extern "C" fn wasm_embed_run(
+pub unsafe extern "C" fn wasm_embed_run(
     input_ids: *const i64,
     attention_mask: *const i64,
     token_type_ids: *const i64,
@@ -160,9 +181,21 @@ pub extern "C" fn wasm_embed_run(
     };
 
     let inputs: TVec<TValue> = tvec!(
-        ids_tensor.cast_to_dt(DatumType::I64).unwrap().into_owned().into(),
-        mask_tensor.cast_to_dt(DatumType::I64).unwrap().into_owned().into(),
-        types_tensor.cast_to_dt(DatumType::I64).unwrap().into_owned().into(),
+        ids_tensor
+            .cast_to_dt(DatumType::I64)
+            .unwrap()
+            .into_owned()
+            .into(),
+        mask_tensor
+            .cast_to_dt(DatumType::I64)
+            .unwrap()
+            .into_owned()
+            .into(),
+        types_tensor
+            .cast_to_dt(DatumType::I64)
+            .unwrap()
+            .into_owned()
+            .into(),
     );
 
     let model = MODEL.with(|m| m.borrow().as_ref().map(|arc| arc.clone()));
@@ -201,11 +234,14 @@ pub extern "C" fn wasm_embed_run(
 
     // Pool: mean over real tokens (where mask == 1).
     let mut pooled = vec![0f32; hidden];
-    for row in 0..rows {
-        if mask[row] == 0 {
+    for (slice, &m) in output
+        .axis_iter(tract_ndarray::Axis(1))
+        .take(rows)
+        .zip(mask.iter())
+    {
+        if m == 0 {
             continue;
         }
-        let slice = output.index_axis(tract_ndarray::Axis(1), row);
         for (col, value) in pooled.iter_mut().enumerate() {
             *value += slice[[0, col]];
         }
