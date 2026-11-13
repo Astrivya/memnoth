@@ -738,7 +738,6 @@ fn billing_entitlements_carry_nullable_ceilings() {
         "seats": 5,
         "workspaces": null,
         "history_days": 90,
-        "cloud_sessions": true,
         "console": true,
         "audit_log": true,
         "sso": false,

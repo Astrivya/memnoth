@@ -6,7 +6,7 @@ use reqwest::blocking::Client;
 use url::Url;
 
 use crate::{CloudError, Result as CloudResult};
-use crate::types::{Me, OrgInfo, ErrorBody};
+use crate::types::{BillingEntitlements, Me, OrgInfo, ErrorBody};
 use crate::auth::DeviceAuthClient;
 
 /// Main entry point for the cloud API client.
@@ -68,6 +68,24 @@ impl CloudClient {
     /// GET /api/v1/org
     pub fn get_org(&self) -> CloudResult<OrgInfo> {
         let url = self.base_url.join("/api/v1/org")
+            .map_err(|e| CloudError::InvalidUrl(e.to_string()))?;
+
+        let mut req = self.http.get(url);
+        if let Some(key) = &self.api_key {
+            req = req.bearer_auth(key);
+        }
+
+        let resp = req.send()
+            .map_err(|e| CloudError::NetworkError(e.to_string()))?;
+
+        handle_response(resp).map(|v| serde_json::from_value(v).unwrap())
+    }
+
+    /// Get organization entitlements.
+    ///
+    /// GET /api/v1/billing/entitlements
+    pub fn entitlements(&self) -> CloudResult<BillingEntitlements> {
+        let url = self.base_url.join("/api/v1/billing/entitlements")
             .map_err(|e| CloudError::InvalidUrl(e.to_string()))?;
 
         let mut req = self.http.get(url);

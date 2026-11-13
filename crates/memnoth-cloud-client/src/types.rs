@@ -91,7 +91,6 @@ pub struct BillingEntitlements {
     pub seats: i64,
     pub workspaces: Option<i64>,
     pub history_days: Option<i64>,
-    pub cloud_sessions: bool,
     pub console: bool,
     pub audit_log: bool,
     pub sso: bool,
