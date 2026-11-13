@@ -92,6 +92,8 @@ fn read_request(stream: &mut std::net::TcpStream) {
 
 fn command(home: &Path) -> Command {
     let mut command = Command::new(binary());
+    // The trust gate refuses a headless folder; this table is about exit codes.
+    command.arg("--trust-folder");
     command
         .env("MEMNOTH_HOME", home)
         .env_remove("MEMNOTH_VAULT")

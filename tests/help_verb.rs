@@ -90,6 +90,9 @@ fn exactly_twelve_verbs_are_public() {
         .map(|verb| verb.get_name().to_string())
         .collect();
     visible.sort();
+    // D7 / W2-02: the public surface is exactly twelve verbs. `budget` and
+    // `trust` are real commands (they keep working and appear in `help --all`),
+    // but they are advanced, not part of the twelve.
     let expected = [
         "ask",
         "auth",
@@ -104,8 +107,10 @@ fn exactly_twelve_verbs_are_public() {
         "vault",
         "version",
     ];
-    assert_eq!(visible, expected, "D7 fixes the public surface at twelve");
-
+    assert_eq!(
+        visible, expected,
+        "the public surface is twelve verbs; everything else is hidden"
+    );
     let skills = command.find_subcommand("skills").expect("skills is public");
     assert!(
         skills.get_all_aliases().any(|alias| alias == "skill"),

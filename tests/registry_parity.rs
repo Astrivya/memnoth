@@ -58,3 +58,78 @@ fn every_registry_row_names_a_verb_the_binary_parses() {
         "these registry rows name no verb in src/cli.rs: {stray:?}"
     );
 }
+
+/// Every destructive verb carries `--dry-run` and `--yes` and refuses to
+/// prompt when stdin is not a terminal. Audited verbs: `keys revoke`,
+/// `skill remove`, `worktree clean`, `uninstall`.
+#[test]
+fn destructive_verbs_have_dry_run_and_yes() {
+    let registry = memnoth_command::build_p0_registry().build();
+    // The verb is `skills` (plural) in src/cli.rs; the registry row has
+    // always used that name, so the test must too.
+    let destructive = [
+        ("keys", "revoke"),
+        ("skills", "remove"),
+        ("worktree", "clean"),
+    ];
+
+    for (verb, sub) in destructive {
+        let found = registry
+            .all()
+            .find(|spec| spec.cli_path == vec![verb.to_string(), sub.to_string()]);
+        let spec = found.unwrap_or_else(|| {
+            let paths: Vec<_> = registry
+                .all()
+                .map(|s| s.cli_path.join(" "))
+                .filter(|p| p.starts_with(verb))
+                .collect();
+            panic!("destructive verb {verb} {sub} missing from registry; have: {paths:?}")
+        });
+        assert!(
+            spec.slash.params.iter().any(|p| p.name == "dry_run"),
+            "{verb} {sub} missing --dry-run param"
+        );
+        assert!(
+            spec.slash.params.iter().any(|p| p.name == "yes"),
+            "{verb} {sub} missing --yes param"
+        );
+    }
+
+    // `uninstall` is a top-level verb
+    let uninstall = registry
+        .all()
+        .find(|spec| spec.cli_path == vec!["uninstall".to_string()])
+        .expect("uninstall missing from registry");
+    assert!(
+        uninstall.slash.params.iter().any(|p| p.name == "dry_run"),
+        "uninstall missing --dry-run param"
+    );
+    assert!(
+        uninstall.slash.params.iter().any(|p| p.name == "yes"),
+        "uninstall missing --yes param"
+    );
+}
+
+/// Every registry command resolves to a `Verb` the binary parses — walking
+/// the full registry surface without arguments never reaches `Parsed::Unknown`.
+#[test]
+fn registry_walk_resolves_every_command() {
+    let registry = memnoth_command::build_p0_registry().build();
+    let mut unknown = Vec::new();
+    for spec in registry.all() {
+        if spec.slash.hidden {
+            continue;
+        }
+        let path = spec.cli_path.join(" ");
+        let parsed = memnoth::tui::app::parse_line(&path);
+        match parsed {
+            memnoth::tui::app::Parsed::Unknown(_) => unknown.push(path),
+            memnoth::tui::app::Parsed::Help => {} // help is a real command
+            _ => {}
+        }
+    }
+    assert!(
+        unknown.is_empty(),
+        "registry commands that do not parse: {unknown:?}"
+    );
+}

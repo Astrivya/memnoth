@@ -87,6 +87,9 @@ fn command(provider: &Provider, home: &Path) -> Command {
         .env("MEMNOTH_PROVIDER_BASE_URL", &provider.base_url)
         .env_remove("MEMNOTH_VAULT")
         .env_remove("MEMNOTH_GRAPH");
+    // The trust gate refuses a headless folder. These tests are about `ask`,
+    // not about the gate, so they opt in for the run and write nothing.
+    command.arg("--trust-folder");
     command
 }
 

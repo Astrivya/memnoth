@@ -93,6 +93,9 @@ impl Sandbox {
     fn run_with(&self, args: &[&str], env: &[(&str, &str)]) -> Run {
         let mut command = Command::new(binary());
         command
+            // The trust gate refuses a headless folder. These tests exercise
+            // verbs, not the gate, so they opt in for one run and write nothing.
+            .arg("--trust-folder")
             .args(args)
             .env("MEMNOTH_HOME", self.home())
             .env_remove("MEMNOTH_VAULT")

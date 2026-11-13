@@ -1,11 +1,5 @@
-//! Exit 8 is distinct from exit 2, and this is the test that keeps it so.
-//!
-//! A bad flag and a missing feature look the same to a naive CLI: both are "the
-//! command did not run". They are not the same to a script. Exit 2 means the
-//! caller passed something wrong and must change the request; exit 8 means the
-//! request was right and this build cannot serve it, so the same command works
-//! elsewhere. `vault backup --compress` is the one flag that is parsed,
-//! documented and not compiled in.
+//! `vault backup --compress` writes a real gzip backup and `vault restore`
+//! round-trips it (detected by magic bytes, not by file name).
 
 use std::process::Command;
 
@@ -23,42 +17,60 @@ fn run(args: &[&str], home: &std::path::Path) -> std::process::Output {
 }
 
 #[test]
-fn a_feature_this_build_lacks_exits_8() {
+fn a_compressed_backup_round_trips_through_restore() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("home");
 
-    // The flag needs a vault to act on; create one so the compression refusal is
-    // the only thing standing between the call and a backup.
     let init = run(&["vault", "init"], &home);
     assert!(init.status.success(), "vault init failed");
 
-    let target = dir.path().join("vault.bak");
+    let target = dir.path().join("vault.bak.gz");
     let target = target.to_string_lossy().into_owned();
-    let refused = run(
+    let compressed = run(
         &["vault", "backup", "--output", &target, "--compress"],
         &home,
     );
-    assert_eq!(
-        refused.status.code(),
-        Some(8),
-        "an unbuilt feature must exit 8, not 2: {}",
-        String::from_utf8_lossy(&refused.stderr)
-    );
     assert!(
-        String::from_utf8_lossy(&refused.stderr).contains("not available in this build"),
-        "the error should say what is missing: {}",
-        String::from_utf8_lossy(&refused.stderr)
-    );
-    assert!(
-        String::from_utf8_lossy(&refused.stderr).contains("--compress"),
-        "the fix should name the flag to drop"
+        compressed.status.success(),
+        "gzip backup must work: {}",
+        String::from_utf8_lossy(&compressed.stderr)
     );
 
-    // The same verb without the flag still works, so 8 is about the flag.
+    // The file is a gzip stream, not a SQLite copy.
+    let bytes = std::fs::read(&target).unwrap();
+    assert!(
+        bytes.starts_with(&[0x1f, 0x8b]),
+        "a --compress backup must start with the gzip magic"
+    );
+
+    // Point the vault elsewhere and restore from the gzip file.
+    let home2 = dir.path().join("home2");
+    let init2 = run(&["vault", "init"], &home2);
+    assert!(init2.status.success(), "second vault init failed");
+    // Replace it, so --force is required.
+    let restored = run(&["vault", "restore", "--input", &target, "--force"], &home2);
+    assert!(
+        restored.status.success(),
+        "restore from a gzip backup must work: {}",
+        String::from_utf8_lossy(&restored.stderr)
+    );
+    let stats = run(&["vault", "stats"], &home2);
+    assert!(
+        stats.status.success(),
+        "the restored vault must open: {}",
+        String::from_utf8_lossy(&stats.stderr)
+    );
+
+    // And the plain path still works.
     let plain = run(&["vault", "backup", "--output", &target], &home);
     assert!(
         plain.status.success(),
         "a backup without --compress must work: {}",
         String::from_utf8_lossy(&plain.stderr)
+    );
+    let plain_bytes = std::fs::read(&target).unwrap();
+    assert!(
+        plain_bytes.starts_with(b"SQLite format 3"),
+        "a backup without --compress stays a byte-for-byte copy"
     );
 }

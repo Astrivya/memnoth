@@ -57,6 +57,7 @@ impl Sandbox {
     /// servers, and a piped stdout nobody drains is its own kind of hang.
     fn spawn(&self, args: &[&str]) -> ChildGuard {
         let child = Command::new(binary())
+            .arg("--trust-folder")
             .args(args)
             .current_dir(self.root())
             .env("MEMNOTH_HOME", self.home())
@@ -183,6 +184,7 @@ fn serve_answers_health_on_the_port_it_names() {
 fn serve_with_port_zero_announces_the_bound_port() {
     let sandbox = Sandbox::new();
     let mut child = Command::new(binary())
+        .arg("--trust-folder")
         .args(["serve", "--host", "127.0.0.1", "--port", "0"])
         .current_dir(sandbox.root())
         .env("MEMNOTH_HOME", sandbox.home())
@@ -275,6 +277,7 @@ fn watch_with_a_port_really_listens() {
 fn mcp_exposes_lists_every_profile_with_tools() {
     let sandbox = Sandbox::new();
     let output = Command::new(binary())
+        .arg("--trust-folder")
         .args(["mcp", "exposes", "--json"])
         .current_dir(sandbox.root())
         .env("MEMNOTH_HOME", sandbox.home())
