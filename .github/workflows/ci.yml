@@ -49,7 +49,7 @@ jobs:
 
       # `-D warnings` across the workspace and all targets: a new warning fails
       # review here instead of accumulating in a library nobody reads.
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   generated:
     name: generated surfaces
@@ -105,7 +105,13 @@ jobs:
       # The whole workspace, not just the binary: the vault, graph and session
       # behaviour the CLI is a thin shell over is tested in those crates.
       # `--locked` also fails here when Cargo.lock drifts from a manifest.
-      - run: cargo test --workspace --locked
+      # The output lands in the job summary: a red step that names no failing
+      # test is where a morning used to go.
+      - name: Run cargo test --workspace --locked
+        run: |
+          set -o pipefail
+          cargo test --workspace --locked 2>&1 | tee test-output.log
+          { grep -E "FAILED|panicked at" test-output.log | head -40; } >> "$GITHUB_STEP_SUMMARY" || true
 
   generated-surfaces-ci:
     name: generated surfaces (memnoth-command)
@@ -149,12 +155,33 @@ jobs:
       - name: Build memnoth
         run: cargo build --locked --bin memnoth
 
+      # The evaluation measures a real model behind a real key. Without a key
+      # every task scores zero and the job would be red for a reason that has
+      # nothing to do with the change under test, so the run is gated on the
+      # key's presence: set KILO_API_KEY (or a provider key) as a repository
+      # secret and the same steps run in full.
+      - name: Provider key present?
+        id: providerkeys
+        env:
+          KILO_API_KEY: ${{ secrets.KILO_API_KEY }}
+          MEMNOTH_API_KEY: ${{ secrets.MEMNOTH_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -n "$KILO_API_KEY$MEMNOTH_API_KEY$OPENAI_API_KEY$ANTHROPIC_API_KEY" ]; then
+            echo "have=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "have=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No provider key configured: pinned-model evaluation is skipped."
+          fi
+
       # N=3 paired repetitions: every (model, effort) pair runs the same
       # tasks under the same seeds. The percentile bootstrap yields a 95%
       # CI on each configuration's mean score; the cost per 1k turns is
       # gated against the pinned price table in ci/manifest.json, which also
       # pins commit, dataset and seed.
       - name: Run pinned model evaluation
+        if: steps.providerkeys.outputs.have == 'true'
         run: python ci/eval_bootstrap.py ci/manifest.json
   fuzz:
     name: fuzz (cargo-fuzz targets)
@@ -170,16 +197,21 @@ jobs:
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
 
+      # Run from the workspace root: cargo-fuzz finds the fuzz crate at
+      # `./fuzz` beneath the manifest it is handed, so running from inside
+      # `fuzz/` makes it look for `fuzz/fuzz/`. `cargo fuzz build` has no
+      # `--locked` flag either (it forwards its own flags to cargo).
       - name: Build fuzz targets
-        run: cargo fuzz build --locked
-        working-directory: fuzz
+        run: cargo fuzz build
 
+      # Two flags that are not flags: `--max_total_time` belongs to libFuzzer
+      # (so it comes after `--`), and the release switch is `-O`, not `-r` —
+      # cargo-fuzz 0.13 rejects both, and the step died before fuzzing.
       - name: Run fuzz targets on seed corpus
         run: |
           for target in config mcp_framing diff_parsing provider_url sync_manifest frontmatter security; do
-            cargo fuzz run "$target" -r --max_total_time=60
+            cargo fuzz run "$target" -O -- --max_total_time=60
           done
-        working-directory: fuzz
 
   perf:
     name: benchmarks compile
@@ -221,15 +253,15 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: cargo deny (licenses, advisories, bans, sources)
-        run: cargo deny check
+      # cargo-deny needs installing and a policy file; both are here now. One
+      # tool replaces the old `cargo audit` half of this job: its advisories
+      # check reads the same RustSec database. The npm half of this job used
+      # to point at `../web` — a second repository that cannot exist in this
+      # checkout — so it never ran; the web repo audits its own tree.
+      - uses: EmbarkStudios/cargo-deny-action@v2
 
-      - name: cargo audit (Rust advisory database)
-        run: cargo audit
-
-      - name: npm audit (web dependencies)
-        working-directory: ../web
-        run: npm ci --omit=dev && npm audit --omit=dev || true
+      # Everything but licenses is report-only until the advisory baseline
+      # is clean: `deny.toml` records the allow-list and the reason.
 
   bench:
     name: bench regression gate (MTS-60 / TRS / KG)
@@ -245,10 +277,31 @@ jobs:
       - name: Build memnoth
         run: cargo build --locked --bin memnoth
 
+      # MTS and TRS measure a model; without a provider key every task
+      # scores zero and the gate fails for want of a credential, not a
+      # regression. KG is local and always runs. See the pinned-model job
+      # for the same gate.
+      - name: Provider key present?
+        id: providerkeys
+        env:
+          KILO_API_KEY: ${{ secrets.KILO_API_KEY }}
+          MEMNOTH_API_KEY: ${{ secrets.MEMNOTH_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -n "$KILO_API_KEY$MEMNOTH_API_KEY$OPENAI_API_KEY$ANTHROPIC_API_KEY" ]; then
+            echo "have=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "have=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No provider key configured: MTS/TRS benches are skipped, KG still runs."
+          fi
+
       - name: Run MTS-60 bench
+        if: steps.providerkeys.outputs.have == 'true'
         run: ./target/debug/memnoth bench run --suite mts --n 3 --fail-below 0.5 --json -o ci/mts-result.json
 
       - name: Run TRS bench
+        if: steps.providerkeys.outputs.have == 'true'
         run: ./target/debug/memnoth bench run --suite trs --n 3 --fail-below 0.5 --json -o ci/trs-result.json
 
       - name: Run KG bench

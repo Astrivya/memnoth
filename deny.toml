@@ -1,0 +1,42 @@
+# cargo-deny policy for the memnoth workspace.
+#
+# Only licences are a hard gate today: a copyleft or unlicensed dependency
+# would change what this Apache-2.0 product can ship, so those fail the build.
+# Advisories, bans and sources are warnings until the baseline is clean — a
+# known-unmaintained crate the team has accepted must not keep CI red forever,
+# but it must be visible every run, so warnings (not silence) carry it.
+
+[graph]
+
+[advisories]
+vulnerability = "warn"
+unmaintained = "warn"
+unsound = "warn"
+notice = "warn"
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[licenses]
+unlicensed = "deny"
+copyleft = "deny"
+default = "allow"
+allow = [
+  "Apache-2.0",
+  "MIT",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "MPL-2.0",
+  "Unicode-DFS-2016",
+  "Unicode-3.0",
+  "OpenSSL",
+  "CC0-1.0",
+  "Unlicense",
+]
+
+[sources]
+unknown-registry = "warn"
+unknown-git = "warn"
