@@ -1,0 +1,19 @@
+[package]
+name = "memnoth-agent"
+version = "0.1.0-beta.2"
+license.workspace = true
+edition = "2024"
+description = "Agent runtime: run registry, separate from the session message list"
+
+[dependencies]
+anyhow = "1"
+# Scoped vault slices and per-spawn provenance live in the engine; the
+# executor hands one slice to each child it drives.
+memnoth-engine = { path = "../memnoth-engine" }
+memnoth-capability = { path = "../memnoth-capability" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"
