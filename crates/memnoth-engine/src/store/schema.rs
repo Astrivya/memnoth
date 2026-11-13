@@ -42,6 +42,11 @@ CREATE TABLE IF NOT EXISTS entities (
 CREATE INDEX IF NOT EXISTS idx_entities_kind     ON entities(kind);
 CREATE INDEX IF NOT EXISTS idx_entities_valid_to ON entities(valid_to);
 CREATE INDEX IF NOT EXISTS idx_entities_name     ON entities(name);
+-- Unique open-belief index: at most one current (open) belief per entity
+-- name. A second `remember` for the same name must supersede the first
+-- (close the old row) rather than opening a second live belief.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_open_belief ON entities(name) WHERE valid_to IS NULL;
+
 
 CREATE TABLE IF NOT EXISTS relations (
     id         INTEGER PRIMARY KEY,

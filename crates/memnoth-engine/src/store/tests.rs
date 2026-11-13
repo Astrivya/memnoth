@@ -1014,10 +1014,13 @@ fn w2_generation_increments_and_proof_folds() {
         .unwrap();
     assert_eq!(eng.entity_generation(b).unwrap(), 1);
     eng.bump_proof_count(b, 3).unwrap();
-    let c = eng.add_entity(EntityKind::Concept, "ga2", 1.0, T0).unwrap();
-    let _ = eng
-        .supersede_entity(c, None, Some("ga2x"), None, None, "dup", T0 + DAY)
+    // A second entity cannot take the name `ga2` (entities.name is unique);
+    // use a fresh name and supersede it the same way.
+    let c = eng.add_entity(EntityKind::Concept, "gc", 1.0, T0).unwrap();
+    let c2 = eng
+        .supersede_entity(c, None, Some("gcx"), None, None, "dup", T0 + DAY)
         .unwrap();
+    assert_eq!(eng.entity_generation(c2).unwrap(), 1);
     // Merge folds proof counts (tested end-to-end in consolidation runner).
     let _ = b;
 }

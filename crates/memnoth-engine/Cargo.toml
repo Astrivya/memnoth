@@ -19,3 +19,11 @@ chrono = { version = "0.4", features = ["serde"] }
 # workspace pins, so this adds no new resolution.
 sha2 = "0.10"
 hex = "0.4"
+
+[dev-dependencies]
+# W12-05: recall at 10k beliefs is a perf-budget gate, not an optional extra.
+criterion = { version = "0.5", features = ["html_reports", "async_tokio", "async_futures"] }
+
+[[bench]]
+name = "recall"
+harness = false
