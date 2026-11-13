@@ -1,0 +1,58 @@
+# Egress policy corpus (W10-02 / W10-10).
+#
+# One probe per line:
+#
+#   label | policy | host | port | expected-rule [| resolved]
+#
+# policy    off | open | allowlist
+# host      the spelling the caller supplied (brackets kept for IPv6)
+# port      a number, or `-` for "no port"
+# resolved  optional comma-separated IPs. When present the probe goes through
+#           recheck_resolved, so a name is judged by what the resolver answered
+#           as well as by how it was spelled.
+#
+# The `allowlist` policy uses one fixed list defined by the test, so a probe
+# cannot pass by inventing its own:
+#
+#   api.example.com   *.internal   [fd00::1]:8443
+#
+# Every rule id here is one the module documents; a change to the order or the
+# ids is a policy event, not a test cleanup.
+
+# --- Default deny -----------------------------------------------------------
+off-denies-internet          | off       | api.example.com      | 443  | deny:network-off
+off-denies-ipv6              | off       | [2001:db8::1]        | 443  | deny:network-off
+off-denies-name-that-resolves| off       | api.example.com      | 443  | deny:network-off      | 93.184.216.34
+
+# --- Open is still not a license for metadata ---------------------------------
+open-allows-internet         | open      | api.example.com      | 443  | allow:network-open
+open-allows-localhost        | open      | localhost            | 8788 | allow:network-open    | 127.0.0.1
+metadata-ipv4-under-open     | open      | 169.254.169.254      | 80   | deny:metadata-endpoint
+metadata-ecs-under-open      | open      | 169.254.170.2        | 80   | deny:metadata-endpoint
+metadata-alibaba-under-off   | off       | 100.100.100.200      | 80   | deny:metadata-endpoint
+metadata-ipv6-under-open     | open      | [fd00:ec2::254]      | 80   | deny:metadata-endpoint
+metadata-name-answer-under-open| open    | metadata.example.com | 80   | deny:metadata-endpoint | 169.254.169.254
+
+# --- Unstateable host spellings fail closed before the policy is read ---------
+invalid-empty                | open      |                      | 443  | deny:host-invalid
+invalid-scheme               | open      | https://example.com  | 443  | deny:host-invalid
+invalid-path                 | open      | example.com/path     | 443  | deny:host-invalid
+invalid-credentials          | open      | user:pw@example.com  | 443  | deny:host-invalid
+invalid-space                | open      | api example.com      | 443  | deny:host-invalid
+invalid-bare-star            | open      | *                    | 443  | deny:host-invalid
+
+# --- Allowlist: exactly the named hosts --------------------------------------
+allowlist-hit                | allowlist | api.example.com      | 443  | allow:egress-allowlist
+allowlist-wildcard-hit       | allowlist | a.internal           | 443  | allow:egress-allowlist
+allowlist-wildcard-deep-hit  | allowlist | a.b.internal         | 443  | allow:egress-allowlist
+allowlist-wildcard-bare-miss | allowlist | internal             | 443  | deny:egress-allowlist
+allowlist-lookalike-miss     | allowlist | evilexample.com      | 443  | deny:egress-allowlist
+allowlist-other-host-miss    | allowlist | evil.example.com     | 443  | deny:egress-allowlist
+allowlist-port-exact         | allowlist | [fd00::1]            | 8443 | allow:egress-allowlist
+allowlist-port-mismatch      | allowlist | [fd00::1]            | 443  | deny:egress-allowlist
+
+# --- DNS rebinding: a listed name that answers with a local address ----------
+rebind-loopback              | allowlist | api.example.com      | 443  | deny:rebinding        | 127.0.0.1
+rebind-private               | allowlist | api.example.com      | 443  | deny:rebinding        | 10.0.0.7
+rebind-unique-local-v6       | allowlist | api.example.com      | 443  | deny:rebinding        | fd00::7
+rebind-public-stays-allowed  | allowlist | api.example.com      | 443  | allow:egress-allowlist | 93.184.216.34
