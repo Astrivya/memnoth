@@ -238,6 +238,28 @@ MANIFEST="$WORK/manifest.json"
     printf '{\n'
     printf '  "version": "%s",\n' "$VERSION_NUM"
     printf '  "channel": "%s",\n' "$CHANNEL"
+# `previous_versions` is what makes a downgrade deliberate rather than a guess
+# (`mn update --version <v>` names one). Read it from the release tree being
+# published to, so the manifest never advertises a version the host does not
+# serve. `MEMNOTH_DIST_URL` turns each directory into an absolute URL; without
+# it the entry keeps the relative directory a same-host reader can resolve.
+PREV_JSON=""
+for prev_dir in "$OUT"/*/; do
+    [ -f "$prev_dir/manifest.json" ] || continue
+    prev_name=$(basename "$prev_dir")
+    [ "$prev_name" = "$VERSION" ] && continue
+    [ "$prev_name" = "latest" ] && continue
+    prev_version=$(sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' \
+        "$prev_dir/manifest.json" | head -n 1)
+    [ -n "$prev_version" ] || continue
+    if [ -n "${MEMNOTH_DIST_URL:-}" ]; then
+        prev_url="${MEMNOTH_DIST_URL%/}/$prev_name/"
+    else
+        prev_url="$prev_name/"
+    fi
+    PREV_JSON="$PREV_JSON${PREV_JSON:+,}{\"version\": \"$prev_version\", \"url\": \"$prev_url\"}"
+done
+    printf '  "previous_versions": [%s],\n' "$PREV_JSON"
     printf '  "targets": [\n'
     FIRST=1
     while read -r name digest; do
@@ -260,7 +282,6 @@ MANIFEST="$WORK/manifest.json"
     printf '  "notes": %s\n' "$(json_string "${MEMNOTH_RELEASE_NOTES:-}")"
     printf '}\n'
 } > "$MANIFEST"
-
 cp "$MANIFEST" "$OUT/$VERSION/manifest.json"
 cp "$MANIFEST" "$OUT/latest/manifest.json"
 

@@ -286,6 +286,19 @@ mkdir -p "$INSTALL_DIR" || fail "cannot create $INSTALL_DIR"
 cp "$BINARY" "$MNN"
 chmod 755 "$MNN"
 
+# The server travels with the CLI. `memnoth mcp serve` execs `memnoth-mcp` from
+# the directory it is running in, so a server left behind in the unpack dir is
+# one the CLI never finds: it falls back to whatever `memnoth-mcp` is on PATH,
+# and an older install there answers with an older tool surface. Archives built
+# before the server was packaged do not carry one; that is reported by
+# `memnoth mcp doctor`, not guessed at here.
+SERVER_NAME="memnoth-mcp$SUFFIX"
+SERVER=$(find "$WORK/unpack" -type f -name "$SERVER_NAME" | head -n 1 || true)
+if [ -n "${SERVER:-}" ] && [ -f "$SERVER" ]; then
+    cp "$SERVER" "$INSTALL_DIR/$SERVER_NAME"
+    chmod 755 "$INSTALL_DIR/$SERVER_NAME"
+fi
+
 # `mn` is the same binary under the name people type. A relative symlink rather
 # than a copy: one file to update, and moving the install directory keeps the
 # pair working. A filesystem without symlinks falls back to a copy, because a

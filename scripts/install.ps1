@@ -344,6 +344,17 @@ try {
         New-Item -ItemType Directory -Path $installDir -Force | Out-Null
         Copy-Item -Path $binary.FullName -Destination (Join-Path $installDir 'memnoth.exe') -Force
         Write-Log "Installed memnoth.exe"
+
+        # The server travels with the CLI: `memnoth mcp serve` execs
+        # memnoth-mcp.exe from its own directory. A server left in the unpack
+        # dir is never found, and the CLI then falls back to whatever is on
+        # PATH — which is how an older install answered with an older surface.
+        # Older archives carry no server; that is not an install failure.
+        $server = Get-ChildItem -Path $extractDir -Filter 'memnoth-mcp.exe' -Recurse | Select-Object -First 1
+        if ($server) {
+            Copy-Item -Path $server.FullName -Destination (Join-Path $installDir 'memnoth-mcp.exe') -Force
+            Write-Log "Installed memnoth-mcp.exe"
+        }
     } else {
         Write-Log "[Preview] Would install memnoth.exe to $installDir"
     }
