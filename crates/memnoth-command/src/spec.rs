@@ -506,3 +506,125 @@ impl CommandSpec {
             .collect()
     }
 }
+
+/// Where a registry row can actually run.
+///
+/// A palette row that cannot say this is a promise the session cannot keep:
+/// `mcp add` refuses without a terminal, `login` without an account, and
+/// `/serve` blocks the screen. The chip is shown before Enter, never after.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Availability {
+    /// Runs in this session.
+    Here,
+    /// Opens a surface (overlay) instead of producing text.
+    Surface,
+    /// Needs its own terminal: it owns the screen or runs until interrupted.
+    Terminal,
+    /// Needs authentication.
+    Auth,
+    /// Registered, but not runnable in this build.
+    Unavailable,
+}
+
+/// What a row risks if it runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Risk {
+    /// Reads only; no local, remote, or vault write.
+    Read,
+    /// Writes local state (vault, graph, config, session).
+    Write,
+    /// Talks to the network.
+    Network,
+    /// Deletes or revokes something.
+    Destructive,
+}
+
+/// Rows that cannot run inside the session because they own the screen or
+/// never return. Named by id so a new verb has to opt in to the label rather
+/// than inherit it from a category.
+const TERMINAL_ONLY: &[&str] = &[
+    "serve",
+    "watch",
+    "kg.serve",
+    "kg.watch",
+    "mcp.serve",
+    "mcp.call",
+    "mcp.selftest",
+    "mcp.token",
+];
+
+impl CommandSpec {
+    /// The risk chip, derived from the declared danger.
+    pub fn risk(&self) -> Risk {
+        match &self.slash.danger {
+            DangerLevel::Safe => Risk::Read,
+            DangerLevel::LocalWrite => Risk::Write,
+            DangerLevel::CloudWrite => Risk::Network,
+            DangerLevel::Destructive => Risk::Destructive,
+        }
+    }
+
+    /// Where this row runs, decided before selection.
+    pub fn availability(&self) -> Availability {
+        if TERMINAL_ONLY.contains(&self.id.as_str()) {
+            return Availability::Terminal;
+        }
+        if matches!(&self.slash.auth, AuthLevel::Cloud | AuthLevel::Operator) {
+            return Availability::Auth;
+        }
+        if !matches!(&self.slash.overlay, OverlayType::None) {
+            return Availability::Surface;
+        }
+        Availability::Here
+    }
+
+    /// The surface this row belongs to.
+    ///
+    /// `terminal` means the row is run elsewhere; `chat` is the default because
+    /// a read-only verb reports into the transcript.
+    pub fn screen(&self) -> &'static str {
+        let has = |name: &str| self.slash.categories.iter().any(|c| c == name);
+        if has("memory") {
+            "memory"
+        } else if has("code") {
+            "review"
+        } else if has("session") {
+            "sessions"
+        } else if self.availability() == Availability::Terminal {
+            "terminal"
+        } else {
+            "chat"
+        }
+    }
+
+    /// The CLI line that produces the same answer without the session.
+    pub fn headless(&self) -> String {
+        format!("memnoth {}", self.cli_command())
+    }
+
+    /// The next command to run when this one cannot.
+    ///
+    /// A hint names a command, never an error code: "run `mn auth login`" is
+    /// actionable, "401" is not.
+    pub fn failure_hint(&self) -> String {
+        match self.availability() {
+            Availability::Terminal => "run it in another terminal".to_string(),
+            Availability::Auth => "run `memnoth auth login` first".to_string(),
+            Availability::Unavailable => "run `memnoth help --all` to see what ships".to_string(),
+            Availability::Surface | Availability::Here => {
+                format!("run `memnoth {} --help`", self.cli_command())
+            }
+        }
+    }
+
+    /// The session row for this command, when it has one.
+    pub fn palette_line(&self) -> Option<String> {
+        self.slash
+            .palette
+            .as_ref()
+            .map(|line| line.trim().trim_start_matches('/').to_string())
+            .filter(|line| !line.is_empty())
+    }
+}
