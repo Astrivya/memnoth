@@ -12,13 +12,13 @@
           "transport": "http"
         },
         "code": {
-          "toolCount": 26
+          "toolCount": 19
         },
         "coord": {
-          "toolCount": 11
+          "toolCount": 14
         },
         "full": {
-          "toolCount": 51
+          "toolCount": 47
         },
         "memory": {
           "includes": [
@@ -36,8 +36,7 @@
         }
       },
       "protocolVersions": [
-        "2026-07-28",
-        "2024-11-05"
+        "2026-07-28"
       ],
       "retrievalTierCost": {
         "//": "The retrieval half of the context tax: what one query costs at each recall tier, beside the tools/list half above. Values come from crates/memnoth-mcp/src/recall_budget.rs::tier_cost_rows and cannot drift (registry_manifest_retrieval_cost_cannot_drift).",
@@ -75,10 +74,10 @@
         "//": "Bytes of the tools/list payload each profile makes a host pay - the context tax, published instead of asserted. Every rival in this category publishes this number (1.9K / ~7K / 11.6K / 170 tokens); memnoth published none. Filled in by `cargo test -p memnoth-mcp -- --ignored regenerate_manifest_schema_cost` after a build, and a test fails if these ever drift from the shipping definitions.",
         "bytesPerProfile": {
           "agent": 3396,
-          "code": 18009,
-          "coord": 5772,
-          "full": 36472,
-          "memory": 17561,
+          "code": 17571,
+          "coord": 7531,
+          "full": 37918,
+          "memory": 19463,
           "micro": 3199
         }
       },
@@ -113,7 +112,7 @@
             "full"
           ],
           "default": "full",
-          "description": "Tool surface to expose: micro (4 tools), memory (21), code (26), coord (11), full (51), agent (6, HTTP only). Default: full.",
+          "description": "Tool surface to expose: micro (4 tools), memory (21), code (26), coord (12), full (52), agent (6, HTTP only). Default: full.",
           "name": "MEMNOTH_MCP_PROFILE"
         }
       ],

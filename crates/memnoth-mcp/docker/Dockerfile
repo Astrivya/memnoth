@@ -36,13 +36,15 @@ USER root
 
 STOPSIGNAL SIGTERM
 
-# Readiness: one JSON-RPC initialize against the port. A 401/400 with the token missing still
-# proves the listener is up, so the check is `curl` succeeding at the TCP/HTTP layer.
+# Readiness: one stateless server/discover against the port, declaring the named
+# 2026-07-28 revision in both the header and _meta. A 401/400 with the token missing
+# still proves the listener is up, so the check is `curl` succeeding at the TCP/HTTP layer.
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=20s \
   CMD curl -fsS -o /dev/null -X POST http://127.0.0.1:7842/mcp \
     -H "Content-Type: application/json" \
+    -H "MCP-Protocol-Version: 2026-07-28" \
     -H "Authorization: Bearer ${MEMNOTH_MCP_HTTP_TOKEN}" \
-    -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"hc","version":"0"}}}' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}},"clientInfo":{"name":"hc","version":"0"}}}' \
     || exit 1
 
 ENTRYPOINT ["/usr/local/bin/memnoth-init.sh"]

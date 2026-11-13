@@ -58,5 +58,5 @@ The `--version` flag works completely offline without spawning the binary.
 
 A tool you expected but cannot see is a profile setting, not a missing
 capability — the server reports the active profile and its tool count in the
-`initialize` instructions and in `server/discover`.
+`server/discover` instructions.
 

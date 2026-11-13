@@ -14,61 +14,89 @@
 //!
 //! ```json
 //! [
-//!   {"point": "on_tool_call", "match": "coord_claim", "command": "/bin/claim-audit"},
-//!   {"point": "on_event", "match": "*", "command": "/bin/event-log"}
+//!   {"point": "tool.pre", "match": "coord_claim", "command": "/bin/claim-audit"},
+//!   {"point": "session.start", "match": "*", "command": "/bin/event-log"}
 //! ]
 //! ```
 //!
-//! Dispatch is detached and fail-open: a missing binary, a bad command line,
-//! or a hook that crashes only produces a log line, never a failed tool call.
+//! The event list is closed: only `session.start|end`, `turn.start|end`,
+//! `tool.pre|post`, `agent.spawn|end`, `approval.request`, `compact.pre|post`
+//! and `vault.write` fire hooks. Each dispatched hook receives a JSON payload
+//! on stdin describing the event and is bound by a timeout — slow hooks are
+//! killed (fail-open: a dropped hook never fails the triggering call).
 //! Hook processes inherit `MEMNOTH_HOOKS_DISABLED=1` so a hook that itself
 //! calls back into the MCP server cannot recurse.
 
+use serde::Serialize;
 use serde_json::Value;
+use std::io::Write;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// Where a plugin hook fires.
+/// Where a plugin hook fires: a closed list of lifecycle events. Only these
+/// names fire hooks; new events require a code change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PluginHookPoint {
-    /// Before/after an MCP `tools/call` (`name` = tool name).
-    ///
-    /// The original name, kept because plugin manifests already declare it. It
-    /// fires at the same moment as [`Self::PreToolUse`].
-    OnToolCall,
-    /// Immediately before the tool runs (`name` = tool name).
-    PreToolUse,
-    /// When the tool call returns, on every path (`name` = tool name).
-    PostToolUse,
-    /// On a server command (`name` = `serve`, `prompts/get`, …).
-    OnCommand,
-    /// On an MCP event (`name` = `session_start`, `tool_done`, …).
-    OnEvent,
-    /// On MCP session lifecycle (`name` = `connect`, `disconnect`).
-    OnSession,
+pub enum HookEvent {
+    /// Session began (`name` = session id).
+    SessionStart,
+    /// Session ended (`name` = session id).
+    SessionEnd,
+    /// Turn began (`name` = turn id).
+    TurnStart,
+    /// Turn ended (`name` = turn id).
+    TurnEnd,
+    /// Immediately before a tool runs (`name` = tool name).
+    ToolPre,
+    /// When a tool call returns, on every path (`name` = tool name).
+    ToolPost,
+    /// Before a subagent starts (`name` = subagent name).
+    AgentSpawn,
+    /// When a subagent finishes (`name` = subagent name).
+    AgentEnd,
+    /// An approval request awaiting a decision (`name` = request id).
+    ApprovalRequest,
+    /// Immediately before compaction runs (`name` = compaction target).
+    CompactPre,
+    /// After compaction finishes (`name` = compaction target).
+    CompactPost,
+    /// A vault entry was written (`name` = entry key/path).
+    VaultWrite,
 }
 
-impl PluginHookPoint {
+impl HookEvent {
     /// Parse the wire name used in `MEMNOTH_PLUGIN_HOOKS` specs.
     pub fn parse(raw: &str) -> Option<Self> {
         match raw.trim().to_ascii_lowercase().as_str() {
-            "on_tool_call" => Some(Self::OnToolCall),
-            "pre_tool_use" => Some(Self::PreToolUse),
-            "post_tool_use" => Some(Self::PostToolUse),
-            "on_command" => Some(Self::OnCommand),
-            "on_event" => Some(Self::OnEvent),
-            "on_session" => Some(Self::OnSession),
+            "session.start" => Some(Self::SessionStart),
+            "session.end" => Some(Self::SessionEnd),
+            "turn.start" => Some(Self::TurnStart),
+            "turn.end" => Some(Self::TurnEnd),
+            "tool.pre" => Some(Self::ToolPre),
+            "tool.post" => Some(Self::ToolPost),
+            "agent.spawn" => Some(Self::AgentSpawn),
+            "agent.end" => Some(Self::AgentEnd),
+            "approval.request" => Some(Self::ApprovalRequest),
+            "compact.pre" => Some(Self::CompactPre),
+            "compact.post" => Some(Self::CompactPost),
+            "vault.write" => Some(Self::VaultWrite),
             _ => None,
         }
     }
 
-    /// Wire name for env export (`MEMNOTH_PLUGIN_HOOK_POINT`).
+    /// Wire name for env export (`MEMNOTH_HOOK_EVENT`).
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::OnToolCall => "on_tool_call",
-            Self::PreToolUse => "pre_tool_use",
-            Self::PostToolUse => "post_tool_use",
-            Self::OnCommand => "on_command",
-            Self::OnEvent => "on_event",
-            Self::OnSession => "on_session",
+            Self::SessionStart => "session.start",
+            Self::SessionEnd => "session.end",
+            Self::TurnStart => "turn.start",
+            Self::TurnEnd => "turn.end",
+            Self::ToolPre => "tool.pre",
+            Self::ToolPost => "tool.post",
+            Self::AgentSpawn => "agent.spawn",
+            Self::AgentEnd => "agent.end",
+            Self::ApprovalRequest => "approval.request",
+            Self::CompactPre => "compact.pre",
+            Self::CompactPost => "compact.post",
+            Self::VaultWrite => "vault.write",
         }
     }
 }
@@ -77,7 +105,7 @@ impl PluginHookPoint {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginHookSpec {
     /// Where the hook fires.
-    pub point: PluginHookPoint,
+    pub point: HookEvent,
     /// Match expression for the hook name: `*` matches everything, otherwise
     /// a case-insensitive substring (`coord_` matches every coordination
     /// tool). Deliberately small: glob enough for routing, no regex engine.
@@ -88,7 +116,7 @@ pub struct PluginHookSpec {
 
 impl PluginHookSpec {
     /// Whether this spec fires for `name` at `point`.
-    pub fn matches(&self, point: PluginHookPoint, name: &str) -> bool {
+    pub fn matches(&self, point: HookEvent, name: &str) -> bool {
         if self.point != point {
             return false;
         }
@@ -98,6 +126,48 @@ impl PluginHookSpec {
         name.to_ascii_lowercase()
             .contains(&self.matcher.to_ascii_lowercase())
     }
+}
+
+/// Payload delivered to a hook on stdin: the event that fired, the subject
+/// name, and a Unix-second timestamp.
+#[derive(Debug, Clone, Serialize)]
+pub struct HookPayload {
+    /// The event that fired.
+    pub event: &'static str,
+    /// The subject the event is about.
+    pub name: String,
+    /// Unix-second timestamp of the event.
+    pub ts: u64,
+}
+
+impl HookPayload {
+    fn new(event: HookEvent, name: &str) -> Self {
+        Self {
+            event: event.as_str(),
+            name: name.to_string(),
+            ts: now_ts(),
+        }
+    }
+}
+
+/// Seconds since the Unix epoch, or 0 if the clock is before the epoch.
+fn now_ts() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Default bound on how long a hook may run before it is killed.
+const DEFAULT_HOOK_TIMEOUT_SEC: u64 = 30;
+
+/// How long the server waits for a hook before killing it (fail-open).
+fn hook_timeout() -> Duration {
+    std::env::var("MEMNOTH_HOOK_TIMEOUT_SEC")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(DEFAULT_HOOK_TIMEOUT_SEC))
 }
 
 /// Parse `MEMNOTH_PLUGIN_HOOKS` (JSON array of `{point, match, command}`).
@@ -119,7 +189,7 @@ pub fn parse_plugin_hooks(raw: &str) -> Vec<PluginHookSpec> {
         let point = value
             .get("point")
             .and_then(Value::as_str)
-            .and_then(PluginHookPoint::parse);
+            .and_then(HookEvent::parse);
         let command = value
             .get("command")
             .and_then(Value::as_str)
@@ -143,7 +213,7 @@ pub fn parse_plugin_hooks(raw: &str) -> Vec<PluginHookSpec> {
 }
 
 /// Specs from the current env that fire for `name` at `point`.
-pub fn matching_plugin_hooks(point: PluginHookPoint, name: &str) -> Vec<PluginHookSpec> {
+pub fn matching_plugin_hooks(point: HookEvent, name: &str) -> Vec<PluginHookSpec> {
     load_plugin_hooks_from_env()
         .into_iter()
         .filter(|spec| spec.matches(point, name))
@@ -151,12 +221,15 @@ pub fn matching_plugin_hooks(point: PluginHookPoint, name: &str) -> Vec<PluginHo
 }
 
 /// Dispatch matching plugin hooks detached and fail-open. Returns the number
-/// of hooks fired (0 when none match or hooks are suppressed). Never blocks,
-/// never errors: every failure mode degrades to a dropped hook.
-pub fn dispatch_plugin_hook(point: PluginHookPoint, name: &str) -> usize {
+/// of hooks fired (0 when none match or hooks are suppressed). Each hook
+/// receives a JSON payload on stdin and is killed if it outlives the timeout
+/// (see `MEMNOTH_HOOK_TIMEOUT_SEC`). A dropped hook never fails the call.
+pub fn dispatch_plugin_hook(point: HookEvent, name: &str) -> usize {
     if std::env::var_os("MEMNOTH_HOOKS_DISABLED").is_some() {
         return 0;
     }
+    let timeout = hook_timeout();
+    let payload = HookPayload::new(point, name);
     let mut fired = 0usize;
     for spec in matching_plugin_hooks(point, name) {
         let mut parts = shell_split(&spec.command);
@@ -167,23 +240,47 @@ pub fn dispatch_plugin_hook(point: PluginHookPoint, name: &str) -> usize {
         let mut cmd = std::process::Command::new(program);
         cmd.args(parts);
         cmd.env("MEMNOTH_HOOKS_DISABLED", "1");
-        cmd.env("MEMNOTH_PLUGIN_HOOK_POINT", point.as_str());
-        cmd.env("MEMNOTH_PLUGIN_HOOK_NAME", name);
-        cmd.stdin(std::process::Stdio::null())
+        cmd.env("MEMNOTH_HOOK_EVENT", point.as_str());
+        cmd.env("MEMNOTH_HOOK_NAME", name);
+        cmd.env("MEMNOTH_HOOK_TS", payload.ts.to_string());
+        cmd.stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
-        if let Ok(mut child) = cmd.spawn() {
-            // Detached by intent: never wait, never reap synchronously.
-            // Best-effort immediate reaping avoids zombies on unix when
-            // the hook already exited; surviving children are reparented.
-            let _ = child.try_wait();
-            fired += 1;
+        let mut child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(_) => continue,
+        };
+        // Deliver the event as JSON on stdin, then close the pipe.
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(
+                serde_json::to_string(&payload)
+                    .unwrap_or_default()
+                    .as_bytes(),
+            );
+            let _ = stdin.flush();
         }
+        // Bound the hook's lifetime: kill it if it outlives the timeout.
+        let started = SystemTime::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => {
+                    if started.elapsed().unwrap_or(Duration::ZERO) >= timeout {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(_) => break,
+            }
+        }
+        fired += 1;
     }
     fired
 }
 
-/// Fires [`PluginHookPoint::PostToolUse`] when it leaves scope.
+/// Fires [`HookEvent::ToolPost`] when it leaves scope.
 ///
 /// A `Drop` guard rather than a call after the tool: the dispatch below has
 /// early returns for a denial, an approval request and a task handle, and a
@@ -197,7 +294,7 @@ pub struct PostToolHook<'a> {
 
 impl Drop for PostToolHook<'_> {
     fn drop(&mut self) {
-        dispatch_plugin_hook(PluginHookPoint::PostToolUse, self.name);
+        dispatch_plugin_hook(HookEvent::ToolPost, self.name);
     }
 }
 
@@ -249,51 +346,56 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hook_points_parse_wire_names() {
+    fn hook_events_parse_wire_names() {
         assert_eq!(
-            PluginHookPoint::parse("on_tool_call"),
-            Some(PluginHookPoint::OnToolCall)
+            HookEvent::parse("session.start"),
+            Some(HookEvent::SessionStart)
         );
+        assert_eq!(HookEvent::parse("SESSION.END"), Some(HookEvent::SessionEnd));
+        assert_eq!(HookEvent::parse("tool.pre"), Some(HookEvent::ToolPre));
+        assert_eq!(HookEvent::parse("tool.post"), Some(HookEvent::ToolPost));
+        assert_eq!(HookEvent::parse("agent.spawn"), Some(HookEvent::AgentSpawn));
+        assert_eq!(HookEvent::parse("agent.end"), Some(HookEvent::AgentEnd));
         assert_eq!(
-            PluginHookPoint::parse("ON_EVENT"),
-            Some(PluginHookPoint::OnEvent)
+            HookEvent::parse("approval.request"),
+            Some(HookEvent::ApprovalRequest)
         );
+        assert_eq!(HookEvent::parse("compact.pre"), Some(HookEvent::CompactPre));
         assert_eq!(
-            PluginHookPoint::parse("pre_tool_use"),
-            Some(PluginHookPoint::PreToolUse)
+            HookEvent::parse("compact.post"),
+            Some(HookEvent::CompactPost)
         );
-        assert_eq!(
-            PluginHookPoint::parse("post_tool_use"),
-            Some(PluginHookPoint::PostToolUse)
-        );
-        assert_eq!(PluginHookPoint::parse("bogus"), None);
+        assert_eq!(HookEvent::parse("vault.write"), Some(HookEvent::VaultWrite));
+        assert_eq!(HookEvent::parse("turn.start"), Some(HookEvent::TurnStart));
+        assert_eq!(HookEvent::parse("turn.end"), Some(HookEvent::TurnEnd));
+        assert_eq!(HookEvent::parse("bogus"), None);
     }
 
     #[test]
     fn specs_match_by_point_and_substring_or_star() {
         let spec = PluginHookSpec {
-            point: PluginHookPoint::OnToolCall,
+            point: HookEvent::ToolPre,
             matcher: "coord_".to_string(),
             command: "/bin/audit".to_string(),
         };
-        assert!(spec.matches(PluginHookPoint::OnToolCall, "coord_claim"));
-        assert!(!spec.matches(PluginHookPoint::OnToolCall, "mem_search"));
-        assert!(!spec.matches(PluginHookPoint::OnEvent, "coord_claim"));
+        assert!(spec.matches(HookEvent::ToolPre, "coord_claim"));
+        assert!(!spec.matches(HookEvent::ToolPre, "mem_search"));
+        assert!(!spec.matches(HookEvent::ToolPost, "coord_claim"));
         let star = PluginHookSpec {
-            point: PluginHookPoint::OnEvent,
+            point: HookEvent::ToolPost,
             matcher: "*".to_string(),
             command: "/bin/log".to_string(),
         };
-        assert!(star.matches(PluginHookPoint::OnEvent, "anything"));
+        assert!(star.matches(HookEvent::ToolPost, "anything"));
     }
 
     #[test]
     fn malformed_specs_are_skipped_not_fatal() {
         let specs = parse_plugin_hooks(
             r#"[
-              {"point": "on_tool_call", "match": "coord_", "command": "/bin/audit"},
+              {"point": "tool.pre", "match": "coord_", "command": "/bin/audit"},
               {"point": "bogus", "command": "/bin/nope"},
-              {"point": "on_event"},
+              {"point": "session.start"},
               {"command": "/bin/nopoint"},
               "garbage"
             ]"#,
@@ -329,10 +431,10 @@ mod tests {
         unsafe {
             std::env::set_var(
                 "MEMNOTH_PLUGIN_HOOKS",
-                r#"[{"point": "on_tool_call", "match": "*", "command": "/nonexistent/memnoth-plugin-hook"}]"#,
+                r#"[{"point": "tool.pre", "match": "*", "command": "/nonexistent/memnoth-plugin-hook"}]"#,
             );
         }
-        let fired = dispatch_plugin_hook(PluginHookPoint::OnToolCall, "coord_claim");
+        let fired = dispatch_plugin_hook(HookEvent::ToolPre, "coord_claim");
         assert_eq!(fired, 0);
         match previous {
             Some(value) => unsafe { std::env::set_var("MEMNOTH_PLUGIN_HOOKS", value) },

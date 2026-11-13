@@ -1,9 +1,7 @@
 //! Experimental StreamableHTTP transport for the memnoth MCP server (P1.4 spike).
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
@@ -227,53 +225,14 @@ struct HttpRequest {
     path: String,
     host: Option<String>,
     authorization: Option<String>,
-    session_id: Option<String>,
-    /// `MCP-Protocol-Version`: present on every modern request, absent on legacy
-    /// ones. This is the era signal for the HTTP binding.
+    /// `MCP-Protocol-Version`: required on every request except
+    /// `server/discover`, which is the probe that teaches it.
     protocol_version: Option<String>,
     /// `Mcp-Method` / `Mcp-Name`: the routing headers added by the 2026-07-28
     /// revision (SEP-2243), validated against the body in `handle_post`.
     mcp_method: Option<String>,
     mcp_name: Option<String>,
     body: Vec<u8>,
-}
-
-#[derive(Default)]
-struct Sessions(Mutex<HashMap<String, ()>>);
-
-impl Sessions {
-    fn issue(&self) -> String {
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let id = format!(
-            "mcp-{:x}-{:x}-{:x}",
-            std::process::id(),
-            memnoth_engine::now_ms(),
-            SEQ.fetch_add(1, Ordering::Relaxed),
-        );
-        self.0
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(id.clone(), ());
-        id
-    }
-
-    fn validate(&self, candidate: Option<&str>) -> bool {
-        let Some(candidate) = candidate else {
-            return false;
-        };
-        self.0
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .contains_key(candidate)
-    }
-
-    fn revoke(&self, candidate: Option<&str>) -> bool {
-        let mut sessions = self.0.lock().unwrap_or_else(|p| p.into_inner());
-        match candidate.map(str::to_string) {
-            Some(id) => sessions.remove(&id).is_some(),
-            None => false,
-        }
-    }
 }
 
 /// The server's whole context is passed once, at startup: every value is a handle the listener
@@ -289,7 +248,6 @@ pub(crate) async fn serve_http(
     open: bool,
     agent: Option<std::sync::Arc<crate::AgentBridge>>,
 ) -> Result<()> {
-    let sessions = Arc::new(Sessions::default());
     let tenants = Arc::new(TenantVaults::from_env(vault));
     // One vault handle, and a `rusqlite::Connection` is `Send` but not `Sync`,
     // so the store cannot be shared by reference between tasks. The mutex is
@@ -319,7 +277,6 @@ pub(crate) async fn serve_http(
             }
         };
         let store = Arc::clone(&store);
-        let sessions = Arc::clone(&sessions);
         let tenants = Arc::clone(&tenants);
         let auth = auth.clone();
         let agent = agent.clone();
@@ -338,7 +295,6 @@ pub(crate) async fn serve_http(
                     stream,
                     &auth,
                     open,
-                    &sessions,
                     agent.as_deref(),
                     &tenants,
                 ),
@@ -371,7 +327,6 @@ async fn handle_connection(
     stream: TcpStream,
     auth: &SharedAuthenticator,
     open: bool,
-    sessions: &Sessions,
     agent: Option<&crate::AgentBridge>,
     tenants: &TenantVaults,
 ) -> Result<()> {
@@ -502,7 +457,6 @@ async fn handle_connection(
         req_vault,
         reader,
         &request,
-        sessions,
         agent,
         principal.as_deref(),
         granted,
@@ -518,7 +472,6 @@ async fn dispatch(
     vault: Option<&Path>,
     reader: BufReader<TcpStream>,
     request: &HttpRequest,
-    sessions: &Sessions,
     agent: Option<&crate::AgentBridge>,
     principal: Option<&str>,
     scopes: Option<&[String]>,
@@ -526,7 +479,7 @@ async fn dispatch(
     match (request.method.as_str(), request.path.as_str()) {
         ("POST", "/mcp") => {
             handle_post(
-                engine, coord, profile, vault, reader, request, sessions, agent, principal, scopes,
+                engine, coord, profile, vault, reader, request, agent, principal, scopes,
             )
             .await
         }
@@ -539,18 +492,22 @@ async fn dispatch(
                 reader,
                 405,
                 "Method Not Allowed",
-                &[("Allow", "POST, DELETE".into())],
+                &[("Allow", "POST".into())],
                 b"GET /mcp was removed in 2026-07-28; this server does not implement subscriptions/listen",
             )
             .await
         }
-        // Legacy-only: modern requests have no session to terminate.
+        // Stateless: there is no session to terminate. A DELETE here used to
+        // revoke a session id minted by `initialize`; that era is removed.
         ("DELETE", "/mcp") => {
-            if sessions.revoke(request.session_id.as_deref()) {
-                respond(reader, 200, "OK", &[], b"").await
-            } else {
-                respond(reader, 404, "Not Found", &[], b"unknown session").await
-            }
+            respond(
+                reader,
+                405,
+                "Method Not Allowed",
+                &[("Allow", "POST".into())],
+                b"the stateless 2026-07-28 transport has no session to terminate",
+            )
+            .await
         }
         _ => respond(reader, 404, "Not Found", &[], b"only /mcp is served").await,
     }
@@ -566,7 +523,6 @@ async fn handle_post<W>(
     vault: Option<&Path>,
     writer: W,
     request: &HttpRequest,
-    sessions: &Sessions,
     agent: Option<&crate::AgentBridge>,
     principal: Option<&str>,
     scopes: Option<&[String]>,
@@ -585,8 +541,6 @@ where
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
-    let is_initialize = body_method == "initialize";
-
     // Scope enforcement sits at the transport boundary, before any dispatcher
     // or plugin hook can see the call. A refusal is a 403 naming the exact
     // scope that would allow it, so the model can ask for the smallest grant
@@ -654,8 +608,6 @@ where
             )
             .await;
     }
-    let modern = header_version.is_some() || meta_version.is_some();
-
     // The routing headers must agree with the body. This is the whole reason
     // `Mcp-Method`/`Mcp-Name` are useful — an intermediary can route without
     // parsing the body — and it is only safe if the server refuses a request
@@ -700,18 +652,45 @@ where
         }
     }
 
-    // Only the legacy era is stateful. A modern request carries everything it
-    // needs on the request, so requiring the handshake's session id of it would
-    // be exactly the 2025 statefulness the revision removed — and would lock
-    // out every migrated host. Authentication is unaffected either way: it is
-    // enforced above this function, and was never what the session id meant.
-    if !is_initialize && !modern && !sessions.validate(request.session_id.as_deref()) {
+    // Stateless: every request except the `server/discover` probe must
+    // declare the named revision, in the `MCP-Protocol-Version` header or
+    // `_meta` (they must agree, checked above). A declared but unsupported
+    // revision is refused here as well as in the dispatcher, so a header-only
+    // client cannot smuggle an unknown version past a meta-less body.
+    // Authentication is enforced above this function.
+    let declared = header_version.or(meta_version);
+    if let Some(version) = declared
+        && !crate::MODERN_PROTOCOL_VERSIONS.contains(&version)
+    {
+        return respond(
+            writer,
+            200,
+            "OK",
+            &[],
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": message.get("id").cloned().unwrap_or(Value::Null),
+                "error": {
+                    "code": crate::ERR_UNSUPPORTED_PROTOCOL_VERSION,
+                    "message": "Unsupported protocol version",
+                    "data": {
+                        "supported": crate::MODERN_PROTOCOL_VERSIONS,
+                        "requested": version,
+                    },
+                },
+            })
+            .to_string()
+            .as_bytes(),
+        )
+        .await;
+    }
+    if body_method != "server/discover" && declared.is_none() {
         return respond(
             writer,
             400,
             "Bad Request",
             &[],
-            b"missing or unknown Mcp-Session-Id; initialize first (or declare MCP-Protocol-Version for the stateless 2026-07-28 flow)",
+            b"missing MCP-Protocol-Version: declare the stateless 2026-07-28 revision (header or _meta); server/discover is the only request exempt",
         )
         .await;
     }
@@ -727,17 +706,6 @@ where
         None => return respond(writer, 202, "Accepted", &[], b"").await,
     };
 
-    if is_initialize {
-        let sid = sessions.issue();
-        return respond(
-            writer,
-            200,
-            "OK",
-            &[("Mcp-Session-Id", sid)],
-            reply.to_string().as_bytes(),
-        )
-        .await;
-    }
     respond(writer, 200, "OK", &[], reply.to_string().as_bytes()).await
 }
 
@@ -782,7 +750,6 @@ where
 
     let mut host = None;
     let mut authorization = None;
-    let mut session_id = None;
     let mut protocol_version = None;
     let mut mcp_method = None;
     let mut mcp_name = None;
@@ -796,7 +763,6 @@ where
         match name.as_str() {
             "host" => host = Some(value.to_string()),
             "authorization" => authorization = Some(value.to_string()),
-            "mcp-session-id" => session_id = Some(value.to_string()),
             "mcp-protocol-version" => protocol_version = Some(value.to_string()),
             "mcp-method" => mcp_method = Some(value.to_string()),
             "mcp-name" => mcp_name = Some(value.to_string()),
@@ -825,7 +791,6 @@ where
         path,
         host,
         authorization,
-        session_id,
         protocol_version,
         mcp_method,
         mcp_name,
@@ -1123,7 +1088,7 @@ mod tests {
 
         // B: a complete request on its own connection, answered while A is
         // still open and unfinished.
-        let body = post_body(1, "initialize");
+        let body = post_body(1, "server/discover");
         let answered = tokio::time::timeout(
             std::time::Duration::from_secs(5),
             exchange(
@@ -1171,8 +1136,8 @@ mod tests {
             &format!(
                 "POST /mcp HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer nope\r\n\
                  Content-Length: {}\r\n\r\n{}",
-                post_body(1, "initialize").len(),
-                post_body(1, "initialize")
+                post_body(1, "server/discover").len(),
+                post_body(1, "server/discover")
             ),
         )
         .await;
@@ -1191,7 +1156,7 @@ mod tests {
         assert!(out.contains("reason=\"bad_static_token\""), "{out}");
 
         // A good token still counts as an allow on the counter.
-        let ok_raw = post_body(2, "initialize");
+        let ok_raw = post_body(2, "server/discover");
         let ok = exchange(
             addr,
             &format!(
@@ -1211,8 +1176,8 @@ mod tests {
             addr,
             &format!(
                 "POST /mcp HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n{}",
-                post_body(3, "initialize").len(),
-                post_body(3, "initialize")
+                post_body(3, "server/discover").len(),
+                post_body(3, "server/discover")
             ),
         )
         .await;
@@ -1220,72 +1185,65 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn initialize_issues_session_and_later_requests_require_it() {
+    async fn stateless_discover_needs_no_version_and_everything_else_declares_it() {
         let addr = start_server(Some("tok123".into()));
 
         // Wrong token is rejected before anything else matters.
         let bad_auth = exchange(
             addr,
             &format!(
-                "POST /mcp HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer nope\r\n\
-                 Content-Length: {}\r\n\r\n{}",
-                post_body(1, "initialize").len(),
-                post_body(1, "initialize")
+                "POST /mcp HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer nope\r\nContent-Length: {}\r\n\r\n{}",
+                post_body(1, "server/discover").len(),
+                post_body(1, "server/discover")
             ),
         )
         .await;
         assert!(bad_auth.starts_with("HTTP/1.1 401"), "{bad_auth}");
 
-        let init_raw = post_body(2, "initialize");
-        let init = exchange(
+        // server/discover is the probe: no version declaration needed, and no
+        // session id is issued -- there is no session in this revision.
+        let discover_raw = post_body(2, "server/discover");
+        let discover = exchange(
             addr,
             &format!(
-                "POST /mcp HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer tok123\r\n\
-                 Content-Length: {}\r\n\r\n{init_raw}",
-                init_raw.len()
+                "POST /mcp HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer tok123\r\nContent-Length: {}\r\n\r\n{discover_raw}",
+                discover_raw.len()
             ),
         )
         .await;
-        assert!(init.starts_with("HTTP/1.1 200"), "{init}");
-        let session_line = init
-            .lines()
-            .find(|l| l.to_ascii_lowercase().starts_with("mcp-session-id:"))
-            .expect("initialize must mint a session")
-            .to_string();
-        let sid = session_line.split_once(':').unwrap().1.trim().to_string();
-        let body = init.split("\r\n\r\n").nth(1).unwrap();
+        assert!(discover.starts_with("HTTP/1.1 200"), "{discover}");
+        assert!(
+            !discover.to_ascii_lowercase().contains("mcp-session-id:"),
+            "stateless: no session id may be issued: {discover}"
+        );
+        let body = discover.split("\r\n\r\n").nth(1).unwrap();
         let parsed: Value = serde_json::from_str(body).unwrap();
-        assert_eq!(parsed["result"]["protocolVersion"], "2024-11-05");
-        // Asserted as *explicit false* rather than as an empty object. The server used to omit
-        // these flags, which is indistinguishable from "not yet implemented" and leaves a host to
-        // guess; claiming `false` is a statement we can be held to. Pinning the exact shape here
-        // is what stops a later change from quietly claiming `listChanged: true` without a
-        // change detector behind it.
+        assert_eq!(parsed["result"]["protocolVersions"], json!(["2026-07-28"]));
+        // Pinning the exact shape stops a later change from quietly claiming
+        // listChanged: true without a change detector behind it.
         assert_eq!(
             parsed["result"]["capabilities"]["resources"],
             json!({"listChanged": false, "subscribe": false})
         );
 
-        // Without the session id: rejected.
-        let no_session = exchange(
+        // Any other request without the named version is refused.
+        let no_version = exchange(
             addr,
             &format!(
-                "POST /mcp HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer tok123\r\n\
-                 Content-Length: {}\r\n\r\n{}",
+                "POST /mcp HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer tok123\r\nContent-Length: {}\r\n\r\n{}",
                 post_body(3, "tools/list").len(),
                 post_body(3, "tools/list")
             ),
         )
         .await;
-        assert!(no_session.starts_with("HTTP/1.1 400"), "{no_session}");
+        assert!(no_version.starts_with("HTTP/1.1 400"), "{no_version}");
 
-        // With it: full tool surface answers over HTTP.
+        // Declaring 2026-07-28 in the header serves the full tool surface.
         let list_raw = post_body(4, "tools/list");
         let listed = exchange(
             addr,
             &format!(
-                "POST /mcp HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer tok123\r\n\
-                 Mcp-Session-Id: {sid}\r\nContent-Length: {}\r\n\r\n{list_raw}",
+                "POST /mcp HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer tok123\r\nMCP-Protocol-Version: 2026-07-28\r\nContent-Length: {}\r\n\r\n{list_raw}",
                 list_raw.len()
             ),
         )
@@ -1293,7 +1251,22 @@ mod tests {
         assert!(listed.starts_with("HTTP/1.1 200"), "{listed}");
         let listed_body: Value =
             serde_json::from_str(listed.split("\r\n\r\n").nth(1).unwrap()).unwrap();
-        assert_eq!(listed_body["result"]["tools"].as_array().unwrap().len(), 51);
+        assert_eq!(listed_body["result"]["tools"].as_array().unwrap().len(), 47);
+
+        // The legacy handshake is not served even with a valid version.
+        let legacy_raw = post_body(5, "initialize");
+        let legacy = exchange(
+            addr,
+            &format!(
+                "POST /mcp HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer tok123\r\nMCP-Protocol-Version: 2026-07-28\r\nContent-Length: {}\r\n\r\n{legacy_raw}",
+                legacy_raw.len()
+            ),
+        )
+        .await;
+        assert!(legacy.starts_with("HTTP/1.1 200"), "{legacy}");
+        let legacy_body: Value =
+            serde_json::from_str(legacy.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(legacy_body["error"]["code"], -32601);
 
         // GET is refused per spec when no SSE stream is offered.
         let get = exchange(
@@ -1303,34 +1276,20 @@ mod tests {
         .await;
         assert!(get.starts_with("HTTP/1.1 405"), "{get}");
 
-        // DELETE terminates the session; a follow-up call fails.
+        // DELETE: there is no session to terminate in a stateless transport.
         let del = exchange(
             addr,
-            &format!(
-                "DELETE /mcp HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer tok123\r\n\
-                 Mcp-Session-Id: {sid}\r\nContent-Length: 0\r\n\r\n"
-            ),
+            "DELETE /mcp HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer tok123\r\nContent-Length: 0\r\n\r\n",
         )
         .await;
-        assert!(del.starts_with("HTTP/1.1 200"), "{del}");
-        let after = exchange(
-            addr,
-            &format!(
-                "POST /mcp HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer tok123\r\n\
-                 Mcp-Session-Id: {sid}\r\nContent-Length: {}\r\n\r\n{}",
-                post_body(5, "tools/list").len(),
-                post_body(5, "tools/list")
-            ),
-        )
-        .await;
-        assert!(after.starts_with("HTTP/1.1 400"), "{after}");
+        assert!(del.starts_with("HTTP/1.1 405"), "{del}");
     }
 
     #[tokio::test]
     async fn open_loopback_mode_serves_without_token_and_notifications_get_202() {
         let addr = start_server(None);
 
-        // A notification carries no id; without a session it is rejected.
+        // A notification carries no id and declares no version: refused.
         let notification = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
         let resp = exchange(
             addr,
@@ -1342,10 +1301,10 @@ mod tests {
         .await;
         assert!(
             resp.starts_with("HTTP/1.1 400"),
-            "notification without session must be rejected: {resp}"
+            "notification without a declared version must be rejected: {resp}"
         );
 
-        let init = r#"{"jsonrpc":"2.0","id":9,"method":"initialize","params":{}}"#;
+        let init = r#"{"jsonrpc":"2.0","id":9,"method":"server/discover","params":{}}"#;
         let resp = exchange(
             addr,
             &format!(
@@ -1355,21 +1314,11 @@ mod tests {
         )
         .await;
         assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
-        let sid = resp
-            .lines()
-            .find(|l| l.to_ascii_lowercase().starts_with("mcp-session-id:"))
-            .unwrap()
-            .split_once(':')
-            .unwrap()
-            .1
-            .trim()
-            .to_string();
-
         let notification = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
         let resp = exchange(
             addr,
             &format!(
-                "POST /mcp HTTP/1.1\r\nHost: localhost\r\nMcp-Session-Id: {sid}\r\n\
+                "POST /mcp HTTP/1.1\r\nHost: localhost\r\nMCP-Protocol-Version: 2026-07-28\r\n\
                  Content-Length: {}\r\n\r\n{notification}",
                 notification.len()
             ),
@@ -1381,7 +1330,7 @@ mod tests {
         let resp = exchange(
             addr,
             &format!(
-                "POST /mcp HTTP/1.1\r\nHost: localhost\r\nMcp-Session-Id: {sid}\r\n\
+                "POST /mcp HTTP/1.1\r\nHost: localhost\r\nMCP-Protocol-Version: 2026-07-28\r\n\
                  Content-Length: {}\r\n\r\n{garbage}",
                 garbage.len()
             ),
@@ -1440,9 +1389,9 @@ mod tests {
         let api = crate::agent::tests::spawn_fake_api().await;
         let addr = start_agent_server(Some("agent-tok".into()), api);
 
-        // Initialize with the bearer token; the Agent profile lists exactly
-        // the five agent tools.
-        let init_body = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#;
+        // Discover with the bearer token; the Agent profile lists exactly
+        // the agent tools. Later requests declare the named version.
+        let init_body = r#"{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{}}"#;
         let init = exchange(
             addr,
             &format!(
@@ -1453,22 +1402,12 @@ mod tests {
         )
         .await;
         assert!(init.starts_with("HTTP/1.1 200"), "{init}");
-        let sid = init
-            .lines()
-            .find(|l| l.to_ascii_lowercase().starts_with("mcp-session-id:"))
-            .expect("session header")
-            .split_once(':')
-            .unwrap()
-            .1
-            .trim()
-            .to_string();
-
         let list_body = r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#;
         let listed = exchange(
             addr,
             &format!(
                 "POST /mcp HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer agent-tok\r\n\
-                 Mcp-Session-Id: {sid}\r\nContent-Length: {}\r\n\r\n{list_body}",
+                 MCP-Protocol-Version: 2026-07-28\r\nContent-Length: {}\r\n\r\n{list_body}",
                 list_body.len()
             ),
         )
@@ -1489,7 +1428,7 @@ mod tests {
             let resp = exchange(
                 addr,
                 &format!(
-                    "POST /mcp HTTP/1.1\r\nHost: localhost\r\n{auth}Mcp-Session-Id: {sid}\r\n\
+                    "POST /mcp HTTP/1.1\r\nHost: localhost\r\n{auth}MCP-Protocol-Version: 2026-07-28\r\n\
                      Content-Length: {}\r\n\r\n{create_body}",
                     create_body.len()
                 ),
@@ -1503,7 +1442,7 @@ mod tests {
             addr,
             &format!(
                 "POST /mcp HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer agent-tok\r\n\
-                 Mcp-Session-Id: {sid}\r\nContent-Length: {}\r\n\r\n{create_body}",
+                 MCP-Protocol-Version: 2026-07-28\r\nContent-Length: {}\r\n\r\n{create_body}",
                 create_body.len()
             ),
         )
@@ -1582,7 +1521,7 @@ mod tests {
     /// Legacy clients keep the handshake *and* the session requirement. Adding
     /// the modern flow must not quietly make the server stateless for everyone.
     #[tokio::test]
-    async fn legacy_request_without_a_session_is_still_refused() {
+    async fn request_without_the_named_version_is_refused() {
         let addr = start_server(Some("tok123".into()));
         let body = post_body(1, "tools/list");
         let resp = exchange(
@@ -1595,7 +1534,7 @@ mod tests {
         )
         .await;
         assert!(resp.starts_with("HTTP/1.1 400"), "{resp}");
-        assert!(resp.contains("Mcp-Session-Id"), "{resp}");
+        assert!(resp.contains("MCP-Protocol-Version"), "{resp}");
     }
 
     /// `GET /mcp` was removed by the revision, and `subscriptions/listen` is not
@@ -1665,7 +1604,7 @@ mod tests {
     #[tokio::test]
     async fn unauthorized_requests_are_told_where_to_get_a_token() {
         let addr = start_server(Some("tok123".into()));
-        let body = post_body(1, "initialize");
+        let body = post_body(1, "server/discover");
 
         let rejected = exchange(
             addr,

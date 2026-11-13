@@ -18,6 +18,82 @@ use serde_json::Value;
 
 use crate::Profile;
 
+pub const KG_PRIMARY: [&str; 11] = [
+    "kg_index",
+    "kg_search",
+    "kg_def",
+    "kg_refs",
+    "kg_impact",
+    "kg_trace",
+    "kg_explore",
+    "kg_status",
+    "kg_changes",
+    "kg_callees",
+    "kg_dead",
+];
+
+/// The `kg_*` tools this profile can reach only through `kg_more`.
+///
+/// Read from the live catalogue rather than a second list: a tool added to
+/// `catalog.rs` appears here the moment it exists, which is what keeps the cap
+/// from silently becoming a deletion.
+pub fn kg_more_names(profile: Profile) -> Vec<String> {
+    let mut names: Vec<String> = crate::tool_definitions()
+        .iter()
+        .filter_map(|definition| definition["name"].as_str().map(str::to_owned))
+        .filter(|name| name.starts_with("kg_") && !KG_PRIMARY.contains(&name.as_str()))
+        .filter(|name| profile.allows(name))
+        .collect();
+    names.sort();
+    names
+}
+
+/// The tools this profile reaches only through `kg_more` — empty when the
+/// profile's KG set already fits.
+///
+/// One function answers both "what is hidden" and "is the hatch advertised",
+/// because two answers computed separately is how a host ends up told there is
+/// a hatch with nothing behind it.
+pub fn hidden_kg_tools(profile: Profile) -> Vec<String> {
+    let permitted = crate::tool_definitions()
+        .iter()
+        .filter_map(|definition| definition["name"].as_str())
+        .filter(|name| name.starts_with("kg_") && profile.allows(name))
+        .count();
+    if permitted <= 12 {
+        return Vec::new();
+    }
+    kg_more_names(profile)
+}
+
+/// The `kg_more` definition, carrying the names it can reach.
+///
+/// The list is in the description rather than hidden behind a first call: a
+/// model that has to probe to learn what exists pays a round trip for something
+/// this server already knows.
+pub fn kg_more_definition(hidden: &[String]) -> Value {
+    let listed = hidden.join(", ");
+    crate::tool(
+        "kg_more",
+        &format!(
+            "Reach the code-graph tools that are not advertised directly: {listed}.              Call with no `tool` to list them again. `args` are that tool's own arguments,              e.g. {{\"tool\":\"kg_coverage\",\"args\":{{\"workspace\":\"/repo\"}}}}."
+        ),
+        &[
+            crate::opt(
+                "tool",
+                "string",
+                "The kg_* tool to run; omit to list the reachable names",
+            ),
+            crate::opt(
+                "args",
+                "object",
+                "That tool's arguments, exactly as you would pass them directly",
+            ),
+        ],
+        crate::READ_ONLY,
+    )
+}
+
 /// The tools a profile advertises: the base definitions **and** the
 /// agent-utility family, filtered by [`Profile::allows`] (which reads
 /// `TOOL_PROFILES`), plus the agent-session family when the profile is
@@ -29,6 +105,14 @@ use crate::Profile;
 /// `Profile::Memory` could not reach the temporal quartet. It is now filtered
 /// like every other tool, and Full's surface is derived rather than
 /// special-cased.
+/// The KG tools a profile advertises directly.
+///
+/// The family is nineteen verbs; a host pays for every schema in its prompt on
+/// every turn, and eight of them are questions an agent asks once a session at
+/// most. These eleven stay first-class — the ones an agent reaches for without
+/// knowing the repository — and `kg_more` reaches the rest by name. The cap is
+/// the plan's W7-13 limit and `every_profile_advertises_at_most_twelve_kg_tools`
+/// holds it; adding a twelfth primary means moving one out, not growing the list.
 pub fn visible_tools(profile: Profile) -> Vec<Value> {
     let mut tools: Vec<Value> = crate::tool_definitions()
         .into_iter()
@@ -57,6 +141,32 @@ pub fn visible_tools(profile: Profile) -> Vec<Value> {
     // list and the table from drifting apart.
     if profile == Profile::Agent {
         tools.extend(crate::agent_tool_definitions());
+    }
+    // The KG cap: everything outside the primary eleven is reached by name
+    // through `kg_more`, and the escape hatch is advertised only when it has
+    // something to reach.
+    // A narrow profile's kg set is curated to fit already, so the cap only
+    // applies where the family actually overflows: trimming `memory` would take
+    // away the tools that profile exists to check its own index with.
+    let hidden = hidden_kg_tools(profile);
+    if !hidden.is_empty() {
+        tools.retain(|tool| {
+            tool["name"]
+                .as_str()
+                .map(|name| !name.starts_with("kg_") || KG_PRIMARY.contains(&name))
+                .unwrap_or(true)
+        });
+        if !hidden.is_empty() {
+            tools.push(kg_more_definition(&hidden));
+        }
+        // Re-sorted after the push: `tools/list` must stay alphabetical or a
+        // host's prompt cache misses on every insertion.
+        tools.sort_by(|a, b| {
+            a["name"]
+                .as_str()
+                .unwrap_or_default()
+                .cmp(b["name"].as_str().unwrap_or_default())
+        });
     }
     tools
 }

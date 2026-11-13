@@ -57,4 +57,12 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # that looks identical. Already in the graph via five other members, so this adds no
 # new third-party code to the build. (This workspace has no `[workspace.dependencies]`
 # table, so the version is declared here, as every other member does.)
+# ACP HTTP server requires axum + tower_http + tracing
+axum = { version = "0.7", features = ["json"] }
+tracing = "0.1"
+
+[dev-dependencies]
+# The evidence harness (`eval.rs`) hashes published datasets with SHA-256.
 sha2 = "0.10"
+
+# SHA-256 of the dataset a published number was measured on. Tier 3 asks for

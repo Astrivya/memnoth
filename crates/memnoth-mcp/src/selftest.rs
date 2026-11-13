@@ -1,4 +1,4 @@
-//! `memnoth-mcp --selftest`: the handshake, without a host.
+//! `memnoth-mcp --selftest`: the wire, without a host.
 //!
 //! Split out of `lib.rs` to keep that file inside the module size budget; it is a self-contained
 //! probe, and nothing else in the crate calls it.
@@ -28,7 +28,7 @@ pub struct Probe {
 pub async fn run(db_path: PathBuf) -> Result<()> {
     let probe = probe(db_path).await?;
     println!(
-        "memnoth-mcp selftest: initialize, tools/list, resources/list, prompts/list all answered \
+        "memnoth-mcp selftest: server/discover, tools/list, resources/list, prompts/list all answered \
          — {} tools on profile '{}'",
         probe.tools, probe.profile
     );
@@ -53,10 +53,12 @@ pub async fn probe(db_path: PathBuf) -> Result<Probe> {
 
     let script = [
         json!({
-            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "jsonrpc": "2.0", "id": 1, "method": "server/discover",
             "params": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities": {},
+                },
                 "clientInfo": {"name": "selftest", "version": env!("CARGO_PKG_VERSION")}
             }
         }),
