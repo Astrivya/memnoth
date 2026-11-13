@@ -4,6 +4,7 @@
 //! JSON half of each answer is the report struct itself, so a rendering that
 //! drops a fact cannot hide it from a script.
 
+use crate::context::{McpServer, version_line};
 use crate::output::{ellipsize, rfc3339};
 
 use super::{
@@ -23,6 +24,14 @@ pub fn render_doctor(report: &DoctorReport) -> String {
     match &report.server {
         Some(path) => {
             text.push_str(&format!("  server     {path}\n"));
+            // The path says which server answered; the version says whether it
+            // is this CLI's. A leftover install answers perfectly and still
+            // advertises the older surface, so the probe is part of the report.
+            let probed = McpServer::version_at(std::path::Path::new(path));
+            text.push_str(&format!(
+                "  version    {}\n",
+                version_line(probed.as_deref())
+            ));
             let verdict = match report.server_ok {
                 Some(true) => "answers",
                 Some(false) => "FAILED",

@@ -15,8 +15,16 @@
 //! [`call`] is the escape hatch: every tool the server advertises is reachable
 //! from a shell, which is what keeps the CLI from needing a second, smaller
 //! implementation of the same questions.
+//! ## Release note — local, read-only memory add-on
+//!
+//! The CLI ships a local, read-only memory add-on: the MCP server runs in
+//! `MEMNOTH_MCP_READ_ONLY=1` mode, so hosts can query the graph and memory
+//! without any tool being able to write to it. `memnoth mcp add` registers
+//! clients with that flag set, and `memnoth mcp doctor` reports whether the
+//! registered server is in read-only mode. The add-on is local only — it talks
+//! to the on-disk graph and never reaches the cloud control plane.
 
-mod clients;
+pub(crate) mod clients;
 mod render;
 
 use std::collections::BTreeMap;
@@ -90,7 +98,7 @@ pub struct AddReport {
     pub results: Vec<ClientStatus>,
     /// Manual registrations for clients this build does not write.
     pub snippets: Vec<String>,
-    /// Read-back and initialize proof for what was written. `None` on a dry run.
+    /// Read-back and server/discover proof for what was written. `None` on a dry run.
     pub verification: Option<VerificationReport>,
 }
 
@@ -103,7 +111,7 @@ pub struct ClientVerification {
     pub path: String,
     /// Whether the `memnoth` entry is present and points at the requested URL.
     pub config_ok: bool,
-    /// Whether the server answered `initialize` for this run.
+    /// Whether the server answered `server/discover` for this run.
     pub initialized: bool,
     /// The status detail from the read-back.
     pub detail: String,
@@ -112,9 +120,9 @@ pub struct ClientVerification {
 /// Proof that `mcp add` wrote something a server actually answers.
 #[derive(Debug, Clone, Serialize)]
 pub struct VerificationReport {
-    /// Config read-back and initialize both succeeded.
+    /// Config read-back and server/discover both succeeded.
     pub ok: bool,
-    /// Whether the server completed the handshake.
+    /// Whether the server answered server/discover.
     pub initialized: bool,
     /// The server binary used, when one was found.
     pub server: Option<String>,
@@ -154,7 +162,7 @@ pub struct TestReport {
     /// Whether the real tool call succeeded.
     pub call_ok: bool,
     /// The tool that was called; empty when the test never got far enough to
-    /// choose one (no binary, failed handshake, failed `tools/list`).
+    /// choose one (no binary, failed server/discover, failed `tools/list`).
     pub tool_called: String,
     /// The call result or error.
     pub call_result: Value,
@@ -272,7 +280,13 @@ pub fn serve(
     if profile == Some(Profile::Agent) && !http {
         bail!("the agent profile needs the HTTP transport; use `memnoth mcp serve --http`");
     }
-    let db = db.unwrap_or_else(|| ctx.vault_path.clone());
+    // One vault, named here, resolved to an absolute path once. The child is
+    // started in `ctx.root`, so a relative `--db` would otherwise name a
+    // different file than the same `--db` meant in this shell. There is no
+    // fallback to a home-wide store: `ctx.vault_path` is this invocation's
+    // resolved vault, which is already the explicit `--vault`, `MEMNOTH_VAULT`,
+    // or the configured path.
+    let db = absolute_vault(db.unwrap_or_else(|| ctx.vault_path.clone()))?;
 
     let mut command = std::process::Command::new(&binary);
     command.arg("--db").arg(&db);
@@ -302,6 +316,28 @@ pub fn serve(
         }
     }
     Ok(())
+}
+
+/// One vault path, absolute and named, or a refusal.
+///
+/// The server is scoped to a single explicit vault (W3-11). Both the path a
+/// registration writes and the path a spawned server is handed go through here,
+/// so a relative path cannot resolve against two different working directories,
+/// and a directory cannot be registered as if it were a vault file.
+fn absolute_vault(path: PathBuf) -> Result<PathBuf> {
+    if path.as_os_str().to_string_lossy().trim().is_empty() {
+        bail!("no vault named; pass `--db <vault>` or let the CLI resolve one");
+    }
+    let absolute = std::path::absolute(&path)
+        .with_context(|| format!("cannot resolve the vault path {}", path.display()))?;
+    if absolute.is_dir() {
+        bail!(
+            "the vault path {} is a directory; name the vault file itself (for example {})",
+            absolute.display(),
+            absolute.join("vault.db").display()
+        );
+    }
+    Ok(absolute)
 }
 
 /// `memnoth mcp doctor`.
@@ -355,12 +391,13 @@ pub fn doctor(ctx: &AppContext) -> Result<DoctorReport> {
     })
 }
 
-/// Everything one `mcp add` invocation carries.
 pub struct AddOptions<'a> {
     pub client_names: &'a [String],
     pub profile: Option<Profile>,
     pub url: Option<&'a str>,
     pub token: Option<&'a str>,
+    pub db: Option<PathBuf>,
+    pub team: Option<&'a str>,
     pub local: bool,
     pub allow_writes: bool,
     pub dry_run: bool,
@@ -374,6 +411,8 @@ pub fn add(ctx: &AppContext, options: AddOptions<'_>) -> Result<AddReport> {
         url,
         token,
         local,
+        db,
+        team,
         allow_writes,
         dry_run,
     } = options;
@@ -389,40 +428,38 @@ pub fn add(ctx: &AppContext, options: AddOptions<'_>) -> Result<AddReport> {
         let command = std::env::current_exe().context(
             "cannot locate this `memnoth` binary; a local MCP registration needs its path",
         )?;
-        let vault = std::path::absolute(&ctx.vault_path).unwrap_or_else(|_| ctx.vault_path.clone());
-        let mut env = BTreeMap::new();
-        env.insert(
-            "MEMNOTH_MCP_WORKSPACE".to_string(),
-            ctx.root.display().to_string(),
-        );
-        env.insert(
-            "MEMNOTH_MCP_PROFILE".to_string(),
-            profile.name().to_string(),
-        );
-        // The default is a memory reader, not a memory writer. A host that
-        // wants to propose beliefs has to say so at registration time.
-        env.insert(
-            "MEMNOTH_MCP_READ_ONLY".to_string(),
-            if allow_writes { "0" } else { "1" }.to_string(),
-        );
+        // --team names a shared team vault: Claude Code, Cursor, and Codex all
+        // read the same vault file under that team's namespace. Without --team
+        // the registration is the personal vault.
+        let vault = match team {
+            Some(t) => {
+                let team_dir = ctx.home.join("teams").join(t);
+                let vault_path = team_dir.join("vault.db");
+                std::fs::create_dir_all(&team_dir).with_context(|| {
+                    format!("cannot create team vault dir {}", team_dir.display())
+                })?;
+                absolute_vault(vault_path)?
+            }
+            None => absolute_vault(db.unwrap_or_else(|| ctx.vault_path.clone()))?,
+        };
+        let command_str = command.to_string_lossy().to_string();
+        let vault_str = vault.to_string_lossy().to_string();
         let entry = Entry::stdio(
-            command.display().to_string(),
+            command_str.clone(),
             vec![
                 "mcp".to_string(),
                 "serve".to_string(),
-                "--profile".to_string(),
-                profile.name().to_string(),
                 "--db".to_string(),
-                vault.display().to_string(),
+                vault_str.clone(),
             ],
-            env,
+            std::collections::BTreeMap::new(),
         );
         (
             String::new(),
             None,
             entry,
-            Some(command.display().to_string()),
-            Some(vault.display().to_string()),
+            Some(command_str),
+            Some(vault_str),
         )
     } else {
         let url = match url {
@@ -505,7 +542,7 @@ pub fn add(ctx: &AppContext, options: AddOptions<'_>) -> Result<AddReport> {
     }
 
     // Writing a config is not proof that a client can use it. Read every entry
-    // back and ask the server to complete the same initialize handshake a host
+    // back and ask the server to answer the same server/discover probe a host
     // performs, so `add` cannot end on a green line over a broken binary.
     let verification = if !dry_run && wrote_any {
         Some(verify_written(
@@ -557,7 +594,7 @@ struct ProbeTarget<'a> {
     read_only: bool,
 }
 
-/// Read back what was written and prove the server answers `initialize`.
+/// Read back what was written and prove the server answers `server/discover`.
 fn verify_written(
     ctx: &AppContext,
     home: &Path,
@@ -618,7 +655,7 @@ fn verify_written_at(
             Ok(_) => (
                 true,
                 Some(binary.display().to_string()),
-                "initialize answered".to_string(),
+                "server/discover answered".to_string(),
             ),
             Err(error) => (
                 false,
@@ -643,7 +680,7 @@ fn verify_written_at(
     }
 }
 
-/// The same stdio handshake `mcp test` uses, with the binary and paths named.
+/// The same stdio server/discover probe `mcp test` uses, with the binary and paths named.
 fn connect_binary(
     binary: &Path,
     root: &Path,
@@ -798,6 +835,12 @@ pub fn call(ctx: &AppContext, tool: &str, args_json: &str, profile: Profile) -> 
         "MEMNOTH_MCP_PROFILE".to_string(),
         profile.name().to_string(),
     );
+    // A vault registered read-only must stay read-only through this diagnostic
+    // path too: the server reads the flag from its environment, so a call that
+    // dropped it could write to a vault the user marked read-only.
+    if let Ok(read_only) = std::env::var("MEMNOTH_MCP_READ_ONLY") {
+        env.insert("MEMNOTH_MCP_READ_ONLY".to_string(), read_only);
+    }
     // A `kg_*` tool chooses its workspace from `MEMNOTH_MCP_WORKSPACE` and then
     // the server's cwd, not from `--root`, so a call made against one checkout
     // silently read another (or none) and reported "no code graph". The CLI
@@ -806,7 +849,8 @@ pub fn call(ctx: &AppContext, tool: &str, args_json: &str, profile: Profile) -> 
         "MEMNOTH_MCP_WORKSPACE".to_string(),
         ctx.root.display().to_string(),
     );
-    let args = vec!["--db".to_string(), ctx.vault_path.display().to_string()];
+    let vault = absolute_vault(ctx.vault_path.clone())?;
+    let args = vec!["--db".to_string(), vault.display().to_string()];
     let transport = StdioTransport::spawn(&binary.display().to_string(), &args, &env)
         .with_context(|| format!("cannot start the MCP server at {}", binary.display()))?;
     let mut client = Client::connect(Box::new(transport), CALL_TIMEOUT)?;
@@ -842,10 +886,13 @@ fn run_selftest(
     ctx: &AppContext,
     profile: Profile,
 ) -> Result<SelftestReport> {
+    // The probe runs in `ctx.root`; hand it the absolute vault for the same
+    // reason `serve` does.
+    let db = absolute_vault(ctx.vault_path.clone())?;
     let output = std::process::Command::new(binary)
         .arg("--selftest")
         .arg("--db")
-        .arg(&ctx.vault_path)
+        .arg(&db)
         .current_dir(&ctx.root)
         .env("MEMNOTH_MCP_WORKSPACE", ctx.root.display().to_string())
         .env("MEMNOTH_MCP_PROFILE", profile.name())
@@ -1086,7 +1133,7 @@ pub fn test(ctx: &AppContext, tool: Option<&str>, profile: Option<Profile>) -> R
 
     // The probe talks to the same server process a host would: stdio, the
     // vault, and the profile under test. `Client::connect` performs the
-    // handshake, so a failed initialize is the first honest failure.
+    // server/discover probe, so a failed discover is the first honest failure.
     let Some(binary) = ctx.mcp_binary() else {
         return Ok(TestReport {
             tools_list_ok: false,
@@ -1116,7 +1163,8 @@ pub fn test(ctx: &AppContext, tool: Option<&str>, profile: Option<Profile>) -> R
     if let Some(token) = token {
         env.insert("MEMNOTH_MCP_TOKEN".to_string(), token);
     }
-    let args = vec!["--db".to_string(), ctx.vault_path.display().to_string()];
+    let vault = absolute_vault(ctx.vault_path.clone())?;
+    let args = vec!["--db".to_string(), vault.display().to_string()];
 
     let transport = match StdioTransport::spawn(&binary.display().to_string(), &args, &env) {
         Ok(transport) => transport,
@@ -1268,6 +1316,8 @@ pub fn add_client(ctx: &AppContext, args: &crate::cli::McpCommand) -> Result<Add
         url,
         token,
         local,
+        db,
+        team,
         allow_writes,
         dry_run,
     } = args
@@ -1281,6 +1331,8 @@ pub fn add_client(ctx: &AppContext, args: &crate::cli::McpCommand) -> Result<Add
                 url: url.as_deref(),
                 token: token.as_deref(),
                 local: *local,
+                db: db.clone(),
+                team: team.as_deref(),
                 allow_writes: *allow_writes,
                 dry_run: *dry_run,
             },
@@ -1562,6 +1614,60 @@ mod tests {
         assert!(!report.clients[0].initialized);
         assert!(!report.initialized);
         assert!(!report.detail.is_empty());
+    }
+
+    /// W11-02: `mcp add --team <name>` gives every host the same shared
+    /// vault. The registration is dry-run here — it must resolve the path and
+    /// create the dir without touching any host's real config.
+    #[test]
+    fn add_with_a_team_names_the_shared_vault_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let ctx = crate::context::AppContext {
+            root: dir.path().to_path_buf(),
+            home: home.clone(),
+            vault_path: home.join("vault.db"),
+            namespace: "default".to_string(),
+            graph_path: home.join("graph.db"),
+            sessions_dir: home.join("sessions"),
+            config_path: home.join("config.toml"),
+            config: Default::default(),
+            json: false,
+            quiet: true,
+            exe_path: std::path::PathBuf::from("memnoth"),
+        };
+        let report = add(
+            &ctx,
+            AddOptions {
+                client_names: &["cursor".to_string()],
+                profile: None,
+                url: None,
+                token: None,
+                local: true,
+                db: None,
+                team: Some("acme"),
+                allow_writes: false,
+                dry_run: true,
+            },
+        )
+        .unwrap();
+        let vault = report.vault.expect("a local registration names its vault");
+        let team_vault = home.join("teams").join("acme").join("vault.db");
+        assert_eq!(
+            vault,
+            team_vault.to_string_lossy().to_string(),
+            "--team must resolve to the shared team vault, not the personal one"
+        );
+        assert!(
+            home.join("teams").join("acme").is_dir(),
+            "the team vault dir must exist for the hosts to share"
+        );
+        assert!(
+            report.results.iter().any(|row| row.ok),
+            "the dry run must succeed for the named client: {:?}",
+            report.results
+        );
     }
 
     #[test]
