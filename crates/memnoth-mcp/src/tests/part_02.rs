@@ -549,7 +549,10 @@ fn mem_search_relaxes_a_prose_question_instead_of_returning_nothing() {
         now,
     )
     .unwrap();
-    for i in 0..30 {
+    // `instance-007` is the target above; the competing fixture must not try to
+    // insert the same name twice, or the second insert hits the vault's unique
+    // constraint before the search under test ever runs.
+    for i in (0..30).filter(|i| *i != 7) {
         let other = e
             .add_entity(
                 EntityKind::Other,

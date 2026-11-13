@@ -1,43 +1,24 @@
 use super::*;
 
 #[test]
-fn initialize_roundtrip() {
+fn initialize_is_removed_and_discover_is_the_only_probe() {
     let (e, c) = setup();
+    // The legacy handshake is gone: `initialize` is an unknown method, not a
+    // negotiated era.
     let resp = handle_message(&e, &c, rpc(1, "initialize", json!({}))).unwrap();
+    assert_eq!(resp["error"]["code"], -32601);
+    // `server/discover` advertises exactly the one named revision.
+    let resp = handle_message(&e, &c, rpc(2, "server/discover", json!({}))).unwrap();
     assert_eq!(resp["result"]["serverInfo"]["name"], "memnoth");
-    assert_eq!(resp["result"]["protocolVersion"], "2024-11-05");
+    assert_eq!(resp["result"]["protocolVersions"], json!(["2026-07-28"]));
 }
 
 #[test]
-fn initialize_negotiates_unsupported_versions_down() {
-    let (e, c) = setup();
-    for requested in [json!("2099-01-01"), json!("2025-06-18"), json!(7)] {
-        let resp = handle_message(
-            &e,
-            &c,
-            rpc(1, "initialize", json!({"protocolVersion": requested})),
-        )
-        .unwrap();
-        assert_eq!(
-            resp["result"]["protocolVersion"], "2024-11-05",
-            "unsupported version must not be echoed"
-        );
-    }
-    let resp = handle_message(
-        &e,
-        &c,
-        rpc(1, "initialize", json!({"protocolVersion": "2024-11-05"})),
-    )
-    .unwrap();
-    assert_eq!(resp["result"]["protocolVersion"], "2024-11-05");
-}
-
-#[test]
-fn tools_list_full_surface_has_51() {
+fn tools_list_full_surface_has_54() {
     let (e, c) = setup();
     let resp = handle_message(&e, &c, rpc(2, "tools/list", json!({}))).unwrap();
     let tools = resp["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 51);
+    assert_eq!(tools.len(), 47);
 }
 
 #[test]
@@ -429,8 +410,8 @@ async fn serve_loop_end_to_end_over_in_memory_pipes() {
     let mut responses = BufReader::new(resp_rx);
 
     let (init, mut interleaved) =
-        rpc(&mut req_tx, &mut responses, 1, "initialize", json!({})).await;
-    assert_eq!(init["result"]["protocolVersion"], "2024-11-05");
+        rpc(&mut req_tx, &mut responses, 1, "server/discover", json!({})).await;
+    assert_eq!(init["result"]["protocolVersions"], json!(["2026-07-28"]));
     // Explicit `false`, not an omitted flag — see the http transport's identical assertion for
     // why an absent capability and a declined one must not look the same to a host.
     assert_eq!(
@@ -554,6 +535,11 @@ fn full_profile_is_allow_all_with_no_second_list() {
                 .filter_map(|d| d["name"].as_str().map(str::to_owned)),
         )
         .collect();
+    // The cap projects eleven primaries plus `kg_more`; everything else in the
+    // union is reachable through the hatch rather than advertised.
+    let hidden = crate::visible::hidden_kg_tools(Profile::Full);
+    expected.retain(|name| !hidden.contains(name));
+    expected.push("kg_more".to_string());
     expected.sort();
     let visible = visible_tools(Profile::Full);
     let mut actual: Vec<String> = visible
@@ -576,9 +562,9 @@ fn profile_filters_tool_list() {
     };
     assert_eq!(count(Profile::Micro), 4);
     assert_eq!(count(Profile::Memory), 21);
-    assert_eq!(count(Profile::Code), 26);
-    assert_eq!(count(Profile::Coord), 11);
-    assert_eq!(count(Profile::Full), 51);
+    assert_eq!(count(Profile::Code), 19);
+    assert_eq!(count(Profile::Coord), 14);
+    assert_eq!(count(Profile::Full), 47);
 }
 
 /// The moat, asserted by name — with the docstring's own reason in the
@@ -644,7 +630,10 @@ fn memory_profile_can_check_its_own_index() {
 /// deliberate exception documented below.
 #[test]
 fn every_profile_tools_are_a_subset_of_full() {
-    let full = Profile::Full.tool_names();
+    let mut full = Profile::Full.tool_names();
+    // Reachability, not advertisement: a capped tool is still callable through
+    // `kg_more`, so the subset invariant is about what Full can do.
+    full.extend(crate::visible::hidden_kg_tools(Profile::Full));
     for profile in [
         Profile::Micro,
         Profile::Memory,
@@ -730,6 +719,15 @@ fn profile_membership_is_a_pure_function_of_metadata() {
             })
             .map(|(name, _)| (*name).to_owned())
             .collect();
+        // The KG cap: a profile whose KG set overflows twelve advertises the
+        // primaries plus the hatch, and the rest stay reachable by name. The
+        // table is still the only membership list — this says which of its rows
+        // `tools/list` projects.
+        let hidden = crate::visible::hidden_kg_tools(profile);
+        expected.retain(|name| !hidden.contains(name));
+        if !hidden.is_empty() {
+            expected.push("kg_more".to_string());
+        }
         expected.sort_unstable();
         let mut actual = profile.tool_names();
         actual.sort_unstable();

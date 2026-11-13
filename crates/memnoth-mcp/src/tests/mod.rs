@@ -135,26 +135,36 @@ fn wait_for_task(e: &MemoryEngine, c: &Coord, task_id: &str) -> Value {
 /// The subset of JSON Schema this server actually declares. Hand-rolled on
 /// purpose: the schemas are ours, and a general validator that agrees with a
 /// wrong schema is not a test.
-fn assert_matches_schema(value: &Value, schema: &Value, label: &str) {
-    let properties = schema["properties"]
-        .as_object()
-        .unwrap_or_else(|| panic!("{label}: outputSchema has no properties"));
-    let object = value
-        .as_object()
-        .unwrap_or_else(|| panic!("{label}: structuredContent must be an object, got {value}"));
-    for key in object.keys() {
-        assert!(
-            properties.contains_key(key),
-            "{label}: payload field `{key}` is not declared in outputSchema — a host that \
-                 validates strictly would reject this answer"
-        );
+///
+/// Returns every problem instead of panicking on the first, so a caller that
+/// walks all typed tools reports one list — a gate that fails one field per run
+/// turns a schema fix into a guessing loop.
+fn schema_problems(value: &Value, schema: &Value, label: &str) -> Vec<String> {
+    let Some(properties) = schema["properties"].as_object() else {
+        return vec![format!("{label}: outputSchema has no properties")];
+    };
+    let Some(object) = value.as_object() else {
+        return vec![format!(
+            "{label}: structuredContent must be an object, got {value}"
+        )];
+    };
+    let mut problems = Vec::new();
+    let undeclared: Vec<&str> = object
+        .keys()
+        .filter(|key| !properties.contains_key(*key))
+        .map(String::as_str)
+        .collect();
+    if !undeclared.is_empty() {
+        problems.push(format!(
+            "{label}: payload fields {undeclared:?} are not declared in outputSchema — a host \
+             that validates strictly would reject this answer"
+        ));
     }
     for required in schema["required"].as_array().expect("required list") {
         let key = required.as_str().unwrap();
-        assert!(
-            object.contains_key(key),
-            "{label}: required field `{key}` is missing"
-        );
+        if !object.contains_key(key) {
+            problems.push(format!("{label}: required field `{key}` is missing"));
+        }
     }
     for (key, spec) in properties {
         let Some(actual) = object.get(key) else {
@@ -171,11 +181,13 @@ fn assert_matches_schema(value: &Value, schema: &Value, label: &str) {
             "null" => actual.is_null(),
             other => panic!("{label}: unhandled declared type `{other}`"),
         };
-        assert!(
-            ok,
-            "{label}: `{key}` is declared {expected} but holds {actual}"
-        );
+        if !ok {
+            problems.push(format!(
+                "{label}: `{key}` is declared {expected} but holds {actual}"
+            ));
+        }
     }
+    problems
 }
 
 fn manifest() -> Value {

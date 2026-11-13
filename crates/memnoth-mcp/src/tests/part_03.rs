@@ -404,10 +404,11 @@ fn unknown_method_is_error() {
 #[test]
 fn task_status_conversion() {
     assert_eq!(
-        TaskStatus::from_label("in_progress"),
+        "in_progress".parse::<TaskStatus>().unwrap(),
         TaskStatus::InProgress
     );
-    assert_eq!(TaskStatus::from_label("nonsense"), TaskStatus::Pending);
+    // Unrecognised labels are rejected, not silently coerced to Pending.
+    assert!("nonsense".parse::<TaskStatus>().is_err());
 }
 
 // ------------------------------------------------------------------
@@ -433,8 +434,8 @@ fn server_discover_advertises_versions_capabilities_and_identity() {
         .collect();
     assert_eq!(
         versions,
-        vec![LATEST_PROTOCOL_VERSION, LEGACY_PROTOCOL_VERSION],
-        "newest first, modern before legacy"
+        vec![LATEST_PROTOCOL_VERSION],
+        "exactly the one named stateless revision"
     );
     assert_eq!(result["serverInfo"]["name"], "memnoth");
     assert!(result["capabilities"]["tools"].is_object());
@@ -488,16 +489,20 @@ fn modern_request_with_the_current_version_needs_no_handshake() {
     )
     .unwrap();
     assert_eq!(resp["result"]["resultType"], "complete");
-    assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 51);
+    assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 47);
 }
 
 #[test]
-fn handshake_never_selects_a_modern_revision() {
+fn the_legacy_handshake_is_not_served() {
     let (e, c) = setup();
-    // Modern revisions have no handshake, so answering one from
-    // `initialize` would tell the client to switch to per-request
-    // semantics it never negotiated for.
-    for requested in [LATEST_PROTOCOL_VERSION, "2025-06-18", "2099-01-01"] {
+    // The legacy `initialize` era is removed: it answers method-not-found
+    // whatever version the client asks for, and never selects a revision.
+    for requested in [
+        LATEST_PROTOCOL_VERSION,
+        "2025-06-18",
+        "2099-01-01",
+        "2024-11-05",
+    ] {
         let resp = handle_message(
             &e,
             &c,
@@ -505,9 +510,10 @@ fn handshake_never_selects_a_modern_revision() {
         )
         .unwrap();
         assert_eq!(
-            resp["result"]["protocolVersion"], LEGACY_PROTOCOL_VERSION,
-            "initialize({requested}) must stay legacy"
+            resp["error"]["code"], -32601,
+            "initialize({requested}) must not be served"
         );
+        assert!(resp.get("result").is_none());
     }
 }
 
@@ -845,15 +851,56 @@ fn index_status_without_an_index_is_an_error_not_a_fresh_verdict() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// A real indexed workspace for the typed walk.
+///
+/// The graph-backed primaries cannot answer structurally without one, and a gate
+/// that skips them is a gate that checks the easy half. This builds the legacy
+/// store (`kg.db`) the server reads when the CLI's `graph.db` is absent, plus a
+/// one-commit git repo so `kg_changes` has a diff to map.
+fn typed_workspace() -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("memnoth-typed-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join(".memnoth")).expect("temp workspace");
+    std::fs::write(
+        dir.join("lib.rs"),
+        "pub fn typed_helper() -> u32 { 1 }\npub fn typed_caller() -> u32 { typed_helper() }\n",
+    )
+    .expect("source file");
+    let mut store =
+        memnoth_codegraph::Store::open(&dir.join(".memnoth").join("kg.db")).expect("a store opens");
+    memnoth_codegraph::index_full(&mut store, &dir).expect("the workspace indexes");
+    for args in [
+        vec!["init", "-q"],
+        vec!["add", "lib.rs"],
+        vec![
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-qm",
+            "seed",
+        ],
+    ] {
+        let _ = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(&dir)
+            .output();
+    }
+    dir
+}
+
 /// A declared `outputSchema` is a promise a host may **validate against**, so
 /// it has to describe the payload exactly. This walks every typed tool: the
 /// definition must carry a schema, the call must return `structuredContent`,
 /// the object must satisfy the schema, and the text half must still be the
-/// same JSON — because a client that predates the field reads only that.
+/// same JSON - because a client that predates the field reads only that.
 #[test]
 fn typed_outputs_match_their_declared_schemas() {
     let (e, c) = setup();
     add_fact(&e, &c, 1, "typed-entity");
+    let code = typed_workspace();
+    let code_arg = code.to_string_lossy().to_string();
     let definitions = visible_tools(Profile::Full);
     let schema_of = |name: &str| -> Value {
         definitions
@@ -890,12 +937,23 @@ fn typed_outputs_match_their_declared_schemas() {
         .as_str()
         .unwrap_or_else(|| panic!("coord_join must answer with a session id: {joined}"))
         .to_string();
+    let mut problems: Vec<String> = Vec::new();
     for (index, name) in TYPED_OUTPUT_TOOLS.iter().enumerate() {
         let args = match *name {
             "vault_asof" => json!({"name": "typed-entity", "as_of_ms": 1}),
             "vault_top" => json!({"limit": 5}),
+            "vault_proposals" => json!({}),
             "coord_heartbeat" | "coord_leave" => json!({"session_id": session_id.clone()}),
             "coord_task_create" => json!({"title": "typed-task"}),
+            "kg_impact" | "kg_def" | "kg_refs" => json!({"symbol": "typed-entity"}),
+            "kg_search" => json!({"query": "typed"}),
+            "kg_status" => json!({"workspace": code_arg.clone()}),
+            "kg_index" => json!({"workspace": code_arg.clone(), "embed": false}),
+            "kg_trace" | "kg_callees" => {
+                json!({"workspace": code_arg.clone(), "symbol": "typed_helper"})
+            }
+            "kg_explore" => json!({"workspace": code_arg.clone(), "query": "typed_helper"}),
+            "kg_dead" | "kg_changes" => json!({"workspace": code_arg.clone()}),
             _ => json!({"name": "typed-entity"}),
         };
         let resp = handle_message(
@@ -912,7 +970,7 @@ fn typed_outputs_match_their_declared_schemas() {
         let structured = result
             .get("structuredContent")
             .unwrap_or_else(|| panic!("`{name}` must answer with structuredContent: {resp}"));
-        assert_matches_schema(structured, &schema_of(name), name);
+        problems.extend(schema_problems(structured, &schema_of(name), name));
         let text = result["content"][0]["text"].as_str().unwrap();
         let parsed: Value = serde_json::from_str(text).unwrap();
         assert_eq!(
@@ -920,12 +978,14 @@ fn typed_outputs_match_their_declared_schemas() {
             "`{name}`: the text and typed halves must agree"
         );
     }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
 
 /// `resources/list` used to truncate entities at `ENTITY_LIST_CAP` with no
 /// signal at all — a host enumerating the vault simply never saw the rest.
 /// The cursor makes the truncation honest: more results are declared, and a
 /// host can ask for them without risking an overlap or a missing row.
+
 #[test]
 fn resource_entities_page_with_a_cursor_instead_of_truncating() {
     let (e, c) = setup();
@@ -989,12 +1049,7 @@ fn resource_entities_page_with_a_cursor_instead_of_truncating() {
 fn completions_answer_for_our_own_templates_and_prompts() {
     let (e, c) = setup();
     add_fact(&e, &c, 1, "completion-target");
-    // The capability must be advertised on both eras, or no host ever asks.
-    let init = handle_message(&e, &c, rpc(1, "initialize", json!({}))).unwrap();
-    assert!(
-        init["result"]["capabilities"].get("completions").is_some(),
-        "a host only asks for what `initialize` declares: {init}"
-    );
+    // The capability must be advertised, or no host ever asks.
     let discover = handle_message(&e, &c, rpc(2, "server/discover", json!({}))).unwrap();
     assert!(
         discover["result"]["capabilities"]
@@ -1183,4 +1238,77 @@ fn the_symbol_resource_is_advertised_and_explains_what_is_missing() {
         message.contains("not serving a workspace vault"),
         "the read must say why it cannot answer: {read}"
     );
+}
+
+/// W11-02: the team vault is on the same MCP surface as the personal one, so
+/// Claude Code, Cursor and Codex read one vocabulary. The tools are listed,
+/// dispatch, and stamp `scope: "team"` on their answers.
+#[test]
+fn the_team_vault_tools_are_exposed_and_stamp_the_team_scope() {
+    let _lock = hold_notification_queue();
+    let (e, c) = setup();
+    let list = handle_message(&e, &c, rpc(1, "tools/list", json!({}))).unwrap();
+    let names: Vec<&str> = list["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect();
+    assert!(
+        names.contains(&"mem_search_team") && names.contains(&"vault_asof_team"),
+        "both team tools must be listed: {names:?}"
+    );
+
+    let entity_id = add_fact(&e, &c, 2, "team-wedge");
+    // A version row the as-of read can answer from (consolidation writes these
+    // in production; the test states the row it needs).
+    e.connection()
+        .execute(
+            "INSERT INTO entity_versions (entity_id, snapshot, valid_from, valid_to, change_reason) \
+             VALUES (?1, ?2, ?3, NULL, NULL)",
+            rusqlite::params![entity_id, json!({"confidence": 0.9}).to_string(), 1],
+        )
+        .unwrap();
+
+    let raw = handle_message(
+        &e,
+        &c,
+        rpc(
+            3,
+            "tools/call",
+            json!({"name": "mem_search_team", "arguments": {"query": "team-wedge"}}),
+        ),
+    )
+    .unwrap();
+    let raw_text = raw["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let search: Value =
+        serde_json::from_str(&raw_text).unwrap_or_else(|_| panic!("search payload: {raw_text}"));
+    assert_eq!(search["scope"], "team");
+    let hits = search["hits"].as_array().unwrap();
+    assert!(
+        hits.iter().any(|hit| hit["name"] == "team-wedge"),
+        "the seeded fact must be found: {search}"
+    );
+
+    let raw = handle_message(
+        &e,
+        &c,
+        rpc(
+            4,
+            "tools/call",
+            json!({"name": "vault_asof_team", "arguments": {"name": "team-wedge", "at": 2}}),
+        ),
+    )
+    .unwrap();
+    let raw_text = raw["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let asof: Value = serde_json::from_str(&raw_text)
+        .unwrap_or_else(|_| panic!("asof payload: {raw_text} (full: {raw})"));
+    assert_eq!(asof["scope"], "team");
+    assert_eq!(asof["entity"], "team-wedge");
 }
