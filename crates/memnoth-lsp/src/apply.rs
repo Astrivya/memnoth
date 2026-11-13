@@ -109,13 +109,16 @@ mod tests {
     }
 
     fn workspace() -> (PathBuf, std::path::PathBuf) {
+        // One directory per call, not per process: parallel tests share a
+        // pid, and two of them that started in the same clock tick used to
+        // build a workspace each in the same directory and stomp one
+        // another's files mid-edit. The counter, not the clock, is what
+        // makes the name unique (the clock's tick is coarser than a test).
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let base = std::env::temp_dir().join(format!(
             "memnoth-lsp-apply-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::create_dir_all(base.join("src")).unwrap();
         let root = base.canonicalize().unwrap();
