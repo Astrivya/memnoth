@@ -19,19 +19,25 @@
 //! The turn path reads `app.config`, not the startup snapshot, so the next
 //! message uses the new model without restarting the session.
 //!
+//! Typing searches from the moment the screen opens — there is no prefix
+//! key — and the arrows belong to the focused zone: the tab bar answers
+//! `←/→` with a tab, a model row with the reasoning effort, and `↑` past the
+//! first row reaches the tab bar. `tab` moves between the zones. The mouse
+//! does the same work: tabs, rows, the reasoning column, and the wheel.
+//!
 //! Keys:
-//!   ↑/↓ PgUp/PgDn Home/End   move
-//!   ←/→                      reasoning variant for the selected row
+//!   type                     search (backspace edits, esc clears)
+//!   ↑/↓ PgUp/PgDn Home/End   move between models
+//!   ←/→                      reasoning on a model; tab on the tab bar
 //!   Enter                    use this model for the session, and save it
-//!   /                        search (type to filter, esc clears)
-//!   Tab                      All / Connected / Favorites / Reasoning
-//!   s / ctrl+S               sort field / direction
-//!   1..6 0                   provider filter / clear
-//!   f                        favorite (persisted in `[ui]`)
-//!   c                        compare with the current model
-//!   i                        details
-//!   R                        fetch the provider's live list
-//!   esc / q                  close
+//!   Tab                      tab bar / models
+//!   alt+s / ctrl+S           sort field / direction
+//!   alt+1..6, alt+0          provider filter / clear
+//!   alt+f                    favorite (persisted in `[ui]`)
+//!   alt+c                    compare with the current model
+//!   alt+i                    details
+//!   alt+r / ctrl+R           fetch the provider's live list
+//!   esc                      clear the filter, then close
 
 /// One compiled-in catalogue row: id, label, provider, context window, max
 /// output, tools, vision, structured JSON.
@@ -50,7 +56,7 @@ use crate::output::ellipsize;
 use crate::provider::{Kind, Settings, builtin_price};
 use crate::tui::app::{App, ModelsLoaded};
 use crate::tui::overlays::{Overlay, OverlayAction, OverlayKind};
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -245,6 +251,16 @@ impl Tab {
     }
 }
 
+/// The two arrow zones. `Tabs` answers the horizontal arrows with a tab
+/// change; `Table` answers them with the reasoning effort. Vertical arrows
+/// cross between the two, so the keyboard reads as one grid rather than two
+/// screens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FocusZone {
+    Tabs,
+    Table,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum SortField {
     #[default]
@@ -286,7 +302,15 @@ pub struct ModelsOverlay {
     selected: usize,
     table: TableState,
     search: String,
-    searching: bool,
+    /// Which zone owns the arrows: the tab bar or the model table. The search
+    /// has no zone — typing always searches — so the horizontal arrows belong
+    /// to whichever zone is focused, and `tab` moves between them.
+    focus: FocusZone,
+    /// Last frame's hit areas, so a click can be mapped to a tab or a row.
+    tabs_area: Rect,
+    table_area: Rect,
+    /// The reasoning column's x range, for click-to-cycle.
+    effort_col: (u16, u16),
     favorites: Vec<String>,
     /// Effort chosen per model id, seeded from the config for the current one.
     efforts: std::collections::BTreeMap<String, String>,
@@ -316,7 +340,10 @@ impl ModelsOverlay {
             selected: 0,
             table: TableState::default(),
             search: String::new(),
-            searching: false,
+            focus: FocusZone::Table,
+            tabs_area: Rect::default(),
+            table_area: Rect::default(),
+            effort_col: (0, 0),
             favorites: Vec::new(),
             efforts: std::collections::BTreeMap::new(),
             sort: SortField::Provider,
@@ -717,6 +744,33 @@ impl ModelsOverlay {
         self.apply_filters();
     }
 
+    /// One tab either way, wrapping. The tab change resets the row cursor,
+    /// because the list the arrows land on is a different list.
+    fn cycle_tab(&mut self, forward: bool) {
+        self.tab = match (self.tab, forward) {
+            (Tab::All, true) => Tab::Connected,
+            (Tab::Connected, true) => Tab::Favorites,
+            (Tab::Favorites, true) => Tab::Reasoning,
+            (Tab::Reasoning, true) => Tab::All,
+            (Tab::All, false) => Tab::Reasoning,
+            (Tab::Connected, false) => Tab::All,
+            (Tab::Favorites, false) => Tab::Connected,
+            (Tab::Reasoning, false) => Tab::Favorites,
+        };
+        self.selected = 0;
+        self.apply_filters();
+    }
+
+    /// A touchpad flick is a scroll: three rows, not a page, because the
+    /// wheel streams events and a page per event overshoots every shelf.
+    fn wheel(&mut self, up: bool) {
+        if self.focus == FocusZone::Tabs {
+            self.cycle_tab(!up);
+            return;
+        }
+        self.move_by(if up { -3 } else { 3 });
+    }
+
     fn move_by(&mut self, delta: isize) {
         if self.filtered.is_empty() {
             return;
@@ -760,7 +814,7 @@ impl ModelsOverlay {
             None if self.filtered.is_empty() => (
                 "›",
                 Color::Yellow,
-                "no model matches — / changes the filter, 0 clears the provider".to_string(),
+                "no model matches — backspace edits the search, esc clears it, alt-0 clears the provider".to_string(),
             ),
             None => (" ", Color::DarkGray, String::new()),
         };
@@ -772,10 +826,11 @@ impl ModelsOverlay {
 
     /// The hint row: one line, always present, ellipsized rather than wrapped.
     fn hints(&self) -> &'static str {
-        if self.searching {
-            "type to filter · enter keeps the filter · esc clears it"
-        } else {
-            "↑↓ move · enter use · ←→ reasoning · / search · tab filter · f favorite · i details · R refresh · esc close"
+        match self.focus {
+            FocusZone::Tabs => "←→ tabs · ↑↓ models/tabs · tab focus · enter use · esc close",
+            FocusZone::Table => {
+                "type to filter · ↑↓ models · ←→ reasoning · enter use · tab tabs · esc close"
+            }
         }
     }
 }
@@ -894,7 +949,7 @@ impl Overlay for ModelsOverlay {
 
     fn show(&mut self) {
         self.visible = true;
-        self.searching = false;
+        self.focus = FocusZone::Table;
         self.details = None;
         self.compare = None;
         self.note = None;
@@ -953,54 +1008,55 @@ impl Overlay for ModelsOverlay {
             return OverlayAction::None;
         }
 
-        if self.searching {
-            match key.code {
-                KeyCode::Esc => {
-                    self.searching = false;
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        match key.code {
+            KeyCode::Esc => {
+                // One esc clears the filter; the next closes. A filter that
+                // cannot be cleared with the same key as every other cancel
+                // is a trap on a screen whose whole job is narrowing.
+                if !self.search.is_empty() {
                     self.search.clear();
                     self.apply_filters();
+                } else {
+                    return OverlayAction::Close;
                 }
-                KeyCode::Enter => {
-                    // Enter finishes the filter. It used to also switch the
-                    // model, so typing a query and pressing enter changed what
-                    // answers the next turn — the one decision that should
-                    // never happen while you are still narrowing the list.
-                    self.searching = false;
-                }
-                KeyCode::Backspace => {
-                    self.search.pop();
-                    self.apply_filters();
-                }
-                KeyCode::Char(ch)
-                    if !key.modifiers.contains(KeyModifiers::CONTROL)
-                        && !key.modifiers.contains(KeyModifiers::ALT) =>
-                {
-                    self.search.push(ch);
-                    self.apply_filters();
-                }
-                _ => {}
             }
-            return OverlayAction::None;
-        }
-
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => return OverlayAction::Close,
-            KeyCode::Char('/') => self.searching = true,
-            KeyCode::Tab => {
-                self.tab = match self.tab {
-                    Tab::All => Tab::Connected,
-                    Tab::Connected => Tab::Favorites,
-                    Tab::Favorites => Tab::Reasoning,
-                    Tab::Reasoning => Tab::All,
-                };
-                self.selected = 0;
+            KeyCode::Backspace if !alt => {
+                self.search.pop();
                 self.apply_filters();
             }
-            KeyCode::Up => self.move_by(-1),
-            KeyCode::Down => self.move_by(1),
-            KeyCode::PageUp => self.move_by(-10),
-            KeyCode::PageDown => self.move_by(10),
+            KeyCode::Tab | KeyCode::BackTab => {
+                self.focus = match self.focus {
+                    FocusZone::Tabs => FocusZone::Table,
+                    FocusZone::Table => FocusZone::Tabs,
+                };
+            }
+            KeyCode::Up => match self.focus {
+                // Up past the first model reaches the tab bar; the grid is one
+                // surface, not two screens stacked.
+                FocusZone::Table if self.selected == 0 => self.focus = FocusZone::Tabs,
+                FocusZone::Table => self.move_by(-1),
+                FocusZone::Tabs => self.cycle_tab(false),
+            },
+            KeyCode::Down => match self.focus {
+                FocusZone::Tabs => self.focus = FocusZone::Table,
+                FocusZone::Table => self.move_by(1),
+            },
+            KeyCode::PageUp => {
+                if self.focus == FocusZone::Table {
+                    self.move_by(-10);
+                } else {
+                    self.cycle_tab(false);
+                }
+            }
+            KeyCode::PageDown => {
+                if self.focus == FocusZone::Table {
+                    self.move_by(10);
+                } else {
+                    self.cycle_tab(true);
+                }
+            }
             KeyCode::Home => {
                 self.selected = 0;
                 self.table.select(Some(0));
@@ -1009,37 +1065,53 @@ impl Overlay for ModelsOverlay {
                 self.selected = self.filtered.len().saturating_sub(1);
                 self.table.select(Some(self.selected));
             }
-            KeyCode::Left => self.cycle_effort(false),
-            KeyCode::Right => self.cycle_effort(true),
+            // The horizontal arrows belong to the focused zone: tabs on the
+            // tab bar, reasoning effort on a model row. The visual difference
+            // is in the render, not in a mode the person has to remember.
+            KeyCode::Left => match self.focus {
+                FocusZone::Tabs => self.cycle_tab(false),
+                FocusZone::Table => self.cycle_effort(false),
+            },
+            KeyCode::Right => match self.focus {
+                FocusZone::Tabs => self.cycle_tab(true),
+                FocusZone::Table => self.cycle_effort(true),
+            },
             KeyCode::Enter => self.apply_selection(app),
-            KeyCode::Char('f') => self.toggle_favorite(app),
-            KeyCode::Char('c') => self.compare = Some(self.selected),
-            KeyCode::Char('i') => self.details = Some(self.selected),
+            // Typing searches, so the one-letter actions moved behind alt:
+            // the letters they used to take are the letters of the models.
+            KeyCode::Char(ch) if alt => match ch.to_ascii_lowercase() {
+                'f' => self.toggle_favorite(app),
+                'c' => self.compare = Some(self.selected),
+                'i' => self.details = Some(self.selected),
+                's' => {
+                    self.sort = self.sort.next();
+                    self.apply_filters();
+                }
+                'r' => self.refresh_live(app),
+                '0' => {
+                    self.provider_filter = None;
+                    self.apply_filters();
+                }
+                digit @ '1'..='6' => {
+                    let index = digit as usize - '1' as usize;
+                    let providers = crate::connect::known_providers();
+                    if let Some(info) = providers.get(index) {
+                        let name = info.name.to_string();
+                        self.set_provider_filter(&name);
+                    }
+                }
+                _ => {}
+            },
             KeyCode::Char('s') if ctrl => {
                 self.descending = !self.descending;
                 self.apply_filters();
             }
-            KeyCode::Char('S') => {
-                self.descending = !self.descending;
-                self.apply_filters();
-            }
-            KeyCode::Char('s') => {
-                self.sort = self.sort.next();
-                self.apply_filters();
-            }
             KeyCode::Char('r') if ctrl => self.refresh_live(app),
-            KeyCode::Char('R') => self.refresh_live(app),
-            KeyCode::Char('0') => {
-                self.provider_filter = None;
+            // Everything else types: the search is on from the moment the
+            // screen opens, so finding a model never needs a prefix key.
+            KeyCode::Char(ch) if !ctrl && !alt => {
+                self.search.push(ch);
                 self.apply_filters();
-            }
-            KeyCode::Char(digit @ '1'..='6') => {
-                let index = digit as usize - '1' as usize;
-                let providers = crate::connect::known_providers();
-                if let Some(info) = providers.get(index) {
-                    let name = info.name.to_string();
-                    self.set_provider_filter(&name);
-                }
             }
             _ => {}
         }
@@ -1048,13 +1120,68 @@ impl Overlay for ModelsOverlay {
 
     /// A pasted query is a search, not a set of key presses.
     fn handle_paste(&mut self, text: &str) -> bool {
-        if !self.searching {
-            return false;
-        }
         self.search
             .extend(text.chars().filter(|ch| !ch.is_control()));
         self.apply_filters();
         true
+    }
+
+    /// Clicks and the wheel. Tabs are four equal quarters of their bar; a
+    /// model row selects, a second click on the selected row uses it, and
+    /// the reasoning column steps the effort. Every region the render drew
+    /// is clickable, because a row that looks like a button and is not one
+    /// is a lie.
+    fn handle_mouse(&mut self, mouse: MouseEvent, app: &mut App) -> OverlayAction {
+        if !self.visible {
+            return OverlayAction::None;
+        }
+        let position = mouse.column;
+        let row = mouse.row;
+        match mouse.kind {
+            MouseEventKind::ScrollUp => self.wheel(true),
+            MouseEventKind::ScrollDown => self.wheel(false),
+            MouseEventKind::Down(MouseButton::Left) => {
+                if self.tabs_area.contains(Position::new(position, row)) {
+                    let quarter = ((position.saturating_sub(self.tabs_area.x)) as usize) * 4
+                        / self.tabs_area.width.max(1) as usize;
+                    let tab =
+                        [Tab::All, Tab::Connected, Tab::Favorites, Tab::Reasoning][quarter.min(3)];
+                    if tab != self.tab {
+                        self.tab = tab;
+                        self.selected = 0;
+                        self.apply_filters();
+                    }
+                    self.focus = FocusZone::Tabs;
+                } else if self.table_area.contains(Position::new(position, row)) {
+                    // First content row is under the header; the block adds
+                    // one border row above the header.
+                    let first = self.table_area.y + 2;
+                    if row >= first {
+                        let offset = (row - first) as usize;
+                        let target = self.table.offset() + offset;
+                        if target < self.filtered.len() {
+                            let in_effort =
+                                position >= self.effort_col.0 && position < self.effort_col.1;
+                            if in_effort && target == self.selected {
+                                self.cycle_effort(true);
+                            } else if in_effort && target != self.selected {
+                                self.selected = target;
+                                self.table.select(Some(target));
+                                self.cycle_effort(true);
+                            } else if target == self.selected {
+                                self.apply_selection(app);
+                            } else {
+                                self.selected = target;
+                                self.table.select(Some(target));
+                            }
+                            self.focus = FocusZone::Table;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        OverlayAction::None
     }
 
     fn render(&mut self, frame: &mut Frame, area: Rect, _app: &App) {
@@ -1085,8 +1212,20 @@ impl Overlay for ModelsOverlay {
             .iter()
             .position(|tab| *tab == self.tab)
             .unwrap_or(0);
+        // The focused zone carries the bold border: that is what the arrows
+        // answer to, and it is also what a click lands on.
+        let tabs_border = if self.focus == FocusZone::Tabs {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
         let tabs = Tabs::new(titles)
-            .block(Block::default().borders(Borders::ALL).title(self.title()))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(self.title())
+                    .border_style(tabs_border),
+            )
             .select(active)
             .style(Style::default().fg(Color::Gray))
             .highlight_style(
@@ -1094,17 +1233,14 @@ impl Overlay for ModelsOverlay {
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
             );
+        self.tabs_area = chunks[0];
         frame.render_widget(tabs, chunks[0]);
 
-        // Search line and the active filters, so a filtered-out model is
+        // The search is on from the moment the screen opens: typing filters.
+        // The line still says what it is, with a caret parked after the query,
+        // and the active filters beside it so a filtered-out model is
         // explainable rather than missing.
-        let search = if self.searching {
-            format!("search: {}", self.search)
-        } else if self.search.is_empty() {
-            "search: /".to_string()
-        } else {
-            format!("search: {}", self.search)
-        };
+        let search = format!("search: {}", self.search);
         let filter = self
             .provider_filter
             .as_ref()
@@ -1125,7 +1261,7 @@ impl Overlay for ModelsOverlay {
         );
         // A real caret in the field, not a block glyph that cannot be typed
         // over: ratatui places the terminal's own cursor.
-        if self.searching {
+        {
             let prefix = "search: ".chars().count() as u16;
             let typed = self.search.chars().count() as u16;
             let x =
@@ -1165,8 +1301,13 @@ impl Overlay for ModelsOverlay {
                 name.push_str(" +");
             }
 
-            let style = if selected {
+            // The cyan fill belongs to the table zone. With the tab bar
+            // focused the selected row is only a marker, so the eye can tell
+            // which zone the arrows answer to without reading the hint.
+            let style = if selected && self.focus == FocusZone::Table {
                 Style::default().bg(Color::Cyan).fg(Color::Black)
+            } else if selected {
+                Style::default().add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
             };
@@ -1220,6 +1361,11 @@ impl Overlay for ModelsOverlay {
         .row_highlight_style(Style::default().bg(Color::Cyan).fg(Color::Black))
         .highlight_symbol(" ");
 
+        self.table_area = chunks[2];
+        // The reasoning column's x range, for click-to-cycle: one border plus
+        // the five columns left of it.
+        let effort_x = chunks[2].x.saturating_add(1 + 28 + 11 + 6 + 7 + 7 + 1);
+        self.effort_col = (effort_x, effort_x + 10);
         let mut state = self.table.clone();
         state.select(if self.filtered.is_empty() {
             None
@@ -1227,6 +1373,7 @@ impl Overlay for ModelsOverlay {
             Some(self.selected)
         });
         frame.render_stateful_widget(table, chunks[2], &mut state);
+        self.table = state;
 
         frame.render_widget(Paragraph::new(self.status(chunks[3].width)), chunks[3]);
         frame.render_widget(
@@ -1252,18 +1399,19 @@ impl Overlay for ModelsOverlay {
     fn help_text(&self) -> Vec<(&'static str, &'static str)> {
         vec![
             ("/models", "The models your provider lists (alias: /model)"),
-            ("↑/↓", "Move"),
-            ("←/→", "Reasoning variant for the selected model"),
+            ("type", "Filter by model id or provider — typing searches"),
+            ("↑/↓", "Move through models; ↑ at the top reaches the tabs"),
+            ("←/→", "Reasoning on a model row, tabs on the tab bar"),
             ("Enter", "Use this model now, and save it"),
-            ("/", "Filter by model id or provider"),
-            ("Tab", "All / Connected / Favorites / Reasoning"),
-            ("1..6, 0", "Filter by provider, 0 clears"),
-            ("s, Shift+S", "Sort field, direction"),
-            ("f", "Favorite (persisted)"),
-            ("c", "Compare with the current model"),
-            ("i", "Details"),
-            ("R", "Ask the provider for its list again"),
-            ("esc", "Close"),
+            ("Tab", "Move between the tab bar and the models"),
+            ("Alt+1..6, Alt+0", "Filter by provider, alt-0 clears"),
+            ("Alt+s, Ctrl+s", "Sort field, direction"),
+            ("Alt+f", "Favorite (persisted)"),
+            ("Alt+c", "Compare with the current model"),
+            ("Alt+i", "Details"),
+            ("Alt+r, Ctrl+r", "Ask the provider for its list again"),
+            ("wheel / click", "Scroll, pick a tab, pick a model, use it"),
+            ("esc", "Clear the filter, then close"),
         ]
     }
 }
@@ -1458,6 +1606,105 @@ fn truncate(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn opened_overlay() -> ModelsOverlay {
+        let mut overlay = ModelsOverlay::new();
+        overlay.show();
+        overlay.rows = catalogue();
+        overlay.apply_filters();
+        overlay
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// Typing filters without a prefix key: the search is on from the moment
+    /// the screen opens.
+    #[test]
+    fn typing_searches_without_a_slash() {
+        let mut overlay = opened_overlay();
+        let mut app = App::new("s", false);
+        for ch in "deepseek".chars() {
+            overlay.handle_key(key(KeyCode::Char(ch)), &mut app);
+        }
+        assert_eq!(overlay.search, "deepseek");
+        assert!(
+            overlay.filtered.iter().all(|index| overlay.rows[*index]
+                .id
+                .to_ascii_lowercase()
+                .contains("deepseek")),
+            "every row the filter kept names deepseek"
+        );
+        // One esc clears the filter rather than closing the screen.
+        overlay.handle_key(key(KeyCode::Esc), &mut app);
+        assert!(overlay.search.is_empty());
+        // A second esc closes.
+        let action = overlay.handle_key(key(KeyCode::Esc), &mut app);
+        assert!(matches!(action, OverlayAction::Close));
+    }
+
+    /// The arrows belong to the focused zone: on the tab bar they cycle tabs,
+    /// and up past the first model reaches that bar.
+    #[test]
+    fn the_arrows_answer_to_the_focused_zone() {
+        let mut overlay = opened_overlay();
+        let mut app = App::new("s", false);
+        assert!(overlay.focus == FocusZone::Table);
+        overlay.handle_key(key(KeyCode::Up), &mut app);
+        assert!(overlay.focus == FocusZone::Tabs, "up past the first row");
+        let before = overlay.tab;
+        overlay.handle_key(key(KeyCode::Right), &mut app);
+        assert_ne!(overlay.tab, before, "right on the tab bar changes tab");
+        overlay.handle_key(key(KeyCode::Left), &mut app);
+        assert_eq!(overlay.tab, before, "left returns to the first tab");
+        overlay.handle_key(key(KeyCode::Down), &mut app);
+        assert!(overlay.focus == FocusZone::Table, "down returns to models");
+        // On a model row, the same arrows change reasoning effort instead.
+        let position = overlay
+            .filtered
+            .iter()
+            .position(|index| !overlay.rows[*index].variants.is_empty())
+            .expect("a reasoning model is listed");
+        overlay.selected = position;
+        let id = overlay.rows[overlay.filtered[position]].id.clone();
+        let first = overlay.effort(&id, &overlay.rows[overlay.filtered[position]].variants);
+        overlay.handle_key(key(KeyCode::Right), &mut app);
+        let next = overlay.effort(&id, &overlay.rows[overlay.filtered[position]].variants);
+        assert_ne!(first, next, "right on a model steps the effort");
+    }
+
+    /// The wheel moves the selection without a click, and clicking a tab
+    /// quarter focuses the tab bar.
+    #[test]
+    fn wheel_and_click_reach_the_list() {
+        let mut overlay = opened_overlay();
+        // Pretend a frame was drawn at a known rect.
+        overlay.tabs_area = Rect::new(0, 0, 80, 3);
+        overlay.table_area = Rect::new(0, 5, 80, 10);
+        let mut app = App::new("s", false);
+        let mouse = |kind| MouseEvent {
+            kind,
+            column: 5,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        overlay.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left)), &mut app);
+        assert!(overlay.focus == FocusZone::Tabs);
+        assert!(overlay.tab == Tab::All, "leftmost quarter is All");
+        // The wheel follows the focused zone, so a wheel over the tab bar
+        // cycles tabs — and over the models it moves the selection.
+        overlay.handle_key(key(KeyCode::Down), &mut app);
+        assert!(overlay.focus == FocusZone::Table);
+        let wheel = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 10,
+            row: 8,
+            modifiers: KeyModifiers::NONE,
+        };
+        overlay.handle_mouse(wheel, &mut app);
+        assert!(overlay.selected > 0, "the wheel moved the selection");
+    }
 
     #[test]
     fn the_catalogue_is_priced_from_the_shared_table() {

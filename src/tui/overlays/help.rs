@@ -189,14 +189,18 @@ impl HelpOverlay {
         let mut model = KeyBindingGroup::new("Model Overlay");
         model.add_binding(KeyBinding::new(
             "Tab",
-            "Next tab",
-            "All / Connected / Favorites / Reasoning",
+            "Focus",
+            "Tab bar / models (All / Connected / Favorites / Reasoning)",
         ));
-        model.add_binding(KeyBinding::new("↑/↓", "Navigate", "Move through models"));
+        model.add_binding(KeyBinding::new(
+            "↑/↓",
+            "Navigate",
+            "Move through models; ↑ at the top reaches the tabs",
+        ));
         model.add_binding(KeyBinding::new(
             "←/→",
-            "Reasoning",
-            "Reasoning effort for the selected model",
+            "Zone arrows",
+            "Reasoning effort on a model, tabs on the tab bar",
         ));
         model.add_binding(KeyBinding::new(
             "Enter",
@@ -204,37 +208,37 @@ impl HelpOverlay {
             "Use this model now, and save it",
         ));
         model.add_binding(KeyBinding::new(
-            "/",
+            "type",
             "Search",
-            "Filter by model, provider or id",
+            "Typing filters — no prefix key needed",
         ));
         model.add_binding(KeyBinding::new(
-            "1..6, 0",
+            "Alt+1..6, Alt+0",
             "Provider",
-            "Filter by provider, 0 clears",
+            "Filter by provider, alt-0 clears",
         ));
         model.add_binding(KeyBinding::new(
-            "s, Shift+S",
+            "Alt+s, Ctrl+s",
             "Sort",
             "Sort field, then direction",
         ));
         model.add_binding(KeyBinding::new(
-            "f",
+            "Alt+f",
             "Favorite",
             "Pin the model in the Favorites tab",
         ));
         model.add_binding(KeyBinding::new(
-            "c",
+            "Alt+c",
             "Compare",
             "Compare against the current model",
         ));
         model.add_binding(KeyBinding::new(
-            "i",
+            "Alt+i",
             "Details",
             "Context window, price and reasoning",
         ));
         model.add_binding(KeyBinding::new(
-            "R",
+            "Alt+r, Ctrl+r",
             "Refresh",
             "Fetch the provider's live model list",
         ));
@@ -275,177 +279,15 @@ impl HelpOverlay {
     }
 
     fn build_command_help() -> KeyBindingHelp {
+        // One projection: the same rows the palette and the dropdown draw.
+        // Help keeps no second table of command names.
         let mut help = KeyBindingHelp::new();
-
-        let mut commands = KeyBindingGroup::new("Slash Commands");
-        commands.add_binding(KeyBinding::new("/help", "Help", "Show this help overlay"));
-        commands.add_binding(KeyBinding::new(
-            "/quit",
-            "Quit",
-            "Leave the session (also :q, Ctrl+C)",
-        ));
-        commands.add_binding(KeyBinding::new("/clear", "Clear", "Clear the transcript"));
-        commands.add_binding(KeyBinding::new(
-            "/home",
-            "Home",
-            "The session brief, over the transcript",
-        ));
-        commands.add_binding(KeyBinding::new(
-            "/new",
-            "New chat",
-            "Start a fresh conversation",
-        ));
-        commands.add_binding(KeyBinding::new(
-            "/sessions",
-            "Sessions",
-            "Browse saved conversations, with a preview",
-        ));
-        commands.add_binding(KeyBinding::new(
-            "/model",
-            "Model",
-            "Show model configuration",
-        ));
-        commands.add_binding(KeyBinding::new(
-            "/search <query>",
-            "Search",
-            "Search vault and graph (no model)",
-        ));
-        commands.add_binding(KeyBinding::new(
-            "/doctor",
-            "Doctor",
-            "Check paths, vault, graph, model, MCP, profiles",
-        ));
-        commands.add_binding(KeyBinding::new(
-            "/vault init",
-            "Vault Init",
-            "Create the vault",
-        ));
-        commands.add_binding(KeyBinding::new(
-            "/vault status",
-            "Vault Status",
-            "Show vault contents",
-        ));
-        commands.add_binding(KeyBinding::new(
-            "/vault asof",
-            "Vault Asof",
-            "Beliefs at a point in time",
-        ));
-        commands.add_binding(KeyBinding::new(
-            "/vault history",
-            "Vault History",
-            "Version history for a belief",
-        ));
-        commands.add_binding(KeyBinding::new(
-            "/vault contradictions",
-            "Vault Contradictions",
-            "List contradicted beliefs",
-        ));
-        commands.add_binding(KeyBinding::new(
-            "/vault remember",
-            "Vault Remember",
-            "Record a fact/decision",
-        ));
-        commands.add_binding(KeyBinding::new(
-            "/vault recall",
-            "Vault Recall",
-            "Search the vault",
-        ));
-        commands.add_binding(KeyBinding::new(
-            "/kg index",
-            "KG Index",
-            "Build/update code graph",
-        ));
-        commands.add_binding(KeyBinding::new(
-            "/update",
-            "Update memnoth",
-            "Check for and install a new release",
-        ));
-        commands.add_binding(KeyBinding::new(
-            "/kg status",
-            "KG Status",
-            "Show graph build info",
-        ));
-        commands.add_binding(KeyBinding::new(
-            "/kg impact",
-            "KG Impact",
-            "Analyze symbol impact",
-        ));
-        commands.add_binding(KeyBinding::new(
-            "/kg search",
-            "KG Search",
-            "Find symbols by name",
-        ));
-        commands.add_binding(KeyBinding::new(
-            "/mcp doctor",
-            "MCP Doctor",
-            "Check MCP clients",
-        ));
-        commands.add_binding(KeyBinding::new(
-            "/projects",
-            "Cloud Projects",
-            "List, create, rename and delete the org's projects",
-        ));
-        commands.add_binding(KeyBinding::new(
-            "/keys",
-            "Cloud Keys",
-            "List, mint and revoke API keys; a minted secret is shown once",
-        ));
-        commands.add_binding(KeyBinding::new(
-            "/org",
-            "Organization",
-            "The org: members, roles and invites; the link is shown once",
-        ));
-        commands.add_binding(KeyBinding::new(
-            "/teams",
-            "Teams",
-            "List the org's teams; create one, or pick one to see its members",
-        ));
-        commands.add_binding(KeyBinding::new(
-            "/teams join",
-            "Teams Join",
-            "Accept invite and join org",
-        ));
-        commands.add_binding(KeyBinding::new(
-            "/login",
-            "Sign in",
-            "Sign in to memnoth cloud with a one-time code",
-        ));
-        commands.add_binding(KeyBinding::new(
-            "/logout",
-            "Sign out",
-            "Forget this machine's cloud credentials",
-        ));
-        commands.add_binding(KeyBinding::new(
-            "/whoami",
-            "Who am I",
-            "Account, org, role and when the key expires",
-        ));
-        help.add_group(commands);
-
-        // Overlay commands
-        let mut overlays = KeyBindingGroup::new("Overlay Commands");
-        overlays.add_binding(KeyBinding::new("/search", "Search", "Open search overlay"));
-        overlays.add_binding(KeyBinding::new(
-            "/context",
-            "Context",
-            "Open context overlay",
-        ));
-        overlays.add_binding(KeyBinding::new("/diff", "Diff", "Open diff overlay"));
-        overlays.add_binding(KeyBinding::new("/rewind", "Rewind", "Open rewind overlay"));
-        overlays.add_binding(KeyBinding::new("/model", "Model", "Open model overlay"));
-        overlays.add_binding(KeyBinding::new(
-            "/connect",
-            "Connect",
-            "Open provider connections overlay",
-        ));
-        overlays.add_binding(KeyBinding::new(
-            "/permissions",
-            "Permissions",
-            "Open permissions overlay",
-        ));
-        overlays.add_binding(KeyBinding::new("/help", "Help", "Open help overlay"));
-        help.add_group(overlays);
-
+        let mut group = KeyBindingGroup::new("Slash Commands");
+        for row in crate::tui::overlays::command_rows::rows() {
+            let chip = row.chip();
+            group.add_binding(KeyBinding::new(row.command, chip, row.description));
+        }
+        help.add_group(group);
         help
     }
 
@@ -599,20 +441,47 @@ impl HelpOverlay {
                     Style::default()
                 };
 
-                let lines = vec![Line::from(vec![
-                    Span::styled(
-                        format!("{}  ", binding.key),
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(&binding.action, style),
-                    Span::styled(
-                        format!("  — {}", binding.description),
-                        style.fg(Color::Gray),
-                    ),
-                    Span::styled(format!("  [{}]", group_name), style.fg(Color::DarkGray)),
-                ])];
+                let key = Span::styled(
+                    format!("{}  ", binding.key),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                );
+                let action = Span::styled(binding.action.clone(), style);
+                let description = Span::styled(
+                    format!("  — {}", binding.description),
+                    style.fg(Color::Gray),
+                );
+                let group = Span::styled(format!("  [{}]", group_name), style.fg(Color::DarkGray));
+                // One row per binding only when the terminal can show the
+                // description whole. A `List` clips, so at 80 columns the tail of
+                // every long binding used to vanish mid-word; the second line
+                // keeps the words and costs one row.
+                let width = binding.key.chars().count()
+                    + 2
+                    + binding.action.chars().count()
+                    + 2
+                    + binding.description.chars().count()
+                    + 3
+                    + group_name.chars().count()
+                    + 2;
+                // The block's borders and padding eat two columns, so a line
+                // that fits the outer rect still clips inside it.
+                let usable = area.width.saturating_sub(2) as usize;
+                // Four columns of slack: a row that recomputes to exactly the
+                // usable width still loses its last glyph to the border.
+                let lines = if width.saturating_add(4) > usable {
+                    vec![
+                        Line::from(vec![key, action]),
+                        Line::from(vec![
+                            Span::styled("    ", Style::default()),
+                            description,
+                            group,
+                        ]),
+                    ]
+                } else {
+                    vec![Line::from(vec![key, action, description, group])]
+                };
                 ListItem::new(lines).style(style)
             })
             .collect();
@@ -650,20 +519,42 @@ impl HelpOverlay {
                     Style::default()
                 };
 
-                let lines = vec![Line::from(vec![
-                    Span::styled(
-                        format!("{}  ", binding.key),
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(&binding.action, style),
-                    Span::styled(
-                        format!("  — {}", binding.description),
-                        style.fg(Color::Gray),
-                    ),
-                    Span::styled(format!("  [{}]", group_name), style.fg(Color::DarkGray)),
-                ])];
+                let key = Span::styled(
+                    format!("{}  ", binding.key),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                );
+                let action = Span::styled(binding.action.clone(), style);
+                let description = Span::styled(
+                    format!("  — {}", binding.description),
+                    style.fg(Color::Gray),
+                );
+                let group = Span::styled(format!("  [{}]", group_name), style.fg(Color::DarkGray));
+                // One row per binding only when the terminal can show the
+                // description whole. A `List` clips, so at 80 columns the tail of
+                // every long binding used to vanish mid-word; the second line
+                // keeps the words and costs one row.
+                let width = binding.key.chars().count()
+                    + 2
+                    + binding.action.chars().count()
+                    + 2
+                    + binding.description.chars().count()
+                    + 3
+                    + group_name.chars().count()
+                    + 2;
+                let lines = if width > area.width as usize {
+                    vec![
+                        Line::from(vec![key, action]),
+                        Line::from(vec![
+                            Span::styled("    ", Style::default()),
+                            description,
+                            group,
+                        ]),
+                    ]
+                } else {
+                    vec![Line::from(vec![key, action, description, group])]
+                };
                 ListItem::new(lines).style(style)
             })
             .collect();
@@ -701,20 +592,42 @@ impl HelpOverlay {
                     Style::default()
                 };
 
-                let lines = vec![Line::from(vec![
-                    Span::styled(
-                        format!("{}  ", binding.key),
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(&binding.action, style),
-                    Span::styled(
-                        format!("  — {}", binding.description),
-                        style.fg(Color::Gray),
-                    ),
-                    Span::styled(format!("  [{}]", group_name), style.fg(Color::DarkGray)),
-                ])];
+                let key = Span::styled(
+                    format!("{}  ", binding.key),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                );
+                let action = Span::styled(binding.action.clone(), style);
+                let description = Span::styled(
+                    format!("  — {}", binding.description),
+                    style.fg(Color::Gray),
+                );
+                let group = Span::styled(format!("  [{}]", group_name), style.fg(Color::DarkGray));
+                // One row per binding only when the terminal can show the
+                // description whole. A `List` clips, so at 80 columns the tail of
+                // every long binding used to vanish mid-word; the second line
+                // keeps the words and costs one row.
+                let width = binding.key.chars().count()
+                    + 2
+                    + binding.action.chars().count()
+                    + 2
+                    + binding.description.chars().count()
+                    + 3
+                    + group_name.chars().count()
+                    + 2;
+                let lines = if width > area.width as usize {
+                    vec![
+                        Line::from(vec![key, action]),
+                        Line::from(vec![
+                            Span::styled("    ", Style::default()),
+                            description,
+                            group,
+                        ]),
+                    ]
+                } else {
+                    vec![Line::from(vec![key, action, description, group])]
+                };
                 ListItem::new(lines).style(style)
             })
             .collect();
@@ -752,20 +665,42 @@ impl HelpOverlay {
                     Style::default()
                 };
 
-                let lines = vec![Line::from(vec![
-                    Span::styled(
-                        format!("{}  ", binding.key),
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(&binding.action, style),
-                    Span::styled(
-                        format!("  — {}", binding.description),
-                        style.fg(Color::Gray),
-                    ),
-                    Span::styled(format!("  [{}]", group_name), style.fg(Color::DarkGray)),
-                ])];
+                let key = Span::styled(
+                    format!("{}  ", binding.key),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                );
+                let action = Span::styled(binding.action.clone(), style);
+                let description = Span::styled(
+                    format!("  — {}", binding.description),
+                    style.fg(Color::Gray),
+                );
+                let group = Span::styled(format!("  [{}]", group_name), style.fg(Color::DarkGray));
+                // One row per binding only when the terminal can show the
+                // description whole. A `List` clips, so at 80 columns the tail of
+                // every long binding used to vanish mid-word; the second line
+                // keeps the words and costs one row.
+                let width = binding.key.chars().count()
+                    + 2
+                    + binding.action.chars().count()
+                    + 2
+                    + binding.description.chars().count()
+                    + 3
+                    + group_name.chars().count()
+                    + 2;
+                let lines = if width > area.width as usize {
+                    vec![
+                        Line::from(vec![key, action]),
+                        Line::from(vec![
+                            Span::styled("    ", Style::default()),
+                            description,
+                            group,
+                        ]),
+                    ]
+                } else {
+                    vec![Line::from(vec![key, action, description, group])]
+                };
                 ListItem::new(lines).style(style)
             })
             .collect();
@@ -814,20 +749,42 @@ impl HelpOverlay {
                     "Shortcuts"
                 };
 
-                let lines = vec![Line::from(vec![
-                    Span::styled(
-                        format!("{}  ", binding.key),
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(&binding.action, style),
-                    Span::styled(
-                        format!("  — {}", binding.description),
-                        style.fg(Color::Gray),
-                    ),
-                    Span::styled(format!("  [{}]", group_name), style.fg(Color::DarkGray)),
-                ])];
+                let key = Span::styled(
+                    format!("{}  ", binding.key),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                );
+                let action = Span::styled(binding.action.clone(), style);
+                let description = Span::styled(
+                    format!("  — {}", binding.description),
+                    style.fg(Color::Gray),
+                );
+                let group = Span::styled(format!("  [{}]", group_name), style.fg(Color::DarkGray));
+                // One row per binding only when the terminal can show the
+                // description whole. A `List` clips, so at 80 columns the tail of
+                // every long binding used to vanish mid-word; the second line
+                // keeps the words and costs one row.
+                let width = binding.key.chars().count()
+                    + 2
+                    + binding.action.chars().count()
+                    + 2
+                    + binding.description.chars().count()
+                    + 3
+                    + group_name.chars().count()
+                    + 2;
+                let lines = if width > area.width as usize {
+                    vec![
+                        Line::from(vec![key, action]),
+                        Line::from(vec![
+                            Span::styled("    ", Style::default()),
+                            description,
+                            group,
+                        ]),
+                    ]
+                } else {
+                    vec![Line::from(vec![key, action, description, group])]
+                };
                 ListItem::new(lines).style(style)
             })
             .collect();
