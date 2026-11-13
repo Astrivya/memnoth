@@ -48,8 +48,12 @@ pub fn lines(text: &str, width: usize) -> Vec<Line<'static>> {
     let mut out = Vec::new();
     let mut fence: Option<()> = None;
     let mut blank = false;
+    let raws: Vec<&str> = text.split('\n').collect();
+    let mut index = 0;
 
-    for raw in text.split('\n') {
+    while index < raws.len() {
+        let raw = raws[index];
+        index += 1;
         let trimmed = raw.trim_end();
 
         // A fence opens and closes; between them the text is code however it
@@ -62,7 +66,24 @@ pub fn lines(text: &str, width: usize) -> Vec<Line<'static>> {
         }
         if fence.is_some() {
             let code = trimmed.replace('\t', "    ");
-            out.extend(block(&code, width, Some(2), code_style()));
+            // Verbatim, never reflowed: a bar chart is columns of characters
+            // whose meaning is their alignment, and wrapping it word by word
+            // shuffles the bars into noise — which is exactly how a perfectly
+            // good graph arrived on screen as overlapping blocks. A code line
+            // longer than the pane is cut at a character boundary instead.
+            let room = width.saturating_sub(2).max(1);
+            if code.is_empty() {
+                out.push(Line::from(""));
+            } else {
+                let chars: Vec<char> = code.chars().collect();
+                for chunk in chars.chunks(room) {
+                    let text: String = chunk.iter().collect();
+                    out.push(Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled(text, code_style()),
+                    ]));
+                }
+            }
             blank = false;
             continue;
         }
@@ -77,6 +98,28 @@ pub fn lines(text: &str, width: usize) -> Vec<Line<'static>> {
             continue;
         }
         blank = false;
+
+        // A GFM table: a pipe row followed by a separator row. Detected
+        // before bullets and headings because a `| - - |` row would
+        // otherwise be eaten as prose, pipes and all.
+        if let Some(header) = table_row(trimmed)
+            && index < raws.len()
+            && is_separator(raws[index])
+        {
+            index += 1; // the separator itself is structure, never a row
+            let mut rows = Vec::new();
+            while index < raws.len() {
+                match table_row(raws[index].trim_end()) {
+                    Some(row) => {
+                        rows.push(row);
+                        index += 1;
+                    }
+                    None => break,
+                }
+            }
+            out.extend(table_lines(&header, &rows, width));
+            continue;
+        }
 
         let indent = leading_spaces(raw);
         let body = &trimmed[indent.min(trimmed.len())..];
@@ -162,6 +205,138 @@ pub fn lines(text: &str, width: usize) -> Vec<Line<'static>> {
     out
 }
 
+/// `| a | b |` → `["a", "b"]`. The leading pipe is what makes a row a row;
+/// prose that merely contains pipes is not a table.
+fn table_row(line: &str) -> Option<Vec<String>> {
+    let trimmed = line.trim();
+    if !trimmed.starts_with('|') {
+        return None;
+    }
+    let mut cells: Vec<String> = trimmed
+        .strip_prefix('|')?
+        .split('|')
+        .map(|cell| cell.trim().to_string())
+        .collect();
+    // The closing pipe leaves one empty cell behind it; that is the row's
+    // frame, not a column.
+    if cells.last().is_some_and(|cell| cell.is_empty()) {
+        cells.pop();
+    }
+    if cells.is_empty() {
+        return None;
+    }
+    Some(cells)
+}
+
+/// `|---|---|`, `|:--|--:|` — every cell is dashes and optional colons.
+fn is_separator(line: &str) -> bool {
+    let Some(cells) = table_row(line) else {
+        return false;
+    };
+    cells.iter().all(|cell| {
+        let bare = cell.trim_matches(':');
+        !bare.is_empty() && bare.chars().all(|ch| ch == '-')
+    })
+}
+
+/// A GFM table as box-drawn rows: real columns, a header rule, and borders.
+///
+/// Column widths come from the widest cell, then shrink from the widest
+/// column down until the table fits the pane — a wide answer must not push
+/// the table off the right edge where the terminal clips it unreadably.
+/// Cells wrap instead of overflowing, so every cell's words survive.
+fn table_lines(header: &[String], rows: &[Vec<String>], width: usize) -> Vec<Line<'static>> {
+    let cols = header
+        .len()
+        .max(rows.iter().map(Vec::len).max().unwrap_or(0))
+        .max(1);
+    let mut col_w = vec![3usize; cols];
+    for (index, cell) in header.iter().enumerate() {
+        col_w[index] = col_w[index].max(cell.chars().count());
+    }
+    for row in rows {
+        for (index, cell) in row.iter().enumerate() {
+            col_w[index] = col_w[index].max(cell.chars().count());
+        }
+    }
+    // `│ ` + cells + ` │` per column: sum + 3 per column + the frame.
+    let total = |widths: &[usize]| widths.iter().sum::<usize>() + 3 * cols + 1;
+    while total(&col_w) > width {
+        let Some((index, &widest)) = col_w.iter().enumerate().max_by_key(|(_, value)| *value)
+        else {
+            break;
+        };
+        if widest <= 3 {
+            break;
+        }
+        col_w[index] -= 1;
+    }
+
+    let rule = Style::default().fg(Color::DarkGray);
+    let border = |left: &str, mid: &str, right: &str, widths: &[usize]| -> Line<'static> {
+        let mut text = String::from(left);
+        for (index, &w) in widths.iter().enumerate() {
+            if index > 0 {
+                text.push_str(mid);
+            }
+            text.push_str(&"─".repeat(w + 2));
+        }
+        text.push_str(right);
+        Line::from(Span::styled(text, rule))
+    };
+
+    let render_row =
+        |cells: &[String], widths: &[usize], bold: bool, out: &mut Vec<Line<'static>>| {
+            // Every cell wraps on its own, so a long cell grows the row rather
+            // than pushing its neighbours off the line.
+            let mut rendered: Vec<Vec<Line<'static>>> = Vec::with_capacity(cells.len());
+            for (index, &col_width) in widths.iter().enumerate() {
+                let text = cells.get(index).map(String::as_str).unwrap_or("");
+                let mut runs = inline(text);
+                if bold {
+                    for run in &mut runs {
+                        run.style = run.style.add_modifier(Modifier::BOLD);
+                    }
+                }
+                rendered.push(wrap_runs(runs, col_width, 0, None, Style::default()));
+            }
+            let height = rendered.iter().map(Vec::len).max().unwrap_or(1);
+            for row in 0..height {
+                let mut spans = vec![Span::styled("│ ", rule)];
+                for (column, &w) in rendered.iter().zip(widths.iter()) {
+                    let line = column.get(row);
+                    let (line_spans, used) = match line {
+                        Some(line) => {
+                            let used: usize = line
+                                .spans
+                                .iter()
+                                .map(|span| span.content.chars().count())
+                                .sum();
+                            (line.spans.clone(), used)
+                        }
+                        None => (Vec::new(), 0),
+                    };
+                    spans.extend(line_spans);
+                    if used < w {
+                        spans.push(Span::raw(" ".repeat(w - used)));
+                    }
+                    spans.push(Span::styled(" │ ", rule));
+                }
+                out.push(Line::from(spans));
+            }
+        };
+
+    let mut out = Vec::new();
+    out.push(border("┌", "┬", "┐", &col_w));
+    render_row(header, &col_w, true, &mut out);
+    out.push(border("├", "┼", "┤", &col_w));
+    for row in rows {
+        render_row(row, &col_w, false, &mut out);
+    }
+    out.push(border("└", "┴", "┘", &col_w));
+    out
+}
+
 /// The columns a line spends before its first word.
 fn leading_spaces(line: &str) -> usize {
     line.chars().take_while(|ch| *ch == ' ').count()
@@ -200,11 +375,6 @@ fn is_word(ch: char) -> bool {
 
 fn code_style() -> Style {
     Style::default().fg(Color::Yellow)
-}
-
-/// One code line, or prose already split into runs, wrapped as a block.
-fn block(text: &str, width: usize, indent: Option<usize>, style: Style) -> Vec<Line<'static>> {
-    block_runs(vec![Run::plain(text)], width, indent, style)
 }
 
 fn block_runs(
@@ -457,6 +627,17 @@ mod tests {
             .collect()
     }
 
+    /// A streamed answer that is still open — an unclosed fence, a half-bold
+    /// run — renders as what it is so far, never as an error and never as
+    /// raw markers.
+    #[test]
+    fn a_streamed_answer_renders_mid_form() {
+        let rendered = lines("```\nlet x = ", 60);
+        let text = plain(&rendered).join("\n");
+        assert!(!text.contains('`'), "{text}");
+        assert!(text.contains("let x"), "{text}");
+    }
+
     /// The complaint this module exists for: the markers are structure, never
     /// text. A reader must not see `**` or a backtick.
     #[test]
@@ -537,6 +718,44 @@ mod tests {
         assert!(text.contains("(kg_impact)"), "{text}");
         assert!(!text.contains("( kg_impact )"), "{text}");
         assert!(text.contains("and x y"), "{text}");
+    }
+
+    /// A GFM table renders as a box table: columns aligned, header ruled,
+    /// and no raw pipes or separator dashes left for the reader to decode.
+    #[test]
+    fn a_table_renders_as_boxed_columns() {
+        let rendered = lines(
+            "| Dimension | memnoth | Codex |\n|---|---|---|\n| Scope | This workspace | Any repo |\n| Shell | No | Yes |",
+            60,
+        );
+        let text = plain(&rendered);
+        let joined = text.join("\n");
+        assert!(joined.contains('┌') && joined.contains('│'), "{joined}");
+        assert!(!joined.contains('|'), "no pipes survive: {joined}");
+        assert!(!joined.contains("---"), "the separator is a rule: {joined}");
+        assert!(
+            text.iter().any(|line| line.contains("Dimension")),
+            "{joined}"
+        );
+        assert!(
+            text.iter().all(|line| line.chars().count() <= 60),
+            "the table fits the pane: {text:?}"
+        );
+    }
+
+    /// A bar chart in a fence keeps every character exactly where it was
+    /// written: alignment is the data, and word-wrapping it shuffled the
+    /// bars into noise.
+    #[test]
+    fn a_code_block_keeps_its_columns() {
+        let chart =
+            "Autonomy  ██████░░░░  Codex ████████████\nTeam      ███░░░░░░░  Codex ████████";
+        let rendered = lines(&format!("```\n{chart}\n```"), 60);
+        let text = plain(&rendered);
+        let joined = text.join("\n");
+        for line in chart.lines() {
+            assert!(joined.contains(line), "chart line verbatim: {joined}");
+        }
     }
 
     /// A word longer than the pane is cut, never allowed to overflow.
