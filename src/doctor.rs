@@ -10,17 +10,21 @@
 //! It reads; it never initialises. A diagnostic that creates the vault it is
 //! diagnosing answers the next question wrong.
 
+use std::path::PathBuf;
+
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
-use memnoth_context::Scope;
-
+use crate::auth::create_credential_store;
 use crate::cli::DoctorArgs;
 use crate::completion;
 use crate::context::AppContext;
 use crate::kg;
+use crate::mcp::clients::{self, ClientKind, Entry};
 use crate::output::{Outcome, human_bytes};
 use crate::vault;
+use memnoth_auth;
+use memnoth_context::Scope;
 /// `memnoth doctor`.
 pub fn report(ctx: &AppContext) -> Result<Outcome> {
     let vault = vault_section(ctx);
@@ -303,6 +307,12 @@ fn checks(ctx: &AppContext, auth: bool) -> Result<Vec<Check>> {
     rows.push(path_check(ctx, shell));
     rows.push(completions_check(shell)?);
 
+    rows.push(mcp_config_check(ctx)?);
+    rows.push(keyring_check(ctx));
+    rows.push(stale_lock_files_check(ctx));
+    rows.push(telemetry_check(ctx));
+    rows.push(trust_check(ctx));
+
     if auth {
         rows.push(
             match crate::auth::auth_status(ctx, &crate::cli::AuthStatusArgs {}) {
@@ -321,6 +331,177 @@ fn checks(ctx: &AppContext, auth: bool) -> Result<Vec<Check>> {
     }
 
     Ok(rows)
+}
+
+/// Whether this folder is trusted, named as a state rather than a problem.
+///
+/// The first launch in an untrusted folder asks before it reads anything, so
+/// the answer here is what the next launch will do. `--trust-folder` is the
+/// one-run escape and is deliberately not written by `--fix`.
+fn trust_check(ctx: &AppContext) -> Check {
+    if crate::trust::is_trusted(&ctx.root) {
+        observed("trust", "this folder is trusted".to_string())
+    } else {
+        warn(
+            "trust",
+            "not trusted — the next launch in this folder asks; `mn trust list` shows the store, `--trust-folder` allows one run"
+                .to_string(),
+            false,
+        )
+    }
+}
+
+/// Telemetry state, with the local off switch named in the same line.
+///
+/// A fresh install is off, so the check is `ok` rather than a warning: the
+/// promise is the default, and `doctor` reports it instead of asking for trust.
+fn telemetry_check(ctx: &AppContext) -> Check {
+    if ctx.config.telemetry_enabled() {
+        warn(
+            "telemetry",
+            "on — set `privacy.telemetry_enabled = false` in config.toml to stop it".to_string(),
+            false,
+        )
+    } else {
+        observed("telemetry", "off — nothing leaves this machine".to_string())
+    }
+}
+
+/// Whether MCP client configs hold a `memnoth` entry, and whether one can be
+/// written.
+///
+/// A client whose config file does not exist is not fixable here: `mcp add`
+/// creates it. A client whose config exists but has no entry is fixable.
+fn mcp_config_check(ctx: &AppContext) -> Result<Check> {
+    let home = match clients::home_dir() {
+        Some(home) => home,
+        None => {
+            return Ok(warn(
+                "mcp_config",
+                "no home directory; cannot check MCP client configs".to_string(),
+                false,
+            ));
+        }
+    };
+
+    let mut missing = Vec::new();
+    let mut unregistered = Vec::new();
+    let mut parse_errors = Vec::new();
+
+    for kind in ClientKind::ALL {
+        let status = clients::status(kind, &home, &ctx.mcp_url());
+        if !status.present {
+            missing.push(kind.name().to_string());
+        } else if !status.registered {
+            unregistered.push(kind.name().to_string());
+        }
+        if !status.ok && status.detail.contains("cannot parse") {
+            parse_errors.push(kind.name().to_string());
+        }
+    }
+
+    if parse_errors.is_empty() && unregistered.is_empty() && missing.is_empty() {
+        return Ok(observed("mcp_config", "MCP clients registered".to_string()));
+    }
+
+    let mut detail = String::new();
+    if !unregistered.is_empty() {
+        detail.push_str(&format!("not registered: {}", unregistered.join(", ")));
+    }
+    if !missing.is_empty() {
+        if !detail.is_empty() {
+            detail.push_str("; ");
+        }
+        detail.push_str(&format!("no config: {}", missing.join(", ")));
+    }
+    if !parse_errors.is_empty() {
+        if !detail.is_empty() {
+            detail.push_str("; ");
+        }
+        detail.push_str(&format!("unparseable: {}", parse_errors.join(", ")));
+    }
+
+    Ok(warn("mcp_config", detail, !unregistered.is_empty()))
+}
+
+/// Whether the credential store can be opened and its files have sane
+/// permissions. The keyring is never written to by --fix; only file-store
+/// permissions are corrected.
+fn keyring_check(_ctx: &AppContext) -> Check {
+    let store = match create_credential_store() {
+        Ok(store) => store,
+        Err(error) => {
+            return warn(
+                "keyring",
+                format!("credential store cannot be opened: {error:#}"),
+                false,
+            );
+        }
+    };
+
+    // The file store is the one whose permissions we can correct. Try a
+    // no-op read to confirm it is readable; if it is not, a permission fix
+    // may help.
+    // A no-op read, not `list_keys`: the store's listing is async and this
+    // diagnostic is not, and a read is the same permission the keyring needs.
+    let file_store = match store.get_sync("whoami") {
+        Ok(_) => None,
+        Err(error) => Some(format!("{error:#}")),
+    };
+
+    match file_store {
+        None => observed("keyring", "credential store readable".to_string()),
+        Some(error) => warn(
+            "keyring",
+            format!("credential store unreadable: {error}"),
+            true,
+        ),
+    }
+}
+
+/// Stale lock files left behind by a crashed indexer or server.
+///
+/// SQLite `-wal`/`-shm` files beside a missing database, and orphaned lock
+/// files in the state directory, are removed by --fix.
+fn stale_lock_files_check(ctx: &AppContext) -> Check {
+    let mut stale: Vec<PathBuf> = Vec::new();
+
+    // SQLite sidecar files whose primary database is gone.
+    for db in [&ctx.graph_path, &ctx.coord_path()] {
+        for sidecar in [db.with_extension("db-wal"), db.with_extension("db-shm")] {
+            if sidecar.is_file() && !db.is_file() {
+                stale.push(sidecar);
+            }
+        }
+    }
+
+    // Orphaned lock files in the state directory.
+    if let Ok(entries) = std::fs::read_dir(&ctx.home) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file()
+                && path.extension().is_some_and(|ext| ext == "lock")
+                && !path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .contains("coord")
+            {
+                stale.push(path);
+            }
+        }
+    }
+
+    if stale.is_empty() {
+        return observed("lock_files", "no stale lock files".to_string());
+    }
+
+    let detail = stale
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    warn("lock_files", format!("stale lock file(s): {detail}"), true)
 }
 
 fn path_check(ctx: &AppContext, shell: Option<completion::Shell>) -> Check {
@@ -375,7 +556,6 @@ fn completions_check(shell: Option<completion::Shell>) -> Result<Check> {
 }
 
 /// The automatic fixes, one per fixable check.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Fix {
     StateDir,
     Config,
@@ -383,6 +563,9 @@ enum Fix {
     Graph,
     PathLine,
     Completions,
+    McpConfig,
+    Keyring,
+    LockFiles,
 }
 
 impl Fix {
@@ -394,11 +577,14 @@ impl Fix {
             "graph" => Self::Graph,
             "path" => Self::PathLine,
             "completions" => Self::Completions,
+            "mcp_config" => Self::McpConfig,
+            "keyring" => Self::Keyring,
+            "lock_files" => Self::LockFiles,
             _ => return None,
         })
     }
 
-    fn label(self) -> &'static str {
+    fn label(&self) -> &'static str {
         match self {
             Self::StateDir => "create state directory",
             Self::Config => "write default config",
@@ -406,6 +592,9 @@ impl Fix {
             Self::Graph => "build code graph",
             Self::PathLine => "PATH line",
             Self::Completions => "install shell completions",
+            Self::McpConfig => "MCP client config",
+            Self::Keyring => "keyring permissions",
+            Self::LockFiles => "stale lock files",
         }
     }
 }
@@ -439,7 +628,7 @@ fn fix(ctx: &AppContext, args: &DoctorArgs) -> Result<Outcome> {
 
     if !args.dry_run {
         for fix in &plan {
-            match apply(ctx, *fix, args.yes)? {
+            match apply(ctx, fix, args.yes)? {
                 Applied::Done(detail) => fixed.push(format!("{}: {detail}", fix.label())),
                 Applied::Manual(line) => manual.push(format!("{}: {line}", fix.label())),
                 Applied::Skipped(reason) => skipped.push(format!("{}: {reason}", fix.label())),
@@ -514,7 +703,7 @@ fn fix(ctx: &AppContext, args: &DoctorArgs) -> Result<Outcome> {
     ))
 }
 
-fn apply(ctx: &AppContext, fix: Fix, yes: bool) -> Result<Applied> {
+fn apply(ctx: &AppContext, fix: &Fix, yes: bool) -> Result<Applied> {
     match fix {
         Fix::StateDir => {
             std::fs::create_dir_all(&ctx.home)
@@ -556,6 +745,9 @@ fn apply(ctx: &AppContext, fix: Fix, yes: bool) -> Result<Applied> {
             Ok(Applied::Done("indexed the code graph".to_string()))
         }
         Fix::PathLine => path_fix(ctx, yes),
+        Fix::McpConfig => mcp_config_fix(ctx),
+        Fix::Keyring => keyring_fix(ctx),
+        Fix::LockFiles => stale_lock_files_fix(ctx),
         Fix::Completions => match completion::detect_shell() {
             Some(shell) => {
                 let path = completion::install_completions(shell)?;
@@ -563,6 +755,133 @@ fn apply(ctx: &AppContext, fix: Fix, yes: bool) -> Result<Applied> {
             }
             None => Ok(Applied::Skipped("no shell detected".to_string())),
         },
+    }
+}
+
+/// Write MCP client configs for every detected client that lacks a `memnoth`
+/// entry.
+///
+/// Only clients whose config file already exists are written: `mcp add`
+/// creates missing ones. The local `memnoth-mcp` binary is preferred over the
+/// hosted endpoint when it is available.
+fn mcp_config_fix(ctx: &AppContext) -> Result<Applied> {
+    let home = match clients::home_dir() {
+        Some(home) => home,
+        None => {
+            return Ok(Applied::Skipped("no home directory".to_string()));
+        }
+    };
+
+    let binary = ctx.mcp_binary();
+    let url = ctx.mcp_url();
+    let token = ctx.mcp_token();
+    let profile = ctx.profile();
+
+    let entry = if let Some(path) = binary {
+        let path = path.display().to_string();
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("MEMNOTH_ROOT".to_string(), ctx.root.display().to_string());
+        env.insert("MEMNOTH_MCP_READ_ONLY".to_string(), "1".to_string());
+        if let Some(t) = token {
+            env.insert("MEMNOTH_MCP_TOKEN".to_string(), t);
+        }
+        Entry::stdio(
+            path,
+            vec!["serve".to_string(), "--profile".to_string(), profile],
+            env,
+        )
+    } else {
+        Entry::http(url.clone(), token.clone())
+    };
+
+    let mut written = Vec::new();
+    for kind in ClientKind::ALL {
+        let status = clients::status(kind, &home, &url);
+        if !status.present {
+            continue;
+        }
+        if status.registered {
+            continue;
+        }
+        clients::write(kind, &home, &entry, false)?;
+        written.push(kind.name().to_string());
+    }
+
+    if written.is_empty() {
+        Ok(Applied::Skipped(
+            "no unregistered client configs found".to_string(),
+        ))
+    } else {
+        Ok(Applied::Done(format!("wrote {}", written.join(", "))))
+    }
+}
+
+/// Correct file-store credential permissions: make the credentials file
+/// owner-readable only on Unix.
+fn keyring_fix(_ctx: &AppContext) -> Result<Applied> {
+    let path = memnoth_auth::default_credentials_path();
+    if !path.is_file() {
+        return Ok(Applied::Skipped("no credentials file".to_string()));
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        std::fs::set_permissions(&path, perms)
+            .with_context(|| format!("set permissions on {}", path.display()))?;
+    }
+
+    Ok(Applied::Done(format!(
+        "fixed permissions on {}",
+        path.display()
+    )))
+}
+
+/// Remove stale lock files: SQLite sidecars whose primary database is gone,
+/// and orphaned `.lock` files in the state directory.
+fn stale_lock_files_fix(ctx: &AppContext) -> Result<Applied> {
+    let mut removed: Vec<PathBuf> = Vec::new();
+
+    for db in [&ctx.graph_path, &ctx.coord_path()] {
+        for sidecar in [db.with_extension("db-wal"), db.with_extension("db-shm")] {
+            if sidecar.is_file() && !db.is_file() {
+                std::fs::remove_file(&sidecar)
+                    .with_context(|| format!("remove {}", sidecar.display()))?;
+                removed.push(sidecar);
+            }
+        }
+    }
+
+    if ctx.home.is_dir()
+        && let Ok(entries) = std::fs::read_dir(&ctx.home)
+    {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file()
+                && path.extension().is_some_and(|ext| ext == "lock")
+                && !path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .contains("coord")
+            {
+                std::fs::remove_file(&path)
+                    .with_context(|| format!("remove {}", path.display()))?;
+                removed.push(path);
+            }
+        }
+    }
+
+    if removed.is_empty() {
+        Ok(Applied::Skipped("none found".to_string()))
+    } else {
+        let detail = removed
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        Ok(Applied::Done(format!("removed {detail}")))
     }
 }
 
@@ -834,17 +1153,27 @@ fn provider_section(ctx: &AppContext) -> Section {
 }
 
 fn mcp_section(ctx: &AppContext) -> Section {
-    let binary = ctx.mcp_binary();
+    let server = ctx.mcp_server();
     let mut text = String::from("mcp\n");
     let mut data = json!({
         "url": ctx.mcp_url(),
         "profile": ctx.profile(),
         "token_present": ctx.mcp_token().is_some(),
     });
-    match &binary {
-        Some(path) => {
-            text.push_str(&format!("  server     {}\n", path.display()));
-            data["server"] = json!(path.display().to_string());
+    match &server {
+        Some(server) => {
+            text.push_str(&format!("  server     {}\n", server.path.display()));
+            // A PATH hit can be a server from an older install; the version and
+            // where it came from are what turn "found" into "the right one".
+            text.push_str(&format!(
+                "  version    {}\n  found via  {}\n",
+                server.version_line(),
+                server.source.name()
+            ));
+            data["server"] = json!(server.path.display().to_string());
+            data["server_version"] = json!(server.version());
+            data["server_source"] = json!(server.source.name());
+            data["server_matches_cli"] = json!(server.matches_this_build());
         }
         None => {
             text.push_str(
@@ -953,34 +1282,58 @@ fn sandbox_section(ctx: &AppContext) -> Section {
     // The backend question is answered by asking it, not by looking at a config
     // file: `profiles 3 defined` printed a number for a year while nothing was
     // confined, which is how a policy engine came to read as a sandbox.
-    let confinement = match &config_error {
-        // A policy that cannot be read is not a policy: the commands that
-        // would have run under it are refused, so the report says that instead
-        // of describing a plan nobody will use.
-        Some(_) => memnoth_sandbox::Confinement::Unavailable {
-            reason: "the sandbox policy cannot be read, so commands are refused (see `policy` \
-                     above)"
-                .to_string(),
-        },
-        None => match memnoth_sandbox::backend::BackendPlan::build(
+    let mut plan_error: Option<String> = None;
+    let plan = if config_error.is_some() {
+        None
+    } else {
+        match memnoth_sandbox::backend::BackendPlan::build(
             memnoth_sandbox::backend::OsBackend::host(),
             &memnoth_sandbox::profiles::ProfileName::Workspace,
             &ctx.root,
             &config,
         ) {
-            Ok(plan) => memnoth_sandbox::confine(&plan, &ctx.root, &["true".to_string()]),
-            Err(error) => memnoth_sandbox::Confinement::Unavailable {
-                reason: format!("{error:#}"),
-            },
+            Ok(plan) => Some(plan),
+            Err(error) => {
+                plan_error = Some(format!("{error:#}"));
+                None
+            }
+        }
+    };
+    let confinement = match (&config_error, &plan) {
+        // A policy that cannot be read is not a policy: the commands that
+        // would have run under it are refused, so the report says that instead
+        // of describing a plan nobody will use.
+        (Some(_), _) => memnoth_sandbox::Confinement::Unavailable {
+            reason: "the sandbox policy cannot be read, so commands are refused (see `policy` \
+                     above)"
+                .to_string(),
+        },
+        (None, Some(plan)) => memnoth_sandbox::confine(plan, &ctx.root, &["true".to_string()]),
+        (None, None) => memnoth_sandbox::Confinement::Unavailable {
+            reason: plan_error
+                .clone()
+                .unwrap_or_else(|| "no backend plan could be built".to_string()),
         },
     };
+    // One status model for `doctor`, `/status`, and the statusline. The rows
+    // come from the same plan `confine` read, so a report cannot say `enforced`
+    // while execution refuses.
+    let sandbox_status = plan.as_ref().map(memnoth_sandbox::status::status);
     let mut text = String::from("sandbox\n");
     text.push_str(&format!("  profiles   {} defined\n", config.profiles.len()));
     if let Some(error) = &config_error {
         text.push_str(&format!("  policy     {error}\n"));
     }
     text.push_str("  rules      enforced (every !cmd, /tasks run and session exec)\n");
-    text.push_str(&format!("  backend    {}\n", confinement.describe()));
+    match &sandbox_status {
+        Some(status) => {
+            for line in status.lines() {
+                text.push_str(&line);
+                text.push('\n');
+            }
+        }
+        None => text.push_str(&format!("  backend    {}\n", confinement.describe())),
+    }
     match config.governor() {
         Some(governor) => text.push_str(&format!(
             "  governed   {governor} (project config ignored)\n"
@@ -1002,6 +1355,7 @@ fn sandbox_section(ctx: &AppContext) -> Section {
             "rules_enforced": true,
             "backend_enforced": confinement.is_enforced(),
             "backend": confinement.describe(),
+            "status": sandbox_status.as_ref().map(|status| status.to_json()),
             "config_error": config_error,
         }),
     }

@@ -108,6 +108,8 @@ fn confirm_with(
     Ok(read().is_some_and(|input| matches!(input.trim().to_lowercase().as_str(), "y" | "yes")))
 }
 
+impl std::error::Error for ErrorOutcome {}
+
 /// Exit codes for the CLI.
 /// 0 = ok, 1 = unexpected, 2 = usage/bad flag, 3 = auth/credits,
 /// 4 = not found, 5 = transient/network, 6 = conflict, 7 = rate-limited,
@@ -211,6 +213,13 @@ impl ErrorOutcome {
     /// credits, a rate limit — so it maps to the exit code and the fix the
     /// command-line contract promises instead of collapsing into code 1.
     pub fn from_anyhow(error: &anyhow::Error) -> Self {
+        // An ErrorOutcome that travelled through `anyhow` keeps its exit code,
+        // cause and fix. Without this downcast, `?` in an `anyhow::Result`
+        // function silently turned a usage refusal (exit 2) into an unexpected
+        // failure (exit 1) and dropped the `--yes` hint.
+        if let Some(own) = error.downcast_ref::<ErrorOutcome>() {
+            return own.clone();
+        }
         if let Some(cloud) = error.downcast_ref::<memnoth_cloud_client::CloudError>() {
             return Self::from_cloud(cloud);
         }
@@ -240,7 +249,7 @@ impl ErrorOutcome {
                 retry_after_secs,
                 message,
             } => Self::new(
-                ExitCode::Transient,
+                ExitCode::RateLimited,
                 format!("rate limited: {}", bare(message)),
             )
             .with_fix(format!("retry in {retry_after_secs}s")),
@@ -353,12 +362,6 @@ impl From<u8> for ExitCode {
             130 => ExitCode::Cancelled,
             _ => ExitCode::Unexpected,
         }
-    }
-}
-
-impl From<ErrorOutcome> for anyhow::Error {
-    fn from(error: ErrorOutcome) -> Self {
-        anyhow::anyhow!("{}", error.message)
     }
 }
 

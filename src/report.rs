@@ -454,6 +454,7 @@ mod tests {
             output_tokens: 50,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
+            prompt: String::new(),
             cost_micros: Some(2_000),
             turn_id: Some(1),
         });
