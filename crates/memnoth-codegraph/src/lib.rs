@@ -8,6 +8,18 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
+pub mod bench;
+pub mod impact;
+pub mod lsp;
+pub mod precision;
+pub mod repomap;
+pub mod tree_sitter;
+
+pub use precision::{
+    Capabilities, GraphAnswer, Precision, best_available, capabilities, lsp_available,
+    tree_sitter_available,
+};
+
 /// Index scope for selective indexing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum IndexScope {
@@ -220,6 +232,8 @@ pub struct MapReport {
     pub truncated: bool,
     /// The store generation the map was computed from.
     pub generation: u64,
+    /// How the edges behind the communities were produced.
+    pub precision: Precision,
 }
 
 /// A blast radius result with extended info.
@@ -235,6 +249,8 @@ pub struct BlastRadius {
     pub hubs: Vec<String>,
     /// Generation.
     pub generation: u64,
+    /// Precision of the graph answer: how the edges were derived.
+    pub precision: String,
 }
 
 /// A caller in blast radius.
@@ -252,6 +268,30 @@ pub struct Caller {
     pub kind: String,
 }
 
+impl GraphAnswer for BlastRadius {
+    fn precision(&self) -> Precision {
+        Precision::parse(&self.precision).unwrap_or(Precision::Lexical)
+    }
+}
+
+impl GraphAnswer for ExploreResult {
+    fn precision(&self) -> Precision {
+        self.precision
+    }
+}
+
+impl GraphAnswer for MapReport {
+    fn precision(&self) -> Precision {
+        self.precision
+    }
+}
+
+impl GraphAnswer for HybridSearchReport {
+    fn precision(&self) -> Precision {
+        self.precision
+    }
+}
+
 /// Hybrid search report.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HybridSearchReport {
@@ -259,6 +299,8 @@ pub struct HybridSearchReport {
     pub vectors_scored: usize,
     pub added_by_proximity: usize,
     pub truncated: bool,
+    /// How the hits were found; the scanner answers `lexical`.
+    pub precision: Precision,
 }
 
 /// Resolution health.
@@ -316,6 +358,8 @@ pub struct ExploreResult {
     pub callers: Vec<Caller>,
     pub callees: Vec<Callee>,
     pub stale_files: u64,
+    /// How the caller and callee edges were produced.
+    pub precision: Precision,
 }
 
 /// Symbol information.
@@ -914,6 +958,7 @@ pub fn blast_radius(
             files_touched: Vec::new(),
             hubs: Vec::new(),
             generation: 0,
+            precision: "lexical".to_string(),
         });
     };
 
@@ -943,6 +988,7 @@ pub fn blast_radius(
         files_touched: Vec::new(),
         hubs: Vec::new(),
         generation,
+        precision: "lexical".to_string(),
     })
 }
 
@@ -1019,6 +1065,7 @@ pub fn explore(store: &Store, _root: &Path, qname: &str) -> Result<ExploreResult
             callers,
             callees,
             stale_files: 0,
+            precision: best_available(),
         });
     }
 
@@ -1038,6 +1085,7 @@ pub fn explore(store: &Store, _root: &Path, qname: &str) -> Result<ExploreResult
         callers: Vec::new(),
         callees: Vec::new(),
         stale_files: 0,
+        precision: best_available(),
     })
 }
 
@@ -1090,6 +1138,7 @@ pub fn hybrid_search_with_report(
         vectors_scored: 0,
         added_by_proximity: 0,
         truncated: false,
+        precision: best_available(),
     })
 }
 
@@ -1199,6 +1248,7 @@ pub fn untrusted_reach(store: &Store, _depth: usize) -> Result<MapReport> {
         outside: 0,
         truncated: false,
         generation: store.generation()?,
+        precision: best_available(),
     })
 }
 
@@ -1401,6 +1451,7 @@ pub fn compute_clusters(store: &Store, limit: usize) -> Result<MapReport> {
         outside,
         truncated,
         generation: store.generation()?,
+        precision: best_available(),
     })
 }
 
