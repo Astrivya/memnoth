@@ -243,6 +243,12 @@ fn style_for(role: EntryRole) -> (Style, &'static str) {
         // The glyph is the state: running, then done in place.
         EntryRole::Tool => (Style::default().fg(Color::Cyan), "▌"),
         EntryRole::ToolDone => (Style::default().fg(Color::Green), "✓"),
+        EntryRole::Thinking => (
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(ratatui::style::Modifier::ITALIC),
+            "▸",
+        ),
     }
 }
 
