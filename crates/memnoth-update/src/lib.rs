@@ -155,6 +155,70 @@ impl Channel {
             _ => bail!("Unknown channel: {}", s),
         }
     }
+
+    /// The channel a release tag publishes to.
+    ///
+    /// The tag is the one place a release states where it belongs: `v1.2.3`
+    /// is stable, `v1.2.3-beta.4`, `-rc.1` and `-alpha.1` are beta, and a tag
+    /// that names a nightly is nightly. A tag that names no channel is stable,
+    /// because every tag published before channels existed was one.
+    pub fn for_tag(tag: &str) -> Self {
+        let tag = tag.trim().to_lowercase();
+        if tag.contains("nightly") {
+            Channel::Nightly
+        } else if tag.contains("-beta") || tag.contains("-rc") || tag.contains("-alpha") {
+            Channel::Beta
+        } else {
+            Channel::Stable
+        }
+    }
+
+    /// Whether this channel's releases are prereleases.
+    ///
+    /// A prerelease must not become the `latest` a plain install resolves to,
+    /// and GitHub must not mark it latest either: one beta tag would otherwise
+    /// move every user off stable.
+    pub fn is_prerelease(&self) -> bool {
+        !matches!(self, Channel::Stable)
+    }
+}
+
+#[cfg(test)]
+mod channel_tag_tests {
+    use super::Channel;
+
+    #[test]
+    fn a_plain_version_tag_is_stable() {
+        assert_eq!(Channel::for_tag("v0.1.0"), Channel::Stable);
+        assert_eq!(Channel::for_tag("v1.2.3"), Channel::Stable);
+    }
+
+    #[test]
+    fn prerelease_suffixes_are_beta() {
+        assert_eq!(Channel::for_tag("v0.1.0-beta.2"), Channel::Beta);
+        assert_eq!(Channel::for_tag("v1.0.0-rc.1"), Channel::Beta);
+        assert_eq!(Channel::for_tag("v1.0.0-alpha.1"), Channel::Beta);
+    }
+
+    #[test]
+    fn nightly_tags_are_nightly() {
+        assert_eq!(Channel::for_tag("nightly-20261114"), Channel::Nightly);
+        assert_eq!(Channel::for_tag("v0.2.0-nightly.7"), Channel::Nightly);
+    }
+
+    #[test]
+    fn only_stable_is_not_a_prerelease() {
+        assert!(!Channel::Stable.is_prerelease());
+        assert!(Channel::Beta.is_prerelease());
+        assert!(Channel::Nightly.is_prerelease());
+    }
+
+    #[test]
+    fn every_channel_round_trips_through_its_name() {
+        for channel in [Channel::Stable, Channel::Beta, Channel::Nightly] {
+            assert_eq!(Channel::parse(channel.dist_subdir()).ok(), Some(channel));
+        }
+    }
 }
 
 /// Target platform for downloads.

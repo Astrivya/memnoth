@@ -400,7 +400,21 @@ jobs:
           fi
 
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          sh scripts/dist.sh --from artifacts --version "$tag" --out dist
+
+          # The tag names the channel, and the manifest states it, so `mn update
+          # --channel beta` reads a document that agrees with its own tag. The
+          # rule is the same one `Channel::for_tag` applies on the client side:
+          # a nightly tag is nightly, a prerelease suffix is beta, and a plain
+          # version is stable because every tag published before channels
+          # existed was one.
+          case "$tag" in
+            *nightly*) channel=nightly ;;
+            *-beta* | *-rc* | *-alpha*) channel=beta ;;
+            *) channel=stable ;;
+          esac
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+          echo "publishing $tag on the $channel channel"
+          MEMNOTH_CHANNEL="$channel" sh scripts/dist.sh --from artifacts --version "$tag" --out dist
 
       # SBOM for every published artifact, generated after signing so it
       # describes the exact bytes shipped. CycloneDX and SPDX are produced side
@@ -450,6 +464,10 @@ jobs:
           # A tag push creates a draft. Publishing is a human action, so an
           # automated run can never make an unverified build "latest".
           draft: true
+          # A beta must not become the release a plain install resolves to: on
+          # GitHub that means marking it a prerelease, which is exactly what
+          # keeps `releases/latest` pointing at stable.
+          prerelease: ${{ steps.layout.outputs.channel != 'stable' }}
           fail_on_unmatched_files: true
           files: |
             dist/${{ steps.layout.outputs.tag }}/*
