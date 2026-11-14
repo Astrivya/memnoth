@@ -103,11 +103,17 @@ impl Default for OrphanProbe {
 /// it cannot be located (gone, or re-acquisition not supported on this
 /// platform).
 fn current_process_identity(pid: u32) -> Option<ProcessIdentity> {
+    // Each platform's arm is the whole body, not a `return` with a fallback
+    // after it: on unix that fallback was unreachable code.
     #[cfg(unix)]
-    return current_process_identity_unix(pid);
+    {
+        current_process_identity_unix(pid)
+    }
     #[cfg(not(unix))]
-    let _ = pid;
-    None
+    {
+        let _ = pid;
+        None
+    }
 }
 
 #[cfg(unix)]
