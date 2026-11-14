@@ -98,7 +98,10 @@ jobs:
             args: --workspace
           - label: windows-latest, unit
             os: windows-latest
-            args: --workspace --lib --bins
+            # `--bins` here would be wrong: it forces a libtest harness onto
+            # every binary, including the fuzz targets that declare
+            # `test = false` precisely because they have no libtest entry point.
+            args: --workspace --lib
             installer: true
           - label: windows-latest, memnoth integration
             os: windows-latest
