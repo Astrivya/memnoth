@@ -389,32 +389,78 @@ const SECRET_MARKERS: &[(&str, TokenLeakKind)] = &[
     ("bearer ", TokenLeakKind::AccessToken),
 ];
 
+/// Byte offset of `needle` in `haystack`, compared ASCII-case-insensitively,
+/// starting the search at byte `from`.
+///
+/// The offset indexes `haystack` itself. Lowercasing the line first is not
+/// equivalent: `İ` (U+0130) lowercases to two code points, so a match position
+/// found in the lowered copy does not name a byte boundary in the original and
+/// slicing there panics. Markers are ASCII, and every byte of a multi-byte
+/// UTF-8 character is >= 0x80, so a byte-wise comparison can only succeed at a
+/// character boundary and the returned offset is always safe to slice at.
+fn find_ascii_ci(haystack: &str, needle: &str, from: usize) -> Option<usize> {
+    let hay = haystack.as_bytes();
+    let ndl = needle.as_bytes();
+    if ndl.is_empty() || from > hay.len() || hay.len() - from < ndl.len() {
+        return None;
+    }
+    (from..=hay.len() - ndl.len()).find(|&at| hay[at..at + ndl.len()].eq_ignore_ascii_case(ndl))
+}
+
+/// Every marker match in `line`, as `(start, end)` byte spans that never
+/// overlap.
+fn marker_spans(line: &str) -> Vec<(usize, usize)> {
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    for (marker, _) in SECRET_MARKERS {
+        let mut start = 0usize;
+        while let Some(abs) = find_ascii_ci(line, marker, start) {
+            let end = abs + marker.len();
+            spans.push((abs, end));
+            start = end;
+        }
+    }
+
+    // Left to right, longest first when two markers start together, and drop
+    // any span that overlaps an accepted one: `session_token=` also contains
+    // shorter markers, and two replacements over the same bytes would
+    // interleave.
+    spans.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
+    let mut accepted: Vec<(usize, usize)> = Vec::with_capacity(spans.len());
+    for (start, end) in spans {
+        if accepted
+            .last()
+            .is_some_and(|&(_, accepted_end)| start < accepted_end)
+        {
+            continue;
+        }
+        accepted.push((start, end));
+    }
+    accepted
+}
+
 /// Scan `text` for token leaks across the full matrix.
 ///
 /// Returns findings grouped by detector name. Matching is case-insensitive on
-/// markers; the returned snippet preserves the original casing.
+/// markers; the returned snippet preserves the original casing, and `column`
+/// counts bytes from the start of the line, as `snippet` is sliced by byte.
 pub fn scan_token_leaks(text: &str) -> TokenLeakMatrix {
     let mut matrix: TokenLeakMatrix = HashMap::new();
 
     for (line_index, line) in text.lines().enumerate() {
-        let line_lower = line.to_lowercase();
-        for (marker, kind) in SECRET_MARKERS {
-            let marker_lower = marker.to_lowercase();
-            let mut start = 0usize;
-            while let Some(pos) = line_lower[start..].find(marker_lower.as_str()) {
-                let abs = start + pos;
-                let end = (abs + marker.len()).min(line.len());
-                let snippet = line[abs..end].to_string();
-                matrix
-                    .entry(kind_name(*kind).to_string())
-                    .or_default()
-                    .push(TokenLeakFinding {
-                        kind: *kind,
-                        line: line_index + 1,
-                        column: abs + 1,
-                        snippet,
-                    });
-                start = abs + marker.len();
+        for (start, end) in marker_spans(line) {
+            for (marker, kind) in SECRET_MARKERS {
+                if line[start..end].eq_ignore_ascii_case(marker) {
+                    matrix
+                        .entry(kind_name(*kind).to_string())
+                        .or_default()
+                        .push(TokenLeakFinding {
+                            kind: *kind,
+                            line: line_index + 1,
+                            column: start + 1,
+                            snippet: line[start..end].to_string(),
+                        });
+                    break;
+                }
             }
         }
     }
@@ -423,34 +469,30 @@ pub fn scan_token_leaks(text: &str) -> TokenLeakMatrix {
 
 /// Redact every detected token leak in `text`, replacing matched marker
 /// spans with `[REDACTED]`.
+///
+/// Everything outside a marker survives byte for byte, including CRLF line
+/// endings and a missing final newline. The output is rebuilt rather than
+/// patched in place, because a running offset over the original text drifts as
+/// soon as a line ending is not `\n`.
 pub fn redact_token_leaks(text: &str) -> String {
-    let mut result = text.to_string();
-    let mut offset = 0isize;
+    let mut out = String::with_capacity(text.len());
 
-    for (line_index, line) in text.lines().enumerate() {
-        let line_lower = line.to_lowercase();
-        for (marker, _) in SECRET_MARKERS {
-            let marker_lower = marker.to_lowercase();
-            let mut start = 0usize;
-            while let Some(pos) = line_lower[start..].find(marker_lower.as_str()) {
-                let abs = start + pos;
-                let end = (abs + marker.len()).min(line.len());
-                let line_byte_start = text
-                    .lines()
-                    .take(line_index)
-                    .map(|l| l.len() + 1)
-                    .sum::<usize>();
-                let replace_start = line_byte_start + abs;
-                let replace_end = line_byte_start + end;
-                let rs = (replace_start as isize + offset) as usize;
-                let re = (replace_end as isize + offset) as usize;
-                result.replace_range(rs..re, "[REDACTED]");
-                offset += "[REDACTED]".len() as isize - (re - rs) as isize;
-                start = abs + marker.len();
-            }
+    for chunk in text.split_inclusive('\n') {
+        let line = chunk
+            .strip_suffix('\n')
+            .map_or(chunk, |body| body.strip_suffix('\r').unwrap_or(body));
+        let ending = &chunk[line.len()..];
+
+        let mut cursor = 0usize;
+        for (start, end) in marker_spans(line) {
+            out.push_str(&line[cursor..start]);
+            out.push_str("[REDACTED]");
+            cursor = end;
         }
+        out.push_str(&line[cursor..]);
+        out.push_str(ending);
     }
-    result
+    out
 }
 
 fn kind_name(kind: TokenLeakKind) -> &'static str {
@@ -902,6 +944,36 @@ mod tests {
         let redacted = redact_token_leaks(text);
         assert!(!redacted.contains("sk_live_abc123"));
         assert!(redacted.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn scan_token_leaks_survives_a_case_expanding_character() {
+        // `İ` (U+0130) lowercases to two code points. Matching in a lowered copy
+        // put the marker at a byte offset that is not a character boundary in
+        // the original line, and slicing there panicked. A fuzz run found it.
+        let text = "\u{130}\u{130}session_token=abc";
+        let matrix = scan_token_leaks(text);
+        let findings = matrix.get("session_token").expect("session_token findings");
+        assert_eq!(findings[0].snippet, "session_token=");
+        assert_eq!(findings[0].line, 1);
+    }
+
+    #[test]
+    fn redact_token_leaks_keeps_everything_outside_a_marker() {
+        // Non-ASCII before the marker, a CRLF line ending, and no final newline:
+        // each of these shifted the in-place offsets and corrupted the output.
+        let text = "\u{130} a  \r\nSESSION_TOKEN=x\r\nno marker here";
+        assert_eq!(
+            redact_token_leaks(text),
+            "\u{130} a  \r\n[REDACTED]x\r\nno marker here"
+        );
+    }
+
+    #[test]
+    fn redact_token_leaks_does_not_redact_twice_over_one_span() {
+        // `session_token=` contains shorter markers; the longest span wins and
+        // the shorter ones are dropped rather than interleaved.
+        assert_eq!(redact_token_leaks("session_token=abc"), "[REDACTED]abc");
     }
 
     #[test]
