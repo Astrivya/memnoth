@@ -59,7 +59,7 @@ pub const DEFAULT_MAX_TOKENS: u32 = 1600;
 /// A model that has not answered after eight rounds of recall/search is
 /// looping, not investigating. Stopping is honest; the alternative is a session
 /// that burns tokens until the user notices.
-pub const MAX_ROUNDS: usize = 8;
+pub const MAX_ROUNDS: usize = 24;
 
 /// Characters of one tool result the model is allowed to see.
 ///
@@ -1967,6 +1967,10 @@ pub fn run_turn_with(
         .context("cannot build the HTTP client")?;
 
     let mut conversation = Conversation::new(settings, root, &history, prompt);
+    // What the model has said so far. A turn that spends its whole tool budget
+    // still owes the person anything the model already wrote, so this is kept
+    // beside the loop rather than dropped when the loop runs out.
+    let mut spoken = String::new();
     for round in 0..MAX_ROUNDS {
         let (body, url, headers) = conversation.request();
         // The URL can carry a model-supplied endpoint; resolve it now, with the
@@ -2033,6 +2037,9 @@ pub fn run_turn_with(
                 conversation.absorb(&reply)?
             }
         };
+        if !step.text.trim().is_empty() {
+            spoken = step.text.clone();
+        }
         if step.calls.is_empty() {
             emit(ApiEvent::TurnDone {
                 session_id: session_id.to_string(),
@@ -2081,6 +2088,33 @@ pub fn run_turn_with(
             results.push((call.id.clone(), call.name.clone(), clipped));
         }
         conversation.record_round(step.raw_content, results);
+    }
+
+    // Out of rounds with tools still being called. If the model wrote anything
+    // along the way, that text is the turn's answer plus an honest note; only a
+    // model that never said a word is a failed turn. Ending in an error threw
+    // away work the person had already paid for and made a long question look
+    // like a crash.
+    if !spoken.trim().is_empty() {
+        emit(ApiEvent::TurnDone {
+            session_id: session_id.to_string(),
+        });
+        return Ok(Answer {
+            text: format!(
+                "{}\n\n(stopped after {MAX_ROUNDS} tool rounds; the answer above is what the \
+                 model had so far — ask a narrower question to keep going)",
+                spoken.trim_end()
+            ),
+            input_tokens: conversation.input_tokens,
+            output_tokens: conversation.output_tokens,
+            rounds: MAX_ROUNDS,
+            prompt: format!("{}\n\n{}", conversation.prefix, conversation.tail),
+            prefix_hash: conversation.receipt.prefix_hash,
+            context_tokens: conversation.receipt.total_tokens,
+            layer_tokens: conversation.receipt.layer_tokens,
+            pieces: conversation.receipt.pieces.len(),
+            dropped: conversation.receipt.dropped.clone(),
+        });
     }
 
     bail!(

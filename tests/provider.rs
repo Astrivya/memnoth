@@ -323,6 +323,45 @@ fn a_provider_error_message_reaches_the_user_instead_of_a_json_wall() {
 }
 
 #[test]
+fn a_turn_that_runs_out_of_rounds_keeps_what_the_model_said() {
+    // Every round both speaks and asks for a tool. The cap still holds, but the
+    // text the model already wrote is the turn's answer: ending in an error
+    // threw away work the person had paid for and read like a crash.
+    let reply = json!({
+        "choices": [{
+            "finish_reason": "tool_calls",
+            "message": {
+                "content": "half an answer",
+                "tool_calls": [{
+                    "id": "same",
+                    "function": { "name": "kg_status", "arguments": "{}" }
+                }]
+            }
+        }]
+    });
+    let mock = Mock::start(vec![reply; memnoth::provider::MAX_ROUNDS]);
+    let settings = settings(Kind::OpenAi, &mock.base_url);
+    let mut tools = FakeTools {
+        answer: "indexed".into(),
+        calls: Vec::new(),
+    };
+
+    let answer = run_turn(
+        &settings,
+        Path::new("/ws"),
+        &[],
+        "loop forever",
+        &mut tools,
+        &mut |_| {},
+    )
+    .expect("a model that spoke still produced an answer");
+    assert!(answer.text.contains("half an answer"), "{}", answer.text);
+    assert!(answer.text.contains("tool rounds"), "{}", answer.text);
+    assert_eq!(tools.calls.len(), memnoth::provider::MAX_ROUNDS);
+    mock.finish().join().expect("mock server");
+}
+
+#[test]
 fn a_turn_that_never_stops_calling_tools_is_stopped_and_says_so() {
     // Every request gets the same tool call, so the loop can only end at the
     // round cap. The test asserts the cap exists rather than a timeout.
