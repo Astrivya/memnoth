@@ -64,6 +64,4 @@ name = "sync_manifest"
 path = "fuzz_targets/sync_manifest.rs"
 test = false
 
-[profile.release]
-opt-level = 3
 

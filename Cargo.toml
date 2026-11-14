@@ -154,7 +154,5 @@ exclude = []
 
 [workspace.package]
 license = "Apache-2.0"
-version = "0.1.0-beta.2"
-edition = "2024"
 repository = "https://github.com/astrivya/memnoth"
 homepage = "https://memnoth.astrivya.ai"
