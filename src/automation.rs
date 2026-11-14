@@ -227,11 +227,9 @@ fn hook_install(ctx: &AppContext, args: &HookInstallArgs) -> Result<Outcome> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        for path in [&pre_commit_path] {
-            let mut perms = fs::metadata(path)?.permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(path, perms)?;
-        }
+        let mut perms = fs::metadata(&pre_commit_path)?.permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&pre_commit_path, perms)?;
     }
 
     // The receipt needs the commit id, so it is written after the commit.

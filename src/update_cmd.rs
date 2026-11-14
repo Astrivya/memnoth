@@ -294,6 +294,11 @@ fn remove_installed_binary(
     path: &std::path::Path,
     running: &std::path::Path,
 ) -> Result<(), ErrorOutcome> {
+    // Only Windows refuses to delete the running image, so on other platforms
+    // the argument carries no information and is not read.
+    #[cfg(not(windows))]
+    let _ = running;
+
     #[cfg(windows)]
     if path == running {
         use std::os::windows::process::CommandExt;
