@@ -23,33 +23,46 @@ libfuzzer-sys = "0.4"
 # Each target is a binary `path`-ed out of `fuzz_targets/`. cargo-fuzz 0.13
 # builds `--bins`, so a target that exists only as a file in `fuzz_targets/`
 # is one `cargo fuzz build` silently skips and `cargo fuzz run` cannot find.
+#
+# `test = false` on every target: a fuzz target's `main` comes from
+# `fuzz_target!`, so a libtest harness over one has no entry point of its own
+# and `cargo test --workspace` failed to link it (`LNK1561: entry point must be
+# defined` on Windows). They are still built as binaries, which is all
+# cargo-fuzz needs.
 [[bin]]
 name = "config"
 path = "fuzz_targets/config.rs"
+test = false
 
 [[bin]]
 name = "diff_parsing"
 path = "fuzz_targets/diff_parsing.rs"
+test = false
 
 [[bin]]
 name = "frontmatter"
 path = "fuzz_targets/frontmatter.rs"
+test = false
 
 [[bin]]
 name = "mcp_framing"
 path = "fuzz_targets/mcp_framing.rs"
+test = false
 
 [[bin]]
 name = "provider_url"
 path = "fuzz_targets/provider_url.rs"
+test = false
 
 [[bin]]
 name = "security"
 path = "fuzz_targets/security.rs"
+test = false
 
 [[bin]]
 name = "sync_manifest"
 path = "fuzz_targets/sync_manifest.rs"
+test = false
 
 [profile.release]
 opt-level = 3
