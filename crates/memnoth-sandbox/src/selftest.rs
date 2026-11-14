@@ -203,9 +203,21 @@ mod tests {
     #[test]
     fn the_path_decider_names_the_rule_it_used() {
         let plan = plan();
-        let record = crate::backend::decide_record(&plan, Path::new("/etc/shadow"), Access::Read);
-        assert!(matches!(record.outcome, PathDecision::Deny));
-        assert!(!record.rule.is_empty());
+        // A path under no grant and no system root. `/etc/shadow` will not do:
+        // `strict` reads `/etc` on unix (resolv.conf, hosts, certs), so there the
+        // read is allowed and only Windows — where those roots do not exist —
+        // denied it. The rule string is what this test is about, on every host.
+        let record = crate::backend::decide_record(
+            &plan,
+            Path::new("/nowhere/memnoth-probe/secret.txt"),
+            Access::Read,
+        );
+        assert!(
+            matches!(record.outcome, PathDecision::Deny),
+            "{}",
+            record.rule
+        );
+        assert_eq!(record.rule, "deny:read-outside-allowlist");
     }
 
     #[test]
