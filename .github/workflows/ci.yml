@@ -77,11 +77,12 @@ jobs:
   # 3m41s of tests and the rest setup, on the runner where process spawn and
   # file I/O cost the most. Nothing about that shrinks by waiting, but the test
   # half splits cleanly, so Windows runs three balanced shards: unit tests and
-  # bins, the root crate's integration tests, and every other crate's
-  # integration tests plus the doc tests (cargo refuses `--doc` beside a target
-  # selector, so they are a second invocation in the lightest shard). Each
+  # bins, the root crate's integration tests, and every other crate's. Each
   # shard pays the build again, which is why the split is three and not ten,
   # and ubuntu and macOS stay single jobs where the tests only take a minute.
+  # Doc tests are deliberately not a Windows shard: `cargo test --workspace`
+  # already runs them on the ubuntu and macOS legs, and compiling every crate's
+  # doc tests on Windows cost 8m26s on its own, slower than the job it replaced.
   test:
     name: test (${{ matrix.label }})
     runs-on: ${{ matrix.os }}
@@ -95,9 +96,9 @@ jobs:
           - label: macos-latest
             os: macos-latest
             args: --workspace
-          - label: windows-latest, unit + doc
+          - label: windows-latest, unit
             os: windows-latest
-            args: --workspace --lib --bins --doc
+            args: --workspace --lib --bins
             installer: true
           - label: windows-latest, memnoth integration
             os: windows-latest
@@ -105,7 +106,6 @@ jobs:
           - label: windows-latest, other integration
             os: windows-latest
             args: --workspace --exclude memnoth --tests
-            doc: true
     steps:
       - uses: actions/checkout@v4
 
@@ -139,16 +139,8 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          # The step's own status has to survive both invocations: a bare pipeline
-          # reports the status of whatever ran last, which used to hide a failing
-          # suite behind a passing doc-test run.
-          status=0
-          cargo test ${{ matrix.args }} --locked 2>&1 | tee test-output.log || status=$?
-          if [ "${{ matrix.doc }}" = "true" ]; then
-            cargo test --workspace --doc --locked 2>&1 | tee -a test-output.log || status=$?
-          fi
+          cargo test ${{ matrix.args }} --locked 2>&1 | tee test-output.log
           { grep -E "FAILED|panicked at" test-output.log | head -40; } >> "$GITHUB_STEP_SUMMARY" || true
-          exit $status
 
   generated-surfaces-ci:
     name: generated surfaces (memnoth-command)

@@ -154,5 +154,10 @@ exclude = []
 
 [workspace.package]
 license = "Apache-2.0"
+# Nothing inherits this, and cargo warns that it is unused — but it is not: the
+# release contract is one version stated in both the root package and here, and
+# `tests/version_surfaces.rs` fails when the two disagree. Removing it to quiet
+# the warning removes the check.
+version = "0.1.0-beta.2"
 repository = "https://github.com/astrivya/memnoth"
 homepage = "https://memnoth.astrivya.ai"
