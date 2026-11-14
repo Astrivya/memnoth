@@ -1023,6 +1023,7 @@ fn extract_binary(archive: &Path, dir: &Path) -> Result<PathBuf> {
             let out = dir.join(path.file_name().unwrap_or_default());
             let mut target = fs::File::create(&out)?;
             std::io::copy(&mut entry, &mut target)?;
+            make_executable(&out)?;
             return Ok(out);
         }
     } else {
@@ -1036,6 +1037,7 @@ fn extract_binary(archive: &Path, dir: &Path) -> Result<PathBuf> {
             }
             let out = dir.join(path.file_name().unwrap_or_default());
             entry.unpack(&out)?;
+            make_executable(&out)?;
             return Ok(out);
         }
     }
@@ -1044,6 +1046,27 @@ fn extract_binary(archive: &Path, dir: &Path) -> Result<PathBuf> {
         "{} does not contain a memnoth binary",
         archive.display()
     )))
+}
+
+/// Give an unpacked artifact the execute bit before anyone runs it.
+///
+/// A zip carries no POSIX mode unless the writer set one, so the unpacked
+/// binary arrived `0644` and the `--version` check refused it with
+/// `Permission denied` on Linux and macOS — every real update, not just the
+/// test. The archive's own mode is honoured above when it has one; this is the
+/// floor.
+#[cfg(unix)]
+fn make_executable(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = fs::metadata(path)?.permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(path, perms)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn make_executable(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 /// Format update notification message.
@@ -1369,6 +1392,20 @@ mod tests {
         let binary = extract_binary(&archive, &dir.path().join("unpack")).unwrap();
         assert_eq!(binary.file_name().unwrap(), "memnoth.exe");
         assert_eq!(fs::read(&binary).unwrap(), b"not really a binary\n");
+
+        // The artifact is executed next to prove it answers `--version`, and a
+        // zip written without POSIX modes (as `zip` CLI-less tooling writes it)
+        // unpacks at 0644. Without the execute bit the check failed with
+        // `Permission denied` on every unix update.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&binary).unwrap().permissions().mode();
+            assert!(
+                mode & 0o111 != 0,
+                "the unpacked artifact must be executable, got mode {mode:o}"
+            );
+        }
     }
 
     #[test]
