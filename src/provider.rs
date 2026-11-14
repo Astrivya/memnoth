@@ -1935,6 +1935,31 @@ pub fn run_turn_with(
     session_id: &str,
     emit: &mut dyn FnMut(ApiEvent),
 ) -> Result<Answer> {
+    run_turn_attached(
+        settings,
+        root,
+        history,
+        prompt,
+        &[],
+        tools,
+        on_note,
+        session_id,
+        emit,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_turn_attached(
+    settings: &Settings,
+    root: &Path,
+    history: &[Exchange],
+    prompt: &str,
+    attachments: &[Attachment],
+    tools: &mut dyn Tools,
+    on_note: &mut dyn FnMut(&str),
+    session_id: &str,
+    emit: &mut dyn FnMut(ApiEvent),
+) -> Result<Answer> {
     match settings.api_key.as_deref() {
         Some(key) if !key.trim().is_empty() => {}
         _ => bail!(
@@ -1966,7 +1991,7 @@ pub fn run_turn_with(
         .build()
         .context("cannot build the HTTP client")?;
 
-    let mut conversation = Conversation::new(settings, root, &history, prompt);
+    let mut conversation = Conversation::new_with(settings, root, &history, prompt, attachments);
     // What the model has said so far. A turn that spends its whole tool budget
     // still owes the person anything the model already wrote, so this is kept
     // beside the loop rather than dropped when the loop runs out.
@@ -2158,6 +2183,138 @@ struct ToolResult {
 }
 
 /// The provider-neutral state one turn keeps between rounds.
+/// An image or PDF attached to one turn.
+///
+/// The bytes are read when the file is attached, not when the request is
+/// built: a path that disappears between typing and sending would otherwise
+/// fail a turn for a file the composer already said was there. What the file
+/// is comes from its magic bytes, never its extension — a `.png` that is really
+/// a zip must be refused before any of it reaches a provider.
+#[derive(Debug, Clone)]
+pub struct Attachment {
+    /// The path as the person typed or selected it.
+    pub path: String,
+    /// Sniffed, not guessed.
+    pub mime: &'static str,
+    pub bytes: Vec<u8>,
+}
+
+/// Largest single attachment. Base64 inflates a body by a third, and providers
+/// reject requests well under 32 MiB, so 10 MiB raw stays inside every limit.
+pub const ATTACHMENT_MAX_BYTES: usize = 10 * 1024 * 1024;
+
+impl Attachment {
+    /// Read one file, refusing anything that is not an image or a PDF.
+    pub fn read(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("cannot read attachment {}", path.display()))?;
+        if bytes.is_empty() {
+            bail!("{} is empty", path.display());
+        }
+        if bytes.len() > ATTACHMENT_MAX_BYTES {
+            bail!(
+                "{} is {:.1} MiB — the limit is {} MiB per attachment",
+                path.display(),
+                bytes.len() as f64 / (1024.0 * 1024.0),
+                ATTACHMENT_MAX_BYTES / (1024 * 1024)
+            );
+        }
+        let mime = sniff_mime(&bytes).with_context(|| {
+            format!(
+                "{} is not an image or a PDF — the type is read from the file's first bytes, not its name",
+                path.display()
+            )
+        })?;
+        Ok(Self {
+            path: path.display().to_string(),
+            mime,
+            bytes,
+        })
+    }
+
+    fn encode(&self) -> String {
+        base64(&self.bytes)
+    }
+}
+
+/// Identify the formats providers accept, from the bytes rather than the name.
+fn sniff_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) {
+        return Some("image/png");
+    }
+    if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        return Some("image/jpeg");
+    }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return Some("image/gif");
+    }
+    if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    if bytes.starts_with(b"%PDF-") {
+        return Some("application/pdf");
+    }
+    None
+}
+
+/// Standard padded base64. Both a data URI and Anthropic's `source.data` want
+/// this alphabet, and sixteen lines is cheaper than a dependency for one use.
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
+        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(ALPHABET[(n >> 18) as usize & 63] as char);
+        out.push(ALPHABET[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            ALPHABET[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// The content blocks one attachment becomes on a given wire shape.
+///
+/// Anthropic takes images and documents natively. The OpenAI-compatible chat
+/// shape has no document block at all, so a PDF there becomes a text block that
+/// names the file instead of a base64 blob the model would read as prose — a
+/// model told it has a file it cannot open is honest; one handed a blob is not.
+fn attachment_blocks(kind: Kind, file: &Attachment) -> Vec<Value> {
+    let pdf = file.mime == "application/pdf";
+    match kind {
+        Kind::Anthropic if pdf => vec![json!({
+            "type": "document",
+            "source": { "type": "base64", "media_type": file.mime, "data": file.encode() }
+        })],
+        Kind::Anthropic => vec![json!({
+            "type": "image",
+            "source": { "type": "base64", "media_type": file.mime, "data": file.encode() }
+        })],
+        _ if pdf => vec![json!({
+            "type": "text",
+            "text": format!(
+                "[attached {} — this provider cannot receive PDFs; convert it to text or an image]",
+                file.path
+            )
+        })],
+        _ => vec![json!({
+            "type": "image_url",
+            "image_url": { "url": format!("data:{};base64,{}", file.mime, file.encode()) }
+        })],
+    }
+}
+
 struct Conversation<'a> {
     settings: &'a Settings,
     history: &'a [Exchange],
@@ -2181,14 +2338,27 @@ struct Conversation<'a> {
     /// The assembler's accounting for this turn, so the answer can carry a
     /// receipt rather than a token count nobody can audit.
     receipt: Receipt,
+    /// Images and PDFs sent with this turn's prompt.
+    attachments: &'a [Attachment],
 }
 
 impl<'a> Conversation<'a> {
+    #[cfg(test)]
     fn new(
         settings: &'a Settings,
         root: &'a Path,
         history: &'a [Exchange],
         prompt: &'a str,
+    ) -> Self {
+        Self::new_with(settings, root, history, prompt, &[])
+    }
+
+    fn new_with(
+        settings: &'a Settings,
+        root: &'a Path,
+        history: &'a [Exchange],
+        prompt: &'a str,
+        attachments: &'a [Attachment],
     ) -> Self {
         let assembly = assemble_system_prompt_for(root, Some(settings.prompt_budget()));
         let receipt = assembly.receipt.clone();
@@ -2203,9 +2373,27 @@ impl<'a> Conversation<'a> {
             output_tokens: 0,
             tool_results: Vec::new(),
             receipt,
+            attachments,
         };
         conversation.seed();
         conversation
+    }
+
+    /// The user message for this turn. With nothing attached the body is the
+    /// plain string it has always been, so an ordinary turn's wire shape does
+    /// not change because attachments now exist.
+    fn seed_prompt(&mut self) {
+        if self.attachments.is_empty() && !matches!(self.settings.kind, Kind::Anthropic) {
+            self.messages
+                .push(json!({ "role": "user", "content": self.prompt }));
+            return;
+        }
+        let mut content = vec![json!({ "type": "text", "text": self.prompt })];
+        for file in self.attachments {
+            content.extend(attachment_blocks(self.settings.kind, file));
+        }
+        self.messages
+            .push(json!({ "role": "user", "content": content }));
     }
 
     fn seed(&mut self) {
@@ -2224,10 +2412,7 @@ impl<'a> Conversation<'a> {
                         "content": [{ "type": "text", "text": exchange.text }]
                     }));
                 }
-                self.messages.push(json!({
-                    "role": "user",
-                    "content": [{ "type": "text", "text": self.prompt }]
-                }));
+                self.seed_prompt();
             }
             Kind::OpenAi | Kind::Memnoth | Kind::Kilo => {
                 self.messages.push(json!({
@@ -2243,8 +2428,7 @@ impl<'a> Conversation<'a> {
                     self.messages
                         .push(json!({ "role": role, "content": exchange.text }));
                 }
-                self.messages
-                    .push(json!({ "role": "user", "content": self.prompt }));
+                self.seed_prompt();
             }
         }
     }
@@ -3414,5 +3598,65 @@ mod tests {
         fn call(&mut self, _name: &str, _input: &Value) -> Result<String> {
             Ok("nothing".into())
         }
+    }
+}
+
+#[cfg(test)]
+mod attachment_tests {
+    use super::*;
+
+    fn file(mime: &'static str, path: &str) -> Attachment {
+        Attachment {
+            path: path.into(),
+            mime,
+            bytes: vec![1, 2, 3],
+        }
+    }
+
+    #[test]
+    fn base64_matches_the_padding_rules() {
+        assert_eq!(base64(b""), "");
+        assert_eq!(base64(b"f"), "Zg==");
+        assert_eq!(base64(b"fo"), "Zm8=");
+        assert_eq!(base64(b"foo"), "Zm9v");
+        assert_eq!(base64(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn the_type_comes_from_the_bytes_not_the_name() {
+        const PNG: &[u8] = &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        assert_eq!(sniff_mime(PNG), Some("image/png"));
+        assert_eq!(sniff_mime(b"%PDF-1.7"), Some("application/pdf"));
+        assert_eq!(sniff_mime(&[0xff, 0xd8, 0xff, 0xe0]), Some("image/jpeg"));
+        assert_eq!(
+            sniff_mime(&[b'P', b'K', 0x03, 0x04]),
+            None,
+            "a zip renamed .png"
+        );
+    }
+
+    #[test]
+    fn anthropic_receives_images_and_documents() {
+        let image = attachment_blocks(Kind::Anthropic, &file("image/png", "shot.png"));
+        assert_eq!(image[0]["type"], "image");
+        assert_eq!(image[0]["source"]["media_type"], "image/png");
+        assert_eq!(image[0]["source"]["data"], "AQID");
+
+        let pdf = attachment_blocks(Kind::Anthropic, &file("application/pdf", "spec.pdf"));
+        assert_eq!(pdf[0]["type"], "document");
+        assert_eq!(pdf[0]["source"]["media_type"], "application/pdf");
+    }
+
+    #[test]
+    fn openai_receives_a_data_uri_and_is_told_a_pdf_cannot_be_read() {
+        let image = attachment_blocks(Kind::OpenAi, &file("image/jpeg", "shot.jpg"));
+        assert_eq!(image[0]["type"], "image_url");
+        assert_eq!(image[0]["image_url"]["url"], "data:image/jpeg;base64,AQID");
+
+        let pdf = attachment_blocks(Kind::OpenAi, &file("application/pdf", "spec.pdf"));
+        assert_eq!(pdf[0]["type"], "text");
+        let note = pdf[0]["text"].as_str().unwrap();
+        assert!(note.contains("spec.pdf"));
+        assert!(!note.contains("base64"), "no blob dressed up as text");
     }
 }

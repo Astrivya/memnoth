@@ -538,6 +538,9 @@ pub struct App {
     pub input: String,
     /// Cursor position, in characters (not bytes).
     pub cursor: usize,
+    /// Files read for the next turn. Taken when the turn is sent, so a chip
+    /// can never describe something a previous turn already carried.
+    pub attachments: Vec<crate::provider::Attachment>,
     /// Previously submitted lines, oldest first.
     pub history: Vec<String>,
     /// Where `history` navigation currently is.
@@ -749,6 +752,7 @@ impl App {
             entries: Vec::new(),
             input: String::new(),
             cursor: 0,
+            attachments: Vec::new(),
             history: Vec::new(),
             history_pos: None,
             draft: String::new(),

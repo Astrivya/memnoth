@@ -941,15 +941,43 @@ fn draw_footer(
     // the top rule, right-aligned. The border colour follows the theme, so a
     // high-contrast screen gets a high-contrast box and no-colour gets none.
     let scheme = crate::tui::theme::ColorScheme::for_theme(app.theme);
-    let boxed = area.height >= 4;
-    // The box takes everything but the hint row; its inner height is how many
-    // wrapped text rows are visible, and the text scrolls once they are full.
-    let box_area = Rect::new(area.x, area.y, area.width, area.height.saturating_sub(1));
+    // Attachments get one row above the rule, and the row exists only when
+    // there is something to show: a plain prompt pays no height for it. The
+    // box needs three rows plus the hint, so the chip row is part of the
+    // threshold rather than taken out of the box's only text row.
+    let chips_h = u16::from(!app.attachments.is_empty());
+    let boxed = area.height >= 4 + chips_h;
+    // The box takes everything but the hint row and the chips; its inner height
+    // is how many wrapped text rows are visible, and the text scrolls once they
+    // are full.
+    let box_area = Rect::new(
+        area.x,
+        area.y + chips_h,
+        area.width,
+        area.height.saturating_sub(1).saturating_sub(chips_h),
+    );
     let model = app.model.clone();
     let boxed_block = Block::default()
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
         .border_style(Style::default().fg(scheme.border));
+    if chips_h == 1 {
+        let mut chips = String::new();
+        for file in &app.attachments {
+            let name = std::path::Path::new(&file.path)
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| file.path.clone());
+            chips.push_str(&format!("[+{name}] "));
+        }
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                ellipsize(chips.trim_end(), area.width.saturating_sub(1) as usize),
+                Style::default().fg(scheme.accent),
+            ))),
+            Rect::new(area.x + 1, area.y, area.width.saturating_sub(1), 1),
+        );
+    }
     let inner = boxed_block.inner(box_area);
     frame.render_widget(boxed_block, box_area);
     if boxed && !model.is_empty() && area.width >= 50 {

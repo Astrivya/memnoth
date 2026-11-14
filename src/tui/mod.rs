@@ -1058,6 +1058,10 @@ fn handle_key(app: &mut App, key: KeyEvent, workspace_root: &Path) {
             }
         }
         KeyCode::BackTab => app.cycle_pane(false),
+        // ctrl-o attaches the path the line starts with. The composer holds
+        // prose, so the line doubles as the selection: `/tmp/shot.png what is
+        // wrong here?` attaches the file and leaves the question on the line.
+        KeyCode::Char('o') if ctrl => attach_from_input(app),
         KeyCode::Char(ch) if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) => {
             app.insert_char(ch);
             app.sync_slash();
@@ -1137,6 +1141,39 @@ fn handle_key(app: &mut App, key: KeyEvent, workspace_root: &Path) {
         _ => {}
     }
 }
+/// `ctrl-o`: read the leading token of the line as an image or PDF.
+///
+/// The read happens here, while the person is looking at the composer, so a
+/// missing file or a mislabelled extension is answered immediately instead of
+/// failing the turn after the question is already in the transcript.
+fn attach_from_input(app: &mut App) {
+    let line = app.input.trim().to_string();
+    if line.is_empty() {
+        app.push(
+            EntryRole::Info,
+            "ctrl-o takes a path: type the image or PDF path on the line first".to_string(),
+        );
+        return;
+    }
+    let candidate = line
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    match crate::provider::Attachment::read(&candidate) {
+        Ok(file) => {
+            let name = file.path.clone();
+            app.attachments.push(file);
+            let rest = line[candidate.len()..].trim_start().to_string();
+            app.input = rest;
+            app.cursor = app.input.chars().count();
+            app.push(EntryRole::Info, format!("attached {name}"));
+            app.sync_slash();
+        }
+        Err(error) => app.push(EntryRole::Error, format!("{error:#}")),
+    }
+}
+
 /// Whether a submitted prompt must open a fresh conversation first.
 ///
 /// The brief is drawn over a resumed file — that is what keeps its history one
@@ -2167,6 +2204,9 @@ fn start_turn(
     settings: provider::Settings,
 ) -> Option<Busy> {
     app.push(EntryRole::User, prompt);
+    // Taken before the worker starts: the turn owns these bytes, and a second
+    // turn must not silently resend what the first already carried.
+    let attachments = std::mem::take(&mut app.attachments);
     app.turn_started_ms = crate::session::now_ms();
     // A failed turn may have left its stream indices pointing at entries
     // that are never going to finish; a new turn starts its own segments.
@@ -2224,11 +2264,12 @@ fn start_turn(
         let mut on_note = |line: &str| {
             let _ = notes.send(TurnEvent::Note(line.to_string()));
         };
-        let result = provider::run_turn_with(
+        let result = provider::run_turn_attached(
             &settings,
             &root,
             &history,
             &asked_on_worker,
+            &attachments,
             &mut tools,
             &mut on_note,
             &session_id,
