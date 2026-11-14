@@ -24,16 +24,25 @@ use memnoth_sandbox::{Execution, prepare};
 /// corpus without reading Rust. See the file's header for the format.
 const EGRESS_CORPUS: &str = include_str!("fixtures/egress-corpus.txt");
 
+/// A throwaway tree of granted roots.
+///
+/// One directory per test, held by a `TempDir` guard: tests in a binary run in
+/// parallel threads, so a root named after the process alone is removed by
+/// whichever test finishes first. That race surfaces as `create_dir_all`
+/// failing with `AlreadyExists` — the sibling removes the directory between
+/// `mkdir` and the `is_dir` re-check.
 struct Tree {
     root: PathBuf,
+    _dir: tempfile::TempDir,
 }
 
 impl Tree {
     fn new() -> Self {
-        let root = std::env::temp_dir().join(format!("mn-corpus-{}", std::process::id()));
+        let dir = tempfile::tempdir().expect("a temp dir for this test");
+        let root = dir.path().to_path_buf();
         std::fs::create_dir_all(root.join("rw/generated")).unwrap();
         std::fs::create_dir_all(root.join("readonly")).unwrap();
-        Tree { root }
+        Tree { root, _dir: dir }
     }
 
     fn plan(&self) -> BackendPlan {
@@ -59,12 +68,6 @@ impl Tree {
             restrict_network: true,
             network: NetworkPolicy::Off,
         }
-    }
-}
-
-impl Drop for Tree {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
     }
 }
 
