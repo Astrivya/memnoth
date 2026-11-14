@@ -141,12 +141,15 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // saying the same thing twice. The brief's masthead is the header then:
     // while it is up, the one-line transcript header is not drawn at all.
     let splash = app.home_showing();
+    // The composer grows with what is typed into it, up to a cap. A long
+    // question used to wrap into one clipped row — the text past the right edge
+    // was simply not drawn — and a pasted page must not take the whole frame.
+    let composer = composer_rows(&app.input, area.width);
     let rows = Layout::vertical([
         Constraint::Length(if splash { 0 } else { 1 }),
         Constraint::Min(3),
-        // The composer box: top rule, the line, the bottom rule, and the hint.
-        // The box is the separator now, so the blank row it replaced is gone.
-        Constraint::Length(4),
+        // Two rules around the text, plus the hint below them.
+        Constraint::Length(composer + 3),
     ])
     .split(area);
 
@@ -187,6 +190,63 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let mut overlays = std::mem::take(&mut app.overlay_stack);
     overlays.render(frame, area, app);
     app.overlay_stack = overlays;
+}
+
+/// Most rows the composer takes before the text scrolls inside it.
+const MAX_COMPOSER_ROWS: u16 = 8;
+
+/// Characters that fit on one composer row: the box's two rules and the `› `
+/// glyph each spend columns of the same line.
+fn composer_width(width: u16) -> usize {
+    width.saturating_sub(4).max(1) as usize
+}
+
+/// Rows the composer needs for `input`, capped so a paste cannot eat the frame.
+fn composer_rows(input: &str, width: u16) -> u16 {
+    let rows = composer_lines(input, composer_width(width)).len();
+    rows.clamp(1, MAX_COMPOSER_ROWS as usize) as u16
+}
+
+/// `input` split into the rows it occupies at `usable` characters per row.
+fn composer_lines(input: &str, usable: usize) -> Vec<String> {
+    let mut rows = vec![String::new()];
+    let mut col = 0usize;
+    for ch in input.chars() {
+        if ch == '\n' {
+            rows.push(String::new());
+            col = 0;
+            continue;
+        }
+        if col == usable {
+            rows.push(String::new());
+            col = 0;
+        }
+        rows.last_mut().expect("rows is never empty").push(ch);
+        col += 1;
+    }
+    rows
+}
+
+/// Row and column of the caret once `input` is wrapped at `usable` characters.
+fn caret_cell(input: &str, cursor: usize, usable: usize) -> (usize, usize) {
+    let mut row = 0usize;
+    let mut col = 0usize;
+    for (index, ch) in input.chars().enumerate() {
+        if index == cursor {
+            break;
+        }
+        if ch == '\n' {
+            row += 1;
+            col = 0;
+            continue;
+        }
+        if col == usable {
+            row += 1;
+            col = 0;
+        }
+        col += 1;
+    }
+    (row, col)
 }
 
 /// The pending sign-in's code and link, above the prompt.
@@ -867,25 +927,10 @@ fn draw_footer(
     let counter = position
         .map(|(at, of)| format!("{at}/{of}"))
         .unwrap_or_default();
-    let typed = 2 + app.input.chars().count();
-    let room = (area.width as usize)
-        .saturating_sub(typed)
-        .saturating_sub(counter.chars().count() + 3);
-
     // The rest of the highlighted command is deliberately not drawn: the
     // dropdown already marks the selection with `›` and picks out the letters
     // the query landed on, and `Tab` completes. Painting the remainder into
     // the line made typing `/` look like it had already typed `/search`.
-    let _ = room;
-    let input_line = Line::from(vec![
-        Span::styled(
-            "› ",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(app.input.clone(), Style::default().fg(Color::White)),
-    ]);
     let hint_text = ellipsize(&footer_hint(app), area.width as usize);
     let hint = Line::from(Span::styled(
         hint_text,
@@ -897,11 +942,9 @@ fn draw_footer(
     // high-contrast screen gets a high-contrast box and no-colour gets none.
     let scheme = crate::tui::theme::ColorScheme::for_theme(app.theme);
     let boxed = area.height >= 4;
-    let box_area = if boxed {
-        Rect::new(area.x, area.y, area.width, 3)
-    } else {
-        Rect::new(area.x, area.y, area.width, area.height.saturating_sub(1))
-    };
+    // The box takes everything but the hint row; its inner height is how many
+    // wrapped text rows are visible, and the text scrolls once they are full.
+    let box_area = Rect::new(area.x, area.y, area.width, area.height.saturating_sub(1));
     let model = app.model.clone();
     let boxed_block = Block::default()
         .borders(Borders::ALL)
@@ -925,10 +968,39 @@ fn draw_footer(
             ),
         );
     }
-    frame.render_widget(Paragraph::new(input_line), inner);
+    // The typed text is hard-wrapped to the box so the caret math below and
+    // what is on screen agree; word wrapping would move a character to a row
+    // the caret does not know about.
+    let usable = composer_width(area.width);
+    let rows_all = composer_lines(&app.input, usable);
+    let visible = inner.height.max(1) as usize;
+    let cursor_chars = app.cursor.min(app.input.chars().count());
+    let (caret_row, caret_col) = caret_cell(&app.input, cursor_chars, usable);
+    // Keep the caret's row on screen: scroll only once the text passes the box.
+    let first = caret_row
+        .saturating_sub(visible.saturating_sub(1))
+        .min(rows_all.len().saturating_sub(visible));
+    let mut lines: Vec<Line> = Vec::with_capacity(visible);
+    for (index, text) in rows_all.iter().enumerate().skip(first).take(visible) {
+        let glyph = if index == 0 {
+            Span::styled(
+                "› ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::raw("  ")
+        };
+        lines.push(Line::from(vec![
+            glyph,
+            Span::styled(text.clone(), Style::default().fg(Color::White)),
+        ]));
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
     frame.render_widget(
         Paragraph::new(hint),
-        Rect::new(area.x, area.y + 3, area.width, 1),
+        Rect::new(area.x, area.y + area.height - 1, area.width, 1),
     );
 
     if !counter.is_empty() && (area.width as usize) > counter.chars().count() + 4 {
@@ -943,10 +1015,8 @@ fn draw_footer(
     // but only when this line is the one taking keys. Inside the box it sits
     // one column in from the border.
     if caret {
-        let prefix = 2u16;
-        let typed = app.cursor.min(app.input.chars().count()) as u16;
-        let x = (inner.x + prefix + typed).min(inner.x + inner.width.saturating_sub(1));
-        let y = area.y + 1;
+        let x = (inner.x + 2 + caret_col as u16).min(inner.x + inner.width.saturating_sub(1));
+        let y = inner.y + caret_row.saturating_sub(first) as u16;
         frame.set_cursor_position(Position::new(x, y));
     }
 }
