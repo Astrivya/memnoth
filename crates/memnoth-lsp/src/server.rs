@@ -246,7 +246,12 @@ impl LspServer {
         }
         let path = path_from_uri(&params.text_document.uri);
         let Some((name, _)) = identifier_at(&path, &params.position) else {
-            return Ok(json!({ "changes": {} }));
+            // Serialized from the type, not written by hand: `changes` is a list
+            // of `(uri, edits)` pairs, and a `{}` map does not come back as a
+            // `WorkspaceEdit`.
+            return Ok(serde_json::to_value(WorkspaceEdit {
+                changes: Some(Vec::new()),
+            })?);
         };
         // A mention can be both an indexed row and the source of a relation, so
         // the same span arrives twice; an edit applied twice would be a rename
@@ -359,13 +364,19 @@ pub(crate) fn path_from_uri(uri: &str) -> PathBuf {
 }
 
 /// An absolute path as a `file://` URI with forward slashes.
+///
+/// The leading slash is part of a unix path, not decoration: trimming it gave
+/// `file://home/x`, which reads back as the rate path `home/x` and made every
+/// hover, definition and rename miss on Linux and macOS.
 fn uri_for(path: &str) -> String {
     let normalized = path.replace('\\', "/");
-    let bytes = normalized.as_bytes();
-    let needs_slash = bytes.len() >= 2 && bytes[1] == b':';
-    let prefix = if needs_slash { "file:///" } else { "file://" };
-    let trimmed = normalized.trim_start_matches('/');
-    format!("{prefix}{trimmed}")
+    // A Windows path needs the third slash (the drive letter is not an
+    // authority component); a unix path already starts with one.
+    if normalized.as_bytes().get(1) == Some(&b':') {
+        format!("file:///{normalized}")
+    } else {
+        format!("file://{normalized}")
+    }
 }
 
 /// Byte offset of a zero-based LSP position, or `None` past the end of the file.
@@ -473,6 +484,9 @@ mod tests {
     #[test]
     fn uri_round_trips_a_windows_path_and_a_unix_path() {
         assert_eq!(uri_for("E:/x/a.rs"), "file:///E:/x/a.rs");
+        // A unix path keeps its leading slash, so the URI round-trips to an
+        // absolute path rather than a relative one.
+        assert_eq!(uri_for("/home/x/a.rs"), "file:///home/x/a.rs");
         assert_eq!(
             path_from_uri("file:///E:/x/a.rs"),
             PathBuf::from("E:/x/a.rs")
