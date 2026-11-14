@@ -73,13 +73,39 @@ jobs:
       - name: Bash completion
         run: cargo run --quiet -- completion show --shell bash --output completions/memnoth.bash --check
 
+  # Windows is the slowest leg by a distance: its 7m49s was 2m41s of build,
+  # 3m41s of tests and the rest setup, on the runner where process spawn and
+  # file I/O cost the most. Nothing about that shrinks by waiting, but the test
+  # half splits cleanly, so Windows runs three balanced shards: unit tests and
+  # bins, the root crate's integration tests, and every other crate's
+  # integration tests plus the doc tests (cargo refuses `--doc` beside a target
+  # selector, so they are a second invocation in the lightest shard). Each
+  # shard pays the build again, which is why the split is three and not ten,
+  # and ubuntu and macOS stay single jobs where the tests only take a minute.
   test:
-    name: test (${{ matrix.os }})
+    name: test (${{ matrix.label }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - label: ubuntu-latest
+            os: ubuntu-latest
+            args: --workspace
+          - label: macos-latest
+            os: macos-latest
+            args: --workspace
+          - label: windows-latest, unit + doc
+            os: windows-latest
+            args: --workspace --lib --bins --doc
+            installer: true
+          - label: windows-latest, memnoth integration
+            os: windows-latest
+            args: --package memnoth --tests
+          - label: windows-latest, other integration
+            os: windows-latest
+            args: --workspace --exclude memnoth --tests
+            doc: true
     steps:
       - uses: actions/checkout@v4
 
@@ -91,7 +117,7 @@ jobs:
       # Rust test executes it. Parse it on the Windows leg so an indentation or
       # quoting mistake in a here-string fails here instead of at install time.
       - name: Windows installer parses
-        if: runner.os == 'Windows'
+        if: matrix.installer
         shell: pwsh
         run: |
           $errors = $null
@@ -109,12 +135,20 @@ jobs:
       # test is where a morning used to go. Pinned to bash: `set -o pipefail`
       # is not PowerShell, and windows-latest runs run: steps in pwsh, so the
       # step died before cargo did and the job reported failure for nothing.
-      - name: Run cargo test --workspace --locked
+      - name: Run cargo test ${{ matrix.args }} --locked
         shell: bash
         run: |
           set -o pipefail
-          cargo test --workspace --locked 2>&1 | tee test-output.log
+          # The step's own status has to survive both invocations: a bare pipeline
+          # reports the status of whatever ran last, which used to hide a failing
+          # suite behind a passing doc-test run.
+          status=0
+          cargo test ${{ matrix.args }} --locked 2>&1 | tee test-output.log || status=$?
+          if [ "${{ matrix.doc }}" = "true" ]; then
+            cargo test --workspace --doc --locked 2>&1 | tee -a test-output.log || status=$?
+          fi
           { grep -E "FAILED|panicked at" test-output.log | head -40; } >> "$GITHUB_STEP_SUMMARY" || true
+          exit $status
 
   generated-surfaces-ci:
     name: generated surfaces (memnoth-command)
@@ -153,16 +187,12 @@ jobs:
         with:
           python-version: "3.11"
 
-      # Build once; every repetition reuses the same binary so measured
-      # differences come from the model/effort, not from a rebuild.
-      - name: Build memnoth
-        run: cargo build --locked --bin memnoth
-
       # The evaluation measures a real model behind a real key. Without a key
       # every task scores zero and the job would be red for a reason that has
       # nothing to do with the change under test, so the run is gated on the
       # key's presence: set KILO_API_KEY (or a provider key) as a repository
-      # secret and the same steps run in full.
+      # secret and the same steps run in full. The key check comes first: the
+      # job used to compile the whole workspace and then evaluate nothing.
       - name: Provider key present?
         id: providerkeys
         env:
@@ -177,6 +207,12 @@ jobs:
             echo "have=false" >> "$GITHUB_OUTPUT"
             echo "::notice::No provider key configured: pinned-model evaluation is skipped."
           fi
+
+      # Build once; every repetition reuses the same binary so measured
+      # differences come from the model/effort, not from a rebuild.
+      - name: Build memnoth
+        if: steps.providerkeys.outputs.have == 'true'
+        run: cargo build --locked --bin memnoth
 
       # N=3 paired repetitions: every (model, effort) pair runs the same
       # tasks under the same seeds. The percentile bootstrap yields a 95%
