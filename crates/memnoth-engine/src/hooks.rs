@@ -131,9 +131,14 @@ fn run_one(hook: &HookCommand, point: HookPoint, name: &str, cwd: &Path) -> Resu
         .with_context(|| format!("cannot start hook {:?}", hook.command))?;
 
     if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(&payload)
-            .with_context(|| format!("cannot write to hook {:?}", hook.command))?;
+        // A hook is entitled to ignore its input: `exit 3` closes the pipe
+        // before the payload is written, and on unix that write is `EPIPE`.
+        // Its exit status is the answer, so a broken pipe is not a failure.
+        if let Err(error) = stdin.write_all(&payload)
+            && error.kind() != std::io::ErrorKind::BrokenPipe
+        {
+            return Err(error).with_context(|| format!("cannot write to hook {:?}", hook.command));
+        }
         // Dropping stdin closes it, so a hook that reads to EOF sees EOF.
     }
 
