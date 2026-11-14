@@ -186,10 +186,14 @@ jobs:
       - name: Run pinned model evaluation
         if: steps.providerkeys.outputs.have == 'true'
         run: python ci/eval_bootstrap.py ci/manifest.json
+  # Compiling the fuzz targets is the per-push gate: it catches a target that
+  # no longer builds against the crates it fuzzes, under nightly with the
+  # sanitizer. Running them is a hunt with its own budget, and lives in
+  # fuzz.yml on a schedule.
   fuzz:
-    name: fuzz (cargo-fuzz targets)
+    name: fuzz (cargo-fuzz targets build)
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 25
     # rust-toolchain.toml pins the workspace to 1.98.0 (stable), and rustup
     # honours it over the nightly installed above: every fuzz step ran the
     # stable rustc and `-Zsanitizer` is rejected on stable. RUSTUP_TOOLCHAIN
@@ -212,15 +216,6 @@ jobs:
       # `--locked` flag either (it forwards its own flags to cargo).
       - name: Build fuzz targets
         run: cargo fuzz build
-
-      # Two flags that are not flags: `--max_total_time` belongs to libFuzzer
-      # (so it comes after `--`), and the release switch is `-O`, not `-r` —
-      # cargo-fuzz 0.13 rejects both, and the step died before fuzzing.
-      - name: Run fuzz targets on seed corpus
-        run: |
-          for target in config mcp_framing diff_parsing provider_url sync_manifest frontmatter security; do
-            cargo fuzz run "$target" -O -- --max_total_time=60
-          done
 
   perf:
     name: benchmarks compile

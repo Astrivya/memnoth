@@ -1,0 +1,80 @@
+name: fuzz
+
+# Fuzzing is a hunt, not a gate. A fixed minute per target on a fresh runner
+# mostly replays the seed corpus, and the wall clock is dominated by building
+# seven sanitizer targets. So it runs nightly and on demand, with a real budget
+# and a corpus that survives between runs.
+#
+# The per-push gate is in ci.yml: `cargo fuzz build` proves every target still
+# compiles under nightly with the sanitizer enabled.
+on:
+  schedule:
+    - cron: "20 3 * * *"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: "Seconds of fuzzing per target"
+        required: false
+        default: "300"
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # rust-toolchain.toml pins the workspace to stable, and rustup honours it
+  # over the nightly installed above. RUSTUP_TOOLCHAIN outranks the toolchain
+  # file, so the whole job runs on nightly where `-Zsanitizer` is accepted.
+  RUSTUP_TOOLCHAIN: nightly
+
+jobs:
+  fuzz:
+    name: fuzz targets
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      # The corpus is committed as seed input; this carries forward what each
+      # run discovers so the next one starts ahead instead of from the seeds.
+      - name: Restore corpus
+        uses: actions/cache@v4
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: fuzz-corpus-
+
+      # libFuzzer reads its own arguments with a single leading dash. The job
+      # used to pass `--max_total_time=60`, which libFuzzer answered with
+      # "did you mean '-max_total_time=60'" and then ignored, so every target
+      # ran unbounded until the job timeout killed it.
+      - name: Fuzz each target
+        env:
+          BUDGET: ${{ inputs.seconds || '300' }}
+        run: |
+          for target in config mcp_framing diff_parsing provider_url sync_manifest frontmatter security; do
+            echo "::group::$target"
+            cargo fuzz run "$target" -O -- "-max_total_time=$BUDGET"
+            echo "::endgroup::"
+          done
+
+      # A crashing input is written to fuzz/artifacts/<target>/ and a run that
+      # lost it would have to rediscover it from nothing.
+      - name: Keep reproducers
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
+          if-no-files-found: ignore
