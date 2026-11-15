@@ -57,6 +57,7 @@ pub mod net_guard;
 pub mod open;
 pub mod org;
 pub mod output;
+pub mod pdf_text;
 pub mod projects;
 pub mod provider;
 pub mod provider_stream;

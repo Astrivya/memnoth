@@ -13,11 +13,11 @@
 
 use anyhow::{Result, anyhow};
 use memnoth_update::{
-    Channel, Manifest, UpdateConfig, check_for_update, detect_managed_install, fetch_manifest,
-    fetch_manifest_at,
+    Channel, Manifest, UpdateConfig, check_for_update, detect_managed_install, fetch_manifest_at,
 };
 use std::env;
 use std::fs;
+use std::path::{Path, PathBuf};
 
 use crate::cli::{InstallArgs, UninstallArgs, UpdateArgs};
 use crate::completion::{self, Shell};
@@ -148,25 +148,10 @@ pub fn execute_uninstall(
         ));
     }
 
-    let config = config_for(Channel::Stable);
-
-    // The release's own uninstall page, if one is published, is the official
-    // route. Offer it before doing anything local.
-    if let Ok(manifest) = fetch_manifest(&config, config.channel)
-        && let Some(uninstall) = &manifest.uninstall
-        && !uninstall.url.is_empty()
-    {
-        return Ok(Outcome::new(
-            "uninstall",
-            format!(
-                "Official uninstaller: {}\n\nRun it to remove memnoth, \
-                         or continue below to remove the local binaries.",
-                uninstall.url
-            ),
-            serde_json::json!({"uninstall_url": uninstall.url}),
-        ));
-    }
-
+    // The release manifest's `uninstall` URL used to short-circuit this verb:
+    // a published uninstall page turned `mn uninstall` into a message that
+    // removed nothing. Removing what is actually on this machine is the local
+    // command's job, so the network is not consulted at all.
     let current_exe = env::current_exe().map_err(failure)?;
 
     if let Some(manager) = detect_managed_install() {
@@ -175,38 +160,34 @@ pub fn execute_uninstall(
             manager, manager
         )));
     }
+    let install_dir = current_exe
+        .parent()
+        .ok_or_else(|| ErrorOutcome::usage("Could not determine install directory"))?
+        .to_path_buf();
+
+    // Everything the installer and the updater put here: both names, the MCP
+    // server the installer places beside them, the Windows `mn` alias, and the
+    // `.old` copy an update keeps for rollback. Names that are not present are
+    // skipped, so a partial install still uninstalls cleanly.
+    let installed = installed_files(&install_dir);
 
     if args.dry_run {
-        let exe_path = current_exe.clone();
-        let install_dir = exe_path
-            .parent()
-            .ok_or_else(|| ErrorOutcome::usage("Could not determine install directory"))?;
-        let suffix = env::consts::EXE_SUFFIX;
-        let mut would_remove: Vec<String> = Vec::new();
-        for name in ["memnoth", "mn"] {
-            let path = install_dir.join(format!("{name}{suffix}"));
-            if path.exists() {
-                would_remove.push(name.to_string());
-            }
-        }
-        for shell in [
-            Shell::Bash,
-            Shell::Zsh,
-            Shell::Fish,
-            Shell::PowerShell,
-            Shell::Elvish,
-        ] {
+        let mut would_remove: Vec<String> = installed
+            .iter()
+            .map(|path| file_label(path, &install_dir))
+            .collect();
+        for shell in COMPLETION_SHELLS {
             if let Ok(path) = completion::completion_path(shell)
                 && path.exists()
             {
                 would_remove.push(format!("completion ({shell:?})"));
             }
         }
-        if !args.keep_state {
-            let config_path = ctx.home.join("config.toml");
-            if config_path.exists() {
-                would_remove.push("config".to_string());
-            }
+        if !args.keep_state && ctx.home.join("config.toml").exists() {
+            would_remove.push("config".to_string());
+        }
+        if install_dir.is_dir() {
+            would_remove.push("the install directory, once it is empty".to_string());
         }
         let summary = if would_remove.is_empty() {
             "nothing".to_string()
@@ -220,41 +201,9 @@ pub fn execute_uninstall(
         ));
     }
 
-    let question =
-        "Uninstall memnoth? This removes the binaries and completions. Vault data is preserved.";
-    if !confirm(question, args.yes)? {
-        return Ok(Outcome::new(
-            "uninstall",
-            "Cancelled; nothing was removed.\n",
-            serde_json::json!({"cancelled": true}),
-        ));
-    }
-
-    let exe_path = current_exe.clone();
-    let install_dir = exe_path
-        .parent()
-        .ok_or_else(|| ErrorOutcome::usage("Could not determine install directory"))?;
-
-    // The installed names carry the platform's executable suffix: on Windows
-    // the file is `memnoth.exe`, so looking for `memnoth` removed nothing and
-    // then reported success.
-    let suffix = env::consts::EXE_SUFFIX;
     let mut removed: Vec<String> = Vec::new();
-    for name in ["memnoth", "mn"] {
-        let path = install_dir.join(format!("{name}{suffix}"));
-        if path.exists() {
-            remove_installed_binary(&path, &exe_path)?;
-            removed.push(name.to_string());
-        }
-    }
 
-    for shell in [
-        Shell::Bash,
-        Shell::Zsh,
-        Shell::Fish,
-        Shell::PowerShell,
-        Shell::Elvish,
-    ] {
+    for shell in COMPLETION_SHELLS {
         if let Ok(path) = completion::completion_path(shell)
             && path.exists()
         {
@@ -274,45 +223,194 @@ pub fn execute_uninstall(
         }
     }
 
+    removed.extend(remove_installation(&installed, &install_dir, &current_exe)?);
+
+    // A PATH entry pointing at a directory that no longer exists is harmless
+    // but confusing. Rewriting the user's PATH from here is not: on Windows it
+    // is a registry value whose type preserves other tools' `%VAR%` expansions,
+    // and a shell one-liner would flatten them. The entry is named, not edited.
+    let still_on_path = env::var_os("PATH")
+        .is_some_and(|paths| env::split_paths(&paths).any(|entry| entry == install_dir));
+
     Ok(Outcome::text(format!(
-        "Uninstalled: {}\nInstall directory: {}",
+        "Uninstalled: {}\nInstall directory: {}{}",
         if removed.is_empty() {
             "nothing (the binary is not in this directory)".to_string()
         } else {
             removed.join(", ")
         },
-        install_dir.display()
+        install_dir.display(),
+        if still_on_path {
+            "\n\nThe install directory is still on PATH; remove that entry if you want it gone."
+        } else {
+            ""
+        }
     )))
 }
 
-/// Remove one installed binary. The running executable cannot be deleted on
-/// Windows (the image is locked), so deleting *this* process's own file goes
-/// through the same post-exit helper the update rollback uses: a short-lived
-/// shell that waits for us to exit and then deletes it. Every other file is a
-/// plain remove.
-fn remove_installed_binary(
-    path: &std::path::Path,
-    running: &std::path::Path,
-) -> Result<(), ErrorOutcome> {
-    // Only Windows refuses to delete the running image, so on other platforms
-    // the argument carries no information and is not read.
-    #[cfg(not(windows))]
-    let _ = running;
+/// The shells completions may have been written for.
+const COMPLETION_SHELLS: [Shell; 5] = [
+    Shell::Bash,
+    Shell::Zsh,
+    Shell::Fish,
+    Shell::PowerShell,
+    Shell::Elvish,
+];
 
-    #[cfg(windows)]
-    if path == running {
-        use std::os::windows::process::CommandExt;
-        std::process::Command::new("cmd")
-            .arg("/C")
-            .raw_arg(format!(
-                "ping -n 3 127.0.0.1 >NUL & del /F \"{}\"",
-                path.display()
-            ))
-            .spawn()
-            .map_err(|error| failure(anyhow::Error::from(error)))?;
-        return Ok(());
+/// Files an install of this product owns in its directory.
+///
+/// The installed names carry the platform's executable suffix: on Windows the
+/// file is `memnoth.exe`, and looking for `memnoth` removed nothing and then
+/// reported success. `memnoth-mcp` is installed beside the CLI by both
+/// installers; `.old` is the copy `memnoth_update::backup_path` keeps for
+/// `update --rollback`; `mn.ps1` is the Windows alias.
+fn installed_files(install_dir: &Path) -> Vec<PathBuf> {
+    let suffix = env::consts::EXE_SUFFIX;
+    let mut names: Vec<String> = Vec::new();
+    for name in ["memnoth", "mn", "memnoth-mcp"] {
+        names.push(format!("{name}{suffix}"));
+        names.push(format!("{name}{suffix}.old"));
     }
-    fs::remove_file(path).map_err(failure)
+    names.push("mn.ps1".to_string());
+    names
+        .into_iter()
+        .map(|name| install_dir.join(name))
+        .filter(|path| path.exists())
+        .collect()
+}
+
+/// The part of a path worth printing, relative to the heading below it.
+fn file_label(path: &Path, install_dir: &Path) -> String {
+    path.strip_prefix(install_dir)
+        .unwrap_or(path)
+        .display()
+        .to_string()
+}
+
+/// Remove every file, then every directory the removal left empty.
+///
+/// The `memnoth` parent the Windows installer creates by default
+/// (`%LOCALAPPDATA%\memnoth\bin`) goes too, and only when it is empty. A shared
+/// destination — the unix default is `~/.local/bin` — is left alone as soon as
+/// anything else lives in it, and never with `/S`: another tool's file is not
+/// ours to delete to get rid of ours.
+fn remove_installation(
+    files: &[PathBuf],
+    install_dir: &Path,
+    running: &Path,
+) -> Result<Vec<String>, ErrorOutcome> {
+    let mut removed = Vec::new();
+    let mut deferred: Option<&Path> = None;
+
+    for path in files {
+        // Only Windows locks the image it is running from; elsewhere the
+        // running binary is unlinked like any other file.
+        if cfg!(windows) && path == running {
+            deferred = Some(path);
+            continue;
+        }
+        fs::remove_file(path).map_err(failure)?;
+        removed.push(file_label(path, install_dir));
+    }
+
+    match deferred {
+        Some(running) => {
+            // It cannot go before this process exits, and neither can the
+            // directory that holds it, so one helper does both afterwards.
+            let mut dirs = vec![install_dir.to_path_buf()];
+            if let Some(parent) = install_dir.parent()
+                && parent
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.eq_ignore_ascii_case("memnoth"))
+            {
+                dirs.push(parent.to_path_buf());
+            }
+            defer_removal(running, &dirs)?;
+            removed.push(file_label(running, install_dir));
+            removed.push("install directory (after this process exits)".to_string());
+        }
+        None => {
+            for dir in empty_dirs_to_remove(install_dir) {
+                fs::remove_dir(&dir).map_err(failure)?;
+                removed.push(if dir == install_dir {
+                    "install directory".to_string()
+                } else {
+                    dir.display().to_string()
+                });
+            }
+        }
+    }
+
+    Ok(removed)
+}
+
+/// Directories the removal leaves empty, deepest first.
+///
+/// The parent of the install directory counts only when it is the installer's
+/// own `memnoth` directory and removing the child empties it — checking the
+/// parent before the child is gone would always find the child inside.
+fn empty_dirs_to_remove(install_dir: &Path) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    let mut dir = install_dir.to_path_buf();
+    loop {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            break;
+        };
+        let children: Vec<PathBuf> = entries
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .collect();
+        let emptied_by_us = match (children.as_slice(), dirs.last()) {
+            ([], _) => true,
+            ([only], Some(next)) => only == next,
+            _ => false,
+        };
+        if !emptied_by_us {
+            break;
+        }
+        dirs.push(dir.clone());
+        if dirs.len() >= 2 {
+            break;
+        }
+        let Some(parent) = dir.parent() else {
+            break;
+        };
+        if !parent
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case("memnoth"))
+        {
+            break;
+        }
+        dir = parent.to_path_buf();
+    }
+    dirs
+}
+
+/// Delete a running image (and the directories it blocks) after this process
+/// exits. The updater's rollback uses the same shape: a short-lived shell with
+/// a wait long enough for the image handle to close.
+#[cfg(windows)]
+fn defer_removal(running: &Path, dirs: &[PathBuf]) -> Result<(), ErrorOutcome> {
+    use std::os::windows::process::CommandExt;
+    let mut script = format!(
+        "ping -n 3 127.0.0.1 >NUL & del /F /Q \"{}\"",
+        running.display()
+    );
+    for dir in dirs {
+        script.push_str(&format!(" & rd /Q \"{}\"", dir.display()));
+    }
+    std::process::Command::new("cmd")
+        .arg("/C")
+        .raw_arg(script)
+        .spawn()
+        .map_err(|error| failure(anyhow::Error::from(error)))?;
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn defer_removal(_running: &Path, _dirs: &[PathBuf]) -> Result<(), ErrorOutcome> {
+    Ok(())
 }
 
 fn check_update(config: &UpdateConfig) -> Result<Outcome, ErrorOutcome> {
@@ -493,6 +591,77 @@ mod tests {
         assert!(Channel::parse("beta").is_ok());
         assert!(Channel::parse("nightly").is_ok());
         assert!(Channel::parse("unknown").is_err());
+    }
+
+    #[test]
+    fn an_install_owns_both_names_the_mcp_server_the_alias_and_the_rollback_copy() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        let suffix = env::consts::EXE_SUFFIX;
+        for name in ["memnoth", "mn", "memnoth-mcp"] {
+            fs::write(dir.join(format!("{name}{suffix}")), b"ours").unwrap();
+            fs::write(dir.join(format!("{name}{suffix}.old")), b"ours").unwrap();
+        }
+        fs::write(dir.join("mn.ps1"), b"ours").unwrap();
+        fs::write(dir.join("someone-elses-tool.exe"), b"theirs").unwrap();
+
+        let found: Vec<String> = installed_files(dir)
+            .iter()
+            .map(|path| file_label(path, dir))
+            .collect();
+        for expected in [
+            format!("memnoth{suffix}"),
+            format!("mn{suffix}"),
+            format!("memnoth-mcp{suffix}"),
+            format!("memnoth{suffix}.old"),
+            "mn.ps1".to_string(),
+        ] {
+            assert!(
+                found.contains(&expected),
+                "{expected} missing from {found:?}"
+            );
+        }
+        assert!(
+            !found.iter().any(|name| name.contains("someone-elses-tool")),
+            "only this product's files are the product's to remove: {found:?}"
+        );
+
+        // A shared destination survives as long as anyone else is in it.
+        assert!(
+            empty_dirs_to_remove(dir).is_empty(),
+            "a directory with another tool's file must not be offered for removal"
+        );
+        fs::remove_file(dir.join("someone-elses-tool.exe")).unwrap();
+        for path in installed_files(dir) {
+            fs::remove_file(path).unwrap();
+        }
+        assert_eq!(empty_dirs_to_remove(dir), vec![dir.to_path_buf()]);
+    }
+
+    #[test]
+    fn the_directory_the_installer_made_is_removed_when_it_is_empty() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("memnoth").join("bin");
+        fs::create_dir_all(&dir).unwrap();
+        let binary = dir.join(format!("memnoth{}", env::consts::EXE_SUFFIX));
+        fs::write(&binary, b"ours").unwrap();
+
+        // The running image is elsewhere, so nothing has to wait for exit.
+        let removed = remove_installation(
+            &installed_files(&dir),
+            &dir,
+            temp.path().join("elsewhere").as_path(),
+        )
+        .unwrap();
+        assert!(
+            removed.iter().any(|label| label == "install directory"),
+            "{removed:?}"
+        );
+        assert!(!dir.exists());
+        assert!(
+            !temp.path().join("memnoth").exists(),
+            "the parent the Windows installer creates is empty and goes too"
+        );
     }
 
     #[test]

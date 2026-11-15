@@ -2287,9 +2287,10 @@ fn base64(bytes: &[u8]) -> String {
 /// The content blocks one attachment becomes on a given wire shape.
 ///
 /// Anthropic takes images and documents natively. The OpenAI-compatible chat
-/// shape has no document block at all, so a PDF there becomes a text block that
-/// names the file instead of a base64 blob the model would read as prose — a
-/// model told it has a file it cannot open is honest; one handed a blob is not.
+/// shape has no document block at all, so a PDF's text layer is read here and
+/// sent as text. A scan, or a PDF whose fonts carry a custom encoding, yields
+/// nothing readable; that is said plainly instead of sending a base64 blob the
+/// model would read as prose.
 fn attachment_blocks(kind: Kind, file: &Attachment) -> Vec<Value> {
     let pdf = file.mime == "application/pdf";
     match kind {
@@ -2301,13 +2302,18 @@ fn attachment_blocks(kind: Kind, file: &Attachment) -> Vec<Value> {
             "type": "image",
             "source": { "type": "base64", "media_type": file.mime, "data": file.encode() }
         })],
-        _ if pdf => vec![json!({
-            "type": "text",
-            "text": format!(
-                "[attached {} — this provider cannot receive PDFs; convert it to text or an image]",
-                file.path
-            )
-        })],
+        _ if pdf => {
+            let text = crate::pdf_text::extract(&file.bytes);
+            let note = match text {
+                Some(text) => format!("[attached {} — extracted text]\n\n{text}", file.path),
+                None => format!(
+                    "[attached {} — no text could be extracted (it may be a scan); \
+                     this provider cannot receive PDF bytes]",
+                    file.path
+                ),
+            };
+            vec![json!({ "type": "text", "text": note })]
+        }
         _ => vec![json!({
             "type": "image_url",
             "image_url": { "url": format!("data:{};base64,{}", file.mime, file.encode()) }
@@ -3658,5 +3664,17 @@ mod attachment_tests {
         let note = pdf[0]["text"].as_str().unwrap();
         assert!(note.contains("spec.pdf"));
         assert!(!note.contains("base64"), "no blob dressed up as text");
+    }
+
+    #[test]
+    fn a_pdf_with_a_text_layer_reaches_an_openai_shape_as_its_text() {
+        let mut pdf = file("application/pdf", "spec.pdf");
+        pdf.bytes = crate::pdf_text::sample_pdf("Hello from a PDF");
+
+        let blocks = attachment_blocks(Kind::OpenAi, &pdf);
+        assert_eq!(blocks[0]["type"], "text");
+        let text = blocks[0]["text"].as_str().unwrap();
+        assert!(text.contains("Hello from a PDF"), "{text}");
+        assert!(!text.contains("base64"), "the bytes are not sent");
     }
 }
