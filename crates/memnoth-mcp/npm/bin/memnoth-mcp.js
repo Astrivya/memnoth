@@ -70,7 +70,7 @@ child.on("error", (error) => {
       `memnoth-mcp: could not find "${binary}".\n` +
         "Looked for a bundled copy in this package, then MEMNOTH_BIN, then PATH.\n" +
         "Install it with `cargo install memnoth`, or download a release from " +
-        "https://github.com/amruthjakku/memnoth/releases, then either put it on " +
+        "https://github.com/astrivya/memnoth/releases, then either put it on " +
         "PATH or set MEMNOTH_BIN to its full path.\n"
     );
     process.exit(127);
