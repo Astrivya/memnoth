@@ -102,7 +102,7 @@ pub enum Verb {
     Cloud(CloudArgs),
     /// Check for and apply updates.
     Update(UpdateArgs),
-    /// Install memnoth (shows installer instructions).
+    /// Install this build into the install directory.
     #[command(hide = true)]
     Install(InstallArgs),
     /// Uninstall memnoth.
@@ -2330,7 +2330,7 @@ pub struct UpdateArgs {
     pub rollback: bool,
 }
 
-/// `mn install` — install memnoth (shows installer instructions).
+/// `mn install` — install this build into the install directory.
 #[derive(Debug, Args)]
 pub struct InstallArgs {
     /// Force reinstall even if already installed.

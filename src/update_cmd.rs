@@ -23,9 +23,6 @@ use crate::cli::{InstallArgs, UninstallArgs, UpdateArgs};
 use crate::completion::{self, Shell};
 use crate::output::{ErrorOutcome, ExitCode, Outcome, confirm};
 
-/// The installer line this build is published behind.
-const INSTALLER_URL: &str = "https://memnoth.astrivya.ai/install";
-
 /// Map an engine or I/O failure into the CLI's error envelope.
 fn failure(error: impl std::fmt::Display) -> ErrorOutcome {
     ErrorOutcome::new(ExitCode::Unexpected, error.to_string())
@@ -97,29 +94,193 @@ pub fn execute_update(
 
 /// Execute install verb.
 ///
-/// This prints the one supported route rather than pretending to install: the
-/// script knows the platform table, the checksum and the `mn` alias, and a
-/// second implementation here would be a second answer to those questions.
+/// Installs the build that is running: the executable is copied to the
+/// destination both installers use, the `mn` alias is made beside it, and the
+/// MCP server that shipped next to this binary travels with it. Nothing is
+/// downloaded. The release installer is the route for a machine with no
+/// memnoth at all, and `mn update` is the route for an installed build; a
+/// downloader here would be a third answer about checksums and platform
+/// artifacts, and the build a person is already running is the one thing
+/// neither of those can install.
 pub fn execute_install(
     _ctx: &crate::context::AppContext,
-    _args: &InstallArgs,
+    args: &InstallArgs,
 ) -> Result<Outcome, ErrorOutcome> {
-    let running = env::current_exe()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|_| "an unknown path".to_string());
+    let current = env::current_exe().map_err(failure)?;
+    let install_dir = default_install_dir()?;
+    let installed = install_into(&current, &install_dir, args.force)?;
+
+    let on_path = env::var_os("PATH")
+        .is_some_and(|paths| env::split_paths(&paths).any(|entry| entry == install_dir));
+
+    let body = if installed.is_empty() {
+        format!(
+            "memnoth is already installed at {}\n\n\
+             Nothing was copied. Pass --force to install this build over it.",
+            install_dir.display()
+        )
+    } else {
+        format!(
+            "Installed this build into {}:\n  {}\n\n\
+             Your vault and sessions were not touched.",
+            install_dir.display(),
+            installed.join("\n  ")
+        )
+    };
+
+    let path_note = if on_path {
+        String::new()
+    } else {
+        #[cfg(windows)]
+        {
+            format!(
+                "\n\n{} is not on PATH. Add it to your user PATH so `memnoth` \
+                 and `mn` work from any shell.",
+                install_dir.display()
+            )
+        }
+        #[cfg(not(windows))]
+        {
+            format!(
+                "\n\n{} is not on PATH. Add it:\n  export PATH=\"{}:$PATH\"",
+                install_dir.display(),
+                install_dir.display()
+            )
+        }
+    };
+
+    Ok(Outcome::text(format!("{body}{path_note}")))
+}
+
+/// Where an install goes: the same default both installers use, overridable the
+/// same way they allow.
+fn default_install_dir() -> Result<PathBuf, ErrorOutcome> {
+    if let Some(dir) = env::var_os("MEMNOTH_INSTALL_DIR").filter(|dir| !dir.is_empty()) {
+        return Ok(PathBuf::from(dir));
+    }
 
     #[cfg(windows)]
-    let command = format!("irm {INSTALLER_URL}.ps1 | iex");
+    let default =
+        env::var_os("LOCALAPPDATA").map(|base| PathBuf::from(base).join("memnoth").join("bin"));
     #[cfg(not(windows))]
-    let command = format!("curl -fsSL {INSTALLER_URL} | sh");
+    let default = env::var_os("HOME").map(|home| PathBuf::from(home).join(".local").join("bin"));
 
-    Ok(Outcome::text(format!(
-        "memnoth is running from {running}\n\n\
-         To install (or reinstall) the released build:\n  {command}\n\n\
-         The installer verifies the release checksum and installs both names, \
-         memnoth and mn."
-    )))
+    default.ok_or_else(|| {
+        ErrorOutcome::usage(
+            "could not determine a default install directory; set MEMNOTH_INSTALL_DIR",
+        )
+    })
 }
+
+/// Copy this build, its alias, and its companion server into `install_dir`.
+///
+/// The copy is staged and renamed rather than written in place: a shell that
+/// looks during the copy must not find half a binary at the installed name. An
+/// existing install is replaced only with `--force`, because the build there
+/// may be the one a session is running.
+fn install_into(
+    current: &Path,
+    install_dir: &Path,
+    force: bool,
+) -> Result<Vec<String>, ErrorOutcome> {
+    let suffix = env::consts::EXE_SUFFIX;
+    let binary = install_dir.join(format!("memnoth{suffix}"));
+    let running_here =
+        binary.exists() && fs::canonicalize(&binary).ok() == fs::canonicalize(current).ok();
+
+    if binary.exists() && !running_here && !force {
+        return Err(ErrorOutcome::usage(format!(
+            "already installed at {}; pass --force to replace it",
+            binary.display()
+        )));
+    }
+
+    fs::create_dir_all(install_dir).map_err(failure)?;
+    let mut installed = Vec::new();
+
+    if !running_here {
+        let staging = install_dir.join(format!(".memnoth{suffix}.new"));
+        fs::copy(current, &staging).map_err(failure)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&staging, fs::Permissions::from_mode(0o755)).map_err(failure)?;
+        }
+        if binary.exists() {
+            fs::remove_file(&binary).map_err(failure)?;
+        }
+        fs::rename(&staging, &binary).map_err(failure)?;
+        installed.push(file_label(&binary, install_dir));
+    }
+
+    installed.push(install_alias(&binary, install_dir)?);
+
+    let server_name = format!("memnoth-mcp{suffix}");
+    let server = current.parent().map(|dir| dir.join(&server_name));
+    let server_here = install_dir.join(&server_name);
+    if let Some(server) = server
+        && server.exists()
+        && server != server_here
+    {
+        fs::copy(&server, &server_here).map_err(failure)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&server_here, fs::Permissions::from_mode(0o755))
+                .map_err(failure)?;
+        }
+        installed.push(server_name);
+    }
+
+    Ok(installed)
+}
+
+/// The short name, beside the installed binary.
+///
+/// Unix gets the relative symlink the shell installer makes — one file to
+/// update. Windows gets the `mn.ps1` forwarding script the PowerShell
+/// installer makes; there is no symlink to create and copying the executable
+/// again would double what an upgrade has to replace.
+fn install_alias(binary: &Path, install_dir: &Path) -> Result<String, ErrorOutcome> {
+    #[cfg(unix)]
+    {
+        let alias = install_dir.join("mn");
+        let _ = fs::remove_file(&alias);
+        if std::os::unix::fs::symlink("memnoth", &alias).is_err() {
+            use std::os::unix::fs::PermissionsExt;
+            fs::copy(binary, &alias).map_err(failure)?;
+            fs::set_permissions(&alias, fs::Permissions::from_mode(0o755)).map_err(failure)?;
+        }
+        Ok("mn (points at memnoth)".to_string())
+    }
+    #[cfg(windows)]
+    {
+        // The alias forwards by name, so the copy is what matters here; the
+        // parameter is only read by the Unix fallback that copies it.
+        let _ = binary;
+        let alias = install_dir.join("mn.ps1");
+        fs::write(&alias, MN_ALIAS_SCRIPT).map_err(failure)?;
+        Ok("mn.ps1 (forwards to memnoth.exe)".to_string())
+    }
+}
+
+/// The Windows alias, byte for byte what `scripts/install.ps1` writes.
+#[cfg(windows)]
+const MN_ALIAS_SCRIPT: &str = r#"<#
+.SYNOPSIS
+    mn - memnoth short alias
+
+.DESCRIPTION
+    This is a generated alias script that forwards all arguments to memnoth.exe.
+    It is created by `memnoth install` and updated on each install.
+#>
+$memnoth = Join-Path $PSScriptRoot 'memnoth.exe'
+if (-not (Test-Path $memnoth)) {
+    Write-Error "memnoth.exe not found at $memnoth"
+    exit 1
+}
+& $memnoth @args
+"#;
 
 /// Execute uninstall verb.
 ///
@@ -661,6 +822,60 @@ mod tests {
         assert!(
             !temp.path().join("memnoth").exists(),
             "the parent the Windows installer creates is empty and goes too"
+        );
+    }
+
+    #[test]
+    fn installing_a_build_copies_it_with_its_alias_and_server() {
+        let temp = tempfile::tempdir().unwrap();
+        let suffix = env::consts::EXE_SUFFIX;
+        let source_dir = temp.path().join("source");
+        fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join(format!("memnoth{suffix}"));
+        fs::write(&source, b"this build").unwrap();
+        fs::write(
+            source_dir.join(format!("memnoth-mcp{suffix}")),
+            b"its server",
+        )
+        .unwrap();
+        let install_dir = temp.path().join("bin");
+
+        let installed = install_into(&source, &install_dir, false).unwrap();
+        assert!(
+            installed.iter().any(|label| label.starts_with("memnoth")),
+            "{installed:?}"
+        );
+        assert_eq!(
+            fs::read(install_dir.join(format!("memnoth{suffix}"))).unwrap(),
+            b"this build"
+        );
+        assert_eq!(
+            fs::read(install_dir.join(format!("memnoth-mcp{suffix}"))).unwrap(),
+            b"its server"
+        );
+        #[cfg(unix)]
+        assert!(
+            fs::symlink_metadata(install_dir.join("mn"))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the short name is the shell installer's relative symlink"
+        );
+        #[cfg(windows)]
+        assert!(install_dir.join("mn.ps1").exists());
+
+        // A second install must not replace a build that may be running.
+        let refused = install_into(&source, &install_dir, false).unwrap_err();
+        assert!(
+            refused.to_string().contains("already installed"),
+            "{refused}"
+        );
+
+        fs::write(&source, b"a newer build").unwrap();
+        install_into(&source, &install_dir, true).unwrap();
+        assert_eq!(
+            fs::read(install_dir.join(format!("memnoth{suffix}"))).unwrap(),
+            b"a newer build"
         );
     }
 

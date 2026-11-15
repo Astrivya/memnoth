@@ -1671,7 +1671,7 @@ memnoth update --check
 
 ### `memnoth install`
 
-Install memnoth (shows installer instructions)
+Install this memnoth build into the install directory
 
 **Examples:**
 

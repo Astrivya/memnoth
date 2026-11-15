@@ -3297,7 +3297,7 @@
         ],
         "danger": "local_write",
         "deprecated": null,
-        "description": "Install memnoth (shows installer instructions)",
+        "description": "Install this memnoth build into the install directory",
         "examples": [
           "install"
         ],

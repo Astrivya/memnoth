@@ -1816,7 +1816,7 @@ pub fn build_p0_registry() -> RegistryBuilder {
             slash: SlashSpec {
                 name: "install".into(),
                 palette: None,
-                description: "Install memnoth (shows installer instructions)".into(),
+                description: "Install this memnoth build into the install directory".into(),
                 long_description: None,
                 params: vec![ParamSpec::bool(
                     "force",
