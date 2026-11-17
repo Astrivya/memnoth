@@ -156,7 +156,7 @@ impl Kind {
         }
     }
 
-    fn parse(raw: &str) -> Result<Self> {
+    pub(crate) fn parse(raw: &str) -> Result<Self> {
         match raw.trim().to_ascii_lowercase().as_str() {
             "anthropic" | "claude" => Ok(Kind::Anthropic),
             "openai" | "open-ai" | "openai-compatible" | "compatible" => Ok(Kind::OpenAi),
@@ -183,15 +183,66 @@ impl std::fmt::Display for Kind {
 /// Llama id sent `reasoning_effort` answers 400 — the parameter is not a no-op
 /// there, it is an error. Only the OpenAI reasoning families document it, and
 /// the models screen offers the arrows on exactly these ids.
+#[cfg(test)]
 pub(crate) fn takes_reasoning_effort(model: &str) -> bool {
+    !reasoning_efforts_for(Kind::OpenAi, model).is_empty()
+}
+
+/// Known effort values for a wire/model pair. Newer OpenAI model families
+/// expose the expanded API scale; recent direct Claude models use Anthropic's
+/// adaptive-thinking `output_config.effort` field.
+pub(crate) fn reasoning_efforts_for(kind: Kind, model: &str) -> Vec<String> {
     let id = model.to_ascii_lowercase();
-    id.starts_with("o1")
+    if kind == Kind::Anthropic
+        && (id.contains("claude-opus-4-6")
+            || id.contains("claude-opus-4-7")
+            || id.contains("claude-opus-4-8")
+            || id.contains("claude-sonnet-4-6")
+            || id.contains("claude-sonnet-5")
+            || id.contains("claude-opus-5")
+            || id.contains("claude-fable-5")
+            || id.contains("claude-mythos-5"))
+    {
+        return ["low", "medium", "high"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+    }
+    let reasoning_model = id.starts_with("o1")
         || id.starts_with("o3")
         || id.starts_with("o4")
         || id.contains("gpt-5")
+        || id.contains("gpt-6")
         || id.contains("/o3")
         || id.contains("/o4")
         || id.contains("/gpt-5")
+        || id.contains("/gpt-6");
+    if !reasoning_model {
+        return Vec::new();
+    }
+    let expanded = id.contains("gpt-5.1")
+        || id.contains("gpt-5.2")
+        || id.contains("gpt-5.3")
+        || id.contains("gpt-5.4")
+        || id.contains("gpt-5.5")
+        || id.contains("gpt-6")
+        || id.contains("/gpt-5.1")
+        || id.contains("/gpt-5.2")
+        || id.contains("/gpt-5.3")
+        || id.contains("/gpt-5.4")
+        || id.contains("/gpt-5.5")
+        || id.contains("/gpt-6");
+    if expanded {
+        ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    } else {
+        ["low", "medium", "high"]
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    }
 }
 
 /// The `[provider]` table in `~/.memnoth/config.toml`.
@@ -220,6 +271,19 @@ pub struct ProviderConfig {
     /// Reply budget, in tokens.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    /// Context window in tokens for models whose limit is not in the registry,
+    /// or when a provider's documented limit differs from the registry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u32>,
+    /// Model that the explicit context-window value applies to. Older config
+    /// files leave this unset, making their override provider-wide.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window_model: Option<String>,
+    /// Explicit effort values for one model, including provider metadata.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_efforts: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_efforts_model: Option<String>,
     /// USD per million input tokens, for the session's cost estimate. Either
     /// this and `output_per_mtok` are set, or the built-in list price for the
     /// model is used, or the cost is reported as unknown.
@@ -421,6 +485,11 @@ pub struct Settings {
     pub top_p: Option<f32>,
     /// Reasoning effort for this turn, when the config sets one.
     pub reasoning_effort: Option<String>,
+    /// Allowed effort values for the selected model and wire protocol.
+    pub reasoning_efforts: Vec<String>,
+    /// User-provided context-window limit, which takes precedence over the
+    /// built-in provider catalogue.
+    pub context_window_override: Option<usize>,
     /// Where the key came from, for the screens that explain a connection.
     pub key_source: Option<String>,
 }
@@ -431,17 +500,26 @@ impl Settings {
     /// Never a hard-coded 200k: an unknown model gets
     /// [`FALLBACK_CONTEXT_WINDOW`], which the budget may report as assumed.
     pub fn context_window(&self) -> usize {
-        memnoth_provider_registry::context_window_for(&self.model)
-            .map(|tokens| tokens as usize)
+        self.known_context_window()
             .unwrap_or(FALLBACK_CONTEXT_WINDOW)
+    }
+
+    /// An authoritative configured or catalogue value. `None` means the
+    /// fallback is only a safety budget and must not be presented as the
+    /// model's actual window.
+    pub fn known_context_window(&self) -> Option<usize> {
+        self.context_window_override.or_else(|| {
+            memnoth_provider_registry::context_window_for(&self.model).map(|tokens| tokens as usize)
+        })
     }
 
     /// Tokens one request may spend on context: the window minus the reply
     /// reservation, and never less than one compaction budget.
     pub fn prompt_budget(&self) -> usize {
-        self.context_window()
+        let window = self.context_window();
+        window
             .saturating_sub(RESERVED_OUTPUT_TOKENS)
-            .max(COMPACT_BUDGET_TOKENS)
+            .max(COMPACT_BUDGET_TOKENS.min(window))
     }
 
     /// Resolve the session's model settings.
@@ -484,6 +562,28 @@ impl Settings {
             .max_tokens
             .filter(|value| *value > 0)
             .unwrap_or(DEFAULT_MAX_TOKENS);
+        let context_window_override = section
+            .context_window
+            .filter(|value| *value > 0)
+            .filter(|_| {
+                section
+                    .context_window_model
+                    .as_deref()
+                    .is_none_or(|configured_model| configured_model == model)
+            })
+            .map(|value| value as usize);
+        let reasoning_efforts = section
+            .reasoning_efforts
+            .as_ref()
+            .filter(|_| {
+                section
+                    .reasoning_efforts_model
+                    .as_deref()
+                    .is_none_or(|configured_model| configured_model == model)
+            })
+            .filter(|efforts| !efforts.is_empty())
+            .cloned()
+            .unwrap_or_else(|| reasoning_efforts_for(kind, &model));
 
         // The key is resolved once, here, so every screen that reports a
         // connection reports the same one a turn would use. An environment
@@ -512,6 +612,7 @@ impl Settings {
             model,
             base_url: base_url.trim_end_matches('/').to_string(),
             max_tokens,
+            context_window_override,
             api_key,
             pricing,
             provider_name,
@@ -521,8 +622,9 @@ impl Settings {
                 .reasoning_effort
                 .as_deref()
                 .map(str::trim)
-                .filter(|effort| matches!(*effort, "minimal" | "low" | "medium" | "high" | "off"))
+                .filter(|effort| reasoning_efforts.iter().any(|allowed| allowed == *effort))
                 .map(str::to_string),
+            reasoning_efforts,
             key_source,
         })
     }
@@ -696,18 +798,46 @@ pub fn fetch_memnoth_models(base_url: &str, api_key: Option<&str>) -> Result<Vec
     Ok(models)
 }
 
-/// Fetch the model ids a configured provider offers.
+/// Fetch the models a configured provider offers, including any context limit
+/// published in its catalogue response.
 ///
 /// `fetch_memnoth_models` speaks the managed endpoint's dialect; this speaks
 /// each wire shape's own, so `/models` can show what the provider actually
 /// serves instead of a catalogue baked into the binary. A provider that does
 /// not implement `GET /models` is a normal failure here, not a broken config:
 /// the caller keeps its offline catalogue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderModel {
+    pub id: String,
+    pub context_window: Option<u32>,
+    pub reasoning_efforts: Option<Vec<String>>,
+}
+
+pub fn deduplicate_provider_models(models: Vec<ProviderModel>) -> Vec<ProviderModel> {
+    let mut unique = std::collections::BTreeMap::<String, ProviderModel>::new();
+    for model in models {
+        let entry = unique
+            .entry(model.id.clone())
+            .or_insert_with(|| ProviderModel {
+                id: model.id.clone(),
+                context_window: None,
+                reasoning_efforts: None,
+            });
+        if entry.context_window.is_none() {
+            entry.context_window = model.context_window;
+        }
+        if entry.reasoning_efforts.is_none() {
+            entry.reasoning_efforts = model.reasoning_efforts;
+        }
+    }
+    unique.into_values().collect()
+}
+
 pub fn fetch_provider_models(
     kind: Kind,
     base_url: &str,
     api_key: Option<&str>,
-) -> Result<Vec<String>> {
+) -> Result<Vec<ProviderModel>> {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(8))
         .user_agent(concat!("memnoth/", env!("CARGO_PKG_VERSION")))
@@ -757,13 +887,100 @@ pub fn fetch_provider_models(
 
     let value: Value =
         serde_json::from_str(&text).with_context(|| format!("{} did not answer with JSON", url))?;
-    let models = value["data"]
+    let entries = value["data"]
         .as_array()
-        .ok_or_else(|| anyhow::anyhow!("unexpected models response: no 'data' array"))?
+        .or_else(|| value["models"].as_array())
+        .ok_or_else(|| anyhow::anyhow!("unexpected models response: no model array"))?;
+    let models = entries
         .iter()
-        .filter_map(|model| model["id"].as_str().map(str::to_string))
+        .filter_map(|model| {
+            let id = ["id", "name", "modelId"]
+                .iter()
+                .find_map(|key| model[*key].as_str())?;
+            Some(ProviderModel {
+                id: id.to_string(),
+                context_window: provider_model_context_window(model),
+                reasoning_efforts: provider_model_reasoning_efforts(model, id),
+            })
+        })
         .collect();
     Ok(models)
+}
+
+fn provider_model_reasoning_efforts(model: &Value, id: &str) -> Option<Vec<String>> {
+    let candidates = [
+        &model["reasoning_efforts"],
+        &model["reasoning_effort_values"],
+        &model["supported_reasoning_efforts"],
+        &model["reasoning_effort_options"],
+        &model["reasoning_effort_levels"],
+        &model["reasoning"]["effort_levels"],
+        &model["reasoning"]["efforts"],
+        &model["reasoning"]["effort"]["enum"],
+        &model["reasoning_effort"]["enum"],
+    ];
+    let declared = candidates.into_iter().find_map(|candidate| {
+        let options = candidate.as_array()?;
+        let values: Vec<String> = options
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|value| {
+                !value.is_empty()
+                    && value.len() <= 32
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte))
+            })
+            .map(str::to_ascii_lowercase)
+            .collect();
+        (!values.is_empty()).then_some(values)
+    });
+    declared.or_else(|| {
+        let supports_effort = model["supported_parameters"]
+            .as_array()?
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|parameter| {
+                matches!(
+                    parameter,
+                    "reasoning_effort" | "reasoning.effort" | "output_config.effort"
+                )
+            });
+        supports_effort
+            .then(|| reasoning_efforts_for(Kind::OpenAi, id))
+            .filter(|efforts| !efforts.is_empty())
+    })
+}
+
+/// Read common context-limit fields from provider model-list responses.
+/// OpenAI-compatible gateways use several spellings; providers that return
+/// only ids leave this unset for the registry/config fallback.
+fn provider_model_context_window(model: &Value) -> Option<u32> {
+    let candidates = [
+        &model["context_length"],
+        &model["context_window"],
+        &model["context_window_tokens"],
+        &model["contextWindow"],
+        &model["input_token_limit"],
+        &model["inputTokenLimit"],
+        &model["max_context_length"],
+        &model["top_provider"]["context_length"],
+        &model["architecture"]["context_length"],
+        &model["limits"]["context_window"],
+        &model["limits"]["context_length"],
+    ];
+    candidates.into_iter().find_map(|value| {
+        let tokens = value
+            .as_u64()
+            .or_else(|| {
+                let number = value.as_f64()?;
+                (number.is_finite() && number > 0.0 && number.fract() == 0.0)
+                    .then_some(number as u64)
+            })
+            .or_else(|| value.as_str()?.parse::<u64>().ok())?;
+        (tokens > 0 && tokens <= u32::MAX as u64).then_some(tokens as u32)
+    })
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Exchange {
@@ -780,6 +997,10 @@ pub struct Answer {
     pub text: String,
     /// Prompt tokens reported by the provider.
     pub input_tokens: u64,
+    /// Input tokens reported for the final provider request in this turn.
+    /// Unlike `input_tokens`, this is a window occupancy reading, not a sum
+    /// across tool rounds.
+    pub context_window_used: Option<u64>,
     /// Completion tokens reported by the provider.
     pub output_tokens: u64,
     /// How many tool rounds it took (0 for an immediate answer).
@@ -2072,6 +2293,7 @@ pub fn run_turn_attached(
             return Ok(Answer {
                 text: step.text,
                 input_tokens: conversation.input_tokens,
+                context_window_used: conversation.context_window_used,
                 output_tokens: conversation.output_tokens,
                 rounds: round,
                 prompt: format!("{}\n\n{}", conversation.prefix, conversation.tail),
@@ -2131,6 +2353,46 @@ pub fn run_turn_attached(
                 spoken.trim_end()
             ),
             input_tokens: conversation.input_tokens,
+            context_window_used: conversation.context_window_used,
+            output_tokens: conversation.output_tokens,
+            rounds: MAX_ROUNDS,
+            prompt: format!("{}\n\n{}", conversation.prefix, conversation.tail),
+            prefix_hash: conversation.receipt.prefix_hash,
+            context_tokens: conversation.receipt.total_tokens,
+            layer_tokens: conversation.receipt.layer_tokens,
+            pieces: conversation.receipt.pieces.len(),
+            dropped: conversation.receipt.dropped.clone(),
+        });
+    }
+
+    // The model never said a word: only tool calls, for the whole budget. Ask
+    // once more with the tools removed. The results are already paid for, and a
+    // turn that dies here throws them away; if the model will not speak even
+    // with no tools on offer, the honest error below still stands.
+    let (body, url, headers) = conversation.request_final();
+    crate::net_guard::validate_before_request(&url)
+        .map_err(|error| anyhow::anyhow!("refusing the provider request: {error}"))?;
+    if let Ok(reply) = post_json(
+        &client,
+        &url,
+        headers,
+        &body,
+        settings.kind,
+        settings.api_key.as_deref(),
+    ) && let Ok(step) = conversation.absorb(&reply)
+        && !step.text.trim().is_empty()
+    {
+        emit(ApiEvent::TurnDone {
+            session_id: session_id.to_string(),
+        });
+        return Ok(Answer {
+            text: format!(
+                "{}\n\n(stopped after {MAX_ROUNDS} tool rounds; the answer above is what the \
+                 model had so far — ask a narrower question to keep going)",
+                step.text.trim_end()
+            ),
+            input_tokens: conversation.input_tokens,
+            context_window_used: conversation.context_window_used,
             output_tokens: conversation.output_tokens,
             rounds: MAX_ROUNDS,
             prompt: format!("{}\n\n{}", conversation.prefix, conversation.tail),
@@ -2209,28 +2471,31 @@ impl Attachment {
         let path = path.as_ref();
         let bytes = std::fs::read(path)
             .with_context(|| format!("cannot read attachment {}", path.display()))?;
+        Self::from_bytes(path.display().to_string(), bytes)
+    }
+
+    /// An attachment from bytes already in hand: a file just read, or an image
+    /// lifted off the clipboard. Everything after the read is shared, so a
+    /// pasted screenshot passes the same emptiness, size, and type checks a
+    /// path does.
+    pub fn from_bytes(name: impl Into<String>, bytes: Vec<u8>) -> Result<Self> {
+        let path = name.into();
         if bytes.is_empty() {
-            bail!("{} is empty", path.display());
+            bail!("{path} is empty");
         }
         if bytes.len() > ATTACHMENT_MAX_BYTES {
             bail!(
-                "{} is {:.1} MiB — the limit is {} MiB per attachment",
-                path.display(),
+                "{path} is {:.1} MiB — the limit is {} MiB per attachment",
                 bytes.len() as f64 / (1024.0 * 1024.0),
                 ATTACHMENT_MAX_BYTES / (1024 * 1024)
             );
         }
         let mime = sniff_mime(&bytes).with_context(|| {
             format!(
-                "{} is not an image or a PDF — the type is read from the file's first bytes, not its name",
-                path.display()
+                "{path} is not an image or a PDF — the type is read from the first bytes, not the name"
             )
         })?;
-        Ok(Self {
-            path: path.display().to_string(),
-            mime,
-            bytes,
-        })
+        Ok(Self { path, mime, bytes })
     }
 
     fn encode(&self) -> String {
@@ -2335,6 +2600,7 @@ struct Conversation<'a> {
     /// sent after the byte-stable prefix so the provider can cache the prefix.
     tail: String,
     input_tokens: u64,
+    context_window_used: Option<u64>,
     output_tokens: u64,
     /// Tool results delivered this turn, newest last. Bodies older than
     /// `TOOL_RESULT_MAX_AGE_MS` are replaced by a re-call hint while the call
@@ -2376,6 +2642,7 @@ impl<'a> Conversation<'a> {
             prefix: assembly.prefix,
             tail: assembly.tail,
             input_tokens: 0,
+            context_window_used: None,
             output_tokens: 0,
             tool_results: Vec::new(),
             receipt,
@@ -2453,11 +2720,19 @@ impl<'a> Conversation<'a> {
             if let Some(top_p) = self.settings.top_p {
                 object.insert("top_p".into(), json!(top_p));
             }
-            if !matches!(self.settings.kind, Kind::Anthropic)
-                && takes_reasoning_effort(&self.settings.model)
-                && let Some(effort) = self.settings.reasoning_effort.as_deref()
+            if let Some(effort) = self.settings.reasoning_effort.as_deref()
+                && self
+                    .settings
+                    .reasoning_efforts
+                    .iter()
+                    .any(|value| value == effort)
             {
-                object.insert("reasoning_effort".into(), json!(effort));
+                if self.settings.kind == Kind::Anthropic {
+                    object.insert("thinking".into(), json!({ "type": "adaptive" }));
+                    object.insert("output_config".into(), json!({ "effort": effort }));
+                } else {
+                    object.insert("reasoning_effort".into(), json!(effort));
+                }
             }
         }
         body
@@ -2522,9 +2797,46 @@ impl<'a> Conversation<'a> {
         }
     }
 
+    /// The request that ends a turn with no tool rounds left.
+    ///
+    /// Same conversation and endpoint, with `tools` removed and one note added
+    /// to the last user turn: a model that spent its whole budget calling tools
+    /// still owes an answer from what those calls returned. The note is part of
+    /// the user turn rather than a new system prompt, so it cannot rewrite the
+    /// cached prefix, and it does not add a second consecutive message the way
+    /// Anthropic refuses.
+    fn request_final(&self) -> (Value, String, Vec<(&'static str, String)>) {
+        const NOTE: &str = "You have no tool calls left in this turn. Answer the question from \
+             the tool results already in this conversation. Do not ask for another tool.";
+        let (mut body, url, headers) = self.request();
+        if let Some(object) = body.as_object_mut() {
+            object.remove("tools");
+            object.remove("tool_choice");
+            if let Some(messages) = object.get_mut("messages").and_then(Value::as_array_mut) {
+                match messages.last_mut() {
+                    Some(last) if last["role"] == "user" => match &mut last["content"] {
+                        Value::String(text) => {
+                            text.push_str("\n\n");
+                            text.push_str(NOTE);
+                        }
+                        Value::Array(parts) => {
+                            parts.push(json!({ "type": "text", "text": NOTE }));
+                        }
+                        _ => {}
+                    },
+                    _ => messages.push(json!({ "role": "user", "content": NOTE })),
+                }
+            }
+        }
+        (body, url, headers)
+    }
+
     /// Add streamed usage to the turn's accounting, in one place.
     fn add_usage(&mut self, input: u64, output: u64) {
         self.input_tokens += input;
+        if input > 0 {
+            self.context_window_used = Some(input);
+        }
         self.output_tokens += output;
     }
 
@@ -2533,7 +2845,11 @@ impl<'a> Conversation<'a> {
         match self.settings.kind {
             Kind::Anthropic => {
                 let usage = &reply["usage"];
-                self.input_tokens += usage["input_tokens"].as_u64().unwrap_or(0);
+                let input = usage["input_tokens"].as_u64().unwrap_or(0);
+                self.input_tokens += input;
+                if input > 0 {
+                    self.context_window_used = Some(input);
+                }
                 self.output_tokens += usage["output_tokens"].as_u64().unwrap_or(0);
 
                 let blocks = reply["content"].as_array().with_context(|| {
@@ -2577,7 +2893,11 @@ impl<'a> Conversation<'a> {
             }
             Kind::OpenAi | Kind::Kilo => {
                 let usage = &reply["usage"];
-                self.input_tokens += usage["prompt_tokens"].as_u64().unwrap_or(0);
+                let input = usage["prompt_tokens"].as_u64().unwrap_or(0);
+                self.input_tokens += input;
+                if input > 0 {
+                    self.context_window_used = Some(input);
+                }
                 self.output_tokens += usage["completion_tokens"].as_u64().unwrap_or(0);
 
                 let message = &reply["choices"][0]["message"];
@@ -2625,7 +2945,11 @@ impl<'a> Conversation<'a> {
             }
             Kind::Memnoth => {
                 let usage = &reply["usage"];
-                self.input_tokens += usage["prompt_tokens"].as_u64().unwrap_or(0);
+                let input = usage["prompt_tokens"].as_u64().unwrap_or(0);
+                self.input_tokens += input;
+                if input > 0 {
+                    self.context_window_used = Some(input);
+                }
                 self.output_tokens += usage["completion_tokens"].as_u64().unwrap_or(0);
 
                 let message = &reply["choices"][0]["message"];
@@ -2848,10 +3172,11 @@ fn streaming_body(body: &Value, settings: &Settings) -> Value {
                 object.insert("stream_options".into(), json!({ "include_usage": true }));
             }
             Kind::Anthropic => {
-                if settings
-                    .reasoning_effort
-                    .as_deref()
-                    .is_some_and(|effort| !effort.trim().is_empty())
+                if !object.contains_key("thinking")
+                    && settings
+                        .reasoning_effort
+                        .as_deref()
+                        .is_some_and(|effort| !effort.trim().is_empty())
                     && settings.model.to_ascii_lowercase().contains("claude")
                 {
                     let budget: u32 = match settings.reasoning_effort.as_deref() {
@@ -2983,12 +3308,14 @@ mod tests {
             model: "test-model".into(),
             base_url: kind.default_base_url().into(),
             max_tokens: 512,
+            context_window_override: None,
             api_key: Some("k".into()),
             pricing: None,
             provider_name: None,
             temperature: None,
             top_p: None,
             reasoning_effort: None,
+            reasoning_efforts: Vec::new(),
             key_source: Some("test".into()),
         }
     }
@@ -3651,6 +3978,20 @@ mod attachment_tests {
         let pdf = attachment_blocks(Kind::Anthropic, &file("application/pdf", "spec.pdf"));
         assert_eq!(pdf[0]["type"], "document");
         assert_eq!(pdf[0]["source"]["media_type"], "application/pdf");
+    }
+
+    #[test]
+    fn bytes_in_hand_pass_the_same_checks_as_a_file() {
+        const PNG: &[u8] = &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        let pasted = Attachment::from_bytes("clipboard-1.png", PNG.to_vec())
+            .expect("a clipboard PNG is an attachment");
+        assert_eq!(pasted.mime, "image/png");
+        assert_eq!(pasted.path, "clipboard-1.png");
+        assert!(Attachment::from_bytes("empty.png", Vec::new()).is_err());
+        assert!(
+            Attachment::from_bytes("not-an-image.png", b"plain text".to_vec()).is_err(),
+            "the bytes, not the name, decide"
+        );
     }
 
     #[test]

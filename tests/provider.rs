@@ -130,6 +130,8 @@ fn settings(kind: Kind, base_url: &str) -> Settings {
         temperature: None,
         top_p: None,
         reasoning_effort: None,
+        reasoning_efforts: Vec::new(),
+        context_window_override: None,
         key_source: Some("test".into()),
     }
 }
@@ -358,6 +360,73 @@ fn a_turn_that_runs_out_of_rounds_keeps_what_the_model_said() {
     assert!(answer.text.contains("half an answer"), "{}", answer.text);
     assert!(answer.text.contains("tool rounds"), "{}", answer.text);
     assert_eq!(tools.calls.len(), memnoth::provider::MAX_ROUNDS);
+    mock.finish().join().expect("mock server");
+}
+
+#[test]
+fn a_turn_out_of_rounds_asks_once_more_without_tools_and_answers() {
+    // The model spent every round calling a tool and never wrote a word. Rather
+    // than throwing away the results it paid for, the turn asks one final time
+    // with the tools removed; the answer is what the person gets.
+    let tool_reply = json!({
+        "choices": [{
+            "finish_reason": "tool_calls",
+            "message": {
+                "content": null,
+                "tool_calls": [{
+                    "id": "same",
+                    "function": { "name": "kg_status", "arguments": "{}" }
+                }]
+            }
+        }]
+    });
+    let mut replies = vec![tool_reply; memnoth::provider::MAX_ROUNDS];
+    replies.push(json!({
+        "choices": [{
+            "finish_reason": "stop",
+            "message": {
+                "role": "assistant",
+                "content": "answered from the results already read"
+            }
+        }],
+        "usage": { "prompt_tokens": 3, "completion_tokens": 4 }
+    }));
+    let mock = Mock::start(replies);
+    let settings = settings(Kind::OpenAi, &mock.base_url);
+    let mut tools = FakeTools {
+        answer: "indexed".into(),
+        calls: Vec::new(),
+    };
+
+    let answer = run_turn(
+        &settings,
+        Path::new("/ws"),
+        &[],
+        "loop forever",
+        &mut tools,
+        &mut |_| {},
+    )
+    .expect("the final no-tools request answered");
+    assert!(
+        answer
+            .text
+            .contains("answered from the results already read"),
+        "{}",
+        answer.text
+    );
+    assert!(answer.text.contains("tool rounds"), "{}", answer.text);
+    assert_eq!(tools.calls.len(), memnoth::provider::MAX_ROUNDS);
+
+    let requests = mock.requests();
+    let last = requests.last().expect("the final request");
+    assert!(
+        !last.contains("\"tools\""),
+        "the final request must offer no tools: {last}"
+    );
+    assert!(
+        last.contains("no tool calls left"),
+        "the model must be told why it has to answer: {last}"
+    );
     mock.finish().join().expect("mock server");
 }
 

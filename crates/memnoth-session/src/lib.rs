@@ -77,6 +77,16 @@ pub struct TurnReceipt {
     pub layer_tokens: [usize; 4],
     pub pieces: usize,
     pub input_tokens: u64,
+    /// Provider-reported input tokens for the last request, for context-window
+    /// occupancy. `input_tokens` remains the total billed across tool rounds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window_used: Option<u64>,
+    /// Model/provider identity for this request usage. Older receipts omit
+    /// these fields and cannot be matched safely to the current provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window_provider: Option<String>,
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
     pub cache_write_tokens: u64,
@@ -625,6 +635,9 @@ mod tests {
             layer_tokens: [10, 20, 30, 60],
             pieces: 3,
             input_tokens: 100,
+            context_window_used: Some(100),
+            context_window_model: Some("m".into()),
+            context_window_provider: Some("provider".into()),
             output_tokens: 20,
             cache_read_tokens: 80,
             cache_write_tokens: 5,
@@ -717,6 +730,9 @@ mod tests {
             layer_tokens: [0, 0, 0, 10],
             pieces: 1,
             input_tokens: 5,
+            context_window_used: None,
+            context_window_model: None,
+            context_window_provider: None,
             output_tokens: 5,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
@@ -830,6 +846,9 @@ mod tests {
             layer_tokens: [0, 0, 0, 10],
             pieces: 1,
             input_tokens: 5,
+            context_window_used: None,
+            context_window_model: None,
+            context_window_provider: None,
             output_tokens: 5,
             cache_read_tokens: 0,
             cache_write_tokens: 0,

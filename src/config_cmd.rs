@@ -52,6 +52,16 @@ const CONFIG_KEYS: &[ConfigKey] = &[
         value_type: "integer",
     },
     ConfigKey {
+        key: "provider.context_window",
+        description: "Model context window in tokens (override detected value)",
+        value_type: "integer (tokens)",
+    },
+    ConfigKey {
+        key: "provider.reasoning_efforts",
+        description: "Comma-separated effort levels supported by the configured model",
+        value_type: "string (comma-separated values)",
+    },
+    ConfigKey {
         key: "provider.input_per_mtok",
         description: "Input cost per million tokens (USD)",
         value_type: "float",
@@ -167,6 +177,22 @@ fn get_effective_value(config: &Config, key: &str) -> (Value, &'static str) {
             }
             (json!(Value::Null), "default")
         }
+        "provider.context_window" => {
+            if let Some(value) = config
+                .provider
+                .as_ref()
+                .and_then(|provider| provider.context_window)
+            {
+                return (json!(value), "config");
+            }
+            (json!(Value::Null), "model registry or unknown")
+        }
+        "provider.reasoning_efforts" => config
+            .provider
+            .as_ref()
+            .and_then(|provider| provider.reasoning_efforts.as_ref())
+            .map(|values| (json!(values), "config"))
+            .unwrap_or((json!(Value::Null), "provider metadata or model defaults")),
         "provider.input_per_mtok" => {
             if let Some(ref p) = config.provider
                 && let Some(v) = p.input_per_mtok
@@ -197,6 +223,13 @@ fn get_config_file_value(config: &Config, key: &str) -> Option<Value> {
         "provider.model" => config.provider.as_ref()?.model.clone().map(|v| json!(v)),
         "provider.base_url" => config.provider.as_ref()?.base_url.clone().map(|v| json!(v)),
         "provider.max_tokens" => config.provider.as_ref()?.max_tokens.map(|v| json!(v)),
+        "provider.context_window" => config.provider.as_ref()?.context_window.map(|v| json!(v)),
+        "provider.reasoning_efforts" => config
+            .provider
+            .as_ref()?
+            .reasoning_efforts
+            .clone()
+            .map(|values| json!(values)),
         "provider.input_per_mtok" => config.provider.as_ref()?.input_per_mtok.map(|v| json!(v)),
         "provider.output_per_mtok" => config.provider.as_ref()?.output_per_mtok.map(|v| json!(v)),
         _ => None,
@@ -336,7 +369,15 @@ pub fn set(ctx: &crate::context::AppContext, args: &crate::cli::ConfigSetArgs) -
             args.value.to_ascii_lowercase().as_str(),
             "true" | "yes" | "1" | "on"
         ))
-    } else if key_info.key.contains("max_tokens") {
+    } else if key_info.key == "provider.reasoning_efforts" {
+        json!(
+            args.value
+                .split(',')
+                .map(|value| value.trim().to_ascii_lowercase())
+                .filter(|value| !value.is_empty())
+                .collect::<Vec<_>>()
+        )
+    } else if key_info.key.contains("max_tokens") || key_info.key == "provider.context_window" {
         json!(
             args.value
                 .parse::<u32>()
@@ -394,6 +435,41 @@ pub fn set(ctx: &crate::context::AppContext, args: &crate::cli::ConfigSetArgs) -
                 .parse::<u32>()
                 .context("max_tokens must be an integer")?;
             config.provider.get_or_insert_default().max_tokens = Some(val);
+        }
+        "provider.context_window" => {
+            let val = args
+                .value
+                .parse::<u32>()
+                .context("context_window must be a positive integer number of tokens")?;
+            if val == 0 {
+                bail!("context_window must be greater than zero");
+            }
+            let provider = config.provider.get_or_insert_default();
+            provider.context_window = Some(val);
+            provider.context_window_model = provider.model.clone();
+        }
+        "provider.reasoning_efforts" => {
+            let mut values = Vec::new();
+            for value in args.value.split(',') {
+                let value = value.trim().to_ascii_lowercase();
+                if !value.is_empty() && !values.contains(&value) {
+                    values.push(value);
+                }
+            }
+            if values.is_empty()
+                || values.iter().any(|value| {
+                    !value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+                })
+            {
+                bail!(
+                    "reasoning_efforts must be comma-separated effort names (for example: low,medium,high,xhigh)"
+                );
+            }
+            let provider = config.provider.get_or_insert_default();
+            provider.reasoning_efforts = Some(values);
+            provider.reasoning_efforts_model = provider.model.clone();
         }
         "provider.input_per_mtok" => {
             let val = args
