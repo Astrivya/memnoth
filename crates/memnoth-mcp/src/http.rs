@@ -182,6 +182,7 @@ fn secure_tenant_vault_path(path: &Path) -> Result<()> {
     let file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
+        .truncate(false)
         .mode(0o600)
         .open(path)
         .with_context(|| format!("create private tenant vault {}", path.display()))?;
@@ -1050,7 +1051,14 @@ mod tests {
     /// other's rows — rather than that a config flag was read.
     #[test]
     fn tenant_vaults_isolate_two_principals_and_never_let_a_path_escape() {
-        let root = std::env::temp_dir().join(format!("memnoth-mcp-tenants-{}", std::process::id()));
+        // Include the timestamp: stale temp directories can outlive a test
+        // process and Windows may later reuse its PID, making the test read a
+        // previous run's SQLite rows.
+        let root = std::env::temp_dir().join(format!(
+            "memnoth-mcp-tenants-{}-{}",
+            std::process::id(),
+            memnoth_engine::now_ms()
+        ));
         let base = root.join("vault.db");
         let tenants = TenantVaults::new(Some(&base), true);
         assert!(tenants.enabled(), "a file-backed vault can host tenants");
