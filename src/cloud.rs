@@ -40,36 +40,28 @@ fn credits(ctx: &AppContext, _args: &crate::cli::CreditsArgs) -> Result<Outcome>
 /// stored one — but a machine with no credential is refused here rather than
 /// answering 401 on the first request. A write command that cannot say "sign
 /// in first" is a command that looks broken.
-pub fn signed_in_client(ctx: &AppContext) -> Result<CloudClient> {
+pub fn signed_in_client(_ctx: &AppContext) -> Result<CloudClient> {
     let mut client = CloudClient::from_env().context("Failed to create cloud client")?;
 
-    let token = std::env::var("MEMNOTH_API_KEY")
-        .ok()
-        .or_else(|| std::env::var("MEMNOTH_MCP_TOKEN").ok())
-        .or_else(|| ctx.auth_token())
-        .filter(|token| !token.trim().is_empty())
-        .ok_or_else(|| {
-            // These verbs answer as `/projects` and friends inside the session, so
-            // the sign-in they name has to be the one that exists where the person is.
-            anyhow::anyhow!(
-                "not signed in. Run `/login` in the session, `mn auth login` in a shell, \
+    let token = memnoth_auth::account_key_sync().ok_or_else(|| {
+        // These verbs answer as `/projects` and friends inside the session, so
+        // the sign-in they name has to be the one that exists where the person is.
+        anyhow::anyhow!(
+            "not signed in. Run `/login` in the session, `mn auth login` in a shell, \
                  or set MEMNOTH_API_KEY"
-            )
-        })?;
+        )
+    })?;
 
     client.set_auth_token(token);
     Ok(client)
 }
 
-fn get_cloud_client(ctx: &AppContext) -> Result<CloudClient> {
+fn get_cloud_client(_ctx: &AppContext) -> Result<CloudClient> {
     let mut client = CloudClient::from_env().context("Failed to create cloud client")?;
 
-    // Environment first, so an exported key wins over the stored one.
-    if let Ok(token) = std::env::var("MEMNOTH_API_KEY") {
-        client.set_auth_token(token);
-    } else if let Ok(token) = std::env::var("MEMNOTH_MCP_TOKEN") {
-        client.set_auth_token(token);
-    } else if let Some(token) = ctx.auth_token() {
+    // `account_key_sync` excludes hosted-MCP bearer tokens and ignores blank
+    // environment overrides before falling back to the stored account key.
+    if let Some(token) = memnoth_auth::account_key_sync() {
         client.set_auth_token(token);
     }
 

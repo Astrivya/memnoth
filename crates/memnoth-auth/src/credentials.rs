@@ -42,6 +42,12 @@ impl CredentialEntry {
 /// and `mn feedback`, while `mn sync` in the same shell was authenticated.
 pub const ACCOUNT_KEY: &str = "api_key";
 
+fn nonblank_account_key(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 /// The account key this machine holds, if any. Whitespace-only counts as none.
 ///
 /// Resolved in the order this crate documents — environment, OS keychain, file —
@@ -52,12 +58,8 @@ pub const ACCOUNT_KEY: &str = "api_key";
 /// fine. The keychain read is blocking here because the callers that need this
 /// most — the TUI's report thread and the sync queue — are not async.
 pub fn account_key_sync() -> Option<String> {
-    for var in ["MEMNOTH_API_KEY", "MEMNOTH_MCP_TOKEN"] {
-        if let Ok(value) = std::env::var(var)
-            && !value.trim().is_empty()
-        {
-            return Some(value.trim().to_string());
-        }
+    if let Some(value) = nonblank_account_key(std::env::var("MEMNOTH_API_KEY").ok()) {
+        return Some(value);
     }
 
     if let Some(key) = KeyringCredentialStore::new("memnoth").get_blocking(ACCOUNT_KEY) {
@@ -67,7 +69,26 @@ pub fn account_key_sync() -> Option<String> {
     get_credential_sync(ACCOUNT_KEY)
         .ok()
         .flatten()
-        .filter(|key| !key.trim().is_empty())
+        .and_then(|key| nonblank_account_key(Some(key)))
+}
+
+#[cfg(test)]
+mod account_key_tests {
+    use super::nonblank_account_key;
+
+    #[test]
+    fn account_key_env_values_are_trimmed() {
+        assert_eq!(
+            nonblank_account_key(Some("  account-key  ".into())),
+            Some("account-key".into())
+        );
+    }
+
+    #[test]
+    fn blank_account_key_env_values_fall_through_to_stored_credentials() {
+        assert_eq!(nonblank_account_key(Some("  \t".into())), None);
+        assert_eq!(nonblank_account_key(None), None);
+    }
 }
 
 /// Synchronously read a credential from the default credentials file.

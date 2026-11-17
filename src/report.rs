@@ -389,14 +389,7 @@ pub(crate) fn instance_id() -> String {
 /// Env first, so an exported key wins, then the stored account key that `/login`
 /// writes — the same order every other cloud command uses.
 fn signed_in(ctx: &AppContext) -> bool {
-    if ["MEMNOTH_API_KEY", "MEMNOTH_MCP_TOKEN"].iter().any(|var| {
-        std::env::var(var)
-            .ok()
-            .is_some_and(|value| !value.trim().is_empty())
-    }) {
-        return true;
-    }
-    ctx.auth_token().is_some()
+    memnoth_auth::account_key_sync().is_some() || ctx.auth_token().is_some()
 }
 
 /// A millisecond epoch timestamp as RFC 3339, which is the only shape the plane

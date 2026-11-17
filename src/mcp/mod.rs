@@ -371,8 +371,8 @@ pub fn doctor(ctx: &AppContext) -> Result<DoctorReport> {
 
     // Expiry comes from the same mint `mcp token` makes: the response carries
     // the deadline as an RFC 3339 instant (`expires_at`), not a lifetime.
-    let token_expires_at_ms = ctx.auth_token().and_then(|api_key| {
-        mint_mcp_token(&api_key)
+    let token_expires_at_ms = memnoth_auth::account_key_sync().and_then(|_| {
+        mint_mcp_token(ctx)
             .ok()
             .map(|minted| epoch_ms_of(&minted.expires_at))
     });
@@ -1263,23 +1263,6 @@ pub fn test(ctx: &AppContext, tool: Option<&str>, profile: Option<Profile>) -> R
     }
 }
 
-/// Mint an MCP token through the typed client.
-///
-/// The body this endpoint answers with is `{token, endpoint, expires_at}` — a
-/// signed bearer and its deadline, not an OAuth envelope. Reading
-/// `expires_in` / `mcp_url` from it failed to parse on every mint, so the
-/// hosted-MCP path never actually held a token.
-fn mint_mcp_token(api_key: &str) -> Result<memnoth_cloud_client::McpTokenResponse> {
-    const DEFAULT_API_URL: &str = "https://memnoth.astrivya.ai/api/v1";
-    let base = std::env::var("MEMNOTH_API_URL").unwrap_or_else(|_| DEFAULT_API_URL.to_string());
-    let mut client = memnoth_cloud_client::CloudClient::with_base_url(&base)
-        .map_err(|e| anyhow::anyhow!("cannot build the cloud client: {e}"))?;
-    client.set_auth_token(api_key.to_string());
-    client
-        .mcp_token()
-        .map_err(|e| anyhow::anyhow!("failed to get MCP token: {e}"))
-}
-
 /// Epoch milliseconds the given RFC 3339 instant names (0 when unparseable).
 fn epoch_ms_of(rfc3339: &str) -> i64 {
     chrono::DateTime::parse_from_rfc3339(rfc3339)
@@ -1287,13 +1270,17 @@ fn epoch_ms_of(rfc3339: &str) -> i64 {
         .unwrap_or(0)
 }
 
+/// Mint an MCP bearer through the same account credential path used by Cloud
+/// commands. The returned token is for the hosted MCP resource only.
+fn mint_mcp_token(ctx: &AppContext) -> Result<memnoth_cloud_client::McpTokenResponse> {
+    crate::cloud::signed_in_client(ctx)?
+        .mcp_token()
+        .context("failed to get MCP token")
+}
+
 /// `memnoth mcp token`.
 pub fn token(ctx: &AppContext) -> Result<TokenReport> {
-    let api_key = ctx
-        .auth_token()
-        .context("not authenticated; run `memnoth auth login` first")?;
-
-    let minted = mint_mcp_token(&api_key)?;
+    let minted = mint_mcp_token(ctx)?;
     let deadline_ms = epoch_ms_of(&minted.expires_at);
     let now = chrono::Utc::now().timestamp_millis();
 

@@ -19,11 +19,7 @@ pub fn run(ctx: &AppContext, args: &FeedbackArgs) -> Result<Outcome> {
 /// credential store. Feedback is useful without an account, so a missing token
 /// is not an error here — the server decides.
 fn auth_token() -> Option<String> {
-    std::env::var("MEMNOTH_API_KEY")
-        .ok()
-        .or_else(|| std::env::var("MEMNOTH_MCP_TOKEN").ok())
-        .filter(|token| !token.trim().is_empty())
-        .or_else(memnoth_auth::account_key_sync)
+    memnoth_auth::account_key_sync()
 }
 
 /// `mn feedback send <message>` - POST /api/v1/feedback
