@@ -372,9 +372,8 @@ pub fn confine(
     let windows_plan = WindowsPlan::build(plan, workspace);
     let reason = match &state {
         HelperState::NotInstalled => format!(
-            "no Windows launcher in this build, and the helper is not installed, so filesystem \
-             and network access are not confined (run `mn sandbox setup` once, elevated). The \
-             plan it would apply is: {}",
+            "the Windows sandbox helper and launcher are not included in this build, so filesystem \
+             and network access are not OS-confined. Run `mn doctor` for details. The plan is: {}",
             windows_plan.describe()
         ),
         HelperState::Installed { firewall_rule, .. } => format!(
@@ -448,7 +447,7 @@ mod tests {
         );
         assert!(!confinement.is_enforced());
         let text = confinement.describe();
-        assert!(text.contains("mn sandbox setup"), "{text}");
+        assert!(text.contains("mn doctor"), "{text}");
         assert!(text.contains("job object"), "{text}");
     }
 

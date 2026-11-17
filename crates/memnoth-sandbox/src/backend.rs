@@ -253,11 +253,7 @@ pub fn enforcement_report(plan: &BackendPlan) -> EnforcementReport {
              built as data, but this build installs none of it: filesystem and process-tree \
              confinement are not applied and egress is not blocked"
                 .to_string(),
-            Some(
-                "run `mn sandbox setup` once (elevated) to install the helper; until this build \
-                 launches it, Windows stays policy-checked"
-                    .to_string(),
-            ),
+            Some("Windows sandbox helper and launcher are not included in this build; no install command is available".to_string()),
         ),
     };
     let policy = plan.effective_network();

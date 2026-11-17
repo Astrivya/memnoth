@@ -74,9 +74,10 @@ impl SandboxStatus {
         match &self.helper {
             HelperState::NotInstalled => {
                 if self.report.backend.starts_with("windows") {
-                    "not installed (run `mn sandbox setup` once, elevated)".to_string()
+                    "Windows sandbox helper unavailable; installer is not included in this build"
+                        .to_string()
                 } else {
-                    "n/a (no elevated helper on this platform)".to_string()
+                    "not needed on this platform".to_string()
                 }
             }
             HelperState::Installed { firewall_rule, .. } => {
@@ -111,13 +112,8 @@ impl SandboxStatus {
 
     /// One line for the statusline: the facts, no reassurance.
     pub fn statusline(&self) -> String {
-        let helper = if self.report.backend.starts_with("windows") {
-            format!(" · helper {}", self.helper.label())
-        } else {
-            String::new()
-        };
         format!(
-            "sandbox {} · fs {} · net {}{helper}",
+            "sandbox {} · fs {} · net {}",
             self.profile, self.report.filesystem, self.report.network
         )
     }
@@ -189,11 +185,7 @@ mod tests {
             "{}",
             status.network_line()
         );
-        assert!(
-            status.network_line().contains("mn sandbox setup"),
-            "{}",
-            status.network_line()
-        );
+        assert!(status.network_line().contains("no install command"));
         assert!(status.report.fail_closed);
     }
 
@@ -229,11 +221,12 @@ mod tests {
     }
 
     #[test]
-    fn the_statusline_is_one_line_and_states_network_state() {
+    fn the_statusline_is_compact_and_leaves_helper_detail_to_doctor() {
         let status = status(&plan(OsBackend::Windows, ProfileName::Strict));
         let line = status.statusline();
         assert!(!line.contains('\n'));
         assert!(line.contains("net not enforced"), "{line}");
-        assert!(line.contains("helper not installed"), "{line}");
+        assert!(!line.contains("helper"), "{line}");
+        assert!(status.helper_line().contains("installer is not included"));
     }
 }

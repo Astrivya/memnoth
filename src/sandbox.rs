@@ -73,7 +73,7 @@ fn run_test(ctx: &crate::AppContext, command: &str) -> anyhow::Result<Outcome> {
     Ok(Outcome::new("sandbox.test", report.summary(), data))
 }
 
-/// `mn sandbox setup`: install the elevated sandbox helper.
+/// `mn sandbox setup`: report the helper installation state.
 ///
 /// Windows (D15): write the helper marker and report what was installed.
 /// Other platforms: report that no elevated helper exists yet.
@@ -101,7 +101,7 @@ fn run_setup(ctx: &crate::AppContext) -> anyhow::Result<Outcome> {
                 // For v1 this is plan-as-data: we write nothing, and report
                 // what `doctor` will show until a helper exists.
                 let text = format!(
-                    "sandbox helper not installed at {}\nrun `mn doctor` for the enforcement report\n",
+                    "Windows sandbox helper not installed at {}\nthis build does not include its installer or launcher; run `mn doctor` for enforcement details\n",
                     marker_path.display()
                 );
                 let data = serde_json::json!({
@@ -133,7 +133,7 @@ fn run_setup(ctx: &crate::AppContext) -> anyhow::Result<Outcome> {
         "sandbox setup: {}\n{}\n",
         status.statusline(),
         if cfg!(target_os = "windows") {
-            "elevated helper install not available on this build"
+            "Windows sandbox helper installer not available on this build"
         } else {
             "no elevated helper required on this platform"
         }
