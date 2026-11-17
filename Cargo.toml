@@ -65,7 +65,7 @@ reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls",
     "rustls-tls-native-roots",
 ] }
-rusqlite = { version = "0.41", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled", "backup"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
@@ -107,9 +107,9 @@ tower = { version = "0.5", features = ["util"] }
 portable-pty = "0.9"
 vt100 = "0.15"
 
-# The agent host starts processes with no console at all; ConPTY's child fails
-# DLL initialisation (0xC0000142) until one exists. tests/tui_pty.rs allocates it.
-[target.'cfg(windows)'.dev-dependencies]
+# Windows TUI sets the console output code page to UTF-8 so status glyphs and
+# punctuation render correctly in conhost as well as ConPTY.
+[target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
 [workspace]
 resolver = "3"

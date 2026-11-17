@@ -45,6 +45,7 @@ memnoth-harness-api = { version = "0.1.0-beta.2", path = "../memnoth-harness-api
 memnoth-transport = { version = "0.1.0-beta.2", path = "../memnoth-transport" }
 memnoth-mcp-auth = { version = "0.1.0-beta.2", path = "../memnoth-mcp-auth", features = ["prometheus"] }
 rusqlite = { version = "0.41", features = ["bundled"] }
+url = "2"
 # The cloud ingest's HTTP client. Required, not optional: the previous
 # implementation spoke cleartext HTTP over a raw `TcpStream`, so every ingest
 # against the documented `https://` endpoint wrote an HTTP request into a TLS

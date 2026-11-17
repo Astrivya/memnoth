@@ -2590,6 +2590,7 @@ name = "memnoth-codegraph"
 version = "0.1.0-beta.2"
 dependencies = [
  "anyhow",
+ "blake3",
  "rusqlite",
  "serde",
  "serde_json",
@@ -2767,6 +2768,7 @@ dependencies = [
  "sha2 0.10.9",
  "tokio",
  "tracing",
+ "url",
 ]
 
 [[package]]
