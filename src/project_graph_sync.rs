@@ -841,6 +841,9 @@ mod tests {
                         .as_deref()
                         .expect("first checkout uploaded before restore")
                         .to_vec();
+                    // First download is valid ciphertext for the wrong-phrase
+                    // check. Corrupt the second response to exercise the
+                    // ciphertext hash check independently of AEAD auth.
                     if server_download_count.fetch_add(1, Ordering::SeqCst) == 1 {
                         response[0] ^= 1;
                     }
@@ -867,8 +870,12 @@ mod tests {
 
         let ctx_b = test_context(&root_b, &home_b, graph_b.clone());
         fs::remove_file(&graph_b).unwrap();
-        let wrong_phrase = restore_project(&ctx_b, &client, "wrong phrase", "org-test", project_id);
-        assert!(wrong_phrase.is_err());
+        let wrong_phrase =
+            restore_project(&ctx_b, &client, "wrong phrase", "org-test", project_id).unwrap_err();
+        assert!(
+            format!("{wrong_phrase:#}").contains("could not be authenticated"),
+            "wrong phrase should fail authenticated decryption: {wrong_phrase:#}"
+        );
         assert!(
             !graph_b.exists(),
             "failed authentication must not install a graph"
@@ -879,8 +886,12 @@ mod tests {
             "test recovery phrase",
             "org-test",
             project_id,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{tampered:#}").contains("ciphertext hash check"),
+            "tampered bytes should fail the hash check: {tampered:#}"
         );
-        assert!(tampered.is_err());
         assert!(!graph_b.exists(), "tampered bytes must not install a graph");
         let restored = sync_project(
             &ctx_b,
@@ -1008,5 +1019,23 @@ mod tests {
             .unwrap();
         drop(connection);
         assert!(source_fingerprint(root, &db).is_err());
+    }
+
+    #[test]
+    fn local_snapshot_refuses_a_graph_after_its_workspace_source_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("workspace");
+        let graph = root.join(".memnoth/graph.db");
+        index_checkout(&root, &graph);
+        let ctx = test_context(&root, &temp.path().join("home"), graph);
+
+        local_snapshot(&ctx).unwrap();
+        fs::write(root.join("lib.rs"), "pub fn changed_symbol() -> u8 { 9 }\n").unwrap();
+
+        let error = local_snapshot(&ctx).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("stale source file"),
+            "changed workspace source should reject stale graph: {error:#}"
+        );
     }
 }
