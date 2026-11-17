@@ -1,5 +1,5 @@
 {
-  "command_count": 160,
+  "command_count": 161,
   "commands": [
     {
       "cli_path": [
@@ -857,6 +857,66 @@
         "index"
       ],
       "timeout_secs": 3600
+    },
+    {
+      "cli_path": [
+        "kg",
+        "viz"
+      ],
+      "handler": "kg_viz",
+      "id": "kg.viz",
+      "json_output": true,
+      "min_version": null,
+      "related": [
+        "kg.index",
+        "kg.status"
+      ],
+      "slash": {
+        "aliases": [],
+        "auth": "none",
+        "categories": [
+          "kg"
+        ],
+        "danger": "safe",
+        "deprecated": null,
+        "description": "Index if needed, then open the code graph",
+        "examples": [
+          "kg viz",
+          "kg viz --limit 3000"
+        ],
+        "hidden": false,
+        "long_description": "Updates a missing or stale index locally, then opens the offline graph viewer. Browse symbols by source folder, search declarations, filter kinds, and inspect textual mention links. Available in the session as `/kg viz`.",
+        "name": "viz",
+        "overlay": "none",
+        "palette": "kg viz",
+        "params": [
+          {
+            "default": 1800,
+            "deprecated": null,
+            "description": "Maximum symbols to draw (100–6000)",
+            "env": null,
+            "hidden": false,
+            "long": null,
+            "name": "limit",
+            "param_type": {
+              "max": null,
+              "min": null,
+              "type": "integer"
+            },
+            "position": null,
+            "positional": false,
+            "required": false,
+            "short": null
+          }
+        ],
+        "profile": null
+      },
+      "streaming": false,
+      "tags": [
+        "kg",
+        "visualization"
+      ],
+      "timeout_secs": null
     },
     {
       "cli_path": [

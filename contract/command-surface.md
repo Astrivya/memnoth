@@ -1094,6 +1094,30 @@ memnoth kg index --no-embed
 
 ---
 
+### `memnoth kg viz`
+
+Index if needed, then open the code graph
+
+Updates a missing or stale index locally, then opens the offline graph viewer. Browse symbols by source folder, search declarations, filter kinds, and inspect textual mention links. Available in the session as `/kg viz`.
+
+**Examples:**
+
+```bash
+memnoth kg viz
+```
+
+```bash
+memnoth kg viz --limit 3000
+```
+
+**Optional arguments:**
+
+- `--limit` (integer) — Maximum symbols to draw (100–6000) (default: 1800)
+
+**Overlay:** `None` | **Danger:** `Safe` | **Auth:** `None`
+
+---
+
 ### `memnoth kg status`
 
 What was built, when, and how stale it is

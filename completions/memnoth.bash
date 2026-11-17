@@ -361,6 +361,9 @@ _memnoth() {
             memnoth__subcmd__kg,status)
                 cmd="memnoth__subcmd__kg__subcmd__status"
                 ;;
+            memnoth__subcmd__kg,viz)
+                cmd="memnoth__subcmd__kg__subcmd__viz"
+                ;;
             memnoth__subcmd__mcp,add)
                 cmd="memnoth__subcmd__mcp__subcmd__add"
                 ;;
@@ -3057,7 +3060,7 @@ _memnoth() {
             return 0
             ;;
         memnoth__subcmd__kg)
-            opts="-h --root --vault --namespace --json --quiet --resume --help index status impact search"
+            opts="-h --root --vault --namespace --json --quiet --resume --help index viz status impact search"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -3199,6 +3202,40 @@ _memnoth() {
                 return 0
             fi
             case "${prev}" in
+                --root)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --vault)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --namespace)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --resume)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        memnoth__subcmd__kg__subcmd__viz)
+            opts="-h --limit --root --vault --namespace --json --quiet --resume --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --limit)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
                 --root)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
