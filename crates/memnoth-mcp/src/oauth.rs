@@ -42,6 +42,20 @@ pub const ENDPOINT_PATH: &str = "/mcp";
 /// `MEMNOTH_MCP_PUBLIC_URL` — the externally visible base URL.
 pub const PUBLIC_URL_ENV: &str = "MEMNOTH_MCP_PUBLIC_URL";
 
+/// Public discovery URLs are part of the credential audience. Remote servers
+/// must use an absolute HTTPS origin with no userinfo, query, or fragment.
+pub fn valid_remote_public_url(value: &str) -> bool {
+    url::Url::parse(value.trim()).is_ok_and(|url| {
+        url.scheme() == "https"
+            && url.host_str().is_some()
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none()
+            && matches!(url.path(), "/" | "/mcp")
+    })
+}
+
 /// `MEMNOTH_MCP_SCOPES` — comma/space separated scopes this resource accepts.
 pub const SCOPES_ENV: &str = "MEMNOTH_MCP_SCOPES";
 
@@ -197,6 +211,27 @@ pub fn insufficient_scope(metadata_url: &str, required: &[String], description: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_discovery_requires_a_clean_https_origin() {
+        for value in [
+            "https://mcp.example.com",
+            "https://mcp.example.com/",
+            "https://mcp.example.com/mcp",
+        ] {
+            assert!(valid_remote_public_url(value), "{value}");
+        }
+        for value in [
+            "",
+            "http://mcp.example.com",
+            "https://user@mcp.example.com",
+            "https://mcp.example.com/?token=x",
+            "https://mcp.example.com/#fragment",
+            "https://mcp.example.com/unexpected",
+        ] {
+            assert!(!valid_remote_public_url(value), "{value}");
+        }
+    }
 
     fn config(zitadel_issuer: Option<&str>, hs256_issuer: Option<&str>) -> AuthConfig {
         AuthConfig {

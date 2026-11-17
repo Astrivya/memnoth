@@ -21,6 +21,7 @@ use serde::de::DeserializeOwned;
 
 use crate::error::{AuthError, AuthFailureReason};
 use crate::jwks::{JwksCache, JwksError};
+use crate::verifier::bearer_token;
 use crate::{AuthContext, AuthMode, Authenticator};
 
 /// Provider-specific claims + defaults for an RS256 JWT mode.
@@ -168,7 +169,7 @@ impl<C: Rs256Claims> Authenticator for Rs256JwtVerifier<C> {
         let Some(header) = authorization_header else {
             return Err(AuthError::new(C::mode(), AuthFailureReason::MissingHeader));
         };
-        let Some(token) = header.strip_prefix("Bearer ") else {
+        let Some(token) = bearer_token(header) else {
             return Err(AuthError::new(
                 C::mode(),
                 AuthFailureReason::MalformedHeader,

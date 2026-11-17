@@ -17,6 +17,11 @@ use tokio::sync::OnceCell;
 use crate::error::{AuthError, AuthFailureReason};
 use crate::{AuthContext, AuthMode, Authenticator};
 
+pub(crate) fn bearer_token(header: &str) -> Option<&str> {
+    let (scheme, token) = header.split_once(' ')?;
+    (scheme.eq_ignore_ascii_case("Bearer") && !token.trim().is_empty()).then(|| token.trim())
+}
+
 /// Static bearer authenticator. The HTTP layer constructs one of these
 /// from the `MEMNOTH_MCP_HTTP_TOKEN` env var. If the env var is empty,
 /// the static mode is **not** registered (the HTTP server's loopback-only
@@ -66,10 +71,17 @@ impl Authenticator for StaticBearerVerifier {
                 AuthFailureReason::MissingHeader,
             ));
         };
-        let Some(present) = header.strip_prefix("Bearer ") else {
+        let Some(present) = bearer_token(header) else {
+            let empty_bearer = header.split_once(' ').is_some_and(|(scheme, token)| {
+                scheme.eq_ignore_ascii_case("Bearer") && token.trim().is_empty()
+            });
             return Err(AuthError::new(
                 AuthMode::StaticBearer,
-                AuthFailureReason::MalformedHeader,
+                if empty_bearer {
+                    AuthFailureReason::BadStaticToken
+                } else {
+                    AuthFailureReason::MalformedHeader
+                },
             ));
         };
         // `subtle::ConstantTimeEq` over bytes. Length is compared in
@@ -191,3 +203,17 @@ const MODES_PLACEHOLDER: [AuthMode; 3] = [
 const _: fn() = || {
     let _ = OnceCell::<()>::new;
 };
+
+#[cfg(test)]
+mod bearer_scheme_tests {
+    use super::bearer_token;
+
+    #[test]
+    fn bearer_scheme_is_case_insensitive_and_requires_a_token() {
+        assert_eq!(bearer_token("Bearer abc"), Some("abc"));
+        assert_eq!(bearer_token("bearer abc"), Some("abc"));
+        assert_eq!(bearer_token("BEARER abc"), Some("abc"));
+        assert_eq!(bearer_token("Basic abc"), None);
+        assert_eq!(bearer_token("Bearer  "), None);
+    }
+}

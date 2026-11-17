@@ -17,6 +17,9 @@
 //!   `expired`, `jwks_unavailable`).
 //! - `memnoth_mcp_auth_jwks_cache_entries` — Gauge (set by the
 //!   HTTP layer periodically; we expose a setter).
+//! - `memnoth_mcp_tool_calls_total` — aggregate Counter for dispatched MCP
+//!   `tools/call` requests. It deliberately has no user, project, or tool-name
+//!   labels and records no arguments or results.
 //!
 //! These two are the metrics described in
 //! `D:\xclaw\memnoth-findings.md` §13 (T8 handoff). The Grafana
@@ -54,6 +57,30 @@ pub fn record_verify(mode: AuthMode, reason: Option<&AuthFailureReason>) {
         .with_label_values(&[mode.as_str(), reason_label])
         .inc();
 }
+
+/// Count one dispatched MCP tool-call request without retaining its name,
+/// arguments, result, user, or project. This aggregate counter is process-local
+/// and is exposed only through the server's metrics endpoint.
+#[cfg(feature = "prometheus")]
+pub fn record_tool_call() {
+    use prometheus::{IntCounter, register_int_counter};
+    use std::sync::OnceLock;
+
+    static COUNTER: OnceLock<IntCounter> = OnceLock::new();
+    COUNTER
+        .get_or_init(|| {
+            register_int_counter!(
+                "memnoth_mcp_tool_calls_total",
+                "Number of MCP tool-call requests dispatched by this server process"
+            )
+            .expect("metric registration must succeed (no other writer)")
+        })
+        .inc();
+}
+
+/// No-op variant used when Prometheus instrumentation is disabled.
+#[cfg(not(feature = "prometheus"))]
+pub fn record_tool_call() {}
 
 /// No-op variant of [`record_verify`] compiled when the `prometheus`
 /// feature is off. Keeps the call site unconditional.
@@ -130,6 +157,7 @@ mod tests {
             Some(&AuthFailureReason::BadSignature),
         );
         record_verify(AuthMode::StaticBearer, None);
+        record_tool_call();
         set_jwks_cache_entries(42);
         let s = render();
         assert!(
@@ -166,6 +194,24 @@ mod tests {
             s.contains("reason=\"bad_static_token\""),
             "render must include the failure reason"
         );
+    }
+
+    #[cfg(feature = "prometheus")]
+    #[test]
+    fn tool_call_metric_is_aggregate_and_increments() {
+        fn current() -> u64 {
+            prometheus::gather()
+                .into_iter()
+                .find(|family| family.get_name() == "memnoth_mcp_tool_calls_total")
+                .and_then(|family| family.get_metric().first().cloned())
+                .map(|metric| metric.get_counter().get_value() as u64)
+                .unwrap_or(0)
+        }
+
+        let before = current();
+        record_tool_call();
+        assert!(current() > before);
+        assert!(render().contains("memnoth_mcp_tool_calls_total"));
     }
 
     /// Sanity: the typed `AuthMode::as_str` and `AuthFailureReason::as_str`

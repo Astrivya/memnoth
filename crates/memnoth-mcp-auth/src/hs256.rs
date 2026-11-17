@@ -31,6 +31,7 @@ use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{AuthError, AuthFailureReason};
+use crate::verifier::bearer_token;
 use crate::{AuthContext, AuthMode, Authenticator};
 
 /// Clock skew tolerance. 60s is a balance between replay safety
@@ -194,7 +195,7 @@ impl Authenticator for Hs256UserJwtVerifier {
                 AuthFailureReason::MissingHeader,
             ));
         };
-        let Some(token) = header.strip_prefix("Bearer ") else {
+        let Some(token) = bearer_token(header) else {
             return Err(AuthError::new(
                 AuthMode::Hs256UserJwt,
                 AuthFailureReason::MalformedHeader,

@@ -10,24 +10,74 @@
 //! task machinery — a name that arrives here has already been authorised.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use memnoth_codegraph::{DEFAULT_BUDGET, blast_radius, blast_radius_page, explore, open_store};
 use serde_json::{Value, json};
+
+static TRUSTED_WORKSPACE_ROOT: OnceLock<PathBuf> = OnceLock::new();
+
+/// Freeze the one workspace this server process may expose to graph tools.
+/// An explicit setting wins, then a workspace-local vault, then startup cwd.
+pub(crate) fn configure_trusted_workspace(vault: Option<&Path>) -> Result<()> {
+    let configured = std::env::var("MEMNOTH_MCP_WORKSPACE")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let root = match configured {
+        Some(path) => PathBuf::from(path),
+        None => crate::workspace_root_for_vault(vault).unwrap_or(std::env::current_dir()?),
+    }
+    .canonicalize()
+    .context("resolving the trusted MCP workspace")?;
+    if !root.is_dir() {
+        anyhow::bail!("the trusted MCP workspace is not a directory");
+    }
+    TRUSTED_WORKSPACE_ROOT
+        .set(root)
+        .map_err(|_| anyhow::anyhow!("the MCP trusted workspace was already configured"))
+}
+
+/// Inject the process workspace for graph calls and refuse caller-supplied
+/// paths outside it. Canonicalization also catches symlink escapes.
+pub(crate) fn bind_trusted_workspace(args: &Value, vault: Option<&Path>) -> Result<Value> {
+    let root = TRUSTED_WORKSPACE_ROOT.get().cloned().or_else(|| {
+        crate::workspace_root_for_vault(vault).and_then(|path| path.canonicalize().ok())
+    });
+    let Some(root) = root else {
+        return Ok(args.clone());
+    };
+    let requested = args
+        .get("workspace")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.clone());
+    let requested = requested
+        .canonicalize()
+        .context("resolving the requested MCP workspace")?;
+    if !requested.starts_with(&root) {
+        anyhow::bail!("graph tools may only use the MCP server's trusted workspace");
+    }
+    if !requested.is_dir() {
+        anyhow::bail!("the requested MCP workspace is not a directory");
+    }
+    let mut bound = args.clone();
+    bound["workspace"] = json!(requested.display().to_string());
+    Ok(bound)
+}
 
 use crate::{
     arg_str, arg_usize, cross_encoder, freshness_of, load_communities, referenced_staleness_notice,
     rerank_cross_encoder_symbols, stamped, workspace_root_for_vault,
 };
 
-/// The workspace a `kg_*` call is about: the argument, `MEMNOTH_MCP_WORKSPACE`, then the
-/// directory the server was started in.
-///
-/// `workspace` stays an argument for a host that serves several checkouts from one server, but it
-/// is optional: a stdio host launches the server in the project, and requiring an absolute path on
-/// every one of sixteen calls made the model spend tokens reproducing something the server already
-/// knows — with a wrong guess surfacing as an error instead of a fallback.
+/// Resolve a graph call's workspace argument. Dispatch binds this to one trusted
+/// server root before execution; the argument may select a directory within that
+/// root. It is optional because the server supplies its root.
 pub(crate) fn workspace_arg(args: &Value) -> Result<String> {
     if let Some(workspace) = args
         .get("workspace")
@@ -1046,6 +1096,53 @@ mod tests {
             Some(Path::new("/repo/.memnoth/vault.db")),
         );
         assert_eq!(filled["workspace"], "/other");
+    }
+
+    #[test]
+    fn graph_calls_are_bound_to_the_vaults_workspace_and_reject_siblings() {
+        let temp = std::env::temp_dir().join(format!(
+            "memnoth-mcp-workspace-bound-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let root = temp.join("repo");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let vault_dir = root.join(".memnoth");
+        std::fs::create_dir_all(&vault_dir).unwrap();
+        let vault = vault_dir.join("vault.db");
+        let args = bind_trusted_workspace(&json!({}), Some(&vault)).unwrap();
+        assert_eq!(
+            args["workspace"],
+            root.canonicalize().unwrap().display().to_string()
+        );
+
+        let inside = bind_trusted_workspace(
+            &json!({"workspace": root.join("src").display().to_string()}),
+            Some(&vault),
+        )
+        .unwrap();
+        assert_eq!(
+            inside["workspace"],
+            root.join("src")
+                .canonicalize()
+                .unwrap()
+                .display()
+                .to_string()
+        );
+
+        let sibling = temp.join("other");
+        std::fs::create_dir(&sibling).unwrap();
+        assert!(
+            bind_trusted_workspace(
+                &json!({"workspace": sibling.display().to_string()}),
+                Some(&vault),
+            )
+            .is_err()
+        );
+        let _ = std::fs::remove_dir_all(temp);
     }
 
     #[test]

@@ -17,6 +17,30 @@ use serde_json::{Value, json};
 
 const DEFAULT_BIND: &str = "127.0.0.1:7842";
 
+/// Remote HTTP mode is a multi-user boundary. Local code/agent tools take
+/// caller-selected filesystem paths (or execute against one server workspace),
+/// so they cannot safely be exposed until every operation is project-scoped.
+fn remote_mode_error(
+    profile: Profile,
+    has_user_principal_auth: bool,
+    tenant_vaults_enabled: bool,
+) -> Option<&'static str> {
+    if matches!(
+        profile,
+        Profile::Code | Profile::Full | Profile::Agent | Profile::Memory
+    ) {
+        return Some(
+            "remote MCP cannot use the code, memory, full, or agent profile: workspace graph, filesystem, and agent tools are not yet scoped to a caller-owned project",
+        );
+    }
+    if has_user_principal_auth && !tenant_vaults_enabled {
+        return Some(
+            "remote MCP with per-user HS256 or RS256 tokens requires MEMNOTH_MCP_TENANTS=on and a file-backed vault",
+        );
+    }
+    None
+}
+
 /// Wall-clock budget for a single HTTP connection.
 ///
 /// The accept loop serves one connection at a time (the shared `MemoryEngine`
@@ -149,6 +173,7 @@ impl TenantVaults {
 /// bind when zero modes are configured (never serves open).
 pub async fn run_http_server(db_path: PathBuf) -> Result<()> {
     let profile = Profile::from_env()?;
+    crate::kg_tools::configure_trusted_workspace(Some(&db_path))?;
     let bind = std::env::var("MEMNOTH_MCP_HTTP_BIND")
         .ok()
         .filter(|v| !v.trim().is_empty())
@@ -158,6 +183,10 @@ pub async fn run_http_server(db_path: PathBuf) -> Result<()> {
     // modes means the server runs open — allowed on loopback only, and
     // never in agent mode.
     let config = AuthConfig::from_env();
+    let has_user_principal_auth = config.hs256_secret.is_some()
+        || config.zitadel_jwks_url.is_some()
+        || config.zitadel_audience.is_some()
+        || config.zitadel_issuer.is_some();
     let enabled = config.enabled_modes();
     let open = enabled.is_empty();
     let auth: SharedAuthenticator = config.build(true).context("failed to build auth")?;
@@ -189,6 +218,21 @@ pub async fn run_http_server(db_path: PathBuf) -> Result<()> {
         .await
         .with_context(|| format!("failed to bind MCP HTTP server on {bind}"))?;
     let is_loopback = listener.local_addr()?.ip().is_loopback();
+    if !is_loopback {
+        let public_url = std::env::var(crate::oauth::PUBLIC_URL_ENV).unwrap_or_default();
+        if !crate::oauth::valid_remote_public_url(&public_url) {
+            anyhow::bail!(
+                "remote MCP HTTP requires MEMNOTH_MCP_PUBLIC_URL to be an absolute HTTPS origin (for example https://mcp.example.com); OAuth discovery cannot safely use the request Host header"
+            );
+        }
+        if let Some(reason) = remote_mode_error(
+            profile,
+            has_user_principal_auth,
+            TenantVaults::from_env(Some(&db_path)).enabled(),
+        ) {
+            anyhow::bail!("{reason}");
+        }
+    }
     if open && !is_loopback {
         anyhow::bail!(
             "refusing to serve MCP HTTP without any auth mode on non-loopback address {bind}"
@@ -902,6 +946,32 @@ where
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn remote_mcp_requires_isolated_state_for_every_user_jwt_mode() {
+        assert!(remote_mode_error(Profile::Memory, true, false).is_some());
+        assert!(remote_mode_error(Profile::Coord, true, true).is_none());
+        assert!(remote_mode_error(Profile::Memory, false, false).is_some());
+    }
+
+    #[test]
+    fn remote_mcp_refuses_profiles_with_unscoped_workspace_or_agent_tools() {
+        for profile in [
+            Profile::Code,
+            Profile::Memory,
+            Profile::Full,
+            Profile::Agent,
+        ] {
+            assert!(
+                remote_mode_error(profile, false, false).is_some(),
+                "{} must not be exposed on a shared remote filesystem",
+                profile.name()
+            );
+        }
+        for profile in [Profile::Micro, Profile::Coord] {
+            assert!(remote_mode_error(profile, false, false).is_none());
+        }
+    }
 
     #[test]
     fn an_authenticated_transport_requires_the_scope_the_tool_needs() {

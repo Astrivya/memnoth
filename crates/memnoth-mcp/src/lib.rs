@@ -553,6 +553,7 @@ pub async fn run_stdio_server(db_path: PathBuf) -> Result<()> {
              plus MEMNOTH_MCP_HTTP_TOKEN (and optionally MEMNOTH_MCP_HTTP_BIND)"
         );
     }
+    crate::kg_tools::configure_trusted_workspace(Some(&db_path))?;
     eprintln!(
         "memnoth-mcp: serving tool profile '{}' (set MEMNOTH_MCP_PROFILE=micro|memory|coord|code|full)",
         profile_name(profile)
@@ -612,6 +613,8 @@ pub fn call(
     if profile == Profile::Agent {
         anyhow::bail!("the agent profile needs the HTTP transport; use `memnoth mcp serve --http`");
     }
+    #[cfg(not(test))]
+    crate::kg_tools::configure_trusted_workspace(Some(db))?;
     ensure_vault_parent(db)?;
     let engine = memnoth_engine::open_vault(db)?;
     let coord = Coord::open(db)?;
@@ -893,6 +896,7 @@ async fn maybe_agent_response(
     if !is_agent_call {
         return None;
     }
+    memnoth_mcp_auth::metrics::record_tool_call();
     let id = msg.get("id")?.clone();
     let params = msg.get("params").cloned().unwrap_or(Value::Null);
     let result = match agent {
@@ -1003,6 +1007,7 @@ pub(crate) fn handle_message_for_profile(
             cache_ttl(CacheKind::Definitions),
         )),
         "tools/call" => {
+            memnoth_mcp_auth::metrics::record_tool_call();
             // Whether this tool promised a typed result, read from the request
             // rather than from what came back: the promise and the payload are
             // then two independent facts, and only their agreement is checked.
@@ -3244,11 +3249,14 @@ fn tools_call(
     } else {
         name
     };
-    let args = params.get("arguments").cloned().unwrap_or(json!({}));
+    let mut args = params.get("arguments").cloned().unwrap_or(json!({}));
     // `kg_more` carries the KG tools that are not advertised; it hands the
     // call back to this function so the inner tool passes the same gate.
     if name == "kg_more" {
         return kg_more::call(engine, coord, profile, &args, principal, vault);
+    }
+    if name.starts_with("kg_") {
+        args = crate::kg_tools::bind_trusted_workspace(&args, vault)?;
     }
     if !profile.allows(name) {
         anyhow::bail!(
