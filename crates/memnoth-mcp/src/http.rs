@@ -157,12 +157,42 @@ impl TenantVaults {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create tenant dir {}", parent.display()))?;
         }
+        secure_tenant_vault_path(&path)?;
         let engine = memnoth_engine::open_vault(&path)
             .with_context(|| format!("open tenant vault {}", path.display()))?;
         let coord = Coord::open(&path)
             .with_context(|| format!("open tenant coordination room {}", path.display()))?;
         Ok((engine, coord, path))
     }
+}
+
+/// Restrict tenant vault files on Unix before SQLite opens them. The private
+/// parent directory also protects SQLite WAL/SHM sidecars. Non-Unix platforms
+/// retain their platform ACLs and rely on the deployment's data-directory ACL.
+#[cfg(unix)]
+fn secure_tenant_vault_path(path: &Path) -> Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let parent = path
+        .parent()
+        .context("tenant vault path has no parent directory")?;
+    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("restrict tenant directory {}", parent.display()))?;
+
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .open(path)
+        .with_context(|| format!("create private tenant vault {}", path.display()))?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("restrict tenant vault {}", path.display()))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn secure_tenant_vault_path(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 /// Run the MCP server over HTTP on loopback for the active profile.
@@ -1046,6 +1076,25 @@ mod tests {
         // bob's — the fact must not be there.
         let (alice_engine, _alice_coord, _alice_path) = tenants.open("user-alice").unwrap();
         let bob = tenants.open("user-bob").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            assert_eq!(
+                std::fs::metadata(alice.parent().unwrap())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700,
+                "tenant directory must be private"
+            );
+            assert_eq!(
+                std::fs::metadata(&alice).unwrap().permissions().mode() & 0o777,
+                0o600,
+                "tenant vault must be private"
+            );
+        }
         let now = memnoth_engine::now_ms();
         let entity = alice_engine
             .add_entity(memnoth_engine::EntityKind::Other, "alice-secret", 0.9, now)
