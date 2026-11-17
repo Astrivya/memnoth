@@ -79,7 +79,7 @@ pub(crate) struct ModelRow {
     pub input_per_mtok: Option<f64>,
     pub output_per_mtok: Option<f64>,
     /// Effort levels the model's API actually accepts.
-    pub variants: Vec<&'static str>,
+    pub variants: Vec<String>,
     pub tools: bool,
     pub vision: bool,
     pub json: bool,
@@ -205,7 +205,7 @@ pub(crate) fn catalogue() -> Vec<ModelRow> {
                     max_output,
                     input_per_mtok: pricing.map(|price| price.input_per_mtok),
                     output_per_mtok: pricing.map(|price| price.output_per_mtok),
-                    variants: variants_for(id),
+                    variants: variants_for(id, provider),
                     tools,
                     vision,
                     json,
@@ -223,12 +223,8 @@ pub(crate) fn catalogue() -> Vec<ModelRow> {
 /// The predicate is the one the request path uses, so the arrows are offered on
 /// exactly the models that will not answer 400 when the field is sent; the list
 /// is empty everywhere else.
-fn variants_for(id: &str) -> Vec<&'static str> {
-    if crate::provider::takes_reasoning_effort(id) {
-        vec!["low", "medium", "high"]
-    } else {
-        Vec::new()
-    }
+fn variants_for(id: &str, provider: &str) -> Vec<String> {
+    crate::provider::reasoning_efforts_for(kind_of(provider), id)
 }
 
 /// Which tab is showing.
@@ -439,17 +435,13 @@ impl ModelsOverlay {
         let tx = app.models_tx.clone();
         std::thread::spawn(move || {
             let result = crate::provider::fetch_provider_models(kind, &base_url, key.as_deref());
-            let (ids, error) = match result {
-                Ok(mut ids) => {
-                    ids.sort();
-                    ids.dedup();
-                    (ids, None)
-                }
+            let (models, error) = match result {
+                Ok(models) => (crate::provider::deduplicate_provider_models(models), None),
                 Err(error) => (Vec::new(), Some(format!("{error:#}"))),
             };
             let _ = tx.send(ModelsLoaded {
                 provider,
-                ids,
+                models,
                 error,
             });
         });
@@ -472,24 +464,29 @@ impl ModelsOverlay {
     /// Only that provider's rows: the catalogue entries for the others describe
     /// providers this screen has not asked, and deleting them would make the
     /// browser lose its content every time a gateway answered.
-    fn replace_live_rows(&mut self, provider: &str, ids: &[String]) {
+    fn replace_live_rows(&mut self, provider: &str, models: &[crate::provider::ProviderModel]) {
         let keep = self.selected_id();
         self.rows.retain(|row| row.provider != provider);
-        for id in ids {
-            let pricing = builtin_price(id);
+        for model in models {
+            let pricing = builtin_price(&model.id);
             self.rows.push(ModelRow {
-                id: id.clone(),
+                id: model.id.clone(),
                 // The id is the label: it is what the endpoint accepts, and a
                 // prettified name would be a second spelling to get wrong.
-                label: id.clone(),
+                label: model.id.clone(),
                 provider: provider.to_string(),
                 // A models endpoint lists ids, not context windows or prices;
                 // `—` is honest about that where a guess would not be.
-                context: 0,
+                context: model.context_window.unwrap_or_else(|| {
+                    memnoth_provider_registry::context_window_for(&model.id).unwrap_or(0)
+                }),
                 max_output: 0,
                 input_per_mtok: pricing.map(|price| price.input_per_mtok),
                 output_per_mtok: pricing.map(|price| price.output_per_mtok),
-                variants: variants_for(id),
+                variants: model
+                    .reasoning_efforts
+                    .clone()
+                    .unwrap_or_else(|| variants_for(&model.id, provider)),
                 tools: false,
                 vision: false,
                 json: false,
@@ -574,15 +571,14 @@ impl ModelsOverlay {
             .map(|index| &self.rows[*index])
     }
 
-    fn effort(&self, id: &str, variants: &[&'static str]) -> Option<String> {
+    fn effort(&self, id: &str, variants: &[String]) -> Option<String> {
         if variants.is_empty() {
             return None;
         }
         self.efforts
             .get(id)
             .cloned()
-            .filter(|effort| variants.contains(&effort.as_str()))
-            .or_else(|| Some(variants[0].to_string()))
+            .filter(|effort| variants.iter().any(|allowed| allowed == effort))
     }
 
     /// Move the selected row's reasoning effort one level.
@@ -596,12 +592,12 @@ impl ModelsOverlay {
         }
         let current = self
             .effort(&row.id, &row.variants)
-            .and_then(|effort| row.variants.iter().position(|v| *v == effort))
-            .unwrap_or(0);
-        let next = if forward {
-            (current + 1) % row.variants.len()
-        } else {
-            (current + row.variants.len() - 1) % row.variants.len()
+            .and_then(|effort| row.variants.iter().position(|value| value == &effort));
+        let next = match (current, forward) {
+            (Some(index), true) => (index + 1) % row.variants.len(),
+            (Some(index), false) => (index + row.variants.len() - 1) % row.variants.len(),
+            (None, true) => 0,
+            (None, false) => row.variants.len() - 1,
         };
         self.efforts
             .insert(row.id.clone(), row.variants[next].to_string());
@@ -676,6 +672,23 @@ impl ModelsOverlay {
         section.name = Some(row.provider.clone());
         section.model = Some(row.id.clone());
         section.reasoning_effort = self.effort(&row.id, &row.variants);
+        if row.variants.is_empty() {
+            section.reasoning_efforts = None;
+            section.reasoning_efforts_model = None;
+        } else {
+            section.reasoning_efforts = Some(row.variants.clone());
+            section.reasoning_efforts_model = Some(row.id.clone());
+        }
+        let context_override_active = section.context_window.is_some()
+            && section
+                .context_window_model
+                .as_deref()
+                .is_none_or(|model| model == row.id);
+        let selected_context_window = if context_override_active {
+            section.context_window.map(u64::from)
+        } else {
+            (row.context > 0).then_some(u64::from(row.context))
+        };
 
         if family_changed {
             section.base_url = Some(base_url_for(&row.provider, target));
@@ -691,6 +704,17 @@ impl ModelsOverlay {
         match config.save(&app.config_path) {
             Ok(()) => {
                 app.config = config;
+                app.model = row.id.clone();
+                app.reasoning_effort = effort.clone();
+                if app.context_model != row.id
+                    || !app.context_provider.eq_ignore_ascii_case(&row.provider)
+                {
+                    app.context_window_used = None;
+                }
+                app.context_model = row.id.clone();
+                app.context_provider = row.provider.clone();
+                app.context_window_override_active = context_override_active;
+                app.context_window_size = selected_context_window;
                 self.current = Some(row.id.clone());
                 let effort = effort
                     .map(|effort| format!(" · reasoning {effort}"))
@@ -968,14 +992,14 @@ impl Overlay for ModelsOverlay {
         self.loading = None;
         match &result.error {
             None => {
-                self.replace_live_rows(&result.provider, &result.ids);
-                self.live_count = result.ids.len();
+                self.replace_live_rows(&result.provider, &result.models);
+                self.live_count = result.models.len();
                 self.live_for = Some(result.provider.clone());
                 self.note = Some((
                     true,
                     format!(
                         "{} models listed by {} — enter uses one",
-                        result.ids.len(),
+                        result.models.len(),
                         result.provider
                     ),
                 ));
@@ -1719,10 +1743,23 @@ mod tests {
 
     #[test]
     fn only_reasoning_models_offer_effort_levels() {
-        assert!(variants_for("o3").contains(&"high"));
-        assert!(variants_for("gpt-5").contains(&"medium"));
-        assert!(variants_for("claude-sonnet-4-5").is_empty());
-        assert!(variants_for("gpt-4o").is_empty());
+        assert!(
+            variants_for("o3", "openai")
+                .iter()
+                .any(|value| value == "high")
+        );
+        assert!(
+            variants_for("gpt-5.4", "openai")
+                .iter()
+                .any(|value| value == "xhigh")
+        );
+        assert!(
+            variants_for("claude-sonnet-4-6", "anthropic")
+                .iter()
+                .any(|value| value == "high")
+        );
+        assert!(variants_for("claude-sonnet-4-5", "anthropic").is_empty());
+        assert!(variants_for("gpt-4o", "openai").is_empty());
     }
 
     #[test]

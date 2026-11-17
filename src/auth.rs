@@ -988,7 +988,7 @@ fn read_key() -> Option<Key> {
 ///
 /// No clipboard crate: each platform already ships the tool, and a dependency
 /// that duplicates three command lines is one more thing to keep patched.
-fn copy_to_clipboard(text: &str) -> Result<()> {
+pub(crate) fn copy_to_clipboard(text: &str) -> Result<()> {
     #[cfg(target_os = "windows")]
     return feed_clipboard(clipboard_tool("cmd", &["/C", "clip"])?, text);
     #[cfg(target_os = "macos")]

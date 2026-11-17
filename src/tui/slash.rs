@@ -7,7 +7,7 @@
 //! testable without a terminal, and the frame stays a pure function of state.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use memnoth_ui::palette::{PaletteItem, fuzzy_match};
@@ -127,6 +127,8 @@ pub struct SlashMenu {
     query: String,
     selected: usize,
     items: Vec<PaletteItem>,
+    /// Ranked indices shared by rendering and navigation until the prompt edits.
+    ranked_cache: Vec<(usize, Vec<usize>)>,
     /// What the command still needs, from the shared projection.
     /// The per-line parse below stays as a fallback for a line the
     /// projection does not list.
@@ -134,6 +136,9 @@ pub struct SlashMenu {
     /// The command being given arguments, when the line is past its name.
     /// `None` means the dropdown is choosing a command.
     argument: Option<Argument>,
+    /// Parent command path whose immediate subcommands are being browsed.
+    /// For example, `mcp profile` makes the menu show its children only.
+    subcommand_prefix: Option<String>,
     /// Rows for the argument, built by `sync` because they read the directory
     /// listing and the frame must not.
     values: Vec<Row>,
@@ -161,7 +166,9 @@ impl SlashMenu {
             query: String::new(),
             selected: 0,
             items: commands(),
+            ranked_cache: Vec::new(),
             argument: None,
+            subcommand_prefix: None,
             hint: None,
             values: Vec::new(),
             recent: Vec::new(),
@@ -211,8 +218,10 @@ impl SlashMenu {
     pub fn close(&mut self) {
         self.open = false;
         self.argument = None;
+        self.subcommand_prefix = None;
         self.hint = None;
         self.values.clear();
+        self.ranked_cache.clear();
     }
 
     /// Remember that a line was run, so `/` offers it first next time.
@@ -242,12 +251,59 @@ impl SlashMenu {
         self.recent.truncate(RECENT);
     }
 
-    /// Recompute from the prompt line.
-    ///
-    /// Three states, in order: choosing a command while the line is still a
-    /// prefix of one that exists, filling in a command's arguments once it is
-    /// past a name, and closed for anything else. Cheap enough to call after
-    /// every keystroke.
+    /// Return a parent path and the partial child name when the input is
+    /// navigating the command tree instead of supplying a leaf's arguments.
+    fn subcommand_stage(&self, rest: &str) -> Option<(String, String)> {
+        let trailing_space = rest.ends_with(' ');
+        let path = rest.trim_end();
+        let path_name = format!("/{path}");
+        let path_prefix = format!("{path_name} ");
+        let split = path.rsplit_once(' ');
+        let parent_prefix = split.map(|(parent, _)| format!("/{parent} "));
+        let (mut complete_leaf, mut path_has_children, mut parent_has_children) =
+            (false, false, false);
+        for item in &self.items {
+            let name = display_name(&item.command);
+            complete_leaf |= name.eq_ignore_ascii_case(&path_name);
+            path_has_children |= name.starts_with(&path_prefix);
+            if let Some(prefix) = &parent_prefix {
+                parent_has_children |= name.starts_with(prefix);
+            }
+            if complete_leaf && path_has_children && parent_has_children {
+                break;
+            }
+        }
+
+        // A trailing space after a complete leaf belongs to its argument
+        // picker (or closes for a zero-argument leaf).
+        if trailing_space && complete_leaf {
+            return None;
+        }
+
+        // Typing a complete parent drills into its immediate children.
+        if !trailing_space && path_has_children {
+            return Some((path.to_string(), String::new()));
+        }
+
+        // A trailing space after an intermediate family enters the next
+        // level. Check this before splitting the path into parent + last word;
+        // otherwise `/root child ` incorrectly reopens `root` filtered by
+        // the already-completed word `child`.
+        if trailing_space && !complete_leaf && path_has_children {
+            return Some((path.to_string(), String::new()));
+        }
+
+        // Otherwise the last token filters the children of the preceding path.
+        if let Some((parent, child)) = split.filter(|_| parent_has_children) {
+            return Some((parent.to_string(), child.to_string()));
+        }
+
+        // `/root ` opens the first level when root itself is not a command.
+        None
+    }
+
+    /// Recompute the root, subcommand, or argument menu from the prompt line.
+    /// Cheap enough to call after every keystroke.
     pub fn sync(&mut self, input: &str, cursor: usize) {
         let chars: Vec<char> = input.chars().collect();
         let cursor = cursor.min(chars.len());
@@ -259,9 +315,26 @@ impl SlashMenu {
         };
         let typed = format!("/{rest}");
         let lower = typed.to_lowercase();
-        // One answer to "what does this still need", from the same projection
-        // the palette, `/commands` and help draw.
-        self.hint = crate::tui::overlays::command_rows::argument_hint(&lower);
+        let previous_subcommand_prefix = self.subcommand_prefix.take();
+        // Navigate the command tree one level at a time. At `/`, only roots
+        // are shown. Typing a root (or a child prefix) opens its children;
+        // once a complete leaf is followed by a space, normal argument
+        // completion takes over.
+        if let Some((prefix, query)) = self.subcommand_stage(rest) {
+            self.argument = None;
+            self.values.clear();
+            self.hint = None;
+            if previous_subcommand_prefix.as_deref() != Some(prefix.as_str()) || self.query != query
+            {
+                self.selected = 0;
+            }
+            self.subcommand_prefix = Some(prefix);
+            self.query = query;
+            self.open = true;
+            self.ranked_cache = self.compute_ranked();
+            self.clamp();
+            return;
+        }
 
         // A complete command is not a prefix to narrow. `/models` opens the
         // model browser, so listing `/models list` and `/models use` under the
@@ -288,8 +361,12 @@ impl SlashMenu {
             .items
             .iter()
             .filter(|item| {
-                let name = display_name(&item.command).to_lowercase();
-                lower.starts_with(&format!("{name} ")) && !usage_of(item).trim().is_empty()
+                let name = display_name(&item.command);
+                lower
+                    .get(..name.len())
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case(name))
+                    && lower.as_bytes().get(name.len()) == Some(&b' ')
+                    && !usage_of(item).trim().is_empty()
             })
             .max_by_key(|item| display_name(&item.command).chars().count());
         let Some(item) = resolved else {
@@ -297,14 +374,20 @@ impl SlashMenu {
             // `/vault s` narrows to `/vault status`.
             self.argument = None;
             self.values.clear();
+            self.hint = None;
             if self.query != rest {
                 self.query = rest.to_string();
                 self.selected = 0;
             }
             self.open = true;
+            self.ranked_cache = self.compute_ranked();
             self.clamp();
             return;
         };
+
+        // Only argument entry needs a missing-value hint. Avoid scanning the
+        // command projection while the user is browsing roots/subcommands.
+        self.hint = crate::tui::overlays::command_rows::argument_hint(&lower);
 
         let name = display_name(&item.command);
         let after = &typed[name.len() + 1..];
@@ -350,6 +433,7 @@ impl SlashMenu {
         });
         self.values = values;
         self.open = true;
+        self.ranked_cache.clear();
         self.clamp();
     }
 
@@ -360,9 +444,9 @@ impl SlashMenu {
 
     /// The rows that match the query, best first.
     pub fn matches(&self) -> Vec<&PaletteItem> {
-        self.ranked()
-            .into_iter()
-            .map(|(index, _)| &self.items[index])
+        self.ranked_cache
+            .iter()
+            .map(|(index, _)| &self.items[*index])
             .collect()
     }
 
@@ -372,14 +456,41 @@ impl SlashMenu {
         if self.argument.is_some() {
             return self.values.clone();
         }
-        self.ranked()
-            .into_iter()
+        let roots_with_children = if self.subcommand_prefix.is_none() {
+            let mut roots = HashMap::new();
+            for item in &self.items {
+                let path = display_name(&item.command).trim_start_matches('/');
+                if let Some((root, _)) = path.split_once(' ') {
+                    roots.insert(root.to_string(), true);
+                }
+            }
+            Some(roots)
+        } else {
+            None
+        };
+        self.ranked_cache
+            .iter()
             .map(|(index, hits)| {
-                let item = &self.items[index];
+                let item = &self.items[*index];
+                let root = command_root(&item.command);
+                let name = if let Some(prefix) = &self.subcommand_prefix {
+                    immediate_child(prefix, &item.command).unwrap_or_default()
+                } else {
+                    format!("/{root}")
+                };
                 Row {
-                    name: display_name(&item.command).to_string(),
-                    description: tidy_description(&item.command, &item.description),
-                    hits,
+                    name,
+                    description: if self.subcommand_prefix.is_some() {
+                        item.description.clone()
+                    } else if roots_with_children
+                        .as_ref()
+                        .is_some_and(|roots| roots.contains_key(&root))
+                    {
+                        "Browse subcommands".to_string()
+                    } else {
+                        tidy_description(&item.command, &item.description)
+                    },
+                    hits: hits.clone(),
                 }
             })
             .collect()
@@ -387,10 +498,8 @@ impl SlashMenu {
 
     /// The width the command column is padded to.
     ///
-    /// Taken from every command rather than from the matches, so the column does
-    /// not jump sideways while the query is being typed. Capped, because a list
-    /// whose widest name sets the gutter for all of them wastes the width on
-    /// nine rows out of ten.
+    /// Taken from the current level of the command tree and capped, so a long
+    /// nested path does not waste space in a short root list.
     pub fn name_column(&self) -> usize {
         if self.argument.is_some() {
             // A flag gets a column; a file path does not, because a path is as
@@ -399,9 +508,17 @@ impl SlashMenu {
             return 12;
         }
         let longest = self
-            .items
+            .ranked_cache
             .iter()
-            .map(|item| display_name(&item.command).chars().count())
+            .map(|(index, _)| {
+                if let Some(parent) = &self.subcommand_prefix {
+                    immediate_child(parent, &self.items[*index].command)
+                        .map(|name| name.chars().count())
+                        .unwrap_or_default()
+                } else {
+                    command_root(&self.items[*index].command).chars().count() + 1
+                }
+            })
             .max()
             .unwrap_or(0);
         longest.clamp(10, 22)
@@ -410,15 +527,24 @@ impl SlashMenu {
     /// The line already spells the highlighted command out, so a one-row list
     /// would only repeat what is on the prompt.
     pub fn exact(&self) -> bool {
-        let rows = self.rows();
-        let Some(row) = rows.get(self.selected_index()) else {
+        if let Some(argument) = &self.argument {
+            return argument.word.eq_ignore_ascii_case(&self.query);
+        }
+        let Some((index, _)) = self.ranked_cache.get(self.selected_index()) else {
             return false;
         };
-        let typed = match &self.argument {
-            Some(argument) => argument.word.clone(),
-            None => format!("/{}", self.query),
+        let (name, typed) = if let Some(parent) = &self.subcommand_prefix {
+            (
+                immediate_child(parent, &self.items[*index].command).unwrap_or_default(),
+                self.query.as_str(),
+            )
+        } else {
+            (
+                command_root(&self.items[*index].command),
+                self.query.strip_prefix('/').unwrap_or(&self.query),
+            )
         };
-        row.name.to_lowercase() == typed.to_lowercase()
+        name.eq_ignore_ascii_case(typed)
     }
 
     /// The matching rows, best first, with the positions the query landed on.
@@ -432,17 +558,70 @@ impl SlashMenu {
     /// Only the name is searched. The usage tail (`<symbol>`, `--at WHEN`) is on
     /// half the commands, so matching it would make one common word match
     /// everything and the ranking meaningless.
-    fn ranked(&self) -> Vec<(usize, Vec<usize>)> {
-        // Before a filter is typed the order is what was run last: the dropdown
-        // is for the commands someone actually uses, and the rest are one letter
-        // away. Ties keep registry order, which is grouped by area already.
-        if self.query.is_empty() {
-            let mut all: Vec<(usize, Vec<usize>)> = (0..self.items.len())
-                .map(|index| (index, Vec::new()))
+    fn compute_ranked(&self) -> Vec<(usize, Vec<usize>)> {
+        if let Some(parent) = &self.subcommand_prefix {
+            let query = self.query.to_lowercase();
+            let mut grouped: Vec<(usize, Vec<usize>, String, usize)> = Vec::new();
+            let mut positions: HashMap<String, usize> = HashMap::new();
+            for (index, item) in self.items.iter().enumerate() {
+                let Some(child) = immediate_child(parent, &item.command) else {
+                    continue;
+                };
+                let hits = if query.is_empty() {
+                    Vec::new()
+                } else if let Some(hits) = fuzzy_match(&child.to_lowercase(), &query) {
+                    hits
+                } else {
+                    continue;
+                };
+                let recent = self.recency(index);
+                if let Some(position) = positions.get(&child).copied() {
+                    grouped[position].3 = grouped[position].3.min(recent);
+                } else {
+                    positions.insert(child.clone(), grouped.len());
+                    grouped.push((index, hits, child, recent));
+                }
+            }
+            grouped.sort_by_key(|(_, _, _, recent)| *recent);
+            return grouped
+                .into_iter()
+                .map(|(index, hits, _, _)| (index, hits))
                 .collect();
-            all.sort_by_key(|(index, _)| self.recency(*index));
-            return all;
         }
+
+        // At the top level, collapse every command family to its root. The
+        // full registry remains available as the user types into that family.
+        if !self.query.contains(' ') {
+            let query = self.query.to_lowercase();
+            let mut roots: Vec<(usize, Vec<usize>, String, usize)> = Vec::new();
+            let mut positions: HashMap<String, usize> = HashMap::new();
+            for (index, item) in self.items.iter().enumerate() {
+                let root = command_root(&item.command);
+                let hits = if query.is_empty() {
+                    Vec::new()
+                } else if let Some(hits) = fuzzy_match(&format!("/{root}").to_lowercase(), &query) {
+                    hits
+                } else {
+                    continue;
+                };
+                let recent = self.recency(index);
+                if let Some(position) = positions.get(&root).copied() {
+                    roots[position].3 = roots[position].3.min(recent);
+                } else {
+                    positions.insert(root.clone(), roots.len());
+                    roots.push((index, hits, root, recent));
+                }
+            }
+            roots.sort_by_key(|(_, _, root, recent)| {
+                let prefix_match = !root.to_lowercase().starts_with(&query);
+                (prefix_match, *recent)
+            });
+            return roots
+                .into_iter()
+                .map(|(index, hits, _, _)| (index, hits))
+                .collect();
+        }
+
         let query = self.query.to_lowercase();
         let mut hits: Vec<(usize, Vec<usize>)> = Vec::new();
         for (index, item) in self.items.iter().enumerate() {
@@ -478,7 +657,7 @@ impl SlashMenu {
         if self.argument.is_some() {
             self.values.len()
         } else {
-            self.ranked().len()
+            self.ranked_cache.len()
         }
     }
 
@@ -544,11 +723,25 @@ impl SlashMenu {
             };
             return Some((line, false));
         }
-        let (command, needs_more) = {
-            let matches = self.matches();
-            let item = matches.get(self.selected)?;
-            (insertable(&item.command), needs_arguments(item))
-        };
+        let item = self
+            .matches()
+            .get(self.selected)
+            .map(|item| (**item).clone())?;
+        if let Some(parent) = &self.subcommand_prefix {
+            let child = immediate_child(parent, &item.command)?;
+            let path = format!("{parent} {child}");
+            if has_children(&self.items, &path) {
+                self.close();
+                return Some((format!("/{path} "), false));
+            }
+        } else {
+            let root = command_root(&item.command);
+            if has_children(&self.items, &root) {
+                self.close();
+                return Some((format!("/{root} "), false));
+            }
+        }
+        let (command, needs_more) = (insertable(&item.command), needs_arguments(&item));
         self.close();
         // The space that leaves room for the argument is part of the pick, so
         // every caller gets the same line.
@@ -585,6 +778,33 @@ fn usage_of(item: &PaletteItem) -> String {
         return item.description[at + 3 + name.len()..].trim().to_string();
     }
     String::new()
+}
+
+/// The first command token, without its leading slash.
+fn command_root(command: &str) -> String {
+    display_name(command)
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .trim_start_matches('/')
+        .to_string()
+}
+
+/// Whether the command projection has a deeper path below `parent`.
+fn has_children(items: &[PaletteItem], parent: &str) -> bool {
+    let parent = format!("/{}", parent.trim_start_matches('/'));
+    items
+        .iter()
+        .any(|item| display_name(&item.command).starts_with(&format!("{parent} ")))
+}
+
+/// The next command token after `parent`, when this item belongs under it.
+fn immediate_child(parent: &str, command: &str) -> Option<String> {
+    let parent = format!("/{} ", parent.trim_start_matches('/'));
+    display_name(command)
+        .strip_prefix(&parent)
+        .and_then(|tail| tail.split_whitespace().next())
+        .map(str::to_string)
 }
 
 /// The arguments a usage string names, in order: `<name>`, `[name]`, `--flag`,
@@ -703,27 +923,29 @@ mod tests {
     }
 
     #[test]
-    fn a_slash_opens_the_whole_list() {
+    fn a_slash_opens_only_main_command_roots() {
         let menu = opened("/");
         assert!(menu.is_open());
         assert_eq!(menu.query(), "");
-        assert_eq!(menu.total(), commands().len());
-        assert!(menu.total() > 10, "the list is the discovery surface");
+        assert!(menu.total() < commands().len());
+        assert!(menu.rows().iter().all(|row| !row.name[1..].contains(' ')));
     }
 
     #[test]
     fn a_command_that_was_run_is_offered_first() {
-        // `/` before a filter is the list of what this session actually runs, so
-        // an ordinary command does not have to be spelled or filtered for.
+        // Recent children promote their root without flattening the subcommands.
         let mut menu = SlashMenu::new();
         menu.record("/vault status");
         menu.sync("/", 1);
-        assert_eq!(menu.rows()[0].name, "/vault status");
+        assert_eq!(menu.rows()[0].name, "/vault");
 
         // Running the same command again moves nothing: one entry, still first.
         menu.record("/vault status");
-        assert_eq!(menu.rows()[0].name, "/vault status");
-        assert_eq!(menu.total(), commands().len(), "nothing is dropped");
+        assert_eq!(menu.rows()[0].name, "/vault");
+        assert!(
+            menu.total() < commands().len(),
+            "subcommands stay collapsed"
+        );
     }
 
     #[test]
@@ -747,7 +969,7 @@ mod tests {
         let mut restored = SlashMenu::new();
         restored.adopt(load_usage(&path));
         restored.sync("/", 1);
-        assert_eq!(restored.rows()[0].name, "/vault status");
+        assert_eq!(restored.rows()[0].name, "/vault");
         assert_eq!(restored.runs().get("/vault status"), Some(&2));
         assert_eq!(restored.runs().get("/kg status"), Some(&1));
 
@@ -789,35 +1011,55 @@ mod tests {
     }
 
     #[test]
-    fn the_letters_are_enough() {
-        // `/vhi` is not a prefix of anything: the list has to match the letters.
-        let menu = opened("/vhi");
+    fn subcommands_appear_after_the_main_command_is_typed() {
+        let mut menu = opened("/telemetry o");
         let rows = menu.rows();
-        assert!(!rows.is_empty(), "a subsequence finds the command");
-        assert_eq!(rows[0].name, "/vault history", "{}", rows[0].name);
-        assert_eq!(rows[0].hits.len(), 3, "one position per typed letter");
-        // The positions point at the letters that matched, in order.
-        let matched: String = rows[0]
-            .name
-            .chars()
-            .enumerate()
-            .filter(|(index, _)| rows[0].hits.contains(index))
-            .map(|(_, ch)| ch)
-            .collect();
-        assert_eq!(matched, "vhi");
+        assert!(rows.iter().any(|row| row.name == "on"));
+        assert!(rows.iter().all(|row| !row.name.contains(' ')));
+        assert_eq!(menu.accept(), Some(("/telemetry on".into(), true)));
     }
 
     #[test]
-    fn a_prefix_comes_before_a_match_in_the_middle() {
+    fn nested_command_families_expand_one_level_at_a_time() {
+        let mut menu = SlashMenu::new();
+        menu.items = vec![
+            PaletteItem {
+                command: "/alpha beta gamma".into(),
+                description: "A nested command".into(),
+            },
+            PaletteItem {
+                command: "/alpha beta delta".into(),
+                description: "Another nested command".into(),
+            },
+        ];
+        menu.sync("/alpha beta ", "/alpha beta ".chars().count());
+        assert!(menu.rows().iter().any(|row| row.name == "gamma"));
+        assert!(menu.rows().iter().all(|row| !row.name.contains(' ')));
+    }
+
+    #[test]
+    fn selecting_a_root_inserts_it_and_opens_its_children() {
+        let mut menu = opened("/");
+        let telemetry = menu
+            .rows()
+            .iter()
+            .position(|row| row.name == "/telemetry")
+            .expect("telemetry is a top-level command");
+        for _ in 0..telemetry {
+            menu.select_next();
+        }
+        assert_eq!(menu.accept(), Some(("/telemetry ".into(), false)));
+        let children = opened("/telemetry ");
+        assert!(children.rows().iter().any(|row| row.name == "on"));
+        assert!(children.rows().iter().any(|row| row.name == "off"));
+    }
+
+    #[test]
+    fn a_prefix_filters_roots_without_exposing_unentered_subcommands() {
         let menu = opened("/re");
         let rows = menu.rows();
         assert!(rows[0].name.starts_with("/re"), "{}", rows[0].name);
-        // `/vault remember` matches the letters but not at the start.
-        let later = rows
-            .iter()
-            .position(|row| row.name == "/vault remember")
-            .expect("the subsequence still finds it");
-        assert!(later > 0);
+        assert!(rows.iter().all(|row| !row.name[1..].contains(' ')));
     }
 
     #[test]
@@ -828,23 +1070,22 @@ mod tests {
 
     #[test]
     fn the_command_column_does_not_move_with_the_query() {
-        let column = SlashMenu::new().name_column();
-        for query in ["/", "/v", "/vault", "/zzz"] {
-            assert_eq!(opened(query).name_column(), column, "{query}");
+        for query in ["/", "/v", "/vault", "/mcp profile"] {
+            let column = opened(query).name_column();
+            assert!((10..=22).contains(&column), "{query}: {column}");
         }
-        assert!((10..=22).contains(&column), "{column}");
     }
 
     #[test]
     fn a_partial_word_narrows_the_list() {
         let menu = opened("/vault");
         assert!(menu.is_open());
-        assert_eq!(menu.query(), "vault");
+        assert_eq!(menu.query(), "");
         let rows = menu.matches();
         assert!(!rows.is_empty());
         assert!(
             rows.len() < commands().len(),
-            "the list is narrowed, not just reordered"
+            "only this root's subcommands are shown"
         );
         assert!(
             rows.iter().all(|item| item.command.contains("vault")),
@@ -852,7 +1093,7 @@ mod tests {
         );
         assert!(
             rows[0].command.starts_with("/vault"),
-            "prefix matches come first: {}",
+            "only the selected root is shown: {}",
             rows[0].command
         );
     }
@@ -929,8 +1170,16 @@ mod tests {
     }
 
     #[test]
-    fn accepting_a_command_with_arguments_leaves_room_to_type_them() {
-        let mut menu = opened("/recall");
+    fn accepting_a_subcommand_with_arguments_leaves_room_to_type_them() {
+        let mut menu = opened("/vault rec");
+        let recall = menu
+            .rows()
+            .iter()
+            .position(|row| row.name == "recall")
+            .expect("recall is a vault subcommand");
+        for _ in 0..recall {
+            menu.select_next();
+        }
         let (line, submit) = menu.accept().expect("a row is highlighted");
         assert_eq!(
             line, "/vault recall ",

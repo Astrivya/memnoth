@@ -16,7 +16,7 @@
 //!   screen exists.
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
@@ -30,16 +30,10 @@ const FACT_LABEL: usize = 12;
 /// Width of the command column in `next` when the description sits beside it.
 const STEP_COLUMN: usize = 20;
 
-/// The widest window that is still one column: below this an inline label plus
-/// a badge leaves the value too little room to say anything. At 64 the value
-/// keeps ~49 columns, which is room enough; below that the stacked layout is
-/// the honest one.
-const COMPACT_MIN_WIDTH: u16 = 64;
-
-/// The narrowest window that earns two columns. Deliberately above the context
-/// pane's 88: at 90 a split would leave a right pane too narrow to hold a step
-/// description, which is what the single column already does well.
-const SPLIT_MIN_WIDTH: u16 = 100;
+/// Keep labels and values on the same row down to a genuinely narrow window.
+/// Values wrap beside their label above this threshold; stacking is reserved
+/// for widths where the label and a useful value fragment cannot share a row.
+const COMPACT_MIN_WIDTH: u16 = 48;
 
 /// A wide window at or below this height is a strip: a status row and the
 /// actions, with nothing that needs a paragraph.
@@ -52,17 +46,6 @@ const BADGE_WIDTH: usize = 2;
 /// action.
 const NEXT_MIN_ROWS: usize = 3;
 
-/// How many rows the timeline keeps when the window is short: its header and
-/// one event.
-const ACTIVITY_MIN_ROWS: usize = 2;
-
-/// A height gate below which the timeline is not drawn at all.
-const ACTIVITY_MIN_HEIGHT: usize = 17;
-
-/// An invitation is a sentence, not an action; it earns a row only when the
-/// window is tall enough that the sentence does not cost an action.
-const INVITATION_MIN_HEIGHT: usize = 20;
-
 /// The narrowest window where a description sits beside its command. Below
 /// this the command column leaves too little for a clause, and two short lines
 /// read better than one cut one.
@@ -71,8 +54,6 @@ const INLINE_MIN_WIDTH: usize = 72;
 /// How the brief answers the window it was given.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum HomeLayout {
-    /// Two panes: facts left, `next` and activity right.
-    Split,
     /// One column, inline label and value, the state glyph right-aligned.
     Compact,
     /// One column, the fact label on its own line above the value.
@@ -83,12 +64,8 @@ enum HomeLayout {
 
 impl HomeLayout {
     fn for_size(width: u16, height: u16) -> Self {
-        if width >= SPLIT_MIN_WIDTH {
-            if height <= STRIP_MAX_HEIGHT {
-                Self::Strip
-            } else {
-                Self::Split
-            }
+        if width >= COMPACT_MIN_WIDTH && height <= STRIP_MAX_HEIGHT {
+            Self::Strip
         } else if width < COMPACT_MIN_WIDTH {
             Self::Portrait
         } else {
@@ -112,7 +89,6 @@ pub(crate) fn draw(frame: &mut Frame, area: Rect, home: &Home, cursor: usize) {
     }
 
     match HomeLayout::for_size(inner.width, inner.height) {
-        HomeLayout::Split => split(frame, inner, home, cursor),
         HomeLayout::Strip => strip(frame, inner, home, cursor),
         HomeLayout::Compact => column(frame, inner, home, cursor, false),
         HomeLayout::Portrait => column(frame, inner, home, cursor, true),
@@ -134,96 +110,23 @@ fn column(frame: &mut Frame, area: Rect, home: &Home, cursor: usize, stacked: bo
         inline_groups(&home.facts, width)
     };
 
-    let invite = home
-        .invitation
-        .as_deref()
-        .filter(|_| height >= INVITATION_MIN_HEIGHT);
-    let mut steps = step_rows(&home.steps, width, cursor, invite);
-    let mut recent = if height >= ACTIVITY_MIN_HEIGHT {
-        activity_rows(&home.recent, width, 3)
-    } else {
-        Vec::new()
-    };
+    let mut steps = step_rows(&home.steps, width, cursor, None);
 
     // The ladder: the timeline gives way first, then whole facts, and the last
     // action row is the one thing that never goes.
-    if header.len() + group_rows(&groups) + steps.len() + recent.len() > height {
+    if header.len() + group_rows(&groups) + steps.len() > height {
         steps.truncate(NEXT_MIN_ROWS);
     }
-    while recent.len() > ACTIVITY_MIN_ROWS
-        && header.len() + group_rows(&groups) + steps.len() + recent.len() > height
-    {
-        recent.pop();
-    }
-    let room = height.saturating_sub(header.len() + steps.len() + recent.len());
+    let room = height.saturating_sub(header.len() + steps.len());
     let facts = fit_groups(groups, room);
 
     let mut lines = header;
     lines.extend(facts);
     lines.extend(steps);
-    lines.extend(recent);
     finish(frame, area, lines, height);
 }
 
 // ── two columns ──────────────────────────────────────────────────────────
-
-fn split(frame: &mut Frame, area: Rect, home: &Home, cursor: usize) {
-    let width = area.width as usize;
-
-    let mut top = masthead(width);
-    top.extend(identity_rows(home, width));
-    top.push(Line::from(""));
-
-    // The masthead spans both panes: the version belongs to the screen, not to
-    // the left column.
-    let top_rows = top.len().min(area.height as usize) as u16;
-    let rows = Layout::vertical([Constraint::Length(top_rows), Constraint::Min(0)]).split(area);
-    frame.render_widget(Paragraph::new(top), rows[0]);
-
-    // Half the frame, floored at 40: the facts are one line each (label and
-    // value side by side), and a value needs the room to say its sentence in
-    // one pass rather than wrapping into a second ragged line.
-    let left_width = ((area.width as usize / 2).clamp(40, 64)) as u16;
-    let columns = Layout::horizontal([
-        Constraint::Length(left_width),
-        Constraint::Length(2),
-        Constraint::Min(20),
-    ])
-    .split(rows[1]);
-
-    let left = columns[0];
-    let right = columns[2];
-    if left.width == 0 || right.width == 0 {
-        return;
-    }
-
-    // Inline facts: label and value on one line, so each fact costs one row
-    // and the pane reads as a glanceable list instead of a two-line ledger.
-    // A long value wraps onto its own next line indented under the value
-    // column, which is still one fact, one block, no orphan header.
-    let facts = fit_groups(
-        inline_groups(&home.facts, left.width as usize),
-        left.height as usize,
-    );
-    frame.render_widget(Paragraph::new(facts), left);
-
-    let invite = home
-        .invitation
-        .as_deref()
-        .filter(|_| right.height as usize >= INVITATION_MIN_HEIGHT);
-    let mut rail = step_rows(&home.steps, right.width as usize, cursor, invite);
-    let room = (right.height as usize).saturating_sub(rail.len());
-    if room > ACTIVITY_MIN_ROWS {
-        rail.extend(activity_rows(
-            &home.recent,
-            right.width as usize,
-            room - ACTIVITY_MIN_ROWS,
-        ));
-    }
-    frame.render_widget(Paragraph::new(rail), right);
-}
-
-// ── wide and short ───────────────────────────────────────────────────────
 
 fn strip(frame: &mut Frame, area: Rect, home: &Home, cursor: usize) {
     let width = area.width as usize;
@@ -241,9 +144,9 @@ fn strip(frame: &mut Frame, area: Rect, home: &Home, cursor: usize) {
 
 /// One row: the workspace, then the two states that need a person.
 fn status_row(home: &Home, width: usize) -> Line<'static> {
-    let share = (width / 3).max(12);
+    let share = (width / 4).max(12);
     let mut spans: Vec<Span<'static>> = Vec::new();
-    for label in ["workspace", "graph", "vault"] {
+    for label in ["workspace", "graph", "vault", "sandbox"] {
         let Some(fact) = home.facts.iter().find(|fact| fact.label == label) else {
             continue;
         };
@@ -266,21 +169,13 @@ fn status_row(home: &Home, width: usize) -> Line<'static> {
 
 // ── the pieces ───────────────────────────────────────────────────────────
 
-fn masthead(width: usize) -> Vec<Line<'static>> {
-    let version = env!("CARGO_PKG_VERSION");
-    let pad = width
-        .saturating_sub("memnoth".len() + version.chars().count() + 1)
-        .max(1);
-    vec![Line::from(vec![
-        Span::styled(
-            "memnoth",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" ".repeat(pad)),
-        Span::styled(format!("{version} "), Style::default().fg(Color::DarkGray)),
-    ])]
+fn masthead(_width: usize) -> Vec<Line<'static>> {
+    vec![Line::from(Span::styled(
+        "memnoth",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    ))]
 }
 
 fn identity_rows(home: &Home, width: usize) -> Vec<Line<'static>> {
@@ -292,12 +187,9 @@ fn identity_rows(home: &Home, width: usize) -> Vec<Line<'static>> {
         Style::default().fg(Color::Gray),
     ))];
     if home.hidden_turns > 0 {
-        let turns = match home.hidden_turns {
-            1 => "1 earlier turn".to_string(),
-            many => format!("{many} earlier turns"),
-        };
+        let turns = format!("{} turns · esc history", home.hidden_turns);
         rows.push(Line::from(Span::styled(
-            ellipsize(&format!("{turns} · esc shows them"), width),
+            ellipsize(&turns, width),
             Style::default().fg(Color::DarkGray),
         )));
     }
@@ -317,7 +209,7 @@ fn value_style(fact: &Fact) -> Style {
 /// `no turns yet` would congratulate the person for a session that has not run.
 fn badge(fact: &Fact) -> Option<(char, Color)> {
     match fact.label {
-        "graph" | "vault" | "model" => Some(match fact.state {
+        "graph" | "vault" | "model" | "sandbox" => Some(match fact.state {
             HomeState::Ready => ('●', Color::Green),
             HomeState::Stale => ('!', Color::Yellow),
             HomeState::Missing => ('○', Color::Yellow),
@@ -328,8 +220,11 @@ fn badge(fact: &Fact) -> Option<(char, Color)> {
 
 /// Facts as groups, so a short window drops a whole fact instead of half of one.
 fn inline_groups(facts: &[Fact], width: usize) -> Vec<Vec<Line<'static>>> {
-    let mut groups: Vec<Vec<Line<'static>>> =
-        facts.iter().map(|fact| inline_fact(fact, width)).collect();
+    let mut groups: Vec<Vec<Line<'static>>> = facts
+        .iter()
+        .filter(|fact| visible_fact(fact))
+        .map(|fact| inline_fact(fact, width))
+        .collect();
     // The blank row before the grid is part of it: fitting then cannot strand a
     // fact under a header with no breathing room.
     if let Some(first) = groups.first_mut() {
@@ -339,7 +234,15 @@ fn inline_groups(facts: &[Fact], width: usize) -> Vec<Vec<Line<'static>>> {
 }
 
 fn stacked_groups(facts: &[Fact], width: usize) -> Vec<Vec<Line<'static>>> {
-    facts.iter().map(|fact| stacked_fact(fact, width)).collect()
+    facts
+        .iter()
+        .filter(|fact| visible_fact(fact))
+        .map(|fact| stacked_fact(fact, width))
+        .collect()
+}
+
+fn visible_fact(fact: &Fact) -> bool {
+    matches!(fact.label, "workspace" | "vault" | "graph" | "sandbox")
 }
 
 fn inline_fact(fact: &Fact, width: usize) -> Vec<Line<'static>> {
@@ -501,25 +404,6 @@ fn step_rows(
     rows
 }
 
-fn activity_rows(recent: &[String], width: usize, limit: usize) -> Vec<Line<'static>> {
-    let mut rows = vec![
-        Line::from(""),
-        Line::from(Span::styled(
-            "recent activity",
-            Style::default().fg(Color::White),
-        )),
-    ];
-    for row in recent.iter().take(limit) {
-        rows.push(Line::from(Span::styled(
-            ellipsize(&format!("  {row}"), width),
-            Style::default().fg(Color::DarkGray),
-        )));
-    }
-    rows
-}
-
-// ── fitting ──────────────────────────────────────────────────────────────
-
 fn group_rows(groups: &[Vec<Line<'static>>]) -> usize {
     groups.iter().map(Vec::len).sum()
 }
@@ -591,7 +475,6 @@ mod tests {
             ],
             invitation: Some("a turn with the vault and the graph as tools".into()),
             hidden_turns: 0,
-            recent: vec!["9s ago   session \"hi\" opened".into()],
         }
     }
 
@@ -605,10 +488,11 @@ mod tests {
 
     #[test]
     fn the_layout_answers_the_window_it_gets() {
-        assert_eq!(HomeLayout::for_size(120, 32), HomeLayout::Split);
+        assert_eq!(HomeLayout::for_size(120, 32), HomeLayout::Compact);
         assert_eq!(HomeLayout::for_size(140, 16), HomeLayout::Strip);
         assert_eq!(HomeLayout::for_size(80, 24), HomeLayout::Compact);
-        assert_eq!(HomeLayout::for_size(60, 40), HomeLayout::Portrait);
+        assert_eq!(HomeLayout::for_size(60, 40), HomeLayout::Compact);
+        assert_eq!(HomeLayout::for_size(44, 40), HomeLayout::Portrait);
     }
 
     /// The defect this module was written for: at 80 columns the value ended in

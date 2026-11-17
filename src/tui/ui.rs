@@ -6,7 +6,7 @@
 //! viewport back into the app, which is what makes `PgUp`/`PgDn` move a screen.
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Position, Rect};
+use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
@@ -29,15 +29,6 @@ const CONTEXT_MIN_WIDTH: u16 = 88;
 
 /// The footer is state, not decoration: at most five keys, and only ones that
 /// do something in the state the screen is in.
-/// The discovery hint, read from the projection so the footer cannot name a
-/// command count the palette does not have.
-fn command_hint() -> String {
-    format!(
-        "/ {} commands",
-        crate::tui::overlays::command_rows::command_count()
-    )
-}
-
 fn footer_hint(app: &App) -> String {
     if app.approval.is_some() || app.pending_shell.is_some() {
         "y approve · n / esc reject · the box names exactly what changes".to_string()
@@ -49,7 +40,7 @@ fn footer_hint(app: &App) -> String {
         if app.slash.total() == 0 {
             "no command matches · enter runs the line as typed".to_string()
         } else {
-            "↑↓ move · tab complete · enter run · esc close".to_string()
+            "↑↓ move · enter open/run · tab complete · esc close".to_string()
         }
     } else if app.login_busy {
         // A device grant can wait ten minutes on a browser. Counting the wait is
@@ -76,9 +67,9 @@ fn footer_hint(app: &App) -> String {
         // On a session with history the brief is standing in front of it, so
         // the key that puts it back is named here rather than discovered.
         if app.entries.is_empty() {
-            "↑↓ choose · enter run · tab edit · / all commands · ? keys".to_string()
+            "1–3 choose · enter run · ↓ activity · / commands".to_string()
         } else {
-            "↑↓ choose · enter run · esc conversation · / commands · ? keys".to_string()
+            "1–3 choose · enter run · ↓ activity · esc chat".to_string()
         }
     } else if app.busy {
         let elapsed = ((crate::session::now_ms() - app.turn_started_ms).max(0) / 1000) as u64;
@@ -87,22 +78,13 @@ fn footer_hint(app: &App) -> String {
         } else {
             format!("{}m {:02}s", elapsed / 60, elapsed % 60)
         };
-        let thinking = if app
-            .entries
-            .iter()
-            .any(|entry| entry.role == EntryRole::Thinking)
-        {
-            " · ctrl-r thinking"
-        } else {
-            ""
-        };
-        format!("esc cancel turn · working {age} · ctrl-c twice quit · ctrl-k palette{thinking}",)
+        format!("working {age} · ↓ activity · esc cancel")
     } else if let Some(running) = &app.running_verb {
         // A verb on its own thread: the screen stays live, so this line is what
         // says the silence is work and not a hang.
-        format!("running {running} · ctrl-c quits · the answer lands here")
+        format!("running {running}")
     } else if app.active_pane != 0 {
-        "tab next pane · ctrl-t tasks · esc transcript · / commands".to_string()
+        "tab pane · ctrl-t tasks · esc transcript".to_string()
     } else if !app.follow {
         // Scrolled back: the position is said here, in the line that is already
         // on screen, rather than in a status strip that costs a row.
@@ -113,14 +95,17 @@ fn footer_hint(app: &App) -> String {
         )
     } else if app.graph_attention.is_some() {
         // The chip in the header names its fix; this is the key that runs it.
-        // It takes the fifth slot rather than adding a sixth: a footer is five
-        // keys wide, and the one that belongs is the one this state enabled.
-        "enter send · ctrl-g fix · ? help · ctrl-k palette · / commands".to_string()
+        // Keep the graph repair action beside its warning while retaining the
+        // correct send affordance for the current draft state.
+        if app.input.is_empty() && app.attachments.is_empty() {
+            "type message · ctrl-g fix · / commands · ? help".to_string()
+        } else {
+            "enter send · shift-enter newline · ctrl-g fix · shift-tab mode".to_string()
+        }
+    } else if !app.input.is_empty() || !app.attachments.is_empty() {
+        "enter send · shift-enter newline · shift-tab mode".to_string()
     } else {
-        format!(
-            "enter send · {} · ? help · ctrl-k palette · ctrl-t tasks",
-            command_hint()
-        )
+        "type message · ↓ activity · shift-tab mode · / commands".to_string()
     }
 }
 
@@ -148,8 +133,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let rows = Layout::vertical([
         Constraint::Length(if splash { 0 } else { 1 }),
         Constraint::Min(3),
-        // Two rules around the text, plus the hint below them.
-        Constraint::Length(composer + 3),
+        // Top rule, breathing row, draft, bottom rule, then one hint row.
+        Constraint::Length(composer + u16::from(!app.attachments.is_empty()) + 3),
     ])
     .split(area);
 
@@ -195,10 +180,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 /// Most rows the composer takes before the text scrolls inside it.
 const MAX_COMPOSER_ROWS: u16 = 8;
 
-/// Characters that fit on one composer row: the box's two rules and the `› `
-/// glyph each spend columns of the same line.
+/// Characters inside the frame after its inset and prompt gutter.
 fn composer_width(width: u16) -> usize {
-    width.saturating_sub(4).max(1) as usize
+    width.saturating_sub(6).max(1) as usize
 }
 
 /// Rows the composer needs for `input`, capped so a paste cannot eat the frame.
@@ -432,7 +416,7 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &mut App) {
         None
     };
     match home {
-        Some(home) => draw_home(frame, columns[0], &home, app.home_cursor),
+        Some(home) => draw_home(frame, columns[0], &home, app),
         None => draw_transcript(frame, columns[0], app),
     }
 
@@ -489,13 +473,18 @@ fn rail_title(title: &str) -> Line<'static> {
     ))
 }
 
-fn draw_context_rail(frame: &mut Frame, area: Rect, app: &App) {
+fn draw_context_rail(frame: &mut Frame, area: Rect, app: &mut App) {
     let (block, inner) = rail_frame(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
         return;
     }
-    let mut lines = vec![rail_title("context")];
+    let mut lines = vec![Line::from(Span::styled(
+        "context",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    ))];
     // Where this machine's sessions are filed, on the rail that already answers
     // "what is this screen". Without it the only way to know is the console.
     if let Some(project) = &app.project {
@@ -510,17 +499,73 @@ fn draw_context_rail(frame: &mut Frame, area: Rect, app: &App) {
         ]));
     }
     for line in app.context.lines() {
-        lines.push(Line::from(Span::styled(
-            line.to_string(),
-            Style::default().fg(Color::Gray),
-        )));
+        let text = line.trim();
+        if text.is_empty() {
+            lines.push(Line::from(""));
+            continue;
+        }
+        let style = if matches!(
+            text,
+            "vault" | "coordination" | "usage" | "decisions" | "lessons"
+        ) {
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD)
+        } else if text.starts_with('/') {
+            Style::default().fg(Color::Cyan)
+        } else if text.contains("unavailable") || text == "missing" {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        lines.push(Line::from(Span::styled(text.to_string(), style)));
     }
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+
+    cache_rail_selection(frame, inner, app);
+}
+
+fn cache_rail_selection(frame: &mut Frame, inner: Rect, app: &mut App) {
+    // Cache the actual wrapped rows from the terminal buffer so a drag copies
+    // exactly what is visible, even when long values wrap in the rail.
+    let rows = {
+        let buffer = frame.buffer_mut();
+        (inner.y..inner.y.saturating_add(inner.height))
+            .map(|y| {
+                (inner.x..inner.x.saturating_add(inner.width))
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    };
+    app.set_rail_selection_rows(inner.x, inner.y, inner.width, rows);
+    if let Some((first, last)) = app.rail_selection {
+        let y_start = inner.y.saturating_add(first as u16);
+        let y_end = inner
+            .y
+            .saturating_add(last as u16)
+            .min(inner.y.saturating_add(inner.height.saturating_sub(1)));
+        for y in y_start..=y_end {
+            let row_end = (inner.x..inner.x.saturating_add(inner.width))
+                .rev()
+                .find(|x| !matches!(frame.buffer_mut().cell((*x, y)), Some(cell) if cell.symbol().trim().is_empty()));
+            let Some(row_end) = row_end else {
+                continue;
+            };
+            for x in inner.x..=row_end {
+                if let Some(cell) = frame.buffer_mut().cell_mut((x, y)) {
+                    cell.set_style(mouse_selection_style(cell.style(), app.theme));
+                }
+            }
+        }
+    }
 }
 
 /// The task rail: what the session is doing in the background. Empty is a
 /// state, not a blank box — it says what will appear here.
-fn draw_tasks_rail(frame: &mut Frame, area: Rect, app: &App) {
+fn draw_tasks_rail(frame: &mut Frame, area: Rect, app: &mut App) {
     let (block, inner) = rail_frame(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -558,10 +603,11 @@ fn draw_tasks_rail(frame: &mut Frame, area: Rect, app: &App) {
     // The rail wraps at the width it was given: a name that does not fit used
     // to be cut with `…`, which hid exactly which job it was.
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    cache_rail_selection(frame, inner, app);
 }
 
 /// The diff rail: a count of what this turn changed, or an honest empty state.
-fn draw_diff_rail(frame: &mut Frame, area: Rect, app: &App) {
+fn draw_diff_rail(frame: &mut Frame, area: Rect, app: &mut App) {
     let (block, inner) = rail_frame(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -591,6 +637,7 @@ fn draw_diff_rail(frame: &mut Frame, area: Rect, app: &App) {
         Style::default().fg(Color::DarkGray),
     )));
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    cache_rail_selection(frame, inner, app);
 }
 
 /// The completion list: one line per command, drawn against the prompt.
@@ -765,8 +812,41 @@ fn row_lines(
 /// it, because a wide short window wants a strip and a tall narrow one wants
 /// stacked facts. That module also owns the rule that a value wraps instead of
 /// being cut at the frame edge.
-fn draw_home(frame: &mut Frame, area: Rect, home: &Home, cursor: usize) {
-    crate::tui::home::draw(frame, area, home, cursor);
+fn draw_home(frame: &mut Frame, area: Rect, home: &Home, app: &mut App) {
+    crate::tui::home::draw(frame, area, home, app.home_cursor);
+    let x = area.x + 2.min(area.width);
+    let width = area.width.saturating_sub(2);
+    let rows = {
+        let buffer = frame.buffer_mut();
+        (area.y..area.y.saturating_add(area.height))
+            .map(|y| {
+                (x..x.saturating_add(width))
+                    .map(|column| buffer[(column, y)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+    };
+    app.set_home_selection_rows(x, area.y, width, rows);
+
+    if let Some((first, last)) = app.home_selection {
+        let y_start = area.y.saturating_add(first as u16);
+        let y_end = area.y.saturating_add(last as u16);
+        for y in y_start..=y_end.min(area.y.saturating_add(area.height.saturating_sub(1))) {
+            let row_end = (x..x.saturating_add(width))
+                .rev()
+                .find(|column| !matches!(frame.buffer_mut().cell((*column, y)), Some(cell) if cell.symbol().trim().is_empty()));
+            let Some(row_end) = row_end else {
+                continue;
+            };
+            for x in x..=row_end {
+                if let Some(cell) = frame.buffer_mut().cell_mut((x, y)) {
+                    cell.set_style(mouse_selection_style(cell.style(), app.theme));
+                }
+            }
+        }
+    }
 }
 
 fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
@@ -827,6 +907,9 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
         .enumerate()
         .map(|(offset, (role, line, header))| {
             let (style, glyph) = style_for(*role);
+            let selected = app
+                .selection
+                .is_some_and(|(first, last)| (first..=last).contains(&(start + offset)));
             // A blank separator row carries no glyph: the space is the whole
             // of its ink. A thinking header carries its own marker, and its
             // body runs down a rail under it.
@@ -852,11 +935,20 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
             } else {
                 style
             };
-            let (glyph, glyph_style) = match (*role, *header) {
+            let (glyph, mut glyph_style) = match (*role, *header) {
                 (EntryRole::Thinking, true) => ("", style),
+                (EntryRole::User, _) => (
+                    glyph,
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 (EntryRole::Thinking, false) => ("┃   ", Style::default().fg(scheme.accent)),
                 _ => (glyph, style.add_modifier(Modifier::BOLD)),
             };
+            if selected {
+                glyph_style = mouse_selection_style(glyph_style, app.theme);
+            }
             let mut spans = vec![Span::styled(glyph, glyph_style)];
             for span in &line.spans {
                 // The row's colour belongs to the row; a span that named one
@@ -864,6 +956,9 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
                 let mut patched = style.add_modifier(span.style.add_modifier);
                 if let Some(fg) = span.style.fg {
                     patched = patched.fg(fg);
+                }
+                if selected {
+                    patched = mouse_selection_style(patched, app.theme);
                 }
                 spans.push(Span::styled(span.content.clone(), patched));
             }
@@ -885,9 +980,8 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
     // newest line out of the view exactly when following it.
     frame.render_widget(Paragraph::new(lines), inner);
 
-    // The scrollbar is the one affordance that says "there is more" without a
-    // word: the footer only names the keys once the view has already stopped
-    // following, and a reader who cannot see a bar has no reason to press them.
+    // A quiet thumb marks position without drawing a permanent rail beside the
+    // transcript. It appears only when content actually overflows.
     if bar && visual.len() > inner.height as usize {
         let mut state = ScrollbarState::new(max).position(app.scroll);
         let track = Rect {
@@ -900,10 +994,13 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(None)
                 .end_symbol(None)
-                .track_symbol(Some("│"))
-                .track_style(Style::default().fg(Color::DarkGray))
-                .thumb_symbol("▐")
-                .thumb_style(Style::default().fg(Color::Cyan)),
+                .track_symbol(Some(" "))
+                .thumb_symbol("▏")
+                .thumb_style(
+                    Style::default()
+                        .fg(scheme.accent)
+                        .add_modifier(Modifier::DIM),
+                ),
             track,
             &mut state,
         );
@@ -917,7 +1014,7 @@ fn draw_footer(
     position: Option<(usize, usize)>,
     caret: bool,
 ) {
-    if area.width == 0 || area.height <= 2 {
+    if area.width == 0 || area.height <= 1 {
         return;
     }
 
@@ -927,40 +1024,114 @@ fn draw_footer(
     let counter = position
         .map(|(at, of)| format!("{at}/{of}"))
         .unwrap_or_default();
+    let scheme = crate::tui::theme::ColorScheme::for_theme(app.theme);
     // The rest of the highlighted command is deliberately not drawn: the
     // dropdown already marks the selection with `›` and picks out the letters
     // the query landed on, and `Tab` completes. Painting the remainder into
     // the line made typing `/` look like it had already typed `/search`.
-    let hint_text = ellipsize(&footer_hint(app), area.width as usize);
+    let notice = app
+        .notification
+        .as_ref()
+        .filter(|(_, expires)| std::time::Instant::now() < *expires);
+    let hint_text = notice
+        .map(|(message, _)| ellipsize(message, area.width as usize))
+        .unwrap_or_else(|| ellipsize(&footer_hint(app), area.width as usize));
     let hint = Line::from(Span::styled(
         hint_text,
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(if notice.is_some() {
+            scheme.accent
+        } else {
+            Color::DarkGray
+        }),
     ));
 
-    // The composer is a box: a rounded rule around the line, with the model in
-    // the top rule, right-aligned. The border colour follows the theme, so a
-    // high-contrast screen gets a high-contrast box and no-colour gets none.
-    let scheme = crate::tui::theme::ColorScheme::for_theme(app.theme);
-    // Attachments get one row above the rule, and the row exists only when
-    // there is something to show: a plain prompt pays no height for it. The
-    // box needs three rows plus the hint, so the chip row is part of the
-    // threshold rather than taken out of the box's only text row.
+    // The active draft is the only framed surface in the conversation.
     let chips_h = u16::from(!app.attachments.is_empty());
-    let boxed = area.height >= 4 + chips_h;
-    // The box takes everything but the hint row and the chips; its inner height
-    // is how many wrapped text rows are visible, and the text scrolls once they
-    // are full.
-    let box_area = Rect::new(
-        area.x,
-        area.y + chips_h,
-        area.width,
-        area.height.saturating_sub(1).saturating_sub(chips_h),
+    let surface = Rect::new(area.x, area.y, area.width, area.height.saturating_sub(1));
+    let accent = if app.plan_mode {
+        Color::Yellow
+    } else {
+        scheme.accent
+    };
+    let effort = app.reasoning_effort.as_deref().unwrap_or("auto");
+    let mode = if app.plan_mode { "PLAN" } else { "BUILD" };
+    let home_model = app
+        .home
+        .as_ref()
+        .and_then(|home| home.facts.iter().find(|fact| fact.label == "model"))
+        .map(|fact| fact.value.as_str())
+        .unwrap_or("default model");
+    let model_id = if app.model.trim().is_empty() {
+        let mut parts = home_model.split(" · ");
+        let first = parts.next().unwrap_or(home_model);
+        if first.eq_ignore_ascii_case("not configured") {
+            "default model"
+        } else if first == "model"
+            || parts
+                .clone()
+                .next()
+                .is_some_and(|state| state.starts_with("no key"))
+        {
+            first
+        } else {
+            parts.next().unwrap_or(first)
+        }
+    } else {
+        app.model.as_str()
+    };
+    let context = Some(match (app.context_window_used, app.context_window_size) {
+        (Some(used), Some(window)) if window > 0 => {
+            format!("ctx {}/{}", compact_tokens(used), compact_tokens(window))
+        }
+        (Some(used), _) => format!("ctx {}/?", compact_tokens(used)),
+        (_, Some(window)) if window > 0 => format!("ctx —/{}", compact_tokens(window)),
+        _ => "ctx ?".to_string(),
+    });
+    let suffix = format!(
+        " {effort} · {mode}{} ",
+        context
+            .as_ref()
+            .map(|value| format!(" · {value}"))
+            .unwrap_or_default()
     );
-    let model = app.model.clone();
-    let boxed_block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(ratatui::widgets::BorderType::Rounded)
-        .border_style(Style::default().fg(scheme.border));
+    let model = ellipsize(
+        model_id,
+        (area.width as usize).saturating_sub(suffix.chars().count() + 4),
+    );
+    let mut title = vec![Span::styled(
+        format!(" {model}"),
+        Style::default().fg(Color::Gray),
+    )];
+    title.push(Span::styled(
+        format!(" {effort} · "),
+        Style::default().fg(Color::DarkGray),
+    ));
+    title.extend([
+        Span::styled(
+            mode,
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        ),
+        context
+            .map(|value| Span::styled(format!(" · {value}"), Style::default().fg(Color::DarkGray)))
+            .unwrap_or_else(|| Span::raw("")),
+        Span::raw(" "),
+    ]);
+    let title = Line::from(title);
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .border_style(Style::default().fg(accent))
+            .title_bottom(title)
+            .title_alignment(Alignment::Right),
+        surface,
+    );
+    let editor = Rect::new(
+        area.x + 2,
+        area.y + 1 + chips_h,
+        area.width.saturating_sub(4),
+        area.height.saturating_sub(3).saturating_sub(chips_h).max(1),
+    );
     if chips_h == 1 {
         let mut chips = String::new();
         for file in &app.attachments {
@@ -968,40 +1139,25 @@ fn draw_footer(
                 .file_name()
                 .map(|name| name.to_string_lossy().to_string())
                 .unwrap_or_else(|| file.path.clone());
-            chips.push_str(&format!("[+{name}] "));
+            chips.push_str(&format!("▧ {name}  "));
         }
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                ellipsize(chips.trim_end(), area.width.saturating_sub(1) as usize),
-                Style::default().fg(scheme.accent),
+                ellipsize(
+                    &format!("    {}", chips.trim_end()),
+                    area.width.saturating_sub(1) as usize,
+                ),
+                Style::default().fg(accent),
             ))),
-            Rect::new(area.x + 1, area.y, area.width.saturating_sub(1), 1),
+            Rect::new(area.x + 1, area.y + 1, area.width.saturating_sub(2), 1),
         );
     }
-    let inner = boxed_block.inner(box_area);
-    frame.render_widget(boxed_block, box_area);
-    if boxed && !model.is_empty() && area.width >= 50 {
-        let label = ellipsize(&model, (area.width as usize).saturating_sub(4));
-        let label_width = label.chars().count() as u16 + 2;
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                format!(" {label} "),
-                Style::default().fg(scheme.accent),
-            ))),
-            Rect::new(
-                area.x + area.width - label_width - 1,
-                area.y,
-                label_width,
-                1,
-            ),
-        );
-    }
-    // The typed text is hard-wrapped to the box so the caret math below and
+    // The typed text is hard-wrapped to the editor so the caret math below and
     // what is on screen agree; word wrapping would move a character to a row
     // the caret does not know about.
     let usable = composer_width(area.width);
     let rows_all = composer_lines(&app.input, usable);
-    let visible = inner.height.max(1) as usize;
+    let visible = editor.height.max(1) as usize;
     let cursor_chars = app.cursor.min(app.input.chars().count());
     let (caret_row, caret_col) = caret_cell(&app.input, cursor_chars, usable);
     // Keep the caret's row on screen: scroll only once the text passes the box.
@@ -1014,18 +1170,24 @@ fn draw_footer(
             Span::styled(
                 "› ",
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(if app.plan_mode {
+                        Color::Yellow
+                    } else {
+                        scheme.accent
+                    })
                     .add_modifier(Modifier::BOLD),
             )
         } else {
             Span::raw("  ")
         };
-        lines.push(Line::from(vec![
-            glyph,
-            Span::styled(text.clone(), Style::default().fg(Color::White)),
-        ]));
+        let content = if app.input.is_empty() && app.attachments.is_empty() && index == 0 {
+            Span::styled(" Ask Memnoth anything…", Style::default().fg(Color::Gray))
+        } else {
+            Span::styled(text.clone(), Style::default().fg(Color::White))
+        };
+        lines.push(Line::from(vec![glyph, content]));
     }
-    frame.render_widget(Paragraph::new(lines), inner);
+    frame.render_widget(Paragraph::new(lines), editor);
     frame.render_widget(
         Paragraph::new(hint),
         Rect::new(area.x, area.y + area.height - 1, area.width, 1),
@@ -1040,25 +1202,48 @@ fn draw_footer(
     }
 
     // The cursor belongs after the prompt and the characters already typed —
-    // but only when this line is the one taking keys. Inside the box it sits
-    // one column in from the border.
+    // but only when this line is the one taking keys.
     if caret {
-        let x = (inner.x + 2 + caret_col as u16).min(inner.x + inner.width.saturating_sub(1));
-        let y = inner.y + caret_row.saturating_sub(first) as u16;
+        let x = (editor.x + 2 + caret_col as u16).min(editor.x + editor.width.saturating_sub(1));
+        let y = editor.y + caret_row.saturating_sub(first) as u16;
         frame.set_cursor_position(Position::new(x, y));
+    }
+}
+
+/// Compact token counts for the composer status, without rounding small
+/// windows up to a misleading whole-kilo value.
+fn compact_tokens(tokens: u64) -> String {
+    if tokens >= 1_000_000 {
+        format!("{:.1}m", tokens as f64 / 1_000_000.0)
+    } else if tokens >= 10_000 {
+        format!("{}k", tokens / 1_000)
+    } else if tokens >= 1_000 {
+        format!("{:.1}k", tokens as f64 / 1_000.0)
+    } else {
+        tokens.to_string()
     }
 }
 
 /// The glyph is the state: `▌` running, `✓` done. A tool row never says
 /// "thinking", and it is the only row that changes after it is drawn.
+fn mouse_selection_style(style: Style, theme: crate::tui::app::Theme) -> Style {
+    match theme {
+        crate::tui::app::Theme::Default => style
+            .fg(Color::Rgb(220, 255, 243))
+            .bg(Color::Rgb(28, 72, 61)),
+        crate::tui::app::Theme::HighContrast => style.fg(Color::Black).bg(Color::White),
+        crate::tui::app::Theme::NoColor => style.add_modifier(Modifier::REVERSED),
+    }
+}
+
 fn style_for(role: EntryRole) -> (Style, &'static str) {
     match role {
         EntryRole::User => (Style::default().fg(Color::Yellow), "› "),
         EntryRole::Answer => (Style::default().fg(Color::White), "  "),
         EntryRole::Error => (Style::default().fg(Color::Red), "! "),
         EntryRole::Info => (Style::default().fg(Color::Gray), "· "),
-        EntryRole::Tool => (Style::default().fg(Color::Cyan), "▌ "),
-        EntryRole::ToolDone => (Style::default().fg(Color::Green), "✓ "),
+        EntryRole::Tool => (Style::default().fg(Color::Cyan), "◌ "),
+        EntryRole::ToolDone => (Style::default().fg(Color::DarkGray), "✓ "),
         // Thinking is the one role that is italic: grey italic is how every
         // coding agent separates reasoning from the answer it produced, and
         // a reader's eye learns the distinction without a legend.
@@ -1161,7 +1346,6 @@ mod tests {
             steps: Vec::new(),
             invitation: None,
             hidden_turns: 0,
-            recent: Vec::new(),
         });
         app.login_busy = true;
         app.login_started = Some(std::time::Instant::now());
@@ -1176,19 +1360,73 @@ mod tests {
     }
 
     #[test]
-    fn the_model_sits_on_the_composer_until_the_terminal_is_too_narrow() {
-        // The model is what a person checks before typing; it belongs on the
-        // composer's top rule, not behind `/models`.
+    fn the_model_and_session_controls_stay_visible_in_the_composer_status() {
         let mut app = App::new("s", false);
         app.model = "kilo/reflection/beam-free".to_string();
+        app.reasoning_effort = Some("medium".to_string());
         let wide = screen(&mut app, 80, 24);
         assert!(wide.contains("kilo/reflection/beam-free"), "{wide}");
+        assert!(wide.contains("medium"), "{wide}");
 
-        // Below 50 columns the label gives way: the model is recoverable with
-        // `/models`, the box and the keys are not obvious anywhere else.
+        // The model clips to fit on a narrow terminal, preserving effort and
+        // mode in the status strip.
+        app.plan_mode = true;
         let narrow = screen(&mut app, 44, 24);
-        assert!(!narrow.contains("kilo/reflection/beam-free"), "{narrow}");
-        assert!(narrow.contains("enter"), "{narrow}");
+        assert!(narrow.contains("kilo/"), "{narrow}");
+        assert!(narrow.contains("medium"), "{narrow}");
+        assert!(narrow.contains("PLAN"), "{narrow}");
+        assert!(narrow.contains("type message"), "{narrow}");
+    }
+
+    #[test]
+    fn the_composer_grows_with_the_line_and_stops_at_eight_rows() {
+        // The defect this covers: a long question wrapped into one clipped row,
+        // so the words past the right edge were typed but never drawn.
+        let width = 80;
+        assert_eq!(composer_rows("", width), 1);
+        assert_eq!(composer_rows("short question", width), 1);
+        let two_rows = "x".repeat(composer_width(width) + 1);
+        assert_eq!(composer_rows(&two_rows, width), 2, "one char past the row");
+        assert_eq!(composer_rows("one\ntwo", width), 2, "an explicit newline");
+        assert_eq!(
+            composer_rows(&"x".repeat(10_000), width),
+            MAX_COMPOSER_ROWS,
+            "a paste must not eat the frame"
+        );
+    }
+
+    #[test]
+    fn the_quiet_composer_keeps_attachments_and_status_visible() {
+        let mut app = App::new("s", false);
+        app.set_paths("E:/memnoth-prod".into(), "E:/vault.db".into());
+        app.model = "provider/actual-model:free".into();
+        let blank = screen(&mut app, 80, 24);
+        assert!(blank.contains("Ask Memnoth anything…"), "{blank}");
+        assert!(
+            blank.contains("provider/actual-model:free auto · BUILD"),
+            "{blank}"
+        );
+        assert!(blank.contains('╭') && blank.contains('╯'), "{blank}");
+
+        app.input = "Explain this image".into();
+        app.cursor = app.input.chars().count();
+        app.plan_mode = true;
+        let draft = screen(&mut app, 80, 24);
+        assert!(draft.contains("Explain this image"), "{draft}");
+        assert!(
+            draft.contains("provider/actual-model:free auto · PLAN"),
+            "{draft}"
+        );
+        assert!(!draft.contains("Ask Memnoth anything…"), "{draft}");
+
+        app.attachments.push(crate::provider::Attachment {
+            path: "E:/screenshots/login.png".into(),
+            mime: "image/png",
+            bytes: Vec::new(),
+        });
+        let attached = screen(&mut app, 80, 24);
+        assert!(attached.contains("▧ login.png"), "{attached}");
+        assert!(attached.contains("Explain this image"), "{attached}");
     }
 
     #[test]
@@ -1256,16 +1494,32 @@ mod tests {
         assert!(text.contains("D:/ws"), "{text}");
         assert!(text.contains("what changed?"), "{text}");
         assert!(text.contains("a fact from the vault"), "{text}");
-        assert!(text.contains("enter send"), "{text}");
-        // No box around the transcript and no rule above the prompt: no frame
-        // characters at all, and the title that labelled the box is gone.
+        assert!(text.contains("type message"), "{text}");
+        // The transcript has no frame; the active composer alone is framed.
         assert!(!text.contains("transcript"), "{text}");
         for frame_char in ['┌', '┐', '└', '┘'] {
             assert!(!text.contains(frame_char), "{frame_char} in\n{text}");
         }
-        // The composer is boxed by design (rounded corners), separate from
-        // the flat transcript this test is about.
-        assert!(text.contains('╭'), "the composer is boxed:\n{text}");
+        // The active composer alone has a frame; the transcript remains flat.
+        assert!(text.contains('╭'), "the composer has a frame:\n{text}");
+    }
+
+    #[test]
+    fn home_and_chat_hints_never_exceed_four_actions() {
+        let mut app = App::new("s", false);
+        let chat = footer_hint(&app);
+        assert!(chat.split(" · ").count() <= 4, "{chat}");
+        assert!(!chat.contains("Ctrl+Shift"), "{chat}");
+
+        app.home_visible = true;
+        let home = footer_hint(&app);
+        assert!(home.split(" · ").count() <= 4, "{home}");
+
+        app.home_visible = false;
+        app.input = "draft".into();
+        let editing = footer_hint(&app);
+        assert!(editing.split(" · ").count() <= 4, "{editing}");
+        assert!(editing.contains("shift-enter newline"), "{editing}");
     }
 
     #[test]
@@ -1325,9 +1579,8 @@ mod tests {
                     runnable: true,
                 },
             ],
-            invitation: Some("a turn with the vault and the graph as tools".into()),
+            invitation: None,
             hidden_turns: 0,
-            recent: vec!["2h ago   payments   retry cap raised".into()],
         }
     }
 
@@ -1337,17 +1590,13 @@ mod tests {
         app.home = Some(example_home());
         let text = screen(&mut app, 110, 32);
         assert!(text.contains("memnoth"), "{text}");
-        assert!(text.contains(env!("CARGO_PKG_VERSION")), "{text}");
+        assert!(!text.contains(env!("CARGO_PKG_VERSION")), "{text}");
         assert!(text.contains("E:/ws"), "{text}");
         assert!(text.contains("missing"), "{text}");
         assert!(text.contains("next"), "{text}");
         assert!(text.contains("/vault init"), "{text}");
         assert!(text.contains("beliefs with dates"), "{text}");
-        assert!(text.contains("session \"s\" (new)"), "{text}");
-        assert!(text.contains("↑↓ choose"), "{text}");
         // The invitation is a row, and says so: no marker, no slash.
-        assert!(text.contains("ask anything"), "{text}");
-        assert!(text.contains("recent"), "{text}");
     }
 
     #[test]
@@ -1374,7 +1623,7 @@ mod tests {
         let mut app = App::new("s", false);
         app.home = Some(example_home());
         let text = screen(&mut app, 80, 14);
-        assert!(text.contains("workspace"), "{text}");
+        assert!(text.contains("E:/ws"), "{text}");
         assert!(text.contains("/vault init"), "{text}");
         assert!(
             !text.contains("recent"),
@@ -1388,12 +1637,10 @@ mod tests {
         app.home = Some(example_home());
         app.push(EntryRole::User, "what changed?");
         let text = screen(&mut app, 110, 32);
-        assert!(!text.contains("↑↓ choose"), "{text}");
         assert!(text.contains("what changed?"), "{text}");
 
         app.open_home();
         let again = screen(&mut app, 110, 32);
-        assert!(again.contains("↑↓ choose"), "{again}");
         assert!(!again.contains("what changed?"), "{again}");
 
         app.close_home();
@@ -1413,10 +1660,10 @@ mod tests {
         app.open_home();
 
         let text = screen(&mut app, 100, 30);
-        assert!(text.contains("3 earlier turns · esc shows them"), "{text}");
+        assert!(text.contains("3 turns"), "{text}");
         assert!(!text.contains("what changed?"), "{text}");
         // The footer names the key the line above it just promised.
-        assert!(text.contains("esc conversation"), "{text}");
+        assert!(text.contains("esc chat"), "{text}");
 
         app.close_home();
         let transcript = screen(&mut app, 100, 30);
@@ -1458,7 +1705,7 @@ mod tests {
         app.push(EntryRole::Answer, "an answer");
         app.slash.sync("/vault", 6);
         let text = screen(&mut app, 110, 32);
-        assert!(text.contains("/vault"), "{text}");
+        assert!(text.contains("recall"), "{text}");
         assert!(text.contains("esc close"), "{text}");
     }
 
@@ -1474,14 +1721,14 @@ mod tests {
         let mut app = App::new("s", false);
         typed(&mut app, "/vault");
         let text = screen(&mut app, 80, 30);
-        assert!(text.contains("/vault recall"), "{text}");
+        assert!(text.contains("recall"), "{text}");
         // The list itself is text, not a box: no frame, no title, and no key
         // hint of its own — the footer already names the keys. The box on
         // screen belongs to the composer, which is rounded by design.
         for frame_char in ['┌', '┐', '└', '┘'] {
             assert!(!text.contains(frame_char), "{frame_char} in\n{text}");
         }
-        assert!(text.contains('╭'), "the composer is boxed:\n{text}");
+        assert!(text.contains('╭'), "the composer has a frame:\n{text}");
         assert!(!text.contains("commands ·"), "{text}");
         assert_eq!(text.matches("↑↓ move").count(), 1, "{text}");
         // The position in the list rides on the prompt row instead.
@@ -1525,7 +1772,7 @@ mod tests {
         typed(&mut app, "/vau");
         assert_eq!(app.input, "/vau", "the suggestion is never typed for you");
         let text = screen(&mut app, 80, 24);
-        assert!(text.contains("/vault remember"), "{text}");
+        assert!(text.contains("/vault"), "{text}");
 
         // Fully typed: nothing left to suggest, so nothing is drawn twice.
         typed(&mut app, "/models");
@@ -1626,11 +1873,11 @@ mod tests {
         app.push_tool("kg refs   RETRY_CAP");
 
         let running = screen(&mut app, 100, 24);
-        assert!(running.contains("▌ kg refs"), "{running}");
+        assert!(running.contains("searching code graph"), "{running}");
 
         app.resolve_tools(from);
         let done = screen(&mut app, 100, 24);
-        assert!(done.contains("✓ kg refs"), "{done}");
+        assert!(done.contains("1 step · code graph"), "{done}");
         assert!(!done.contains('▌'), "no row is left running: {done}");
     }
 

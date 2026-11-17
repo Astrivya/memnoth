@@ -4,6 +4,7 @@
 //! and rendering. Overlays are managed as a stack — the top overlay receives
 //! input first, and `Esc` closes the current overlay.
 
+mod activity;
 pub(crate) mod command_rows;
 
 use crossterm::event::{KeyEvent, MouseEvent};
@@ -31,6 +32,8 @@ pub enum OverlayAction {
 /// Known overlay kinds for dynamic dispatch via the stack.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OverlayKind {
+    /// Down from the empty chat composer: live agents, shell work, and terminals.
+    Activity,
     Search,
     Context,
     Diff,
@@ -39,6 +42,8 @@ pub enum OverlayKind {
     /// a preview, and the one you pick opened in place.
     Sessions,
     Models,
+    /// `/mcps`: recommended MCP services and Memnoth host registrations.
+    Mcps,
     Permissions,
     Help,
     Feedback,
@@ -256,12 +261,14 @@ impl OverlayStack {
 /// Factory function to create an overlay by kind.
 pub fn create_overlay(kind: OverlayKind) -> Box<dyn Overlay> {
     match kind {
+        OverlayKind::Activity => Box::new(activity::ActivityOverlay::new()),
         OverlayKind::Search => Box::new(SearchOverlay::new()),
         OverlayKind::Context => Box::new(ContextOverlay::new()),
         OverlayKind::Diff => Box::new(DiffOverlay::new()),
         OverlayKind::Sessions => Box::new(SessionsOverlay::new()),
         OverlayKind::Rewind => Box::new(RewindOverlay::new()),
         OverlayKind::Models => Box::new(ModelsOverlay::new()),
+        OverlayKind::Mcps => Box::new(mcps::McpsOverlay::new()),
         OverlayKind::Help => Box::new(HelpOverlay::new()),
         OverlayKind::Feedback => Box::new(crate::feedback::FeedbackOverlay::new()),
         OverlayKind::Palette => Box::new(PaletteOverlay::new()),
@@ -306,6 +313,7 @@ pub fn parse_slash_command(input: &str) -> Option<OverlayKind> {
         // `/model` was a second browser over the same data; it is now an alias,
         // so muscle memory keeps working and there is only one list to fix.
         "model" | "models" => Some(OverlayKind::Models),
+        "mcps" => Some(OverlayKind::Mcps),
         "permissions" => Some(OverlayKind::Permissions),
         "help" => Some(OverlayKind::Help),
         "feedback" => Some(OverlayKind::Feedback),
@@ -323,6 +331,7 @@ mod connect;
 mod context;
 mod diff;
 mod help;
+mod mcps;
 mod models;
 pub(crate) mod onboarding;
 // Crate-visible because the inline slash dropdown reads the same command list
@@ -364,12 +373,14 @@ mod reachability {
     /// Every overlay the session can open. Kept as one list so a new surface
     /// has to be added here — and the test below then proves it can be closed.
     const ALL: &[OverlayKind] = &[
+        OverlayKind::Activity,
         OverlayKind::Search,
         OverlayKind::Context,
         OverlayKind::Diff,
         OverlayKind::Rewind,
         OverlayKind::Sessions,
         OverlayKind::Models,
+        OverlayKind::Mcps,
         OverlayKind::Permissions,
         OverlayKind::Help,
         OverlayKind::Feedback,

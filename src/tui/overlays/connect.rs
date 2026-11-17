@@ -715,7 +715,7 @@ impl Overlay for ConnectOverlay {
         if result.error.is_none()
             && let Some(row) = self.rows.iter_mut().find(|row| row.name == result.provider)
         {
-            row.model_count = result.ids.len();
+            row.model_count = result.models.len();
         }
     }
 

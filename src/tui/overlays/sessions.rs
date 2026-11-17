@@ -70,6 +70,13 @@ impl SessionEntry {
 
     /// The right-hand tail: size, then age.
     fn tail(&self) -> String {
+        if self.is_current {
+            return if self.messages == 0 {
+                "current · new".to_string()
+            } else {
+                format!("current · {} msgs", self.messages)
+            };
+        }
         if self.messages == 0 {
             return "new".to_string();
         }
@@ -576,7 +583,7 @@ impl Overlay for SessionsOverlay {
         OverlayAction::None
     }
 
-    fn render(&mut self, frame: &mut Frame, area: Rect, _app: &App) {
+    fn render(&mut self, frame: &mut Frame, area: Rect, app: &App) {
         if !self.visible {
             return;
         }
@@ -584,11 +591,20 @@ impl Overlay for SessionsOverlay {
 
         let total = self.rows.len();
         let title = if self.shown.len() == total {
-            format!(" Sessions ({total}) ")
+            format!(" sessions · {total} ")
         } else {
-            format!(" Sessions ({}/{total}) ", self.shown.len())
+            format!(" sessions · {} of {total} ", self.shown.len())
         };
-        let outer = Block::default().borders(Borders::ALL).title(title);
+        let scheme = crate::tui::theme::ColorScheme::for_theme(app.theme);
+        let outer = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(scheme.border))
+            .title(Span::styled(
+                title,
+                Style::default()
+                    .fg(scheme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ));
         let inner = outer.inner(area);
         frame.render_widget(outer, area);
         if inner.width == 0 || inner.height == 0 {
@@ -609,14 +625,14 @@ impl Overlay for SessionsOverlay {
         // the moment the first character is typed.
         let (filter_text, filter_style) = if self.filter.is_empty() && !self.filtering {
             (
-                "filter · type to search titles, names and models".to_string(),
-                Style::default().fg(Color::DarkGray),
+                "/  search titles, session names, models".to_string(),
+                Style::default().fg(scheme.dim),
             )
         } else {
             let caret = if self.filtering { "▌" } else { "" };
             (
-                format!("filter: {}{caret}", self.filter),
-                Style::default().fg(Color::White),
+                format!("/  {}{caret}  ·  {} matches", self.filter, self.shown.len()),
+                Style::default().fg(scheme.foreground),
             )
         };
         frame.render_widget(
@@ -638,10 +654,10 @@ impl Overlay for SessionsOverlay {
         } else if body.width >= SIDE_BY_SIDE {
             let split = Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+                .constraints([Constraint::Percentage(56), Constraint::Percentage(44)])
                 .split(body);
-            self.render_list(frame, split[0]);
-            self.render_preview(frame, split[1], false);
+            self.render_list(frame, split[0], app.theme);
+            self.render_preview(frame, split[1], false, app.theme);
         } else if body.height >= COMPACT_PREVIEW_MIN_HEIGHT {
             // The split is even: the list keeps enough rows to choose from, and
             // the bottom half answers "which of these is it" without opening
@@ -651,15 +667,15 @@ impl Overlay for SessionsOverlay {
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .split(body);
-            self.render_list(frame, split[0]);
-            self.render_preview(frame, split[1], true);
+            self.render_list(frame, split[0], app.theme);
+            self.render_preview(frame, split[1], true, app.theme);
         } else {
-            self.render_list(frame, body);
+            self.render_list(frame, body, app.theme);
         }
 
         frame.render_widget(
             Paragraph::new(ellipsize(&self.keys(), footer.width as usize))
-                .style(Style::default().fg(Color::DarkGray)),
+                .style(Style::default().fg(scheme.dim)),
             footer,
         );
     }
@@ -680,8 +696,18 @@ impl Overlay for SessionsOverlay {
 
 impl SessionsOverlay {
     /// The list half: one line per conversation, title left and facts right.
-    fn render_list(&mut self, frame: &mut Frame, area: Rect) {
+    fn render_list(&mut self, frame: &mut Frame, area: Rect, theme: crate::tui::app::Theme) {
         let width = area.width as usize;
+        let selected_style = match theme {
+            crate::tui::app::Theme::Default => {
+                Style::default().fg(Color::White).bg(Color::Rgb(24, 48, 50))
+            }
+            crate::tui::app::Theme::HighContrast => {
+                Style::default().fg(Color::Black).bg(Color::White)
+            }
+            crate::tui::app::Theme::NoColor => Style::default().add_modifier(Modifier::REVERSED),
+        };
+        let accent = crate::tui::theme::ColorScheme::for_theme(theme).accent;
         let items: Vec<ListItem> = self
             .shown
             .iter()
@@ -690,15 +716,21 @@ impl SessionsOverlay {
             .map(|(position, row)| {
                 let selected = position == self.selected;
                 let style = if selected {
-                    Style::default().bg(Color::Blue).fg(Color::White)
+                    selected_style
                 } else {
                     Style::default()
                 };
-                let marker = if row.is_current { "· " } else { "  " };
+                let marker = if selected {
+                    "› "
+                } else if row.is_current {
+                    "● "
+                } else {
+                    "  "
+                };
                 // The tail is the first thing to go in a narrow window: a title
                 // cut to three characters so a timestamp can keep its column is
                 // a list that has stopped being a list.
-                let tail = if width >= 40 {
+                let tail = if width >= 36 {
                     row.tail()
                 } else {
                     String::new()
@@ -712,7 +744,7 @@ impl SessionsOverlay {
                     Span::styled(
                         marker,
                         Style::default().fg(if row.is_current {
-                            Color::Cyan
+                            accent
                         } else {
                             Color::DarkGray
                         }),
@@ -720,7 +752,7 @@ impl SessionsOverlay {
                     Span::styled(
                         label,
                         if selected {
-                            style.add_modifier(Modifier::BOLD)
+                            selected_style.add_modifier(Modifier::BOLD)
                         } else {
                             Style::default().fg(Color::White)
                         },
@@ -729,7 +761,7 @@ impl SessionsOverlay {
                     Span::styled(
                         tail,
                         if selected {
-                            style
+                            selected_style.add_modifier(Modifier::DIM)
                         } else {
                             Style::default().fg(Color::DarkGray)
                         },
@@ -739,12 +771,7 @@ impl SessionsOverlay {
             })
             .collect();
 
-        let list = List::new(items).highlight_style(
-            Style::default()
-                .bg(Color::Blue)
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        );
+        let list = List::new(items).highlight_style(selected_style.add_modifier(Modifier::BOLD));
         frame.render_stateful_widget(list, area, &mut self.list_state);
     }
 
@@ -753,7 +780,13 @@ impl SessionsOverlay {
     /// `stacked` is the narrow frame, where the pane sits under the list and a
     /// top border is the divider. The title names the conversation, so the
     /// preview cannot be read against the wrong row.
-    fn render_preview(&self, frame: &mut Frame, area: Rect, stacked: bool) {
+    fn render_preview(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        stacked: bool,
+        theme: crate::tui::app::Theme,
+    ) {
         let title = match self.current() {
             Some(row) => format!(
                 " preview · {} ",
@@ -762,13 +795,49 @@ impl SessionsOverlay {
             None => " preview ".to_string(),
         };
         let borders = if stacked { Borders::TOP } else { Borders::LEFT };
-        let preview = Paragraph::new(self.preview.clone())
-            .style(Style::default().fg(Color::Gray))
+        let scheme = crate::tui::theme::ColorScheme::for_theme(theme);
+        let lines: Vec<Line> = self
+            .preview
+            .lines()
+            .enumerate()
+            .map(|(index, text)| {
+                if text.is_empty() {
+                    return Line::from("");
+                }
+                if let Some((role, body)) = text.split_once(": ") {
+                    let colour = match role {
+                        "you" => scheme.user,
+                        "memnoth" => scheme.assistant,
+                        "tool" => scheme.tool,
+                        "system" => scheme.dim,
+                        _ => scheme.foreground,
+                    };
+                    return Line::from(vec![
+                        Span::styled(
+                            format!("{role}: "),
+                            Style::default().fg(colour).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(body.to_string(), Style::default().fg(scheme.foreground)),
+                    ]);
+                }
+                let style = if index == 0 {
+                    Style::default()
+                        .fg(scheme.foreground)
+                        .add_modifier(Modifier::BOLD)
+                } else if text.starts_with("opened ") || text.starts_with("… ") {
+                    Style::default().fg(scheme.dim)
+                } else {
+                    Style::default().fg(scheme.foreground)
+                };
+                Line::from(Span::styled(text.to_string(), style))
+            })
+            .collect();
+        let preview = Paragraph::new(lines)
             .block(
                 Block::default()
                     .borders(borders)
                     .title(title)
-                    .style(Style::default().fg(Color::DarkGray)),
+                    .border_style(Style::default().fg(scheme.border)),
             )
             .wrap(Wrap { trim: true });
         frame.render_widget(preview, area);

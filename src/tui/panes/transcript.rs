@@ -207,10 +207,11 @@ impl TranscriptPane {
             height: area.height.saturating_sub(2),
         };
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(Some("▲"))
-            .end_symbol(Some("▼"))
-            .track_symbol(Some("│"))
-            .thumb_symbol("█");
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(Some(" "))
+            .thumb_symbol("▏")
+            .thumb_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM));
         frame.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
     }
 }

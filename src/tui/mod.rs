@@ -45,7 +45,7 @@ use anyhow::{Context, Result};
 use crossterm::cursor::Show;
 use crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -114,6 +114,8 @@ struct Busy {
     prompt: String,
     /// The model that answered; the session file records it.
     model: String,
+    /// Provider preset that answered, for matching saved context usage.
+    context_provider: String,
     /// The rates that turn is billed at, for the session's cost estimate.
     pricing: Option<provider::Pricing>,
 }
@@ -127,6 +129,17 @@ struct Pending {
 /// Ask the person, from the worker thread, and wait for the answer.
 struct AskOnScreen {
     tx: mpsc::Sender<TurnEvent>,
+}
+
+/// Plan mode is enforced at the write approval boundary, not just described in
+/// the prompt. A model cannot modify files or memory while this approver is in
+/// use.
+struct DeclineWrites;
+
+impl provider::Approver for DeclineWrites {
+    fn approve(&mut self, _request: &provider::ApprovalRequest) -> bool {
+        false
+    }
 }
 
 impl provider::Approver for AskOnScreen {
@@ -160,6 +173,13 @@ impl provider::Approver for AskOnScreen {
 /// conversation from last Tuesday. The conversation is still loaded — the next
 /// word typed continues it — and it is one `esc` away instead of being the first
 /// thing on screen.
+fn copy_selection(app: &mut App, text: &str) {
+    match crate::auth::copy_to_clipboard(text) {
+        Ok(()) => app.notify("✓ Copied to clipboard", Duration::from_secs(2)),
+        Err(error) => app.notify(format!("Copy failed: {error:#}"), Duration::from_secs(4)),
+    }
+}
+
 pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
     let store = SessionStore::new(ctx.sessions_dir.clone());
     let (mut session, resumed) = store.load_or_create(name)?;
@@ -229,6 +249,10 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
     app.home = Some(home(ctx, name, resumed, &graph, &session, first_run));
     app.graph_attention = graph.attention.clone();
     app.context = context_pane(ctx, &session);
+    // Initialize the composer model and start metadata discovery before the
+    // first frame. The regular refresh path runs after a turn, which used to
+    // leave the home composer without a context limit until then.
+    refresh_provider_status(ctx, &mut app, &session);
     // Read before the first frame: the account line is part of what the screen
     // opened with, not something that appears a redraw later.
     app.account = crate::auth::signed_in_account();
@@ -261,16 +285,18 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
     // scrollbar that no gesture moves is a picture of scrollability, not
     // scrollability. The trade is that the terminal stops doing its own
     // selection; most terminals still select with shift held.
+    let output_code_page = enable_utf8_console_output();
     if let Err(error) = execute!(
         stdout,
         EnterAlternateScreen,
         EnableBracketedPaste,
         EnableMouseCapture
     ) {
+        restore_console_output_code_page(output_code_page);
         let _ = disable_raw_mode();
         return Err(error).context("cannot enter the alternate screen");
     }
-    let guard = RestoreTerminal;
+    let guard = RestoreTerminal { output_code_page };
 
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).context("cannot open the terminal")?;
@@ -445,6 +471,7 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
         // provider on a thread, and the answer lands here rather than inside a
         // draw that would freeze the screen until the request timed out.
         while let Some(result) = app.try_recv_models_loaded() {
+            apply_context_metadata(&mut app, &result);
             app.overlay_stack.deliver_models(&result);
         }
 
@@ -503,6 +530,73 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
                     }
                 }
                 Event::Resize(_, _) => {}
+                Event::Mouse(mouse) if !app.overlay_stack.has_overlay() && app.home_showing() => {
+                    match mouse.kind {
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            if let Some(row) = app.rail_selection_line_at(mouse.column, mouse.row) {
+                                app.rail_selection_anchor = Some(row);
+                                app.rail_selection = None;
+                                app.home_selection_anchor = None;
+                                app.home_selection = None;
+                            } else if let Some(row) =
+                                app.home_selection_line_at(mouse.column, mouse.row)
+                            {
+                                app.home_selection_anchor = Some(row);
+                                app.home_selection = None;
+                                app.rail_selection_anchor = None;
+                                app.rail_selection = None;
+                            } else {
+                                app.home_selection_anchor = None;
+                                app.home_selection = None;
+                                app.rail_selection_anchor = None;
+                                app.rail_selection = None;
+                            }
+                        }
+                        MouseEventKind::Drag(MouseButton::Left)
+                            if app.rail_selection_anchor.is_some() =>
+                        {
+                            let row =
+                                mouse.row.saturating_sub(app.rail_selection_origin.1) as usize;
+                            app.extend_rail_selection(row);
+                        }
+                        MouseEventKind::Drag(MouseButton::Left)
+                            if app.home_selection_anchor.is_some() =>
+                        {
+                            let row =
+                                mouse.row.saturating_sub(app.home_selection_origin.1) as usize;
+                            app.extend_home_selection(row);
+                        }
+                        MouseEventKind::Up(MouseButton::Left)
+                            if app.rail_selection_anchor.is_some() =>
+                        {
+                            if app.rail_selection.is_some() {
+                                let row =
+                                    mouse.row.saturating_sub(app.rail_selection_origin.1) as usize;
+                                app.extend_rail_selection(row);
+                                if let Some(text) = app.finish_rail_selection() {
+                                    copy_selection(&mut app, &text);
+                                }
+                            } else {
+                                app.rail_selection_anchor = None;
+                            }
+                        }
+                        MouseEventKind::Up(MouseButton::Left)
+                            if app.home_selection_anchor.is_some() =>
+                        {
+                            if app.home_selection.is_some() {
+                                let row =
+                                    mouse.row.saturating_sub(app.home_selection_origin.1) as usize;
+                                app.extend_home_selection(row);
+                                if let Some(text) = app.finish_home_selection() {
+                                    copy_selection(&mut app, &text);
+                                }
+                            } else {
+                                app.home_selection_anchor = None;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
                 // The wheel is the one mouse event that carries a command: a
                 // touchpad swipe is a scroll, and a visible scrollbar no gesture
                 // moves is a lie. Overlays and the brief own their own keys, so
@@ -511,13 +605,63 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
                     match mouse.kind {
                         MouseEventKind::ScrollUp => app.wheel(WHEEL_LINES, true),
                         MouseEventKind::ScrollDown => app.wheel(WHEEL_LINES, false),
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            app.mouse_row = Some(mouse.row);
+                            if let Some(row) = app.rail_selection_line_at(mouse.column, mouse.row) {
+                                app.rail_selection_anchor = Some(row);
+                                app.rail_selection = None;
+                                app.selection_anchor = None;
+                                app.selection = None;
+                            } else {
+                                app.rail_selection_anchor = None;
+                                app.rail_selection = None;
+                                app.selection = None;
+                            }
+                            if app.rail_selection_anchor.is_none() && mouse.row > 0 {
+                                let line = app.scroll.saturating_add(mouse.row as usize - 1);
+                                app.selection_anchor = Some(line);
+                            }
+                        }
+                        MouseEventKind::Drag(MouseButton::Left) => {
+                            app.mouse_row = Some(mouse.row);
+                            if app.rail_selection_anchor.is_some() {
+                                let row =
+                                    mouse.row.saturating_sub(app.rail_selection_origin.1) as usize;
+                                app.extend_rail_selection(row);
+                            } else if mouse.row > 0 {
+                                let line = app.scroll.saturating_add(mouse.row as usize - 1);
+                                app.extend_selection(line);
+                            }
+                        }
+                        MouseEventKind::Up(MouseButton::Left) => {
+                            if app.rail_selection_anchor.is_some() {
+                                if app.rail_selection.is_some() {
+                                    let row = mouse.row.saturating_sub(app.rail_selection_origin.1)
+                                        as usize;
+                                    app.extend_rail_selection(row);
+                                    if let Some(text) = app.finish_rail_selection() {
+                                        copy_selection(&mut app, &text);
+                                    }
+                                } else {
+                                    app.rail_selection_anchor = None;
+                                }
+                            } else if app.selection.is_some() {
+                                if mouse.row > 0 {
+                                    let line = app.scroll.saturating_add(mouse.row as usize - 1);
+                                    app.extend_selection(line);
+                                }
+                                if let Some(text) = app.finish_selection() {
+                                    copy_selection(&mut app, &text);
+                                }
+                            } else {
+                                app.selection_anchor = None;
+                            }
+                        }
                         // Pointer motion is tracked for one thing only: the
                         // thinking header's expand hint appears while the
                         // pointer rests on it, and nowhere else.
                         MouseEventKind::Moved => app.mouse_row = Some(mouse.row),
-                        // Clicks, drags and horizontal scroll: nothing on this
-                        // screen is clickable, and a selectable row that a click
-                        // did not select would be worse than no pointer at all.
+                        // Horizontal scroll and non-left clicks have no action.
                         _ => {}
                     }
                 }
@@ -748,17 +892,171 @@ fn refresh(ctx: &AppContext, app: &mut App, session: &Session) {
     app.graph_attention = graph.attention.clone();
     app.home_cursor = 0;
     app.context = context_pane(ctx, session);
+    refresh_provider_status(ctx, app, session);
+}
+
+/// Load the model the next turn will use and initialize its context meter.
+/// Called at startup and after state-changing actions, before the next draw.
+fn refresh_provider_status(ctx: &AppContext, app: &mut App, session: &Session) {
+    app.context_window_used = None;
     // The label beside the prompt: the model the next turn will actually use,
     // including the case where it cannot run because no key is configured.
     app.model = match provider::Settings::load(&ctx.config) {
-        Ok(settings) if settings.ready() => settings.model,
-        Ok(settings) => format!("{} · no key", settings.model),
-        Err(_) => String::new(),
+        Ok(settings) if settings.ready() => {
+            schedule_context_discovery(app, &settings);
+            app.reasoning_effort = settings.reasoning_effort.clone();
+            restore_context_usage(app, session, &settings);
+            settings.model
+        }
+        Ok(settings) => {
+            schedule_context_discovery(app, &settings);
+            restore_context_usage(app, session, &settings);
+            app.reasoning_effort = settings.reasoning_effort;
+            format!("{} · no key", settings.model)
+        }
+        Err(_) => {
+            app.reasoning_effort = None;
+            app.context_window_size = None;
+            app.context_model.clear();
+            app.context_provider.clear();
+            app.context_window_override_active = false;
+            (!session.model.trim().is_empty())
+                .then(|| session.model.clone())
+                .or_else(|| std::env::var("MEMNOTH_MODEL").ok())
+                .or_else(|| {
+                    ctx.config
+                        .provider
+                        .as_ref()
+                        .and_then(|provider| provider.model.clone())
+                })
+                .unwrap_or_else(|| {
+                    let kind = ctx
+                        .config
+                        .provider
+                        .as_ref()
+                        .and_then(|provider| provider.kind.as_deref())
+                        .and_then(|kind| provider::Kind::parse(kind).ok())
+                        .unwrap_or(provider::Kind::Anthropic);
+                    kind.default_model().to_string()
+                })
+        }
     };
 }
 
+fn restore_context_usage(app: &mut App, session: &Session, settings: &provider::Settings) {
+    if settings.model != session.model {
+        return;
+    }
+    let active_provider = settings
+        .provider_name
+        .as_deref()
+        .unwrap_or_else(|| settings.kind.name());
+    app.context_window_used = session.receipts.last().and_then(|receipt| {
+        (receipt.context_window_model.as_deref() == Some(settings.model.as_str())
+            && receipt
+                .context_window_provider
+                .as_deref()
+                .is_some_and(|provider| provider.eq_ignore_ascii_case(active_provider)))
+        .then_some(receipt.context_window_used)
+        .flatten()
+    });
+}
+
+/// Discover live model metadata without delaying the first TUI frame. A
+/// provider list may publish an exact context limit that the compiled model
+/// catalogue does not know.
+fn schedule_context_discovery(app: &mut App, settings: &provider::Settings) {
+    app.context_model = settings.model.clone();
+    app.context_provider = settings
+        .provider_name
+        .clone()
+        .unwrap_or_else(|| settings.kind.name().to_string());
+    app.context_window_override_active = settings.context_window_override.is_some();
+    app.context_window_size = settings.known_context_window().map(|size| size as u64);
+
+    let cache_key = context_cache_key(&app.context_provider, &settings.model);
+    if !app.context_window_override_active
+        && let Some(window) = app.context_window_cache.get(&cache_key)
+    {
+        app.context_window_size = Some(*window);
+    }
+    let discovery_key = format!(
+        "{}|{}",
+        app.context_provider.to_ascii_lowercase(),
+        settings.base_url
+    );
+    if app.context_discovery_key.as_deref() == Some(&discovery_key) {
+        return;
+    }
+    app.context_discovery_key = Some(discovery_key);
+
+    let tx = app.models_tx.clone();
+    let provider_name = app.context_provider.clone();
+    let kind = settings.kind;
+    let base_url = settings.base_url.clone();
+    let api_key = settings.api_key.clone();
+    std::thread::spawn(move || {
+        let result = provider::fetch_provider_models(kind, &base_url, api_key.as_deref());
+        let (models, error) = match result {
+            Ok(models) => (provider::deduplicate_provider_models(models), None),
+            Err(error) => (Vec::new(), Some(format!("{error:#}"))),
+        };
+        let _ = tx.send(crate::tui::app::ModelsLoaded {
+            provider: provider_name,
+            models,
+            error,
+        });
+    });
+}
+
+/// A live provider value outranks the built-in catalogue, while an explicit
+/// per-model user override always wins.
+fn apply_context_metadata(app: &mut App, result: &crate::tui::app::ModelsLoaded) {
+    if result.error.is_some() {
+        return;
+    }
+    for model in &result.models {
+        if let Some(window) = model.context_window {
+            app.context_window_cache.insert(
+                context_cache_key(&result.provider, &model.id),
+                u64::from(window),
+            );
+        }
+    }
+    if app.context_window_override_active
+        || !app.context_provider.eq_ignore_ascii_case(&result.provider)
+    {
+        return;
+    }
+    if let Some(window) = app.context_window_cache.get(&context_cache_key(
+        &app.context_provider,
+        &app.context_model,
+    )) {
+        app.context_window_size = Some(*window);
+    }
+}
+
+fn context_cache_key(provider: &str, model: &str) -> String {
+    // Gateways may expose one catalog id for both paid and free routing
+    // variants, while the selected request id carries a `:free` suffix.
+    // Context capacity belongs to the underlying model, so both spellings
+    // share the same metadata cache entry.
+    let model = model
+        .rsplit_once(':')
+        .filter(|(_, variant)| variant.eq_ignore_ascii_case("free"))
+        .map(|(base, _)| base)
+        .unwrap_or(model);
+    format!(
+        "{}|{}",
+        provider.to_ascii_lowercase(),
+        model.to_ascii_lowercase()
+    )
+}
+
 /// Leave raw mode and the alternate screen, on every path.
-struct RestoreTerminal;
+struct RestoreTerminal {
+    output_code_page: Option<u32>,
+}
 
 impl Drop for RestoreTerminal {
     fn drop(&mut self) {
@@ -772,24 +1070,81 @@ impl Drop for RestoreTerminal {
             Show
         );
         let _ = out.flush();
+        restore_console_output_code_page(self.output_code_page);
     }
 }
+
+#[cfg(windows)]
+fn enable_utf8_console_output() -> Option<u32> {
+    use windows_sys::Win32::System::Console::{GetConsoleOutputCP, SetConsoleOutputCP};
+    // SAFETY: These Win32 calls only read and update the current console's
+    // output encoding. The previous value is restored when the TUI exits.
+    unsafe {
+        let previous = GetConsoleOutputCP();
+        if previous == 0 || previous == 65001 || SetConsoleOutputCP(65001) == 0 {
+            None
+        } else {
+            Some(previous)
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn enable_utf8_console_output() -> Option<u32> {
+    None
+}
+
+#[cfg(windows)]
+fn restore_console_output_code_page(previous: Option<u32>) {
+    if let Some(previous) = previous {
+        use windows_sys::Win32::System::Console::SetConsoleOutputCP;
+        // SAFETY: `previous` came from GetConsoleOutputCP in this process.
+        unsafe {
+            SetConsoleOutputCP(previous);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn restore_console_output_code_page(_: Option<u32>) {}
 
 fn handle_key(app: &mut App, key: KeyEvent, workspace_root: &Path) {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
+    // The composer advertises Shift+Tab even when empty, so this chord owns
+    // mode switching whenever no overlay or running turn has focus.
+    if key.code == KeyCode::BackTab && !ctrl && !app.busy && !app.overlay_stack.has_overlay() {
+        app.plan_mode = !app.plan_mode;
+        return;
+    }
+
+    // Multiline editing has priority over surface shortcuts: without this,
+    // the home and task panes can consume Enter before the composer sees it.
+    if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::SHIFT) {
+        app.insert_char('\n');
+        app.sync_slash();
+        return;
+    }
+
+    // Down on an empty composer is the global live-work switcher, including
+    // the first-run brief (where `home_showing()` remains true until the first
+    // turn). The home brief keeps its numbered quick picks below.
+    if key.code == KeyCode::Down
+        && app.input.is_empty()
+        && !app.slash.is_open()
+        && app.active_pane == 0
+    {
+        open_overlay(app, crate::tui::overlays::OverlayKind::Activity);
+        return;
+    }
+
     // The brief owns four keys while the prompt is empty: its `next` rows are
-    // selectable, and a list that looks selectable but is not was the defect
-    // this replaced. With text in the prompt the arrows are history again,
-    // exactly as they were.
+    // selectable by Up and the 1–3 quick picks. Down opens the activity
+    // switcher above; the brief's footer names both ways to act.
     if app.home_showing() && app.input.is_empty() && !app.slash.is_open() {
         match key.code {
             KeyCode::Up => {
                 app.home_move(-1);
-                return;
-            }
-            KeyCode::Down => {
-                app.home_move(1);
                 return;
             }
             KeyCode::Char(ch @ '1'..='3') if !ctrl => {
@@ -799,7 +1154,7 @@ fn handle_key(app: &mut App, key: KeyEvent, workspace_root: &Path) {
             // `enter` runs the selected row: the command goes into the prompt and
             // is submitted by the same path a typed line takes, so the transcript
             // shows exactly what was run.
-            KeyCode::Enter => {
+            KeyCode::Enter if !key.modifiers.contains(KeyModifiers::SHIFT) => {
                 if let Some(command) = app.home_command() {
                     app.input = command;
                     app.cursor = app.input.chars().count();
@@ -1062,8 +1417,18 @@ fn handle_key(app: &mut App, key: KeyEvent, workspace_root: &Path) {
         // prose, so the line doubles as the selection: `/tmp/shot.png what is
         // wrong here?` attaches the file and leaves the question on the line.
         KeyCode::Char('o') if ctrl => attach_from_input(app),
+        // ctrl-v attaches the image on the clipboard. A screenshot is copied,
+        // not typed, so requiring its path first made the common case a detour
+        // through a file manager.
+        KeyCode::Char('v') if ctrl => paste_clipboard(app),
         KeyCode::Char(ch) if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) => {
             app.insert_char(ch);
+            app.sync_slash();
+        }
+        // Ctrl+J is the portable multiline fallback for terminals that map
+        // Shift+Enter to plain Enter and cannot report the modifier.
+        KeyCode::Char('j' | 'J') if ctrl => {
+            app.insert_char('\n');
             app.sync_slash();
         }
         KeyCode::Enter => {
@@ -1141,6 +1506,7 @@ fn handle_key(app: &mut App, key: KeyEvent, workspace_root: &Path) {
         _ => {}
     }
 }
+
 /// `ctrl-o`: read the leading token of the line as an image or PDF.
 ///
 /// The read happens here, while the person is looking at the composer, so a
@@ -1172,6 +1538,123 @@ fn attach_from_input(app: &mut App) {
         }
         Err(error) => app.push(EntryRole::Error, format!("{error:#}")),
     }
+}
+
+/// `ctrl-v`: attach the image on the system clipboard.
+///
+/// The bytes are read here and decoded by the platform's own tool — no
+/// clipboard crate is pulled in for one key. A clipboard with text, or none at
+/// all, is answered with a sentence rather than a failed turn later.
+fn paste_clipboard(app: &mut App) {
+    let name = format!("clipboard-{}.png", crate::session::now_ms());
+    match clipboard_image() {
+        Ok(bytes) => match crate::provider::Attachment::from_bytes(name.clone(), bytes) {
+            Ok(file) => {
+                app.attachments.push(file);
+            }
+            Err(error) => app.push(EntryRole::Error, format!("{error:#}")),
+        },
+        Err(_) => match clipboard_text() {
+            Ok(Some(text)) => {
+                for ch in text.chars() {
+                    app.insert_char(ch);
+                }
+                app.sync_slash();
+            }
+            _ => app.push(EntryRole::Info, "clipboard has no text or supported image"),
+        },
+    }
+}
+
+#[cfg(windows)]
+fn clipboard_text() -> Result<Option<String>> {
+    use std::process::Command;
+    let out = Command::new("powershell").args(["-NoProfile", "-STA", "-Command", "Add-Type -AssemblyName System.Windows.Forms; [Console]::Write([Windows.Forms.Clipboard]::GetText())"]).output()?;
+    if !out.status.success() {
+        return Ok(None);
+    }
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    Ok((!text.is_empty()).then_some(text))
+}
+
+#[cfg(not(windows))]
+fn clipboard_text() -> Result<Option<String>> {
+    Ok(None)
+}
+
+/// The clipboard's image as PNG bytes.
+///
+/// Windows uses the .NET clipboard through PowerShell (STA, because the
+/// clipboard is apartment-threaded). macOS uses `pngpaste`, which prints the
+/// PNG to stdout. Linux tries Wayland first, then X11. Each failure names the
+/// remedy: a key that silently does nothing is worse than no key.
+#[cfg(windows)]
+fn clipboard_image() -> Result<Vec<u8>> {
+    use std::process::Command;
+    let path = std::env::temp_dir().join(format!("memnoth-clipboard-{}.png", std::process::id()));
+    let escaped = path.to_string_lossy().replace('\'', "''");
+    let script = format!(
+        "Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; \
+         $image = [System.Windows.Forms.Clipboard]::GetImage(); \
+         if ($null -eq $image) {{ exit 3 }}; \
+         $image.Save('{escaped}', [System.Drawing.Imaging.ImageFormat]::Png)"
+    );
+    let status = Command::new("powershell")
+        .args(["-NoProfile", "-STA", "-Command", &script])
+        .status()
+        .map_err(|error| anyhow::anyhow!("cannot run PowerShell to read the clipboard: {error}"))?;
+    let bytes = if status.success() {
+        std::fs::read(&path).ok()
+    } else {
+        None
+    };
+    let _ = std::fs::remove_file(&path);
+    match bytes {
+        Some(bytes) if !bytes.is_empty() => Ok(bytes),
+        _ => anyhow::bail!(
+            "the clipboard holds no image — copy a screenshot and press ctrl-v again, or ctrl-o to attach a file by path"
+        ),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn clipboard_image() -> Result<Vec<u8>> {
+    let output = std::process::Command::new("pngpaste")
+        .arg("-")
+        .output()
+        .map_err(|error| {
+            anyhow::anyhow!("cannot read the clipboard (install pngpaste): {error}")
+        })?;
+    if output.status.success() && !output.stdout.is_empty() {
+        return Ok(output.stdout);
+    }
+    anyhow::bail!("the clipboard holds no image — copy a screenshot and press ctrl-v again")
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn clipboard_image() -> Result<Vec<u8>> {
+    use std::process::Command;
+    let attempts: [(&str, &[&str]); 2] = [
+        ("wl-paste", &["--type", "image/png"]),
+        (
+            "xclip",
+            &["-selection", "clipboard", "-t", "image/png", "-o"],
+        ),
+    ];
+    for (program, args) in attempts {
+        if let Ok(output) = Command::new(program).args(args).output()
+            && output.status.success()
+            && !output.stdout.is_empty()
+        {
+            return Ok(output.stdout);
+        }
+    }
+    anyhow::bail!("the clipboard holds no image (tried wl-paste and xclip)")
+}
+
+#[cfg(not(any(windows, unix)))]
+fn clipboard_image() -> Result<Vec<u8>> {
+    anyhow::bail!("this platform has no clipboard image reader")
 }
 
 /// Whether a submitted prompt must open a fresh conversation first.
@@ -1708,6 +2191,10 @@ fn submit(
             open_overlay(app, crate::tui::overlays::OverlayKind::Models);
             None
         }
+        Parsed::McpsOverlay => {
+            open_overlay(app, crate::tui::overlays::OverlayKind::Mcps);
+            None
+        }
         Parsed::Tasks(command) => {
             run_tasks(app, ctx, command);
             None
@@ -2232,9 +2719,20 @@ fn start_turn(
     history.reverse();
 
     let model = settings.model.clone();
+    let context_provider = settings
+        .provider_name
+        .clone()
+        .unwrap_or_else(|| settings.kind.name().to_string());
     let pricing = settings.pricing;
     let asked = prompt.to_string();
-    let asked_on_worker = asked.clone();
+    let plan_mode = app.plan_mode;
+    let asked_on_worker = if plan_mode {
+        format!(
+            "Plan mode is active. Inspect and reason as needed, but do not make changes. Return a concise plan with ordered steps, risks, and questions.\n\nUser request: {asked}"
+        )
+    } else {
+        asked.clone()
+    };
     let root = ctx.root.clone();
     let worker_ctx = ctx.clone();
     let (tx, rx) = mpsc::channel();
@@ -2253,8 +2751,13 @@ fn start_turn(
     std::thread::spawn(move || {
         // Every write this turn attempts comes back through `asker` and stops
         // here until the screen answers.
+        let approver: Box<dyn provider::Approver> = if plan_mode {
+            Box::new(DeclineWrites)
+        } else {
+            Box::new(AskOnScreen { tx: asker })
+        };
         let mut tools = provider::Toolbox::new(&worker_ctx)
-            .with_approver(Box::new(AskOnScreen { tx: asker }))
+            .with_approver(approver)
             .with_turn_id(turn_id);
         let notes = tx.clone();
         let events = tx.clone();
@@ -2288,6 +2791,7 @@ fn start_turn(
         rx,
         prompt: asked,
         model,
+        context_provider,
         pricing,
     })
 }
@@ -2379,6 +2883,9 @@ fn settle(
                 layer_tokens: answer.layer_tokens,
                 pieces: answer.pieces,
                 input_tokens: input,
+                context_window_used: answer.context_window_used,
+                context_window_model: Some(busy.model.clone()),
+                context_window_provider: Some(busy.context_provider.clone()),
                 output_tokens: output,
                 cache_read_tokens: 0,
                 cache_write_tokens: 0,
@@ -2388,6 +2895,7 @@ fn settle(
                 prompt: answer.prompt.clone(),
                 turn_id: Some(turn_id),
             });
+            app.context_window_used = answer.context_window_used;
             // What it cost and how it was reached, under the answer: the line
             // that separates an answer from a claim. Both numbers are known
             // here, so neither is guessed. Hidden for now: the row is a
@@ -2486,7 +2994,7 @@ fn home(
     resumed: bool,
     graph: &GraphStatus,
     session: &Session,
-    first_run: bool,
+    _first_run: bool,
 ) -> Home {
     let turns = session.turns().len();
     let (model, model_ready) = model_state(ctx);
@@ -2500,7 +3008,16 @@ fn home(
     facts.push(vault_fact(ctx));
     facts.push(Fact {
         label: "graph",
-        value: graph.value.clone(),
+        value: if !graph.indexed {
+            "not indexed".to_string()
+        } else if graph.stale > 0 {
+            let age = file_age(&ctx.graph_path)
+                .map(|age| format!(" · {age}"))
+                .unwrap_or_default();
+            format!("{} stale files{age}", graph.stale)
+        } else {
+            "up to date".to_string()
+        },
         state: if !graph.indexed {
             HomeState::Missing
         } else if graph.stale > 0 {
@@ -2519,25 +3036,7 @@ fn home(
         },
     });
 
-    // What this machine has done, in the two numbers a person can act on: how
-    // many conversations exist to come back to, and what this one has cost.
-    // Both are reads of what is already on disk — the brief never counts
-    // something it did not measure.
     let conversations = session_file_count(ctx);
-    facts.push(Fact {
-        label: "sessions",
-        value: if turns == 0 {
-            format!("{conversations} on disk · this one is new")
-        } else {
-            format!("{conversations} on disk · this one {turns} turn(s)")
-        },
-        state: HomeState::Ready,
-    });
-    facts.push(Fact {
-        label: "spend",
-        value: spend_line(ctx, session),
-        state: HomeState::Ready,
-    });
     match memnoth_sandbox::profiles::load_sandbox_config(&ctx.root).and_then(|config| {
         memnoth_sandbox::backend::BackendPlan::build(
             memnoth_sandbox::backend::OsBackend::host(),
@@ -2550,7 +3049,11 @@ fn home(
             let status = memnoth_sandbox::status::status(&plan);
             facts.push(Fact {
                 label: "sandbox",
-                value: status.statusline(),
+                value: if status.report.backend.starts_with("windows") {
+                    "Windows helper unavailable · /doctor".to_string()
+                } else {
+                    status.statusline()
+                },
                 state: if status.report.mode == "enforced" {
                     HomeState::Ready
                 } else {
@@ -2567,25 +3070,6 @@ fn home(
         }
     }
 
-    // The team is not a mode: it is the organisation the cached account is
-    // already in. Until shared sync ships, the row says where the work is.
-    match &identity {
-        Some(id) if id.in_team() => facts.push(Fact {
-            label: "team",
-            value: teams_line(ctx, id),
-            state: HomeState::Ready,
-        }),
-        _ => facts.push(Fact {
-            label: "cloud",
-            value: if identity.is_some() {
-                "connected · local only".to_string()
-            } else {
-                "not connected · /login".to_string()
-            },
-            state: HomeState::Ready,
-        }),
-    }
-
     let mut steps: Vec<Step> = Vec::new();
     let mut setup = |command: &str, description: &str| {
         steps.push(Step {
@@ -2594,21 +3078,22 @@ fn home(
             runnable: true,
         });
     };
-    if !ctx.vault_path.exists() {
-        setup("/vault init", "beliefs with dates, kept on this machine");
+    if !model_ready {
+        setup("/model", "configure a model for chat");
     }
-    if !graph.indexed {
+    if !graph.indexed || graph.stale > 0 {
         setup(
             "/kg index",
-            "index the workspace so code questions have answers",
+            if graph.indexed {
+                "refresh stale files"
+            } else {
+                "index this workspace"
+            },
         );
     }
-    if !model_ready {
-        setup("/model", "wire a model so questions run as turns");
+    if !ctx.vault_path.exists() {
+        setup("/vault init", "start a local memory vault");
     }
-    // Setup takes at most two rows; the third always works, on a fresh machine
-    // as much as a warm one.
-    steps.truncate(2);
     steps.push(Step {
         command: "/search".to_string(),
         description: "answer from both stores, no model needed".to_string(),
@@ -2616,34 +3101,12 @@ fn home(
     });
     // Only worth a row once there is something to come back to: a picker that
     // opens on one empty conversation is a door into an empty room.
-    if conversations > 1 {
+    if conversations > 1 && steps.len() <= 2 {
         steps.push(Step {
             command: "/sessions".to_string(),
             description: "pick up a conversation you left".to_string(),
             runnable: true,
         });
-    }
-    if first_run {
-        // Prepend rather than replace: a vault or graph that is already set up
-        // keeps its row, and the panel takes the first two slots so the whole
-        // thing is three lines.
-        steps.insert(
-            0,
-            Step {
-                command: "/login".to_string(),
-                description: "connect the cloud (optional)".to_string(),
-                runnable: true,
-            },
-        );
-        steps.insert(
-            0,
-            Step {
-                command: "/doctor".to_string(),
-                description: "check this machine".to_string(),
-                runnable: true,
-            },
-        );
-        steps.truncate(3);
     }
 
     Home {
@@ -2653,22 +3116,17 @@ fn home(
         // Turns, not messages: a briefing that says "6 earlier turns" for three
         // questions and three answers is off by the half people count.
         hidden_turns: turns,
-        invitation: if first_run {
-            Some("start working — type a question".to_string())
-        } else {
-            model_ready.then_some("a turn with the vault and the graph as tools".to_string())
-        },
-        recent: recent_activity(ctx, name, session),
+        invitation: None,
     }
 }
 
 /// `solo · not signed in · session "payments" (new)`, or the three facts a
 /// team account adds. The version rides on the line above.
-fn identity_line(identity: Option<&crate::auth::Identity>, name: &str, resumed: bool) -> String {
+fn identity_line(identity: Option<&crate::auth::Identity>, name: &str, _resumed: bool) -> String {
     let mut who = match identity {
-        Some(id) if id.in_team() => format!("{} (team) · {}", id.org_name.trim(), id.email),
-        Some(id) => format!("solo · {}", id.email),
-        None => "solo · not signed in".to_string(),
+        Some(id) if id.in_team() => id.org_name.trim().to_string(),
+        Some(_) => "personal".to_string(),
+        None => "local".to_string(),
     };
     if let Some(id) = identity
         && id.in_team()
@@ -2677,10 +3135,7 @@ fn identity_line(identity: Option<&crate::auth::Identity>, name: &str, resumed: 
         who.push_str(" · ");
         who.push_str(id.role.trim());
     }
-    who.push_str(&format!(
-        " · session \"{name}\" ({})",
-        if resumed { "resumed" } else { "new" }
-    ));
+    who.push_str(&format!(" · session \"{name}\""));
     who
 }
 
@@ -2694,19 +3149,21 @@ fn vault_fact(ctx: &AppContext) -> Fact {
     if !ctx.vault_path.exists() {
         return Fact {
             label: "vault",
-            value: "missing".to_string(),
+            value: "not initialized".to_string(),
             state: HomeState::Missing,
         };
     }
     let value = match crate::vault::open_existing(ctx) {
         Ok(engine) => match engine.stats() {
             Ok(stats) => {
-                let closed = (stats.entities_total - stats.entities_current).max(0);
-                format!(
-                    "{} beliefs · {} closed · local only",
-                    thousands(stats.entities_current.max(0) as u64),
-                    thousands(closed as u64)
-                )
+                if stats.entities_current <= 0 {
+                    "empty · local".to_string()
+                } else {
+                    format!(
+                        "{} beliefs · local",
+                        thousands(stats.entities_current as u64)
+                    )
+                }
             }
             Err(_) => "unreadable · /doctor".to_string(),
         },
@@ -2743,6 +3200,7 @@ fn session_file_count(ctx: &AppContext) -> usize {
 ///
 /// The same numbers the context pane reports, from the same receipts, so the
 /// brief and the rail cannot quote two different bills.
+#[cfg(test)]
 fn spend_line(ctx: &AppContext, session: &Session) -> String {
     let tokens = session.input_tokens.saturating_add(session.output_tokens);
     if tokens == 0 {
@@ -2800,32 +3258,7 @@ fn session_cost_micros(ctx: &AppContext, session: &Session) -> Option<u64> {
 
 /// The team row. Presence and claims are local (one `coord.db`), so the row
 /// says `on this machine` rather than implying two laptops agree.
-fn teams_line(ctx: &AppContext, id: &crate::auth::Identity) -> String {
-    let mut line = id.org_name.trim().to_string();
-    if let Ok(coord) = memnoth_coord::Coord::open(&ctx.coord_path())
-        && let Ok(rows) = coord.status()
-    {
-        let active: Vec<_> = rows.iter().filter(|row| !row.stale).collect();
-        let claims: usize = active.iter().map(|row| row.active_claims.len()).sum();
-        if active.is_empty() {
-            line.push_str(" · on this machine");
-        } else {
-            line.push_str(&format!(
-                " · {} session(s) · {claims} claimed · on this machine",
-                active.len()
-            ));
-        }
-    } else {
-        line.push_str(" · on this machine");
-    }
-    line
-}
-
-/// The last three things this vault took in, as `(when, row)`.
-///
-/// The timestamp is returned rather than formatted because the activity strip
-/// merges this with conversations and sorts the result: an age printed before
-/// the sort would be the age of a row that is no longer in its place.
+#[cfg(test)]
 fn vault_recent(ctx: &AppContext) -> Vec<(i64, String)> {
     let Ok(engine) = crate::vault::open_existing(ctx) else {
         return Vec::new();
@@ -2869,6 +3302,7 @@ fn vault_recent(ctx: &AppContext) -> Vec<(i64, String)> {
 /// sources answer that, all already on disk — the vault's own timeline, the
 /// conversations this machine has open, and when this one last ran. Nothing is
 /// counted here that was not measured.
+#[cfg(test)]
 fn recent_activity(ctx: &AppContext, name: &str, session: &Session) -> Vec<String> {
     let now = now_ms();
     let mut rows: Vec<(i64, String)> = Vec::new();
@@ -2947,15 +3381,13 @@ pub(crate) fn model_state(ctx: &AppContext) -> (String, bool) {
 /// What the graph row says, and whether it is there at all.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct GraphStatus {
-    /// `1,204 files · 9,830 symbols · 12 stale · 2m old`, or `missing`.
-    value: String,
     /// Whether there is a graph to query.
     indexed: bool,
     /// Files changed since the last index.
     stale: u64,
     /// What the header says when this needs a person, with the verb that fixes
     /// it. `None` when there is nothing to act on — decided here, beside the
-    /// facts, so the header never has to parse `value` back apart.
+    /// facts, so the header never has to parse a display string back apart.
     attention: Option<Attention>,
 }
 
@@ -2971,17 +3403,7 @@ pub(crate) fn graph_state(ctx: &AppContext) -> GraphStatus {
     match crate::commands::execute(ctx, &verb) {
         Ok(outcome) if outcome.data["indexed"].as_bool().unwrap_or(false) => {
             let stale = outcome.data["stale_files"].as_u64().unwrap_or(0);
-            let mut value = format!(
-                "{} files · {} symbols · {} stale",
-                thousands(outcome.data["files"].as_u64().unwrap_or(0)),
-                thousands(outcome.data["symbols"].as_u64().unwrap_or(0)),
-                thousands(stale),
-            );
-            if let Some(age) = file_age(&ctx.graph_path) {
-                value.push_str(&format!(" · {age}"));
-            }
             GraphStatus {
-                value,
                 indexed: true,
                 stale,
                 attention: (stale > 0).then(|| Attention {
@@ -2991,7 +3413,6 @@ pub(crate) fn graph_state(ctx: &AppContext) -> GraphStatus {
             }
         }
         Ok(_) => GraphStatus {
-            value: "missing".to_string(),
             indexed: false,
             stale: 0,
             attention: Some(Attention {
@@ -3000,7 +3421,6 @@ pub(crate) fn graph_state(ctx: &AppContext) -> GraphStatus {
             }),
         },
         Err(_) => GraphStatus {
-            value: "unavailable · /doctor".to_string(),
             indexed: false,
             stale: 0,
             attention: Some(Attention {
@@ -3419,6 +3839,63 @@ mod tests {
     use super::*;
     use crate::context::Config;
 
+    fn receipt(input: u64, output: u64, cost_micros: Option<u64>) -> TurnReceipt {
+        TurnReceipt {
+            at_ms: 1,
+            total_tokens: (input + output) as usize,
+            prefix_hash: String::new(),
+            layer_tokens: [0; 4],
+            pieces: 0,
+            input_tokens: input,
+            context_window_used: Some(input),
+            context_window_model: None,
+            context_window_provider: None,
+            output_tokens: output,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            prompt: String::new(),
+            cost_micros,
+            turn_id: None,
+        }
+    }
+
+    #[test]
+    fn shift_tab_toggles_plan_mode_while_editing_and_keeps_the_draft() {
+        let mut app = App::new("s", false);
+        let root = tempfile::tempdir().unwrap();
+        app.input = "continue with the draft".into();
+        app.cursor = app.input.chars().count();
+        let key = KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT);
+        handle_key(&mut app, key, root.path());
+        assert!(app.plan_mode);
+        assert_eq!(app.input, "continue with the draft");
+        handle_key(&mut app, key, root.path());
+        assert!(!app.plan_mode);
+    }
+
+    #[test]
+    fn shift_tab_with_an_empty_prompt_switches_mode() {
+        let mut app = App::new("s", false);
+        let root = tempfile::tempdir().unwrap();
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
+            root.path(),
+        );
+        assert!(app.plan_mode);
+        assert!(app.input.is_empty());
+    }
+
+    #[test]
+    fn plan_mode_approver_declines_write_requests() {
+        let request = provider::ApprovalRequest {
+            tool: "edit_file",
+            title: "edit src/main.rs".into(),
+            body: "change a line".into(),
+        };
+        assert!(!provider::Approver::approve(&mut DeclineWrites, &request));
+    }
+
     #[test]
     fn next_commands_are_rewritten_for_the_session() {
         let data = serde_json::json!({
@@ -3555,14 +4032,14 @@ mod tests {
         // tells nobody anything. What the brief must always say is which
         // session it opened.
         assert!(
-            home.identity.contains("session \"payments\" (new)"),
+            home.identity.contains("session \"payments\""),
             "{}",
             home.identity
         );
 
         let vault = home.facts.iter().find(|fact| fact.label == "vault");
         let vault = vault.expect("the vault row is always there");
-        assert_eq!(vault.value, "missing");
+        assert_eq!(vault.value, "not initialized");
         assert_eq!(vault.state, HomeState::Missing);
 
         // A briefing that only lists prerequisites tells a new person the
@@ -3577,7 +4054,6 @@ mod tests {
             "{:?}",
             home.steps
         );
-        assert!(home.recent.is_empty(), "a fresh vault has no history");
     }
 
     #[test]
@@ -3628,46 +4104,20 @@ mod tests {
     }
 
     #[test]
-    fn the_first_run_panel_is_three_lines() {
+    fn first_run_home_keeps_only_workspace_actions() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = context(dir.path());
         let graph = graph_state(&ctx);
         let session = Session::new(crate::session::SESSION_MODEL);
-
         let fresh = home(&ctx, "first", false, &graph, &session, true);
-        assert_eq!(fresh.steps.len(), 3, "{:?}", fresh.steps);
-        assert_eq!(fresh.steps[0].command, "/doctor");
-        assert_eq!(fresh.steps[1].command, "/login");
-        assert_eq!(
-            fresh.invitation.as_deref(),
-            Some("start working — type a question")
-        );
-
-        // The same machine after `ui.onboarded = true`: the panel is gone and
-        // the brief is the ordinary one.
-        let later = home(&ctx, "second", false, &graph, &session, false);
+        assert!(fresh.steps.len() <= 4, "{:?}", fresh.steps);
         assert!(
-            later.steps.iter().all(|step| step.command != "/doctor"),
-            "{:?}",
-            later.steps
+            fresh
+                .steps
+                .iter()
+                .all(|step| step.command != "/doctor" && step.command != "/login")
         );
-    }
-
-    fn receipt(input: u64, output: u64, cost: Option<u64>) -> TurnReceipt {
-        TurnReceipt {
-            at_ms: 1,
-            total_tokens: input.saturating_add(output) as usize,
-            prefix_hash: String::new(),
-            layer_tokens: [0; 4],
-            pieces: 0,
-            input_tokens: input,
-            output_tokens: output,
-            cache_read_tokens: 0,
-            cache_write_tokens: 0,
-            prompt: String::new(),
-            cost_micros: cost,
-            turn_id: None,
-        }
+        assert!(fresh.invitation.is_none());
     }
 
     #[test]

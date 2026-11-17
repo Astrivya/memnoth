@@ -332,6 +332,24 @@ impl HelpOverlay {
         ));
         help.add_group(global);
 
+        let mut chat = KeyBindingGroup::new("Chat Controls");
+        chat.add_binding(KeyBinding::new(
+            "Shift+Tab",
+            "Plan / Build",
+            "Cycle Plan / Build while a draft is active",
+        ));
+        chat.add_binding(KeyBinding::new(
+            "Ctrl+M",
+            "Model / effort",
+            "Use left/right for effort, then Enter to apply the selection",
+        ));
+        chat.add_binding(KeyBinding::new(
+            "Shift+Enter",
+            "New line",
+            "Add a line to the composer",
+        ));
+        help.add_group(chat);
+
         let mut overlay_nav = KeyBindingGroup::new("Overlay Navigation");
         overlay_nav.add_binding(KeyBinding::new("Esc", "Close", "Close current overlay"));
         overlay_nav.add_binding(KeyBinding::new("Tab", "Next", "Next overlay / next tab"));
@@ -1189,6 +1207,9 @@ mod tests {
         );
         let text = screen(&mut help);
         assert!(text.contains("Ctrl+L"), "{text}");
+        assert!(text.contains("Shift+Tab"), "{text}");
+        assert!(text.contains("Model / effort"), "{text}");
+        assert!(text.contains("Shift+Enter"), "{text}");
     }
 
     #[test]

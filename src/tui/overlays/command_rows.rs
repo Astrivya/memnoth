@@ -155,11 +155,18 @@ pub(crate) fn atlas_summary() -> String {
 /// is renamed in the registry cannot survive in two of the three surfaces.
 pub(crate) fn argument_hint(line: &str) -> Option<String> {
     let line = line.trim().to_lowercase();
-    let row = rows()
-        .into_iter()
+    if !line.contains(' ') {
+        return None;
+    }
+    let row = cached()
+        .rows
+        .iter()
         .filter(|row| {
-            let command = row.command.to_lowercase();
-            line == command || line.starts_with(&format!("{command} "))
+            line.eq_ignore_ascii_case(&row.command)
+                || line
+                    .get(..row.command.len())
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case(&row.command))
+                    && line.as_bytes().get(row.command.len()) == Some(&b' ')
         })
         .max_by_key(|row| row.command.chars().count())?;
     row.params
@@ -214,11 +221,6 @@ fn params_of(params: &serde_json::Value) -> Vec<String> {
 /// Every command the session can show.
 pub(crate) fn rows() -> Vec<CommandRow> {
     cached().rows.clone()
-}
-
-/// How many commands the surfaces offer, computed once.
-pub(crate) fn command_count() -> usize {
-    cached().rows.len()
 }
 
 /// The rows as the modal palette and the dropdown draw them.
@@ -485,6 +487,12 @@ fn session_actions() -> Vec<CommandRow> {
         (
             "/permissions",
             "Per-tool allow, ask, deny",
+            "opens a surface",
+            "read-only",
+        ),
+        (
+            "/mcps",
+            "Browse recommended MCPs and host registrations",
             "opens a surface",
             "read-only",
         ),

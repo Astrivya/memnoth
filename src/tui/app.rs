@@ -220,6 +220,8 @@ pub enum Parsed {
     Sessions,
     /// `/models` (and its `/model` alias): browse, search, and switch models.
     ModelsOverlay,
+    /// `/mcps`: browse recommended MCPs and Memnoth's host registrations.
+    McpsOverlay,
     /// `/tasks`: the background-task rail and the jobs behind it.
     Tasks(TasksCommand),
     /// `/connect`: open provider connections overlay.
@@ -370,8 +372,6 @@ pub struct Home {
     /// makes `esc` a specific promise — "show those" — instead of a key that
     /// might close the screen.
     pub hidden_turns: usize,
-    /// The vault's own timeline, newest first, already aged (`2h ago`).
-    pub recent: Vec<String>,
 }
 
 /// One entry in the transcript. Wrapped lines still belong to one entry.
@@ -399,22 +399,14 @@ pub struct Entry {
     pub stats: Option<String>,
 }
 
-/// The stats line for one settled turn, in the shape every coding agent
-/// converged on: how long it took, how fast the answer was written, how much
-/// context moved, what it cost, and how many tools it ran. Tokens read 812,
-/// 1.8k, 128k — k is 1,000, never 1,024. The rate is end-to-end (output over
-/// wall time), so a tool-bound turn reads as slow; that is the truth about
-/// the turn, not a hidden detail.
+/// Compact turn summary: elapsed time, tools used, and output throughput.
 pub fn turn_stats(
     elapsed_ms: i64,
-    input: u64,
+    _input: u64,
     output: u64,
-    cost_micros: Option<u64>,
+    _cost_micros: Option<u64>,
     tools: usize,
 ) -> Option<String> {
-    if input == 0 && output == 0 {
-        return None;
-    }
     let elapsed = elapsed_ms.max(0) as f64 / 1000.0;
     let age = if elapsed < 10.0 {
         format!("{elapsed:.1}s")
@@ -428,56 +420,17 @@ pub fn turn_stats(
         )
     };
     let mut parts = vec![age];
-    if output > 0 && elapsed > 0.0 {
-        let rate = output as f64 / elapsed;
-        if rate.fract() < 0.05 || rate >= 100.0 {
-            parts.push(format!("{} tps", rate.round() as u64));
-        } else {
-            parts.push(format!("{rate:.1} tps"));
-        }
-    }
-    fn short(tokens: u64) -> String {
-        if tokens < 1_000 {
-            tokens.to_string()
-        } else if tokens < 1_000_000 {
-            let kilos = tokens as f64 / 1000.0;
-            if kilos.fract() < 0.05 {
-                format!("{}k", kilos.round() as u64)
-            } else {
-                format!("{kilos:.1}k")
-            }
-        } else {
-            let megas = tokens as f64 / 1_000_000.0;
-            if megas.fract() < 0.05 {
-                format!("{}M", megas.round() as u64)
-            } else {
-                format!("{megas:.1}M")
-            }
-        }
-    }
-    parts.push(format!("↑{} ↓{}", short(input), short(output)));
-    // Order is the sentence the other agents read: how long, how fast, how
-    // much. A fourth slot exists for one extra, and only one: cost beats
-    // the tool count, because money is the number a person acts on and a
-    // tool count is colour. More than that is a log line, not a pace line.
-    if let Some(micros) = cost_micros.filter(|micros| *micros > 0) {
-        let dollars = micros as f64 / 1_000_000.0;
-        let cost = if dollars >= 1.0 {
-            format!("${dollars:.2}")
-        } else if dollars >= 0.1 {
-            format!("${dollars:.3}")
-        } else {
-            format!("${dollars:.4}")
-        };
-        parts.push(cost);
-    } else if tools > 0 {
+    if tools > 0 {
         parts.push(format!(
             "{} {}",
             tools,
             if tools == 1 { "tool" } else { "tools" }
         ));
     }
-    debug_assert!(parts.len() <= 4);
+    if output > 0 && elapsed > 0.0 {
+        let rate = output as f64 / elapsed;
+        parts.push(format!("{} tok/s", rate.round() as u64));
+    }
     Some(parts.join(" · "))
 }
 /// Something the header says needs a person, and the line that fixes it.
@@ -555,6 +508,23 @@ pub struct App {
     /// the transcript has: the `ctrl-r` hint on a thinking header exists
     /// only while the pointer rests on it, and is noise everywhere else.
     pub mouse_row: Option<u16>,
+    /// Short-lived footer status, such as a clipboard confirmation.
+    pub notification: Option<(String, std::time::Instant)>,
+    /// Visual transcript lines being selected by a mouse drag.
+    pub selection_anchor: Option<usize>,
+    pub selection: Option<(usize, usize)>,
+    /// Rendered home rows and their selection state, indexed from the top row.
+    pub home_selection_anchor: Option<usize>,
+    pub home_selection: Option<(usize, usize)>,
+    pub home_selection_lines: Vec<String>,
+    pub home_selection_origin: (u16, u16),
+    pub home_selection_width: u16,
+    /// Rendered rows in the right context rail for mouse selection/copy.
+    pub rail_selection_anchor: Option<usize>,
+    pub rail_selection: Option<(usize, usize)>,
+    pub rail_selection_lines: Vec<String>,
+    pub rail_selection_origin: (u16, u16),
+    pub rail_selection_width: u16,
     /// Set when Enter was pressed; the run loop performs the dispatch so the
     /// pure state never needs an `AppContext`.
     pub pending_submit: bool,
@@ -581,6 +551,18 @@ pub struct App {
     /// the config on refresh, not on every frame: a file read per keystroke is
     /// the wrong price for a label.
     pub model: String,
+    /// Last provider-reported prompt size and known model window.
+    pub context_window_used: Option<u64>,
+    pub context_window_size: Option<u64>,
+    pub context_model: String,
+    pub context_provider: String,
+    pub context_window_override_active: bool,
+    pub context_discovery_key: Option<String>,
+    pub context_window_cache: std::collections::HashMap<String, u64>,
+    /// Reasoning budget currently configured for the selected model.
+    pub reasoning_effort: Option<String>,
+    /// Plan mode asks for a read-only plan and refuses every proposed write.
+    pub plan_mode: bool,
     /// The graph's state when it needs a person, with the verb that fixes it.
     ///
     /// `None` when the graph is indexed and current — the header shows nothing
@@ -718,8 +700,8 @@ pub struct ProviderTestResult {
 pub struct ModelsLoaded {
     /// Preset name the list belongs to (`kilo`, `anthropic`, …).
     pub provider: String,
-    pub ids: Vec<String>,
-    /// `Some` when the fetch failed; `ids` is then empty and must not be read
+    pub models: Vec<crate::provider::ProviderModel>,
+    /// `Some` when the fetch failed; `models` is then empty and must not be read
     /// as "this provider has no models".
     pub error: Option<String>,
 }
@@ -734,7 +716,73 @@ pub struct VerbDone {
     pub result: Result<crate::output::Outcome, String>,
 }
 
+/// Render a burst of tool activity as one calm transcript row. Individual
+/// calls remain available in the trace overlay; the conversation keeps its
+/// attention on the answer.
+fn tool_run_summary(run: &[Entry], width: usize, running: bool) -> String {
+    let calls = run.len();
+    if running {
+        let current = run
+            .iter()
+            .rev()
+            .find(|entry| entry.role == EntryRole::Tool)
+            .unwrap_or(&run[run.len() - 1]);
+        let elapsed = (crate::session::now_ms() - current.at_ms).max(0) / 1000;
+        let age = if elapsed < 60 {
+            format!("{elapsed}s")
+        } else {
+            format!("{}m {:02}s", elapsed / 60, elapsed % 60)
+        };
+        let label = if let Some((_, rest)) = current.text.split_once("{\"path\":\"") {
+            format!("reading {}", rest.split('"').next().unwrap_or("file"))
+        } else if current.text.starts_with("kg ") {
+            "searching code graph".to_string()
+        } else if current.text.starts_with("vault ") {
+            "searching memory".to_string()
+        } else {
+            current.text.clone()
+        };
+        let more = calls.saturating_sub(1);
+        let activity = if more == 0 {
+            format!("{label} · {age}")
+        } else {
+            format!("{label} · +{more} {} · {age}", plural(more, "step"))
+        };
+        return crate::output::ellipsize(&activity, width);
+    }
+
+    let files = run
+        .iter()
+        .filter(|entry| entry.text.starts_with("read file "))
+        .count();
+    let graph = run.iter().any(|entry| entry.text.starts_with("kg "));
+    let memory = run.iter().any(|entry| entry.text.starts_with("vault "));
+    let mut parts = vec![format!("{calls} {}", plural(calls, "step"))];
+    if files > 0 {
+        parts.push(format!("{files} {}", plural(files, "file")));
+    }
+    if graph {
+        parts.push("code graph".to_string());
+    }
+    if memory {
+        parts.push("memory".to_string());
+    }
+    crate::output::ellipsize(&parts.join(" · "), width)
+}
+
+fn plural(count: usize, singular: &str) -> String {
+    if count == 1 {
+        singular.to_string()
+    } else {
+        format!("{singular}s")
+    }
+}
+
 impl App {
+    pub fn notify(&mut self, message: impl Into<String>, duration: std::time::Duration) {
+        self.notification = Some((message.into(), std::time::Instant::now() + duration));
+    }
+
     /// A fresh screen.
     pub fn new(name: &str, resumed: bool) -> Self {
         let (provider_test_tx, provider_test_rx) = mpsc::channel();
@@ -759,6 +807,19 @@ impl App {
             scroll: 0,
             follow: true,
             mouse_row: None,
+            notification: None,
+            selection_anchor: None,
+            selection: None,
+            home_selection_anchor: None,
+            home_selection: None,
+            home_selection_lines: Vec::new(),
+            home_selection_origin: (0, 0),
+            home_selection_width: 0,
+            rail_selection_anchor: None,
+            rail_selection: None,
+            rail_selection_lines: Vec::new(),
+            rail_selection_origin: (0, 0),
+            rail_selection_width: 0,
             pending_submit: false,
             busy: false,
             stream_answer: None,
@@ -771,6 +832,15 @@ impl App {
             delegation_root: None,
             focus_agent: None,
             model: String::new(),
+            context_window_used: None,
+            context_window_size: None,
+            context_model: String::new(),
+            context_provider: String::new(),
+            context_window_override_active: false,
+            context_discovery_key: None,
+            context_window_cache: std::collections::HashMap::new(),
+            reasoning_effort: None,
+            plan_mode: false,
             graph_attention: None,
             root: String::new(),
             vault: String::new(),
@@ -1364,6 +1434,136 @@ impl App {
         }
     }
 
+    /// Extend the active selection to another visual line.
+    pub fn extend_selection(&mut self, line: usize) {
+        if let Some(anchor) = self.selection_anchor {
+            self.selection = Some((anchor.min(line), anchor.max(line)));
+        }
+    }
+
+    /// Finish the drag and return selected transcript text for clipboard copy.
+    pub fn finish_selection(&mut self) -> Option<String> {
+        self.selection_anchor = None;
+        let (first, last) = self.selection?;
+        let lines = self.visual_lines(self.view_width);
+        let text = lines
+            .iter()
+            .skip(first)
+            .take(last.saturating_sub(first) + 1)
+            .map(|(_, line, _)| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string();
+        (!text.is_empty()).then_some(text)
+    }
+
+    /// Cache the home screen's visible text so mouse selection copies exactly
+    /// the rows the current layout rendered, including its compact variants.
+    pub fn set_home_selection_rows(&mut self, x: u16, y: u16, width: u16, rows: Vec<String>) {
+        self.home_selection_origin = (x, y);
+        self.home_selection_width = width;
+        self.home_selection_lines = rows;
+        if let Some((first, last)) = self.home_selection {
+            let end = self.home_selection_lines.len().saturating_sub(1);
+            if self.home_selection_lines.is_empty() {
+                self.home_selection = None;
+                self.home_selection_anchor = None;
+            } else {
+                self.home_selection = Some((first.min(end), last.min(end)));
+            }
+        }
+    }
+
+    /// Map a pointer within the home content pane to its rendered row.
+    pub fn home_selection_line_at(&self, x: u16, y: u16) -> Option<usize> {
+        let (origin_x, origin_y) = self.home_selection_origin;
+        let row = y.checked_sub(origin_y)? as usize;
+        (x >= origin_x
+            && x < origin_x.saturating_add(self.home_selection_width)
+            && row < self.home_selection_lines.len())
+        .then_some(row)
+    }
+
+    pub fn extend_home_selection(&mut self, row: usize) {
+        if let Some(anchor) = self.home_selection_anchor {
+            let end = self.home_selection_lines.len().saturating_sub(1);
+            if !self.home_selection_lines.is_empty() {
+                let row = row.min(end);
+                self.home_selection = Some((anchor.min(row), anchor.max(row)));
+            }
+        }
+    }
+
+    pub fn finish_home_selection(&mut self) -> Option<String> {
+        self.home_selection_anchor = None;
+        let (first, last) = self.home_selection?;
+        let text = self
+            .home_selection_lines
+            .iter()
+            .skip(first)
+            .take(last.saturating_sub(first) + 1)
+            .map(|line| line.trim())
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        (!text.is_empty()).then_some(text)
+    }
+
+    pub fn set_rail_selection_rows(&mut self, x: u16, y: u16, width: u16, rows: Vec<String>) {
+        self.rail_selection_origin = (x, y);
+        self.rail_selection_width = width;
+        self.rail_selection_lines = rows;
+        if let Some((first, last)) = self.rail_selection {
+            let end = self.rail_selection_lines.len().saturating_sub(1);
+            if self.rail_selection_lines.is_empty() {
+                self.rail_selection = None;
+                self.rail_selection_anchor = None;
+            } else {
+                self.rail_selection = Some((first.min(end), last.min(end)));
+            }
+        }
+    }
+
+    pub fn rail_selection_line_at(&self, x: u16, y: u16) -> Option<usize> {
+        let (origin_x, origin_y) = self.rail_selection_origin;
+        let row = y.checked_sub(origin_y)? as usize;
+        (x >= origin_x
+            && x < origin_x.saturating_add(self.rail_selection_width)
+            && row < self.rail_selection_lines.len())
+        .then_some(row)
+    }
+
+    pub fn extend_rail_selection(&mut self, row: usize) {
+        if let Some(anchor) = self.rail_selection_anchor {
+            let end = self.rail_selection_lines.len().saturating_sub(1);
+            if !self.rail_selection_lines.is_empty() {
+                let row = row.min(end);
+                self.rail_selection = Some((anchor.min(row), anchor.max(row)));
+            }
+        }
+    }
+
+    pub fn finish_rail_selection(&mut self) -> Option<String> {
+        self.rail_selection_anchor = None;
+        let (first, last) = self.rail_selection?;
+        let text = self
+            .rail_selection_lines
+            .iter()
+            .skip(first)
+            .take(last.saturating_sub(first) + 1)
+            .map(|line| line.trim())
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        (!text.is_empty()).then_some(text)
+    }
+
     /// Scroll down one page; reaching the end resumes following.
     pub fn page_down(&mut self) {
         self.scroll = self.scroll.saturating_add(self.view_height.max(1));
@@ -1408,13 +1608,41 @@ impl App {
         // terminal re-wrap the last word onto a line of its own.
         let width = width.saturating_sub(GUTTER).max(1);
         let mut out = Vec::new();
+        let mut tool_group_end = 0;
         for (index, entry) in self.entries.iter().enumerate() {
+            if index < tool_group_end {
+                continue;
+            }
             // A turn ends with a blank line: the space is what separates the
             // previous answer from the next question, not a rule and not a
             // glyph. The blank never carries one either — a `›` on an empty
             // row reads as a second prompt.
             if entry.role == EntryRole::User && index > 0 {
                 out.push((EntryRole::User, ratatui::text::Line::from(""), false));
+            }
+            if matches!(entry.role, EntryRole::Tool | EntryRole::ToolDone) {
+                let end = self.entries[index..]
+                    .iter()
+                    .position(|candidate| {
+                        !matches!(candidate.role, EntryRole::Tool | EntryRole::ToolDone)
+                    })
+                    .map_or(self.entries.len(), |offset| index + offset);
+                let run = &self.entries[index..end];
+                tool_group_end = end;
+                let running = run.iter().any(|item| item.role == EntryRole::Tool);
+                let summary = tool_run_summary(run, width, running);
+                out.push((
+                    if running {
+                        EntryRole::Tool
+                    } else {
+                        EntryRole::ToolDone
+                    },
+                    ratatui::text::Line::from(summary),
+                    true,
+                ));
+                // A whole burst of calls is one transcript event. The trace
+                // overlay remains the place for individual calls and details.
+                continue;
             }
             if entry.role == EntryRole::Thinking {
                 // The industry shape, from Claude Code and friends: collapsed
@@ -1451,20 +1679,7 @@ impl App {
                 }
                 continue;
             }
-            // A running tool row carries its elapsed time: a turn that works
-            // reports its own pace, and the row stops changing the moment
-            // the result lands.
-            let text = if entry.role == EntryRole::Tool && entry.live {
-                let elapsed = (crate::session::now_ms() - entry.at_ms).max(0) / 1000;
-                let age = if elapsed < 60 {
-                    format!("{elapsed}s")
-                } else {
-                    format!("{}m {:02}s", elapsed / 60, elapsed % 60)
-                };
-                format!("{} · {age}", entry.text)
-            } else {
-                entry.text.clone()
-            };
+            let text = entry.text.clone();
             // An answer is markdown and is rendered as such: headings without
             // their hashes, bullets with a hanging indent, code without its
             // backticks. A prompt or a tool row is text the person typed or the
@@ -1767,6 +1982,7 @@ fn parse_line_inner(raw: &str, suggest: bool) -> Parsed {
         // `/model` was a second, mock copy of the same browser. One name is an
         // alias now, so both spellings open the surface that actually works.
         "model" | "models" => Parsed::ModelsOverlay,
+        "mcps" => Parsed::McpsOverlay,
         "tasks" => parse_tasks(&args),
         "connect" => Parsed::ConnectOverlay,
         "login" => Parsed::Login,
@@ -3272,6 +3488,17 @@ fn parse_kg(args: &[String]) -> Parsed {
         "status" => Parsed::Run(Verb::Kg(KgArgs {
             action: KgCommand::Status,
         })),
+        "viz" => {
+            let (flags, _) = split_flags(rest);
+            Parsed::Run(Verb::Kg(KgArgs {
+                action: KgCommand::Viz {
+                    limit: flags
+                        .get("limit")
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(1800),
+                },
+            }))
+        }
         "impact" => {
             let (flags, positional) = split_flags(rest);
             if positional.is_empty() {
@@ -4293,7 +4520,7 @@ fn is_subsequence(needle: &str, haystack: &str) -> bool {
 
 const VAULT_USAGE: &str = "usage: /vault init|status|asof|history|contradictions|remember|recall|forget|correct|link|unlink|search|export|import|gc|prune|reindex|stats|backup|restore|audit|merge|duplicates|top|timeline|explain|graph";
 const SKILL_USAGE: &str = "usage: /skill add|list|remove|run|edit";
-const KG_USAGE: &str = "usage: /kg index|status|impact|search|explore|refs|callers|callees|def|diff-impact|callpath|outline|tree|review|tests-for|owners|dead-code|cycles|hotspots|unused-exports|deps|query|watch|serve";
+const KG_USAGE: &str = "usage: /kg index|status|viz|impact|search|explore|refs|callers|callees|def|diff-impact|callpath|outline|tree|review|tests-for|owners|dead-code|cycles|hotspots|unused-exports|deps|query|watch|serve";
 
 /// Plain text search results as one answer, with the empty case said plainly.
 ///
@@ -4845,32 +5072,27 @@ mod tests {
     }
 
     #[test]
-    fn the_pace_line_reads_like_the_other_agents() {
+    fn the_turn_summary_shows_time_tools_and_throughput_only() {
         assert_eq!(
             turn_stats(17_000, 24_000, 94, Some(1_700), 3).as_deref(),
-            // Cost and tools compete for the fourth slot; money wins.
-            Some("17s · 5.5 tps · ↑24k ↓94 · $0.0017")
+            Some("17s · 3 tools · 6 tok/s")
         );
         assert_eq!(
             turn_stats(17_000, 24_000, 94, None, 3).as_deref(),
-            Some("17s · 5.5 tps · ↑24k ↓94 · 3 tools")
+            Some("17s · 3 tools · 6 tok/s")
         );
         assert_eq!(
             turn_stats(17_000, 24_000, 94, None, 0).as_deref(),
-            Some("17s · 5.5 tps · ↑24k ↓94")
+            Some("17s · 6 tok/s")
         );
         assert_eq!(
             turn_stats(30_000, 5_000, 500, Some(120_000), 1).as_deref(),
-            Some("30s · 16.7 tps · ↑5k ↓500 · $0.120")
+            Some("30s · 1 tool · 17 tok/s")
         );
-        assert_eq!(
-            turn_stats(0, 0, 0, None, 0),
-            None,
-            "an unpriced turn says nothing"
-        );
+        assert_eq!(turn_stats(0, 0, 0, None, 0).as_deref(), Some("0.0s"));
         assert_eq!(
             turn_stats(90_000, 812, 1_500, None, 0).as_deref(),
-            Some("1m 30s · 16.7 tps · ↑812 ↓1.5k")
+            Some("1m 30s · 17 tok/s")
         );
     }
 
@@ -4879,7 +5101,7 @@ mod tests {
         let mut app = App::new("s", false);
         app.append_stream_delta("the answer");
         let index = app.stream_answer.unwrap();
-        app.entries[index].stats = Some("17s · 5.5 tps · ↑24k ↓94".to_string());
+        app.entries[index].stats = Some("17s · 3 tools · 6 tok/s".to_string());
         app.finish_stream();
         let visual = app.visual_lines(96);
         let texts: Vec<String> = visual
@@ -4895,7 +5117,7 @@ mod tests {
             .iter()
             .position(|text| text == "the answer")
             .expect("the answer renders");
-        assert_eq!(texts[position + 1], "17s · 5.5 tps · ↑24k ↓94");
+        assert_eq!(texts[position + 1], "17s · 3 tools · 6 tok/s");
     }
 
     #[test]
@@ -4927,6 +5149,33 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(!text.contains("0s"), "resolved rows stop ageing: {text}");
+    }
+
+    #[test]
+    fn a_tool_burst_is_one_quiet_transcript_row() {
+        let mut app = App::new("s", false);
+        app.push_tool("kg status");
+        app.push_tool("read file {\"path\":\"Cargo.toml\"}");
+        app.push_tool("read file {\"path\":\"README.md\"}");
+        let active = app.visual_lines(96);
+        let active_text = active
+            .iter()
+            .map(|(_, line, _)| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            active_text.contains("reading README.md · +2 steps"),
+            "{active_text}"
+        );
+        assert_eq!(active.len(), 1, "a running burst occupies one row");
+
+        app.resolve_tools(0);
+        let done = app.visual_lines(96);
+        assert_eq!(done.len(), 1, "finished calls collapse into one summary");
+        let summary = done[0].1.to_string();
+        assert!(summary.contains("3 steps"), "{summary}");
+        assert!(summary.contains("2 files"), "{summary}");
+        assert!(summary.contains("code graph"), "{summary}");
     }
 
     #[test]
