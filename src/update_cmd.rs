@@ -199,17 +199,7 @@ fn install_into(
     let mut installed = Vec::new();
 
     if !running_here {
-        let staging = install_dir.join(format!(".memnoth{suffix}.new"));
-        fs::copy(current, &staging).map_err(failure)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&staging, fs::Permissions::from_mode(0o755)).map_err(failure)?;
-        }
-        if binary.exists() {
-            fs::remove_file(&binary).map_err(failure)?;
-        }
-        fs::rename(&staging, &binary).map_err(failure)?;
+        install_copy(current, &binary)?;
         installed.push(file_label(&binary, install_dir));
     }
 
@@ -235,6 +225,44 @@ fn install_into(
     Ok(installed)
 }
 
+/// Put `source` at `destination`, keeping any image the system will not let go.
+///
+/// The copy is staged beside the destination and renamed, so a shell never
+/// finds half a binary. Windows refuses to delete an image a process is running
+/// from, but it allows the name to be renamed: the running session keeps its
+/// handle and the next launch gets the new build. A delete would fail with
+/// `Access is denied` — which is what an install over a live session is.
+fn install_copy(source: &Path, destination: &Path) -> Result<(), ErrorOutcome> {
+    let name = destination
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "memnoth".to_string());
+    let staging = destination.with_file_name(format!(".{name}.new"));
+    let _ = fs::remove_file(&staging);
+    fs::copy(source, &staging).map_err(failure)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&staging, fs::Permissions::from_mode(0o755)).map_err(failure)?;
+    }
+    if destination.exists() {
+        #[cfg(windows)]
+        {
+            let backup = destination.with_file_name(format!("{name}.old"));
+            let _ = fs::remove_file(&backup);
+            if fs::rename(destination, &backup).is_err() {
+                let aside =
+                    destination.with_file_name(format!("{name}.old-{}", crate::session::now_ms()));
+                fs::rename(destination, &aside).map_err(failure)?;
+            }
+        }
+        #[cfg(not(windows))]
+        fs::remove_file(destination).map_err(failure)?;
+    }
+    fs::rename(&staging, destination).map_err(failure)?;
+    Ok(())
+}
+
 /// The short name, beside the installed binary.
 ///
 /// Unix gets the relative symlink the shell installer makes — one file to
@@ -255,32 +283,14 @@ fn install_alias(binary: &Path, install_dir: &Path) -> Result<String, ErrorOutco
     }
     #[cfg(windows)]
     {
-        // The alias forwards by name, so the copy is what matters here; the
-        // parameter is only read by the Unix fallback that copies it.
-        let _ = binary;
-        let alias = install_dir.join("mn.ps1");
-        fs::write(&alias, MN_ALIAS_SCRIPT).map_err(failure)?;
-        Ok("mn.ps1 (forwards to memnoth.exe)".to_string())
+        // A copy, not a script: `mn` typed in cmd or PowerShell finds an .exe
+        // on PATH, while a .ps1 needs its extension. This is the name the
+        // previous installs already have, so the new build replaces it.
+        let alias = install_dir.join(format!("mn{}", env::consts::EXE_SUFFIX));
+        install_copy(binary, &alias)?;
+        Ok(format!("mn{} (same build)", env::consts::EXE_SUFFIX))
     }
 }
-
-/// The Windows alias, byte for byte what `scripts/install.ps1` writes.
-#[cfg(windows)]
-const MN_ALIAS_SCRIPT: &str = r#"<#
-.SYNOPSIS
-    mn - memnoth short alias
-
-.DESCRIPTION
-    This is a generated alias script that forwards all arguments to memnoth.exe.
-    It is created by `memnoth install` and updated on each install.
-#>
-$memnoth = Join-Path $PSScriptRoot 'memnoth.exe'
-if (-not (Test-Path $memnoth)) {
-    Write-Error "memnoth.exe not found at $memnoth"
-    exit 1
-}
-& $memnoth @args
-"#;
 
 /// Execute uninstall verb.
 ///
@@ -862,7 +872,10 @@ mod tests {
             "the short name is the shell installer's relative symlink"
         );
         #[cfg(windows)]
-        assert!(install_dir.join("mn.ps1").exists());
+        assert!(
+            install_dir.join(format!("mn{suffix}")).exists(),
+            "the Windows short name is a copy that cmd and PowerShell both run"
+        );
 
         // A second install must not replace a build that may be running.
         let refused = install_into(&source, &install_dir, false).unwrap_err();
