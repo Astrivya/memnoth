@@ -475,6 +475,40 @@ pub fn build_p0_registry() -> RegistryBuilder {
 
     builder = builder
         .command(CommandSpec {
+            id: "kg.viz".into(),
+            cli_path: vec!["kg".into(), "viz".into()],
+            slash: SlashSpec {
+                name: "viz".into(),
+                palette: Some("kg viz".into()),
+                description: "Index if needed, then open the code graph".into(),
+                long_description: Some("Updates a missing or stale index locally, then opens the offline graph viewer. Browse symbols by source folder, search declarations, filter kinds, and inspect textual mention links. Available in the session as `/kg viz`.".into()),
+                params: vec![ParamSpec::integer_opt(
+                    "limit",
+                    "Maximum symbols to draw (100–6000)",
+                    1800,
+                )],
+                overlay: OverlayType::None,
+                danger: DangerLevel::Safe,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["kg".into()],
+                aliases: vec![],
+                hidden: false,
+                deprecated: None,
+                examples: vec!["kg viz".into(), "kg viz --limit 3000".into()],
+            },
+            handler: "kg_viz".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["kg".into(), "visualization".into()],
+            related: vec!["kg.index".into(), "kg.status".into()],
+        })
+        .unwrap();
+
+    builder = builder
+        .command(CommandSpec {
             id: "kg.status".into(),
             cli_path: vec!["kg".into(), "status".into()],
             slash: SlashSpec {

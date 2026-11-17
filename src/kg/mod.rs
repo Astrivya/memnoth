@@ -25,6 +25,9 @@
 mod extract;
 mod render;
 mod store;
+mod viz;
+
+pub use viz::{GraphVizReport, IndexUpdate, viz};
 
 pub use render::{
     render_callees, render_callers, render_callpath, render_cycles, render_dead_code, render_def,

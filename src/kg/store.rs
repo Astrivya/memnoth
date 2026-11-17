@@ -543,6 +543,27 @@ impl Graph {
         Ok(out)
     }
 
+    /// A bounded, deterministic slice of reference rows for the local graph viewer.
+    pub fn visualization_refs(&self, limit: usize) -> Result<Vec<RefRow>> {
+        let mut statement = self.conn.prepare(
+            "SELECT DISTINCT name, path, line, COALESCE(container, '')
+             FROM refs ORDER BY path, line LIMIT ?1",
+        )?;
+        let rows = statement.query_map(params![limit as i64], |row| {
+            Ok(RefRow {
+                name: row.get(0)?,
+                path: row.get(1)?,
+                line: row.get::<_, i64>(2)?.max(0) as usize,
+                container: empty_to_none(row.get(3)?),
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     /// Names declared in the given files (for the second impact hop).
     pub fn names_in_files(&self, paths: &[String]) -> Result<Vec<String>> {
         if paths.is_empty() {

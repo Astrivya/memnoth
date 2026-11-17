@@ -546,7 +546,7 @@ pub fn update_file(store: &mut Store, root: &Path, file: &str) -> Result<IndexRe
         report.symbols_extracted += 1;
     }
 
-    let hash = format!("{:x}", content.len());
+    let hash = blake3::hash(content.as_bytes()).to_hex().to_string();
     store.conn.execute(
         "INSERT OR REPLACE INTO files (path, language, hash, last_indexed) VALUES (?, ?, ?, ?)",
         params![file, detect_language(&file_path), hash, 0],
@@ -1287,7 +1287,7 @@ pub fn staleness_report(store: &Store, root: &Path, max_checks: usize) -> Result
         checked += 1;
         let current = std::fs::read(root.join(&path))
             .ok()
-            .map(|bytes| format!("{:x}", bytes.len()));
+            .map(|bytes| blake3::hash(&bytes).to_hex().to_string());
         if current != recorded {
             stale_files += 1;
         }

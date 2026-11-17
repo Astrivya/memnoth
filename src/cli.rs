@@ -2937,6 +2937,12 @@ pub enum KgCommand {
         #[arg(long, default_value_t = 3030)]
         port: u16,
     },
+    /// Open an interactive visualization of the indexed code graph.
+    Viz {
+        /// Maximum symbols to draw (the highest-connection symbols are kept).
+        #[arg(long, default_value_t = 1800)]
+        limit: usize,
+    },
 }
 
 /// `memnoth mcp …`.

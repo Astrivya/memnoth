@@ -490,6 +490,35 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
                     },
                 ))
             }
+            KgCommand::Viz { limit } => {
+                let report = kg::viz(ctx, *limit).map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                let data = serde_json::to_value(&report)
+                    .context("serialize kg visualization report")
+                    .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                let index_note = report
+                    .index_update
+                    .as_ref()
+                    .map(|update| {
+                        format!(
+                            " · auto-indexed locally ({}, {} ms)",
+                            if update.full_rebuild {
+                                "full rebuild"
+                            } else {
+                                "incremental update"
+                            },
+                            update.elapsed_ms
+                        )
+                    })
+                    .unwrap_or_default();
+                Ok(Outcome::new(
+                    "kg.viz",
+                    format!(
+                        "Opened code graph · {} symbols · {} mention links · {} omitted{}",
+                        report.symbols, report.edges, report.omitted_symbols, index_note
+                    ),
+                    data,
+                ))
+            }
         },
         Verb::Mcp(args) => match &args.action {
             McpCommand::Serve { http, db, profile } => {
