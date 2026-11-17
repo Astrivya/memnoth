@@ -14,10 +14,10 @@ pub use types::{
     IngestCounts, IngestEvent, InstanceCounts, Invite, InviteCreated, InvitesResponse,
     KeysResponse, McpTokenResponse, Me, Member, MemberAdded, MembersResponse, ModelInfo,
     ModelUsage, OkResponse, OrgEnvelope, OrgInfo, OrgSwitch, OrganizationInfo,
-    OrganizationsResponse, PlaneStatus, ProjectEnvelope, ProjectInfo, ProjectSettings,
-    ProjectUsage, ProjectsResponse, RevokeKeyResponse, SessionReport, SyncManifestAck,
-    SyncManifestList, SyncManifestSummary, SyncObjectAck, Team, TeamDetail, TeamEnvelope,
-    TeamMember, TeamProject, TeamsResponse,
+    OrganizationsResponse, PlaneStatus, ProjectEnvelope, ProjectGraphSyncStatus, ProjectInfo,
+    ProjectSettings, ProjectUsage, ProjectsResponse, RevokeKeyResponse, SessionReport,
+    SyncManifestAck, SyncManifestList, SyncManifestSummary, SyncObjectAck, Team, TeamDetail,
+    TeamEnvelope, TeamMember, TeamProject, TeamsResponse,
 };
 
 /// Response from GET /api/v1/models
@@ -761,6 +761,80 @@ impl CloudClient {
             .unwrap_or(0))
     }
 
+    /// Read encrypted graph snapshot metadata for a project.
+    pub fn project_graph_sync_status(
+        &self,
+        project_id: &str,
+    ) -> CloudResult<ProjectGraphSyncStatus> {
+        let response = self.get(&format!("projects/{project_id}/graph-sync"))?;
+        Self::handle_response(response)
+    }
+
+    /// Download a versioned encrypted graph snapshot.
+    pub fn project_graph_sync_snapshot(
+        &self,
+        project_id: &str,
+        version: i64,
+    ) -> CloudResult<Vec<u8>> {
+        let response = self.get(&format!("projects/{project_id}/graph-sync/{version}"))?;
+        Self::handle_bytes(response)
+    }
+
+    /// Upload a complete encrypted graph snapshot using compare-and-swap.
+    pub fn put_project_graph_sync_snapshot(
+        &self,
+        project_id: &str,
+        base_version: i64,
+        ciphertext: &[u8],
+        ciphertext_hash: &str,
+    ) -> CloudResult<ProjectGraphSyncStatus> {
+        let url = self
+            .base_url
+            .join(&format!("projects/{project_id}/graph-sync"))
+            .map_err(|e| CloudError::InvalidUrl(e.to_string()))?;
+        let mut headers = self.headers();
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/octet-stream"),
+        );
+        headers.insert(
+            "x-memnoth-ciphertext-hash",
+            HeaderValue::from_str(ciphertext_hash)
+                .map_err(|e| CloudError::ConfigError(e.to_string()))?,
+        );
+        headers.insert(
+            "x-memnoth-base-version",
+            HeaderValue::from_str(&base_version.to_string())
+                .map_err(|e| CloudError::ConfigError(e.to_string()))?,
+        );
+        let response = self
+            .client
+            .put(url)
+            .headers(headers)
+            .body(ciphertext.to_vec())
+            .send()
+            .map_err(|e| CloudError::NetworkError(e.to_string()))?;
+        Self::handle_response(response)
+    }
+
+    /// Purge the current encrypted graph snapshot (project admin required).
+    pub fn purge_project_graph_sync(
+        &self,
+        project_id: &str,
+    ) -> CloudResult<crate::types::OkResponse> {
+        let url = self
+            .base_url
+            .join(&format!("projects/{project_id}/graph-sync"))
+            .map_err(|e| CloudError::InvalidUrl(e.to_string()))?;
+        let response = self
+            .client
+            .delete(url)
+            .headers(self.headers())
+            .send()
+            .map_err(|e| CloudError::NetworkError(e.to_string()))?;
+        Self::handle_response(response)
+    }
+
     /// Read a binary response, mapping an error body through the same table as
     /// every JSON route.
     fn handle_bytes(response: reqwest::blocking::Response) -> CloudResult<Vec<u8>> {
@@ -1073,6 +1147,33 @@ mod tests {
         assert!(params.range.is_none());
         assert!(params.by.is_none());
         assert!(params.since.is_none());
+    }
+
+    #[test]
+    fn graph_snapshot_put_sends_ciphertext_hash_and_cas_version() {
+        let mut server = mockito::Server::new();
+        let project = "c9e6b28b-7906-4321-b843-72f60db8aafd";
+        let body = b"encrypted graph";
+        let hash = "a".repeat(64);
+        let mock = server
+            .mock("PUT", format!("/api/v1/projects/{project}/graph-sync").as_str())
+            .match_header("content-type", "application/octet-stream")
+            .match_header("x-memnoth-ciphertext-hash", hash.as_str())
+            .match_header("x-memnoth-base-version", "4")
+            .match_body(body.to_vec())
+            .with_status(200)
+            .with_body(format!(
+                r#"{{"project_id":"{project}","version":5,"ciphertext_hash":"{hash}","size_bytes":15,"updated_at":"2026-11-17T10:00:00Z"}}"#
+            ))
+            .create();
+        let mut client = CloudClient::with_base_url(&server.url()).unwrap();
+        client.set_auth_token("test-token".into());
+
+        let status = client
+            .put_project_graph_sync_snapshot(project, 4, body, &hash)
+            .unwrap();
+        assert_eq!(status.version, 5);
+        mock.assert();
     }
 }
 #[cfg(test)]

@@ -463,13 +463,52 @@ fn sync_status(ctx: &AppContext) -> Result<Outcome> {
         .as_ref()
         .and_then(|sync| sync.enabled)
         .unwrap_or(false);
+    let project_graph = crate::report::project_id(ctx)
+        .map(|project| crate::project_graph_sync::local_status(ctx, &project))
+        .transpose()?;
+    let graph_line = match &project_graph {
+        Some(graph) => {
+            let last_sync = graph
+                .last_synced_at_unix_secs
+                .and_then(|seconds| {
+                    chrono::DateTime::<chrono::Utc>::from_timestamp(seconds as i64, 0)
+                })
+                .map(|time| time.to_rfc3339())
+                .unwrap_or_else(|| "unknown".into());
+            format!(
+                "\n  graph       project {} · v{} · symbols {} · stale {} · local {} B · encrypted {} B · last {} · pending {} (local cursor; run `mn sync now` to check Cloud)",
+                graph.project_id,
+                graph.last_synced_version,
+                graph
+                    .graph_symbols
+                    .map_or_else(|| "unknown".into(), |value| value.to_string()),
+                graph
+                    .stale_files
+                    .map_or_else(|| "unknown".into(), |value| value.to_string()),
+                graph
+                    .local_graph_bytes
+                    .map_or_else(|| "unknown".into(), |value| value.to_string()),
+                graph
+                    .last_synced_ciphertext_bytes
+                    .map_or_else(|| "unknown".into(), |value| value.to_string()),
+                last_sync,
+                if graph.encrypted_upload_pending {
+                    "yes"
+                } else {
+                    "no"
+                },
+            )
+        }
+        None => "\n  graph       no cloud project selected".to_string(),
+    };
     let text = format!(
-        "sync {}\n  generation  {}\n  manifest    {}\n  vault hash  {}\n  pending     {}",
+        "sync {}\n  generation  {}\n  manifest    {}\n  vault hash  {}\n  pending     {}{}",
         if enabled { "enabled" } else { "paused" },
         state.generation,
         state.manifest_hash.as_deref().unwrap_or("none"),
         state.vault_hash.as_deref().unwrap_or("none"),
         if state.pending.is_some() { "yes" } else { "no" },
+        graph_line,
     );
     Ok(Outcome::new(
         "sync.status",
@@ -483,6 +522,7 @@ fn sync_status(ctx: &AppContext) -> Result<Outcome> {
             "vault_hash": state.vault_hash,
             "object_hash": state.object_hash,
             "pending": state.pending.is_some(),
+            "project_graph": project_graph,
         }),
     ))
 }
@@ -511,12 +551,24 @@ fn sync_now(ctx: &AppContext, phrase: Option<&str>) -> Result<Outcome> {
     // local edit is merged additively, never overwritten without `restore --force`.
     let pulled = crate::sync_engine::pull(&paths, &client, &phrase, &org, false)?;
     let pushed = crate::sync_engine::push(&paths, &client, &phrase, &org, &device)?;
+    let project_graph = crate::report::project_id(ctx)
+        .map(|project| {
+            crate::project_graph_sync::sync_project(ctx, &client, &phrase, &org, &project)
+        })
+        .transpose()?;
 
     Ok(Outcome::new(
         "sync.now",
         format!(
-            "sync complete: pulled generation {} ({} merged, {} conflicts), pushed generation {}",
-            pulled.generation, pulled.merged_events, pulled.conflicts, pushed.generation
+            "sync complete: pulled generation {} ({} merged, {} conflicts), pushed generation {}{}",
+            pulled.generation,
+            pulled.merged_events,
+            pulled.conflicts,
+            pushed.generation,
+            project_graph
+                .as_ref()
+                .map(|graph| format!("; graph {} v{}", graph.note, graph.version))
+                .unwrap_or_default()
         ),
         json!({
             "pulled": pulled.changed,
@@ -527,6 +579,12 @@ fn sync_now(ctx: &AppContext, phrase: Option<&str>) -> Result<Outcome> {
             "manifest_hash": pushed.manifest_hash,
             "object_hash": pushed.object_hash,
             "bytes_uploaded": pushed.bytes_uploaded,
+            "project_graph": project_graph.as_ref().map(|graph| json!({
+                "changed": graph.changed,
+                "version": graph.version,
+                "bytes": graph.bytes,
+                "note": graph.note,
+            })),
         }),
     ))
 }
@@ -536,6 +594,11 @@ fn sync_restore(ctx: &AppContext, phrase: Option<&str>, force: bool) -> Result<O
     let (client, org) = sync_identity(ctx)?;
     let paths = crate::sync_engine::SyncPaths::from_context(ctx);
     let pulled = crate::sync_engine::pull(&paths, &client, &phrase, &org, force)?;
+    let project_graph = crate::report::project_id(ctx)
+        .map(|project| {
+            crate::project_graph_sync::restore_project(ctx, &client, &phrase, &org, &project)
+        })
+        .transpose()?;
     Ok(Outcome::new(
         "sync.restore",
         if pulled.changed {
@@ -549,6 +612,12 @@ fn sync_restore(ctx: &AppContext, phrase: Option<&str>, force: bool) -> Result<O
             "bytes_written": pulled.bytes_written,
             "merged_events": pulled.merged_events,
             "conflicts": pulled.conflicts,
+            "project_graph": project_graph.as_ref().map(|graph| json!({
+                "changed": graph.changed,
+                "version": graph.version,
+                "bytes": graph.bytes,
+                "note": graph.note,
+            })),
         }),
     ))
 }
@@ -921,6 +990,26 @@ const OUTBOUND_PATHS: &[OutboundPath] = &[
         ],
     },
     OutboundPath {
+        name: "project graph sync",
+        endpoint: "GET/PUT /api/v1/projects/{id}/graph-sync",
+        when: "`mn sync now` or `mn sync restore` for a selected Cloud project",
+        gate: "explicit sync command; project membership and role are checked by Cloud",
+        fields: &[
+            "encrypted graph snapshot",
+            "project_id",
+            "ciphertext_hash",
+            "size_bytes",
+            "version",
+        ],
+    },
+    OutboundPath {
+        name: "hosted MCP request",
+        endpoint: "POST /mcp (configured hosted MCP endpoint)",
+        when: "an MCP client calls a tool on the hosted server",
+        gate: "the user registers or selects the hosted server and invokes a tool",
+        fields: &["bearer token", "tool name", "tool arguments"],
+    },
+    OutboundPath {
         name: "heartbeat",
         endpoint: "POST /api/v1/instances/heartbeat",
         when: "beside every session report, and every 30s under `mn sync --watch`",
@@ -970,8 +1059,8 @@ const OUTBOUND_PATHS: &[OutboundPath] = &[
     OutboundPath {
         name: "update check",
         endpoint: "GET <dist>/latest/manifest.json",
-        when: "`mn update` or `mn update --check`",
-        gate: "explicit user action; there is no passive background check",
+        when: "`mn update`, `mn update --check`, or the rate-limited session-start check",
+        gate: "explicit action, or once per 24 hours unless `NO_UPDATE_NOTIFIER` or `CI` is set",
         fields: &["nothing but the request itself (the manifest is public)"],
     },
     OutboundPath {
@@ -1136,6 +1225,9 @@ mod tests {
             "heartbeat",
             "feedback",
             "MCP cloud ingest",
+            "project graph sync",
+            "hosted MCP request",
+            "update check",
         ] {
             assert!(
                 OUTBOUND_PATHS.iter().any(|path| path.name == required),
@@ -1146,5 +1238,25 @@ mod tests {
             assert!(!path.fields.is_empty(), "{} lists no fields", path.name);
             assert!(!path.gate.is_empty(), "{} names no gate", path.name);
         }
+        let graph = OUTBOUND_PATHS
+            .iter()
+            .find(|path| path.name == "project graph sync")
+            .unwrap();
+        assert!(graph.endpoint.contains("/projects/{id}/graph-sync"));
+        assert!(graph.fields.contains(&"encrypted graph snapshot"));
+        assert!(!graph.fields.contains(&"recovery phrase"));
+
+        let hosted_mcp = OUTBOUND_PATHS
+            .iter()
+            .find(|path| path.name == "hosted MCP request")
+            .unwrap();
+        assert!(hosted_mcp.endpoint.starts_with("POST /mcp"));
+        assert!(hosted_mcp.fields.contains(&"tool arguments"));
+
+        let update = OUTBOUND_PATHS
+            .iter()
+            .find(|path| path.name == "update check")
+            .unwrap();
+        assert!(update.gate.contains("NO_UPDATE_NOTIFIER"));
     }
 }

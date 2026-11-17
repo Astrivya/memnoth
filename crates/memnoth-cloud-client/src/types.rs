@@ -904,6 +904,19 @@ pub struct SyncObjectAck {
     pub offset: i64,
 }
 
+/// Current encrypted code-graph snapshot for a cloud project.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProjectGraphSyncStatus {
+    pub project_id: String,
+    pub version: i64,
+    #[serde(default)]
+    pub ciphertext_hash: Option<String>,
+    #[serde(default)]
+    pub size_bytes: Option<i64>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
+}
+
 /// Generic error response from the API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiErrorResponse {

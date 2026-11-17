@@ -122,6 +122,21 @@ impl OrgSalt {
     }
 }
 
+/// A stable salt for one project graph. The dedicated domain and both
+/// identifiers keep graph keys separate from the org vault key and from other
+/// projects that share the same recovery phrase.
+pub fn project_graph_salt(org: &str, project: &str) -> OrgSalt {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"memnoth-project-graph-sync-salt-v1:");
+    hasher.update(org.trim().to_ascii_lowercase().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(project.trim().to_ascii_lowercase().as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; SALT_BYTES];
+    bytes.copy_from_slice(&digest.as_bytes()[..SALT_BYTES]);
+    OrgSalt::from_bytes(bytes)
+}
+
 /// The derived key, zeroized when it is dropped.
 pub struct OrgKey {
     key: Zeroizing<[u8; KEY_BYTES]>,
@@ -297,6 +312,15 @@ impl Manifest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_graph_salts_are_domain_and_project_separated() {
+        let project = project_graph_salt("org-a", "project-a");
+        assert_ne!(project, OrgSalt::for_org("org-a"));
+        assert_ne!(project, project_graph_salt("org-a", "project-b"));
+        assert_ne!(project, project_graph_salt("org-b", "project-a"));
+        assert_eq!(project, project_graph_salt("ORG-A", "PROJECT-A"));
+    }
 
     fn test_org_key() -> OrgKey {
         let salt = OrgSalt::for_org("canonical-test-org");

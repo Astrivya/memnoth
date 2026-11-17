@@ -65,6 +65,7 @@ pub mod receipt;
 pub mod report;
 pub mod sandbox;
 
+pub mod project_graph_sync;
 pub mod serve;
 pub mod session;
 pub mod session_cmd;

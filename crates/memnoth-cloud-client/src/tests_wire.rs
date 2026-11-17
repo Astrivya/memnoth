@@ -16,10 +16,25 @@ use crate::types::{
     ApiKeyInfo, ApprovedAccountKey, BillingEntitlements, CreateKeyResponse, CreditGrant,
     CreditLedgerEntry, CreditsResponse, Invite, InviteCreated, InvitesResponse, KeysResponse,
     McpTokenResponse, Me, Member, MemberAdded, MembersResponse, OrgEnvelope, OrgInfo,
-    OrganizationInfo, OrganizationsResponse, ProjectInfo, ProjectsResponse, Team, TeamDetail,
-    TeamEnvelope, TeamsResponse,
+    OrganizationInfo, OrganizationsResponse, ProjectGraphSyncStatus, ProjectInfo, ProjectsResponse,
+    Team, TeamDetail, TeamEnvelope, TeamsResponse,
 };
 use crate::{CloudClient, ModelRow, UsageResponse};
+
+#[test]
+fn project_graph_sync_status_parses_an_empty_and_populated_snapshot() {
+    let empty: ProjectGraphSyncStatus = serde_json::from_str(
+        r#"{"project_id":"c9e6b28b-7906-4321-b843-72f60db8aafd","version":0,"ciphertext_hash":null,"size_bytes":null,"updated_at":null}"#,
+    ).unwrap();
+    assert_eq!(empty.version, 0);
+    assert_eq!(empty.ciphertext_hash, None);
+
+    let populated: ProjectGraphSyncStatus = serde_json::from_str(
+        r#"{"project_id":"c9e6b28b-7906-4321-b843-72f60db8aafd","version":3,"ciphertext_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size_bytes":4096,"updated_at":"2026-11-17T10:00:00Z"}"#,
+    ).unwrap();
+    assert_eq!(populated.version, 3);
+    assert_eq!(populated.size_bytes, Some(4096));
+}
 
 /// `POST /api/v1/auth/token` answers with an account key, not an OAuth envelope.
 ///
