@@ -226,12 +226,22 @@ jobs:
       # a downloaded binary; stapling bundles the ticket so the first run does
       # not have to reach Apple. Without the credentials the archive ships
       # unsigned, which is the honest default.
+      - name: Check macOS notarization credentials
+        id: apple-signing
+        if: ${{ !matrix.cross && runner.os == 'macOS' }}
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        shell: bash
+        run: |
+          if [[ -n "$APPLE_ID" && -n "$APPLE_PASSWORD" ]]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: notarize and staple (macOS)
-        if: |
-          !matrix.cross &&
-          runner.os == 'macOS' &&
-          secrets.APPLE_ID != '' &&
-          secrets.APPLE_APP_SPECIFIC_PASSWORD != ''
+        if: ${{ !matrix.cross && runner.os == 'macOS' && steps.apple-signing.outputs.configured == 'true' }}
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
@@ -253,11 +263,21 @@ jobs:
 
       # Windows: Authenticode-sign the zip when a certificate is configured.
       # Without WINDOWS_CERTIFICATE_BASE64 the zip ships unsigned.
+      - name: Check Windows signing credentials
+        id: windows-signing
+        if: ${{ !matrix.cross && runner.os == 'Windows' }}
+        env:
+          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        shell: pwsh
+        run: |
+          $configured = -not [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_BASE64) -and
+            -not [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD)
+          if ($configured) { "configured=true" >> $env:GITHUB_OUTPUT }
+          else { "configured=false" >> $env:GITHUB_OUTPUT }
+
       - name: sign with Authenticode (Windows)
-        if: |
-          !matrix.cross &&
-          runner.os == 'Windows' &&
-          secrets.WINDOWS_CERTIFICATE_BASE64 != ''
+        if: ${{ !matrix.cross && runner.os == 'Windows' && steps.windows-signing.outputs.configured == 'true' }}
         env:
           WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
