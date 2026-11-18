@@ -292,4 +292,30 @@ mod tests {
     fn leeway_is_one_minute() {
         assert_eq!(CLOCK_SKEW_LEEWAY_SECS, 60);
     }
+
+    #[tokio::test]
+    async fn expired_user_jwt_is_rejected_after_clock_skew_leeway() {
+        use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+
+        let claims = serde_json::json!({
+            "iss": DEFAULT_ISSUER,
+            "aud": DEFAULT_AUDIENCE,
+            "sub": "user-expired",
+            "jti": "token-expired",
+            "exp": 0,
+        });
+        let token = encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(b"test-user-jwt-secret"),
+        )
+        .unwrap();
+        let verifier = Hs256UserJwtVerifier::new(b"test-user-jwt-secret", None, None).unwrap();
+
+        let error = verifier
+            .verify(Some(&format!("Bearer {token}")))
+            .await
+            .unwrap_err();
+        assert_eq!(error.reason, AuthFailureReason::Expired);
+    }
 }
