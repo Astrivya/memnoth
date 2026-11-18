@@ -116,15 +116,24 @@ impl TenantVaults {
     /// (capped), so `../../etc/passwd` cannot escape the tenants directory, and
     /// the hash carries the identity that the sanitized stem may have dropped.
     fn path_for(&self, principal: &str) -> PathBuf {
-        // `DefaultHasher` is an implementation detail, not a persistence
-        // format. Its output is not promised to remain stable across Rust
-        // releases, which could make an upgrade silently point each user at a
-        // fresh, empty vault. Use a specified digest for this on-disk key.
         let digest = sha2::Sha256::digest(principal.as_bytes());
         let hash = digest[..16]
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
+        self.path_for_hash(principal, &hash)
+    }
+
+    /// Previous releases used `DefaultHasher` for the filename suffix. Keep
+    /// this only as a migration source; it must never be used for new paths.
+    fn legacy_path_for(&self, principal: &str) -> PathBuf {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        principal.hash(&mut hasher);
+        self.path_for_hash(principal, &format!("{:016x}", hasher.finish()))
+    }
+
+    fn path_for_hash(&self, principal: &str, hash: &str) -> PathBuf {
         let stem: String = principal
             .chars()
             .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
@@ -162,6 +171,25 @@ impl TenantVaults {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create tenant dir {}", parent.display()))?;
+        }
+        let legacy = self.legacy_path_for(principal);
+        if !path.exists() && legacy.exists() {
+            // Same-directory rename is atomic. Concurrent first opens may race:
+            // one moves the legacy file; the other can proceed once the new
+            // path exists. Never replace an already-created destination.
+            match std::fs::rename(&legacy, &path) {
+                Ok(()) => {}
+                Err(_error) if path.exists() => {}
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "migrate tenant vault {} to stable path {}",
+                            legacy.display(),
+                            path.display()
+                        )
+                    });
+                }
+            }
         }
         secure_tenant_vault_path(&path)?;
         let engine = memnoth_engine::open_vault(&path)
@@ -1185,7 +1213,45 @@ mod tests {
 
         // Isolation, proved at the data level: write in alice's vault, read
         // bob's — the fact must not be there.
-        let (alice_engine, _alice_coord, _alice_path) = tenants.open("user-alice").unwrap();
+        // Simulate a vault created by the old DefaultHasher mapping, then open
+        // it through the new stable path. Existing data must migrate in place.
+        let legacy_path = tenants.legacy_path_for("user-alice");
+        std::fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+        let legacy_engine = memnoth_engine::open_vault(&legacy_path).unwrap();
+        let legacy_coord = Coord::open(&legacy_path).unwrap();
+        let now = memnoth_engine::now_ms();
+        let legacy_entity = legacy_engine
+            .add_entity(memnoth_engine::EntityKind::Other, "legacy-secret", 0.9, now)
+            .unwrap();
+        legacy_engine
+            .add_observation(
+                legacy_entity,
+                "preserved across migration",
+                "fact",
+                0.9,
+                now,
+            )
+            .unwrap();
+        drop(legacy_engine);
+        drop(legacy_coord);
+
+        let (alice_engine, _alice_coord, alice_path) = tenants.open("user-alice").unwrap();
+        assert!(
+            !legacy_path.exists(),
+            "legacy path is moved after migration"
+        );
+        assert!(
+            alice_path.exists(),
+            "stable path contains the existing vault"
+        );
+        assert_eq!(
+            alice_engine
+                .find_entities_by_name("legacy-secret", now)
+                .unwrap()
+                .len(),
+            1,
+            "migration preserves the principal's existing data"
+        );
         let bob = tenants.open("user-bob").unwrap();
         #[cfg(unix)]
         {
