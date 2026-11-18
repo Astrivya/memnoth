@@ -74,7 +74,7 @@ fn get_telemetry_categories() -> Vec<(&'static str, &'static str)> {
         ),
         (
             "knowledge_graph_size",
-            "After a session finishes: random workspace ID and indexed/file/symbol/reference/stale-file counts; no paths or graph contents",
+            "After a successful `kg index` or a session finishes: random workspace ID and indexed/file/symbol/reference/stale-file counts; no paths or graph contents",
         ),
         ("feature_flags", "Which experimental features are enabled"),
     ]

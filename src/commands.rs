@@ -257,6 +257,7 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
                 };
                 let report = kg::index(ctx, *full, *no_embed, &mut progress)
                     .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                crate::report::graph_snapshot(ctx);
                 let data = serde_json::to_value(&report)
                     .context("serialize kg index report")
                     .map_err(|e| ErrorOutcome::from_anyhow(&e))?;

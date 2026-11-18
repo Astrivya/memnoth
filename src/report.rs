@@ -86,6 +86,16 @@ pub fn finished(ctx: &AppContext, name: &str, session: &Session) {
     enqueue(ctx, name, session, Event::Finished);
 }
 
+/// Report the current aggregate graph snapshot after an explicit index. This
+/// keeps the dashboard current even when the user indexes without opening a
+/// model session. The same opt-in gate and tenant-bound account client apply.
+pub fn graph_snapshot(ctx: &AppContext) {
+    if !ctx.config().telemetry_enabled() || !signed_in(ctx) {
+        return;
+    }
+    let _ = worker().send(Message::Graph(Box::new(ctx.clone())));
+}
+
 /// Hand one report to the worker, or drop it when this machine cannot report.
 ///
 /// Dropped rather than queued for later: the plane has no offline story for
@@ -117,6 +127,8 @@ enum Message {
     // barrier beside it is sixteen bytes. Unboxed, every queue slot paid for
     // the largest row a session could produce.
     Report(Box<Job>),
+    /// Aggregate graph counts, queued after a successful local index.
+    Graph(Box<AppContext>),
     /// Answered only after every message queued before it has been handled,
     /// which is what makes [`flush`] a barrier rather than a sleep.
     Barrier(Sender<()>),
@@ -162,6 +174,7 @@ fn worker() -> &'static Sender<Message> {
                 while let Ok(message) = rx.recv() {
                     match message {
                         Message::Report(job) => send(&job),
+                        Message::Graph(ctx) => send_graph_snapshot(&ctx),
                         // Every earlier message has been handled by the time this
                         // arrives, because one thread consumes the channel in
                         // order.
@@ -212,7 +225,7 @@ fn send(job: &Job) {
     }
 
     if job.event == Event::Finished {
-        report_graph_snapshot(job, &client);
+        report_graph_snapshot(&job.ctx, &client);
     }
 
     // Liveness, alongside the row: the plane counts an instance only because it
@@ -234,25 +247,36 @@ fn send(job: &Job) {
 
 /// Send aggregate graph counts only. The workspace identifier is a random
 /// local UUID; no path, host name, language, model, or graph content is sent.
-fn report_graph_snapshot(job: &Job, client: &memnoth_cloud_client::CloudClient) {
-    let status = match crate::kg::status(&job.ctx) {
+fn send_graph_snapshot(ctx: &AppContext) {
+    let client = match crate::sync::get_cloud_client(ctx) {
+        Ok(client) => client,
+        Err(error) => {
+            append_log(Some(ctx), &format!("no client for graph snapshot: {error}"));
+            return;
+        }
+    };
+    report_graph_snapshot(ctx, &client);
+}
+
+fn report_graph_snapshot(ctx: &AppContext, client: &memnoth_cloud_client::CloudClient) {
+    let status = match crate::kg::status(ctx) {
         Ok(status) => status,
         Err(error) => {
             append_log(
-                Some(&job.ctx),
+                Some(ctx),
                 &format!("cannot read graph status for telemetry: {error}"),
             );
             return;
         }
     };
-    let Some(state_dir) = job.ctx.config_path().parent() else {
+    let Some(state_dir) = ctx.config_path().parent() else {
         return;
     };
-    let workspace_id = match workspace_telemetry_id(&job.ctx.root, state_dir) {
+    let workspace_id = match workspace_telemetry_id(&ctx.root, state_dir) {
         Ok(id) => id,
         Err(error) => {
             append_log(
-                Some(&job.ctx),
+                Some(ctx),
                 &format!("cannot resolve local telemetry id: {error}"),
             );
             return;
@@ -277,7 +301,7 @@ fn report_graph_snapshot(job: &Job, client: &memnoth_cloud_client::CloudClient) 
         events: vec![event],
     }) {
         append_log(
-            Some(&job.ctx),
+            Some(ctx),
             &format!("POST /api/v1/ingest/batch graph snapshot failed: {error}"),
         );
     }

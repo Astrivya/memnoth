@@ -208,6 +208,14 @@ pub fn run() -> ExitCode {
         match commands::execute(&ctx, &verb) {
             Ok(outcome) => {
                 output::emit(json, &outcome);
+                if matches!(
+                    verb,
+                    Verb::Kg(cli::KgArgs {
+                        action: cli::KgCommand::Index { .. }
+                    })
+                ) {
+                    report::flush(std::time::Duration::from_secs(3));
+                }
                 ExitCode::from(outcome.exit_code)
             }
             Err(err) => fail(json, &err),
