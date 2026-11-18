@@ -301,6 +301,12 @@ fn workspace_telemetry_id(
         .join(format!("{key}.id"));
     let read_existing = || -> std::io::Result<String> {
         let id = std::fs::read_to_string(&path)?;
+        if id.trim().is_empty() {
+            return Err(std::io::Error::new(
+                ErrorKind::WouldBlock,
+                "telemetry UUID is still being initialized",
+            ));
+        }
         if uuid::Uuid::parse_str(id.trim()).is_err() {
             return Err(std::io::Error::new(
                 ErrorKind::InvalidData,
@@ -325,7 +331,21 @@ fn workspace_telemetry_id(
             file.sync_all()?;
             Ok(id)
         }
-        Err(error) if error.kind() == ErrorKind::AlreadyExists => read_existing(),
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+            // The creator writes a small UUID after atomically claiming the
+            // path. A concurrent first-use reader can observe that brief empty
+            // file; retry only that transient state and keep malformed IDs
+            // fail-closed.
+            for _ in 0..100 {
+                match read_existing() {
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                    result => return result,
+                }
+            }
+            read_existing()
+        }
         Err(error) => Err(error),
     }
 }
