@@ -339,7 +339,22 @@ fn workspace_telemetry_id(
         }
         Ok(id.trim().to_string())
     };
-    match read_existing() {
+    // A creator claims the path with create_new before writing the UUID. On
+    // Windows especially, another process can observe that short-lived empty
+    // file before it finishes. Retry that transient state both before and
+    // after attempting creation; malformed, non-empty files still fail closed.
+    let wait_for_existing = || -> std::io::Result<String> {
+        for _ in 0..1_000 {
+            match read_existing() {
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                result => return result,
+            }
+        }
+        read_existing()
+    };
+    match wait_for_existing() {
         Ok(id) => return Ok(id),
         Err(error) if error.kind() == ErrorKind::NotFound => {}
         Err(error) => return Err(error),
@@ -360,15 +375,7 @@ fn workspace_telemetry_id(
             // path. A concurrent first-use reader can observe that brief empty
             // file; retry only that transient state and keep malformed IDs
             // fail-closed.
-            for _ in 0..100 {
-                match read_existing() {
-                    Err(error) if error.kind() == ErrorKind::WouldBlock => {
-                        std::thread::sleep(std::time::Duration::from_millis(1));
-                    }
-                    result => return result,
-                }
-            }
-            read_existing()
+            wait_for_existing()
         }
         Err(error) => Err(error),
     }
