@@ -91,12 +91,13 @@ pub fn local_status(ctx: &AppContext, project_id: &str) -> Result<LocalGraphStat
         let store = memnoth_codegraph::Store::open(&ctx.graph_path)
             .context("opening local graph for sync status")?;
         let freshness = memnoth_codegraph::staleness_report(&store, &ctx.root, 0)?;
+        let unindexed = unindexed_source_count(&ctx.root, &ctx.graph_path)?;
         let local_graph_bytes = fs::metadata(&ctx.graph_path)
             .context("reading local graph size")?
             .len();
         (
             Some(store.generation()?),
-            Some(freshness.stale_files),
+            Some(freshness.stale_files + unindexed as u64),
             Some(local_graph_bytes),
         )
     } else {
@@ -144,6 +145,11 @@ pub fn sync_project(
         if remote.version > pending.base_version
             && remote.ciphertext_hash.as_deref() == Some(&pending.ciphertext_hash)
         {
+            if remote.size_bytes != Some(ciphertext.len() as i64) {
+                bail!(
+                    "Cloud graph metadata does not match the pending encrypted upload; the pending copy was kept for recovery"
+                );
+            }
             let local_still_matches = if ctx.graph_path.exists() {
                 let (snapshot, fingerprint) = local_snapshot(ctx)?;
                 fingerprint == pending.source_fingerprint
@@ -281,6 +287,10 @@ pub fn restore_project(
         .context("graph restore requires a cloud project ID, not a project name")?
         .to_string();
     let paths = Paths::new(ctx, &project_id);
+    // A prior restore may have removed the old graph but not yet installed the
+    // verified replacement. Recover its safety copy before doing network I/O,
+    // so an offline retry never leaves the workspace without a usable graph.
+    recover_interrupted_restore(ctx)?;
     let request = SyncRequest {
         ctx,
         client,
@@ -315,6 +325,12 @@ fn pull_remote(
         .as_deref()
         .context("Cloud reports a graph version without its ciphertext hash")?;
     let ciphertext = client.project_graph_sync_snapshot(project_id, remote.version)?;
+    if ciphertext.len() > MAX_SNAPSHOT_BYTES {
+        bail!("downloaded encrypted graph snapshot exceeds the 64 MiB project limit");
+    }
+    if remote.size_bytes != Some(ciphertext.len() as i64) {
+        bail!("downloaded project graph size does not match Cloud metadata");
+    }
     if content_hash(&ciphertext) != expected_hash {
         bail!("downloaded project graph failed the ciphertext hash check");
     }
@@ -483,7 +499,27 @@ fn ensure_graph_fresh(root: &Path, database: &Path) -> Result<()> {
             report.stale_files
         );
     }
+    // staleness_report verifies only rows already in the index. Also compare
+    // against the indexer's discovery set so a newly added source file cannot
+    // be omitted from an upload or accepted from a remote snapshot as current.
+    let added = unindexed_source_count(root, database)?;
+    if added > 0 {
+        bail!("graph has {added} unindexed source file(s); run `mn kg index` before syncing");
+    }
     Ok(())
+}
+
+fn unindexed_source_count(root: &Path, database: &Path) -> Result<usize> {
+    let connection =
+        Connection::open_with_flags(database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut statement = connection.prepare("SELECT path FROM files")?;
+    let indexed = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<std::collections::HashSet<_>>>()?;
+    Ok(memnoth_codegraph::source_files(root)
+        .into_iter()
+        .filter(|path| !indexed.contains(path))
+        .count())
 }
 
 fn frame(project_id: &str, fingerprint: &str, database: &[u8]) -> Result<Vec<u8>> {
@@ -517,6 +553,20 @@ fn unframe(bytes: &[u8]) -> Result<(SnapshotHeader, &[u8])> {
 fn validate_status(status: &ProjectGraphSyncStatus, project_id: &str) -> Result<()> {
     if status.project_id != project_id || status.version < 0 {
         bail!("Cloud returned graph-sync metadata for an unexpected project or version");
+    }
+    if status.version > 0 {
+        let Some(hash) = status.ciphertext_hash.as_deref() else {
+            bail!("Cloud reports a graph version without its ciphertext hash");
+        };
+        if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            bail!("Cloud returned an invalid project graph ciphertext hash");
+        }
+        let Some(size) = status.size_bytes else {
+            bail!("Cloud reports a graph version without its ciphertext size");
+        };
+        if size <= 0 || size as usize > MAX_SNAPSHOT_BYTES {
+            bail!("Cloud returned an invalid project graph ciphertext size");
+        }
     }
     Ok(())
 }
@@ -1157,6 +1207,62 @@ mod tests {
     }
 
     #[test]
+    fn cloud_graph_status_requires_complete_bounded_snapshot_metadata() {
+        let project = "project-a";
+        let valid = ProjectGraphSyncStatus {
+            project_id: project.into(),
+            version: 1,
+            ciphertext_hash: Some("a".repeat(64)),
+            size_bytes: Some(12),
+            updated_at: None,
+        };
+        assert!(validate_status(&valid, project).is_ok());
+
+        let mut missing_size = valid.clone();
+        missing_size.size_bytes = None;
+        assert!(validate_status(&missing_size, project).is_err());
+
+        let mut oversized = valid.clone();
+        oversized.size_bytes = Some(MAX_SNAPSHOT_BYTES as i64 + 1);
+        assert!(validate_status(&oversized, project).is_err());
+
+        let mut malformed_hash = valid;
+        malformed_hash.ciphertext_hash = Some("not-a-hash".into());
+        assert!(validate_status(&malformed_hash, project).is_err());
+    }
+
+    #[test]
+    fn restore_recovers_the_safety_graph_before_a_cloud_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("workspace");
+        let graph = root.join(".memnoth/graph.db");
+        index_checkout(&root, &graph);
+        let ctx = test_context(&root, &temp.path().join("home"), graph.clone());
+        let safety = PathBuf::from(format!("{}.pre-sync", graph.display()));
+        fs::copy(&graph, &safety).unwrap();
+        fs::remove_file(&graph).unwrap();
+
+        let client = CloudClient::with_base_url("http://127.0.0.1:1").unwrap();
+        let result = restore_project(
+            &ctx,
+            &client,
+            "phrase",
+            "org",
+            "7284b093-4bb8-4d92-b661-8502dfbb46c6",
+        );
+
+        assert!(
+            result.is_err(),
+            "the deliberately unavailable Cloud must fail"
+        );
+        assert!(
+            graph.exists(),
+            "the prior local graph is recovered before I/O"
+        );
+        verify_database(&graph).unwrap();
+    }
+
+    #[test]
     fn source_fingerprint_checks_full_source_bytes_and_rejects_escape_paths() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
@@ -1191,6 +1297,14 @@ mod tests {
         let ctx = test_context(&root, &temp.path().join("home"), graph);
 
         local_snapshot(&ctx).unwrap();
+        fs::write(root.join("new_module.rs"), "pub fn added_symbol() {}\n").unwrap();
+        let status = local_status(&ctx, "7284b093-4bb8-4d92-b661-8502dfbb46c6").unwrap();
+        assert_eq!(status.stale_files, Some(1));
+        let error = local_snapshot(&ctx).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("unindexed source file"),
+            "new sources must prevent a stale graph upload: {error:#}"
+        );
         fs::write(root.join("lib.rs"), "pub fn changed_symbol() -> u8 { 9 }\n").unwrap();
 
         let error = local_snapshot(&ctx).unwrap_err();
