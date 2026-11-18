@@ -234,6 +234,33 @@ fn staleness_names_changed_and_deleted_files_and_nothing_else() {
 }
 
 #[test]
+fn staleness_detects_new_indexable_sources_but_ignores_excluded_and_non_source_files() {
+    let root = scratch("new-source");
+    let conn = create_current(&root);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/added.rs"), "pub fn added() {}\n").unwrap();
+    std::fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
+    std::fs::write(
+        root.join("node_modules/pkg/ignored.js"),
+        "export function ignored() {}\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("notes.md"), "not an indexable source file\n").unwrap();
+    drop(conn);
+
+    let graph = CliGraph::open(&root).unwrap();
+    let stale = graph.staleness();
+
+    assert_eq!(stale["added"], 1, "{stale}");
+    assert_eq!(stale["added_examples"][0], "src/added.rs");
+    assert_eq!(stale["stale"], true, "{stale}");
+    assert!(
+        stale["hint"].as_str().unwrap().contains("memnoth kg index"),
+        "{stale}"
+    );
+}
+
+#[test]
 fn a_current_graph_says_so_rather_than_staying_silent() {
     let root = scratch("current-files");
     let conn = create_current(&root);
@@ -442,7 +469,7 @@ fn doctor_passes_a_graph_that_is_current_and_says_what_it_did_not_check() {
     );
     assert_eq!(
         report["not_checked"].as_array().unwrap().len(),
-        3,
+        2,
         "the verdict names its own scope: {report}"
     );
     assert_eq!(report["files"], 1);

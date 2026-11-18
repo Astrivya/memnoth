@@ -224,20 +224,27 @@ impl CliGraph {
             }
         }
 
-        let stale = !changed.is_empty() || !deleted.is_empty();
+        let indexed_paths: HashSet<&str> = rows.iter().map(|(path, _)| path.as_str()).collect();
+        let added: Vec<String> = memnoth_codegraph::source_files(&self.root)
+            .into_iter()
+            .filter(|path| !indexed_paths.contains(path.as_str()))
+            .collect();
+
+        let stale = !changed.is_empty() || !deleted.is_empty() || !added.is_empty();
         json!({
             "indexed_files": indexed_files,
             "checked": indexed_files.min(MAX_STALENESS_STATS),
             "changed": changed.len(),
             "deleted": deleted.len(),
+            "added": added.len(),
             "changed_examples": examples(&changed),
             "deleted_examples": examples(&deleted),
-            "added": "not checked here; `memnoth kg status` walks the tree for new files",
+            "added_examples": examples(&added),
             "stale": stale,
             "hint": if stale {
                 "run `memnoth kg index` (incremental) before trusting a miss"
             } else {
-                "every indexed file still matches the disk"
+                "indexed files match the disk and no new source files were found"
             },
         })
     }
@@ -902,7 +909,6 @@ impl CliGraph {
             "findings": findings,
             // The honest scope of the verdict, beside the verdict.
             "not_checked": [
-                "new files: a file added since the build is not in the graph and is not counted as stale here — `memnoth kg status` walks the tree",
                 "call edges: this graph records where a name appears, so there is no resolution rate to report",
                 "semantic search: the CLI graph is lexical, so vectors are not part of it",
             ],

@@ -751,6 +751,18 @@ fn collect_source_files(root: &Path, scope: &IndexScope) -> Vec<PathBuf> {
     files
 }
 
+/// List source files the indexer would include for a full workspace scan.
+/// Paths are workspace-relative and use `/` separators, matching the graph's
+/// `files.path` values. This lets readers report newly added, unindexed files
+/// without maintaining a second extension/ignore list.
+pub fn source_files(root: &Path) -> Vec<String> {
+    collect_source_files(root, &IndexScope::All)
+        .into_iter()
+        .filter_map(|path| path.strip_prefix(root).ok().map(Path::to_path_buf))
+        .map(|path| path.to_string_lossy().replace('\\', "/"))
+        .collect()
+}
+
 /// Extract symbols from source code (very basic implementation).
 fn extract_symbols(
     content: &str,
