@@ -831,11 +831,15 @@ fn report_authenticated_call(
     } else {
         format!("{base}/api/v1/ingest/batch")
     };
+    let headers = match cloud_ingest_headers(&authorization) {
+        Ok(headers) => headers,
+        Err(_) => return,
+    };
     tokio::spawn(async move {
         let client = CLIENT.get_or_init(reqwest::Client::new).clone();
         let _ = client
             .post(endpoint)
-            .header(reqwest::header::AUTHORIZATION, authorization)
+            .headers(headers)
             .timeout(std::time::Duration::from_secs(3))
             .json(&serde_json::json!({
                 "events": [{
@@ -848,6 +852,21 @@ fn report_authenticated_call(
             .send()
             .await;
     });
+}
+
+fn cloud_ingest_headers(
+    authorization: &str,
+) -> Result<reqwest::header::HeaderMap, reqwest::header::InvalidHeaderValue> {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        reqwest::header::AUTHORIZATION,
+        reqwest::header::HeaderValue::from_str(authorization)?,
+    );
+    headers.insert(
+        reqwest::header::HeaderName::from_static("x-memnoth-csrf"),
+        reqwest::header::HeaderValue::from_static("1"),
+    );
+    Ok(headers)
 }
 
 /// The scope that would allow this call, when the presented token lacks it.
@@ -1043,6 +1062,13 @@ where
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn cloud_metric_posts_include_bearer_and_csrf_headers() {
+        let headers = cloud_ingest_headers("Bearer test-token").unwrap();
+        assert_eq!(headers[reqwest::header::AUTHORIZATION], "Bearer test-token");
+        assert_eq!(headers["x-memnoth-csrf"], "1");
+    }
 
     #[test]
     fn remote_mcp_requires_isolated_state_for_every_user_jwt_mode() {
