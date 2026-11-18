@@ -14,6 +14,7 @@ use memnoth_mcp_auth::SharedAuthenticator;
 use memnoth_mcp_auth::config::AuthConfig;
 use memnoth_mcp_auth::metrics::{record_verify, render as render_metrics, set_jwks_cache_entries};
 use serde_json::{Value, json};
+use sha2::Digest;
 
 const DEFAULT_BIND: &str = "127.0.0.1:7842";
 
@@ -115,10 +116,15 @@ impl TenantVaults {
     /// (capped), so `../../etc/passwd` cannot escape the tenants directory, and
     /// the hash carries the identity that the sanitized stem may have dropped.
     fn path_for(&self, principal: &str) -> PathBuf {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        principal.hash(&mut hasher);
-        let hash = hasher.finish();
+        // `DefaultHasher` is an implementation detail, not a persistence
+        // format. Its output is not promised to remain stable across Rust
+        // releases, which could make an upgrade silently point each user at a
+        // fresh, empty vault. Use a specified digest for this on-disk key.
+        let digest = sha2::Sha256::digest(principal.as_bytes());
+        let hash = digest[..16]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
         let stem: String = principal
             .chars()
             .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
@@ -129,7 +135,7 @@ impl TenantVaults {
         } else {
             stem
         };
-        self.dir.join(format!("{stem}-{hash:016x}.db"))
+        self.dir.join(format!("{stem}-{hash}.db"))
     }
 
     /// `None` when tenancy is off or this request has no usable principal —
@@ -1159,6 +1165,11 @@ mod tests {
         // name per process would read as data loss); different → different.
         let alice = tenants.path_for("user-alice");
         assert_eq!(alice, tenants.path_for("user-alice"));
+        assert_eq!(
+            alice.file_name().unwrap(),
+            "user-alice-0e7b8c3e3b7f94ed81538a568a6408c6.db",
+            "the tenant path is a stable on-disk mapping"
+        );
         assert_ne!(alice, tenants.path_for("user-bob"));
 
         // A hostile `sub` is sanitized: it cannot traverse out of the tenants
