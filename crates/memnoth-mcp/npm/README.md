@@ -2,11 +2,10 @@
 
 Launcher for the [memnoth](https://github.com/astrivya/memnoth) MCP server.
 
-**This package bundles the server binary** in `vendor/<platform>-<arch>/memnoth-mcp`
-(`memnoth-mcp.exe` on Windows; six targets: `win32-x64`, `win32-arm64`, `linux-x64`,
-`linux-arm64`, `darwin-x64`, `darwin-arm64`). The release `SHA256SUMS` covers those exact
-bytes, and the npm verification step runs the launcher against the bundled binary before
-the package is published.
+The release package bundles the server binary in `vendor/<platform>-<arch>/memnoth-mcp`
+(`memnoth-mcp.exe` on Windows) for five targets: `win32-x64`, `linux-x64`, `linux-arm64`,
+`darwin-x64`, and `darwin-arm64`. The release workflow extracts these binaries from the
+checksummed CLI archives and runs the Linux binary's MCP self-test before publishing.
 The launcher resolution order is:
 
 1. **Bundled binary** (`vendor/<platform>-<arch>/memnoth-mcp`) — most hermetic, works offline
@@ -21,8 +20,10 @@ If no bundled binary is present for this platform, it falls back to `MEMNOTH_BIN
 npx -y @astrivya/mcp --help    # sanity check that the launcher starts the bundled server
 ```
 
-The package ships the binary, so no separate memnoth install is required. Set
-`MEMNOTH_BIN` to use a different build (for example a locally compiled one).
+The published package ships the binary, so no separate Memnoth install is required. Set
+`MEMNOTH_BIN` to use a different build (for example a locally compiled one). The release
+workflow needs the repository's `NPM_TOKEN` secret to publish; without it, the verified
+tarball is attached to the GitHub release for manual publication.
 
 ## Client config
 

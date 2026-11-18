@@ -370,6 +370,7 @@ jobs:
     permissions:
       # Creating the release and attaching the bundle's assets to it.
       contents: write
+      id-token: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -435,6 +436,40 @@ jobs:
           echo "channel=$channel" >> "$GITHUB_OUTPUT"
           echo "publishing $tag on the $channel channel"
           MEMNOTH_CHANNEL="$channel" sh scripts/dist.sh --from artifacts --version "$tag" --out dist
+
+      - name: assemble standalone npm package
+        id: npm-package
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.layout.outputs.tag }}"
+          version="${version#v}"
+          out="$RUNNER_TEMP/memnoth-npm"
+          mkdir -p "$out"
+          sh scripts/assemble-npm-mcp.sh "$version" artifacts "$out"
+          package=$(find "$out" -maxdepth 1 -name '*.tgz' -print -quit)
+          test -n "$package" || { echo "npm tarball was not produced" >&2; exit 1; }
+          cp "$package" "dist/${{ steps.layout.outputs.tag }}/"
+          echo "package=$package" >> "$GITHUB_OUTPUT"
+
+      - name: check npm publishing credentials
+        id: npm-publish-auth
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        shell: bash
+        run: |
+          if [ -n "$NPM_TOKEN" ]; then
+            echo 'configured=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'configured=false' >> "$GITHUB_OUTPUT"
+            echo 'NPM_TOKEN is not configured; the tested tarball is attached to the GitHub release artifacts.'
+          fi
+
+      - name: publish standalone npm package
+        if: ${{ steps.npm-publish-auth.outputs.configured == 'true' }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish "${{ steps.npm-package.outputs.package }}" --access public --provenance
 
       # SBOM for every published artifact, generated after signing so it
       # describes the exact bytes shipped. CycloneDX and SPDX are produced side
