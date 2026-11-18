@@ -1,9 +1,8 @@
 # memnoth MCP server (StreamableHTTP transport), packaged from an already built binary.
 #
-# The binary is the root `memnoth` executable (`memnoth mcp serve --http`), built natively for
-# each platform by the CI job. The context holds one file per architecture and buildx's automatic
-# platform arg picks it — a default on that arg is how an arm64 image once shipped an amd64
-# binary that only failed at run time.
+# This image runs the standalone `memnoth-mcp` executable directly. The general `memnoth` CLI
+# launches it as a child and must not be used as the container entrypoint without bundling both
+# executables. The context holds one file per architecture and buildx's platform arg picks it.
 #
 # The server drops capabilities through compose (`cap_drop: ALL`, `read_only: true`), so it runs
 # as root and init.sh prepares the volume before exec.
@@ -18,9 +17,11 @@ WORKDIR /app
 
 ARG TARGETARCH
 RUN test -n "${TARGETARCH}" || (echo "TARGETARCH is unset — build with buildx --platform" && exit 1)
-COPY memnoth-${TARGETARCH} /usr/local/bin/memnoth
+ARG VCS_REF
+LABEL org.opencontainers.image.revision=$VCS_REF
+COPY memnoth-mcp-${TARGETARCH} /usr/local/bin/memnoth-mcp
 COPY init.sh /usr/local/bin/memnoth-init.sh
-RUN chmod 0755 /usr/local/bin/memnoth /usr/local/bin/memnoth-init.sh
+RUN chmod 0755 /usr/local/bin/memnoth-mcp /usr/local/bin/memnoth-init.sh
 
 # Persistent vault/coord store (MEMNOTH_HOME -> /data/.memnoth/vault.db).
 VOLUME ["/data"]
@@ -48,4 +49,4 @@ HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=20s \
     || exit 1
 
 ENTRYPOINT ["/usr/local/bin/memnoth-init.sh"]
-CMD ["mcp", "serve", "--http", "--db", "/data/.memnoth/vault.db"]
+CMD ["--db", "/data/.memnoth/vault.db", "--http"]

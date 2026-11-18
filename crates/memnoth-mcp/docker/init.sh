@@ -7,4 +7,4 @@
 # CAP_CHOWN (dropped). The process does not gain anything beyond writing /data.
 set -eu
 mkdir -p /data/.memnoth
-exec /usr/local/bin/memnoth "$@"
+exec /usr/local/bin/memnoth-mcp "$@"

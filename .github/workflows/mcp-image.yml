@@ -1,0 +1,73 @@
+name: MCP gateway image
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: mcp-image-main
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    name: Build, smoke, and publish linux/amd64 + linux/arm64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: mcp-image
+
+      - name: Test the MCP server
+        run: cargo test --locked -p memnoth-mcp
+
+      - name: Build native and arm64 servers
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release --locked --target x86_64-unknown-linux-gnu -p memnoth-mcp
+          cargo install cross --locked
+          cross build --release --locked --target aarch64-unknown-linux-gnu -p memnoth-mcp
+          work="$(mktemp -d)"
+          target/x86_64-unknown-linux-gnu/release/memnoth-mcp \
+            --selftest --db "$work/smoke.db"
+          mkdir -p image-context
+          cp crates/memnoth-mcp/docker/Dockerfile image-context/Dockerfile
+          cp crates/memnoth-mcp/docker/init.sh image-context/init.sh
+          cp target/x86_64-unknown-linux-gnu/release/memnoth-mcp image-context/memnoth-mcp-amd64
+          cp target/aarch64-unknown-linux-gnu/release/memnoth-mcp image-context/memnoth-mcp-arm64
+
+      - name: Enable arm64 image build support
+        run: docker run --privileged --rm tonistiigi/binfmt --install arm64
+
+      - name: Sign in to GitHub Container Registry
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$GH_TOKEN" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+
+      - name: Build and publish immutable and rolling tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker buildx create --use --name memnoth-mcp-builder --driver docker-container
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --build-arg VCS_REF="$GITHUB_SHA" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --label "org.opencontainers.image.source=https://github.com/astrivya/memnoth" \
+            -t ghcr.io/astrivya/memnoth-mcp:latest \
+            -t "ghcr.io/astrivya/memnoth-mcp:sha-$GITHUB_SHA" \
+            --cache-from type=gha,scope=memnoth-mcp-image \
+            --cache-to type=gha,scope=memnoth-mcp-image,mode=max \
+            --push image-context
