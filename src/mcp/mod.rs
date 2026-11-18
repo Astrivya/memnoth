@@ -364,7 +364,7 @@ pub fn doctor(ctx: &AppContext) -> Result<DoctorReport> {
     let clients = match clients::home_dir() {
         Some(home) => ClientKind::ALL
             .into_iter()
-            .map(|kind| clients::status(kind, &home, &ctx.mcp_url()))
+            .map(|kind| clients::status_for_workspace(kind, &home, Some(&ctx.root), &ctx.mcp_url()))
             .collect(),
         None => Vec::new(),
     };
@@ -444,6 +444,15 @@ pub fn add(ctx: &AppContext, options: AddOptions<'_>) -> Result<AddReport> {
         };
         let command_str = command.to_string_lossy().to_string();
         let vault_str = vault.to_string_lossy().to_string();
+        let mut server_env = std::collections::BTreeMap::new();
+        server_env.insert(
+            "MEMNOTH_MCP_PROFILE".to_string(),
+            profile.name().to_string(),
+        );
+        server_env.insert(
+            "MEMNOTH_MCP_READ_ONLY".to_string(),
+            if allow_writes { "0" } else { "1" }.to_string(),
+        );
         let entry = Entry::stdio(
             command_str.clone(),
             vec![
@@ -452,7 +461,7 @@ pub fn add(ctx: &AppContext, options: AddOptions<'_>) -> Result<AddReport> {
                 "--db".to_string(),
                 vault_str.clone(),
             ],
-            std::collections::BTreeMap::new(),
+            server_env,
         );
         (
             String::new(),
@@ -498,10 +507,27 @@ pub fn add(ctx: &AppContext, options: AddOptions<'_>) -> Result<AddReport> {
         {
             // Claude Code owns its config shape; asking its CLI is the only way
             // this cannot drift from what Claude Code actually reads.
-            results.push(add_with_host_cli(&binary, &entry, dry_run));
+            let status = add_with_host_cli(&binary, &entry, dry_run);
+            if explicit && !status.ok {
+                failures.push(format!("{}: {}", kind.name(), status.detail));
+            }
+            results.push(status);
             continue;
         }
-        match clients::write(*kind, &home, &entry, dry_run) {
+        let opencode_binary = if *kind == ClientKind::OpenCode && local {
+            clients::find_binary(kind.binary())
+        } else {
+            None
+        };
+        if let Some(binary) = opencode_binary {
+            let status = add_with_opencode_cli(&binary, &ctx.root, &home, &entry, dry_run);
+            if explicit && !status.ok {
+                failures.push(format!("{}: {}", kind.name(), status.detail));
+            }
+            results.push(status);
+            continue;
+        }
+        match clients::write_for_workspace(*kind, &home, Some(&ctx.root), &entry, dry_run) {
             Ok(status) => results.push(status),
             Err(error) => {
                 let detail = format!("not written: {error}");
@@ -510,7 +536,10 @@ pub fn add(ctx: &AppContext, options: AddOptions<'_>) -> Result<AddReport> {
                 }
                 results.push(ClientStatus {
                     client: kind.name().to_string(),
-                    path: kind.config_path(&home).display().to_string(),
+                    path: kind
+                        .config_path_for(&home, Some(&ctx.root))
+                        .display()
+                        .to_string(),
                     present: true,
                     registered: false,
                     found: false,
@@ -625,7 +654,8 @@ fn verify_written_at(
     let mut clients = Vec::new();
     let mut configs_ok = true;
     for kind in kinds {
-        let status = clients::status(*kind, target.home, target.url);
+        let status =
+            clients::status_for_workspace(*kind, target.home, Some(target.root), target.url);
         let config_ok = status.registered && !status.detail.contains("but url is");
         configs_ok &= config_ok;
         clients.push(ClientVerification {
@@ -806,6 +836,104 @@ fn add_with_host_cli(binary: &std::path::Path, entry: &Entry, dry_run: bool) -> 
             found: false,
             ok: false,
             detail: format!("cannot run `claude`: {error}"),
+        },
+    }
+}
+
+/// Let OpenCode update the project config it owns. This preserves JSONC
+/// comments and avoids a global server whose vault/workspace accidentally
+/// follows the first project where it was installed.
+fn add_with_opencode_cli(
+    binary: &Path,
+    root: &Path,
+    home: &Path,
+    entry: &Entry,
+    dry_run: bool,
+) -> ClientStatus {
+    let mut args = vec!["mcp".into(), "add".into()];
+    for (key, value) in &entry.env {
+        args.push("--env".into());
+        args.push(format!("{key}={value}"));
+    }
+    args.push(clients::SERVER_NAME.into());
+    if let Some(command) = &entry.command {
+        args.push("--".into());
+        args.push(command.clone());
+        args.extend(entry.args.iter().cloned());
+    } else {
+        args.push("--url".into());
+        args.push(entry.url.clone());
+        if let Some(token) = &entry.token {
+            args.push("--header".into());
+            args.push(format!("Authorization=Bearer {token}"));
+        }
+    }
+    let path = ClientKind::OpenCode
+        .config_path_for(home, Some(root))
+        .display()
+        .to_string();
+    if dry_run {
+        let present = std::path::Path::new(&path).exists();
+        return ClientStatus {
+            client: ClientKind::OpenCode.name().to_string(),
+            path,
+            present,
+            registered: false,
+            found: false,
+            ok: true,
+            detail: "would register in the current project's OpenCode config".into(),
+        };
+    }
+
+    match clients::run_host_cli_at(binary, &args, Some(root)) {
+        Ok(output) if output.status.success() => {
+            let mut status =
+                clients::status_for_workspace(ClientKind::OpenCode, home, Some(root), &entry.url);
+            if !status.registered {
+                status.ok = false;
+                status.detail =
+                    "OpenCode returned success but its project config has no memnoth entry".into();
+            } else {
+                status.detail = "registered through OpenCode CLI in project scope".into();
+            }
+            status
+        }
+        Ok(output) => {
+            let first = String::from_utf8_lossy(&output.stderr)
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            ClientStatus {
+                client: ClientKind::OpenCode.name().to_string(),
+                path,
+                present: true,
+                registered: false,
+                found: false,
+                ok: false,
+                detail: format!(
+                    "`opencode mcp add` failed (exit {}): {}",
+                    output
+                        .status
+                        .code()
+                        .map_or_else(|| "signal".into(), |code| code.to_string()),
+                    if first.is_empty() {
+                        "no message"
+                    } else {
+                        &first
+                    },
+                ),
+            }
+        }
+        Err(error) => ClientStatus {
+            client: ClientKind::OpenCode.name().to_string(),
+            path,
+            present: true,
+            registered: false,
+            found: false,
+            ok: false,
+            detail: format!("cannot run `opencode mcp add`: {error}"),
         },
     }
 }
@@ -1018,12 +1146,15 @@ pub fn remove(
                     }
                 }
             }
+            ClientKind::OpenCode => {
+                clients::remove_opencode_for_workspace(&home, &ctx.root, dry_run)
+            }
             _ => {
                 // This build can write a client's config but has no shape-aware
                 // deleter for it. Reporting the registration as untouched and
                 // handing back the snippet is honest; re-writing the entry (the
                 // previous behaviour) made `remove` register the server again.
-                let current = clients::status(kind, &home, &url);
+                let current = clients::status_for_workspace(kind, &home, Some(&ctx.root), &url);
                 let was_registered = current.registered;
                 if was_registered {
                     snippets.push(clients::snippet(kind, &entry));
@@ -1058,7 +1189,7 @@ pub fn list(ctx: &AppContext) -> Result<ListReport> {
     let clients_vec = match home {
         Some(home) => ClientKind::ALL
             .into_iter()
-            .map(|kind| clients::status(kind, &home, &ctx.mcp_url()))
+            .map(|kind| clients::status_for_workspace(kind, &home, Some(&ctx.root), &ctx.mcp_url()))
             .collect(),
         None => Vec::new(),
     };

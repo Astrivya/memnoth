@@ -26,17 +26,32 @@ The package ships the binary, so no separate memnoth install is required. Set
 
 ## Client config
 
+This is a standalone stdio server for MCP hosts such as OpenCode, Codex, Claude
+Code, Cursor, and Zed. Use the host's local MCP server configuration format.
+The default profile is `memory`; the example starts read-only:
+
 ```json
 {
   "mcpServers": {
     "memnoth": {
       "command": "npx",
       "args": ["-y", "@astrivya/mcp"],
-      "env": { "MEMNOTH_MCP_PROFILE": "full" }
+      "env": {
+        "MEMNOTH_MCP_PROFILE": "memory",
+        "MEMNOTH_MCP_READ_ONLY": "1"
+      }
     }
   }
 }
 ```
+
+For OpenCode, use the corresponding `mcp.servers` entry with `type: "local"`,
+`command: ["npx", "-y", "@astrivya/mcp"]`, and the same values under
+`environment`. The CLI can create and verify a project-scoped entry for you:
+`memnoth mcp add --local --clients opencode`.
+
+The published package includes the server binary for supported platforms, so
+the Memnoth CLI is optional. Set `MEMNOTH_MCP_DB` to select a specific vault.
 
 ## Offline version check
 

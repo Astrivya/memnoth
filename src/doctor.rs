@@ -389,7 +389,7 @@ fn mcp_config_check(ctx: &AppContext) -> Result<Check> {
     let mut parse_errors = Vec::new();
 
     for kind in ClientKind::ALL {
-        let status = clients::status(kind, &home, &ctx.mcp_url());
+        let status = clients::status_for_workspace(kind, &home, Some(&ctx.root), &ctx.mcp_url());
         if !status.present {
             missing.push(kind.name().to_string());
         } else if !status.registered {
@@ -796,14 +796,14 @@ fn mcp_config_fix(ctx: &AppContext) -> Result<Applied> {
 
     let mut written = Vec::new();
     for kind in ClientKind::ALL {
-        let status = clients::status(kind, &home, &url);
+        let status = clients::status_for_workspace(kind, &home, Some(&ctx.root), &url);
         if !status.present {
             continue;
         }
         if status.registered {
             continue;
         }
-        clients::write(kind, &home, &entry, false)?;
+        clients::write_for_workspace(kind, &home, Some(&ctx.root), &entry, false)?;
         written.push(kind.name().to_string());
     }
 

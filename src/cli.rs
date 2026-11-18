@@ -2971,11 +2971,11 @@ pub enum McpCommand {
     Doctor,
     /// Write a client's MCP config for this server.
     Add {
-        /// Clients to write: claude, cursor, codex, zed. Comma-separated, or
+        /// Clients to write: claude, cursor, codex, zed, opencode. Comma-separated, or
         /// repeat the flag. Omit to detect every client on this machine.
         #[arg(long, value_delimiter = ',', value_name = "CLIENT")]
         clients: Vec<String>,
-        /// Tool profile to register. Defaults to `full`.
+        /// Tool profile: local defaults to `memory`; remote defaults to `full`.
         #[arg(long, value_name = "PROFILE")]
         profile: Option<String>,
         /// Server endpoint. Defaults to the configured URL.
@@ -3019,7 +3019,7 @@ pub enum McpCommand {
     Selftest,
     /// Remove a client's MCP registration.
     Remove {
-        /// Clients to remove: claude, cursor, codex, zed. Comma-separated, or
+        /// Clients to remove: claude, cursor, codex, zed, opencode. Comma-separated, or
         /// repeat the flag. Omit to remove from every detected client.
         #[arg(long, value_delimiter = ',', value_name = "CLIENT")]
         clients: Vec<String>,

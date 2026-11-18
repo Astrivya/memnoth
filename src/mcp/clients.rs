@@ -1,7 +1,7 @@
 //! Client configs: where each host keeps its server list, and how to merge one
 //! entry into it without touching anything else.
 //!
-//! Four clients, three shapes:
+//! Five clients, four shapes:
 //!
 //! | Client | File | Container |
 //! |---|---|---|
@@ -9,6 +9,7 @@
 //! | Cursor | `~/.cursor/mcp.json` | `mcpServers.memnoth` |
 //! | Codex | `~/.codex/config.toml` | `[mcp_servers.memnoth]` |
 //! | Zed | `~/.config/zed/settings.json` (`%APPDATA%/Zed/settings.json`) | `context_servers.memnoth` |
+//! | OpenCode | project `opencode.json(c)` | `mcp.servers.memnoth` |
 //!
 //! Two rules make this safe to run against a file somebody else owns:
 //!
@@ -64,15 +65,18 @@ pub enum ClientKind {
     Codex,
     /// Zed.
     Zed,
+    /// OpenCode.
+    OpenCode,
 }
 
 impl ClientKind {
     /// Every supported client, in the order `add` reports them.
-    pub const ALL: [ClientKind; 4] = [
+    pub const ALL: [ClientKind; 5] = [
         ClientKind::Claude,
         ClientKind::Cursor,
         ClientKind::Codex,
         ClientKind::Zed,
+        ClientKind::OpenCode,
     ];
 
     /// Parse a `--clients` value. Unknown names are refused so a typo cannot
@@ -83,6 +87,7 @@ impl ClientKind {
             "cursor" => Some(Self::Cursor),
             "codex" => Some(Self::Codex),
             "zed" => Some(Self::Zed),
+            "opencode" | "open-code" => Some(Self::OpenCode),
             _ => None,
         }
     }
@@ -94,6 +99,7 @@ impl ClientKind {
             Self::Cursor => "cursor",
             Self::Codex => "codex",
             Self::Zed => "zed",
+            Self::OpenCode => "opencode",
         }
     }
 
@@ -104,6 +110,7 @@ impl ClientKind {
             Self::Cursor => "cursor",
             Self::Codex => "codex",
             Self::Zed => "zed",
+            Self::OpenCode => "opencode",
         }
     }
 
@@ -117,7 +124,19 @@ impl ClientKind {
             Self::Cursor => home.join(".cursor").join("mcp.json"),
             Self::Codex => home.join(".codex").join("config.toml"),
             Self::Zed => zed_settings_path(home),
+            Self::OpenCode => opencode_global_config_path(home),
         }
+    }
+
+    /// OpenCode supports project MCP entries; prefer the project file so the
+    /// server's workspace and vault stay aligned with the folder using it.
+    pub fn config_path_for(self, home: &Path, workspace: Option<&Path>) -> PathBuf {
+        if self == Self::OpenCode
+            && let Some(workspace) = workspace
+        {
+            return opencode_project_config_path(workspace);
+        }
+        self.config_path(home)
     }
 
     /// Parse every `--clients` value in one place.
@@ -125,7 +144,9 @@ impl ClientKind {
         let mut out = Vec::new();
         for name in names {
             let kind = Self::from_name(name).ok_or_else(|| {
-                anyhow::anyhow!("unknown client {name:?}; use claude, cursor, codex or zed")
+                anyhow::anyhow!(
+                    "unknown client {name:?}; use claude, cursor, codex, zed or opencode"
+                )
             })?;
             if !out.contains(&kind) {
                 out.push(kind);
@@ -133,6 +154,22 @@ impl ClientKind {
         }
         Ok(out)
     }
+}
+
+fn opencode_global_config_path(home: &Path) -> PathBuf {
+    let directory = home.join(".config").join("opencode");
+    existing_opencode_config(&directory).unwrap_or_else(|| directory.join("opencode.json"))
+}
+
+fn opencode_project_config_path(workspace: &Path) -> PathBuf {
+    existing_opencode_config(workspace).unwrap_or_else(|| workspace.join("opencode.json"))
+}
+
+fn existing_opencode_config(directory: &Path) -> Option<PathBuf> {
+    ["opencode.jsonc", "opencode.json"]
+        .into_iter()
+        .map(|name| directory.join(name))
+        .find(|path| path.is_file())
 }
 
 fn zed_settings_path(home: &Path) -> PathBuf {
@@ -245,9 +282,19 @@ pub fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// Read one client's state without modifying anything.
-pub fn status(kind: ClientKind, home: &Path, expected_url: &str) -> ClientStatus {
-    let path = kind.config_path(home);
+/// Read client state in the current project where the host supports it.
+#[cfg(test)]
+fn status(kind: ClientKind, home: &Path, expected_url: &str) -> ClientStatus {
+    status_for_workspace(kind, home, None, expected_url)
+}
+
+pub fn status_for_workspace(
+    kind: ClientKind,
+    home: &Path,
+    workspace: Option<&Path>,
+    expected_url: &str,
+) -> ClientStatus {
+    let path = kind.config_path_for(home, workspace);
     let path_text = path.display().to_string();
     if !path.exists() {
         return ClientStatus {
@@ -284,11 +331,11 @@ pub fn status(kind: ClientKind, home: &Path, expected_url: &str) -> ClientStatus
             read_json_entry(&text, SERVER_NAME, "mcpServers")
         }
         ClientKind::Zed => read_json_entry(&text, SERVER_NAME, "context_servers"),
+        ClientKind::OpenCode => read_opencode_entry(&text),
     };
 
-    // A JSONC file still answers the question — is memnoth registered? — but the
-    // answer carries the fact that the file cannot be rewritten by us, so nobody
-    // reads "registered" as "the next `mcp add` will keep this file working".
+    // A JSONC file still answers whether Memnoth is registered. Keep the format
+    // visible in status so a user knows which host-owned writer will preserve it.
     let parsed = match parsed {
         Ok(parsed) => parsed,
         Err(error) => {
@@ -303,7 +350,15 @@ pub fn status(kind: ClientKind, home: &Path, expected_url: &str) -> ClientStatus
             };
         }
     };
-    let note = if parsed.jsonc { JSONC_NOTE } else { "" };
+    let note = if parsed.jsonc {
+        if kind == ClientKind::OpenCode {
+            OPENCODE_JSONC_NOTE
+        } else {
+            JSONC_NOTE
+        }
+    } else {
+        ""
+    };
 
     match parsed.entry {
         None => ClientStatus {
@@ -317,7 +372,9 @@ pub fn status(kind: ClientKind, home: &Path, expected_url: &str) -> ClientStatus
         },
         Some(entry) => {
             let registered = true;
-            let detail = if entry.get("command").and_then(Value::as_str).is_some() {
+            let detail = if entry.get("command").is_some_and(|command| {
+                command.is_string() || command.as_array().is_some_and(|args| !args.is_empty())
+            }) {
                 format!("registered (local stdio){note}")
             } else {
                 let url = entry.get("url").and_then(Value::as_str);
@@ -349,10 +406,6 @@ pub fn status(kind: ClientKind, home: &Path, expected_url: &str) -> ClientStatus
 }
 
 /// What a client's config said, and whether reading it needed JSONC rules.
-///
-/// `jsonc` is the reason this is not just `Option<Value>`: a file Zed wrote with
-/// comments is a file this build will never rewrite, and a status that did not
-/// say so would make a read-only observation look like an editable one.
 struct ParsedJson {
     /// The `memnoth` entry, if the container holds one.
     entry: Option<Value>,
@@ -360,9 +413,9 @@ struct ParsedJson {
     jsonc: bool,
 }
 
-/// Appended to a status detail when the file is JSON-with-comments.
-const JSONC_NOTE: &str =
-    " (settings.json is JSON with comments; read-only — `mcp add` will not rewrite it)";
+/// Appended when a client writer cannot safely rewrite JSONC itself.
+const JSONC_NOTE: &str = " (JSON with comments; this writer will not rewrite it)";
+const OPENCODE_JSONC_NOTE: &str = " (OpenCode JSONC; read with comments preserved)";
 
 /// Read a `memnoth` entry from a JSON or JSONC config.
 ///
@@ -385,6 +438,24 @@ fn read_json_entry(text: &str, name: &str, container: &str) -> Result<ParsedJson
         entry: root
             .get(container)
             .and_then(|servers| servers.get(name))
+            .cloned(),
+        jsonc,
+    })
+}
+
+fn read_opencode_entry(text: &str) -> Result<ParsedJson> {
+    let (root, jsonc) = match serde_json::from_str::<Value>(text) {
+        Ok(root) => (root, false),
+        Err(error) => match serde_json::from_str::<Value>(&strip_jsonc(text)) {
+            Ok(root) => (root, true),
+            Err(_) => return Err(error).context("not valid JSONC"),
+        },
+    };
+    Ok(ParsedJson {
+        entry: root
+            .get("mcp")
+            .and_then(|mcp| mcp.get("servers"))
+            .and_then(|servers| servers.get(SERVER_NAME))
             .cloned(),
         jsonc,
     })
@@ -532,8 +603,15 @@ fn read_codex_entry(text: &str) -> Result<Option<Value>> {
 }
 
 /// Write (or, with `dry_run`, only compose) one client's entry.
-pub fn write(kind: ClientKind, home: &Path, entry: &Entry, dry_run: bool) -> Result<ClientStatus> {
-    let path = kind.config_path(home);
+/// Write the host registration, choosing project scope for OpenCode.
+pub fn write_for_workspace(
+    kind: ClientKind,
+    home: &Path,
+    workspace: Option<&Path>,
+    entry: &Entry,
+    dry_run: bool,
+) -> Result<ClientStatus> {
+    let path = kind.config_path_for(home, workspace);
     let path_text = path.display().to_string();
     let existed = path.exists();
 
@@ -541,6 +619,7 @@ pub fn write(kind: ClientKind, home: &Path, entry: &Entry, dry_run: bool) -> Res
         ClientKind::Codex => write_codex(&path, entry, dry_run)?,
         ClientKind::Claude | ClientKind::Cursor => write_json(&path, "mcpServers", entry, dry_run)?,
         ClientKind::Zed => write_json(&path, "context_servers", entry, dry_run)?,
+        ClientKind::OpenCode => write_opencode(&path, entry, dry_run)?,
     }
 
     let detail = if entry.is_stdio() {
@@ -648,6 +727,163 @@ fn write_json(path: &Path, container: &str, entry: &Entry, dry_run: bool) -> Res
         serde_json::to_string_pretty(&*root).context("cannot serialize the client config")?;
     text.push('\n');
     std::fs::write(path, text).with_context(|| format!("cannot write {}", path.display()))
+}
+
+/// OpenCode's local server format is a command vector, nested in `mcp.servers`.
+/// The host CLI is preferred by `mcp add`; this writer is the deterministic
+/// fallback when OpenCode itself is not installed. JSONC is readable for
+/// status, but deliberately not rewritten so comments cannot be lost.
+fn write_opencode(path: &Path, entry: &Entry, dry_run: bool) -> Result<()> {
+    let mut root = match std::fs::read_to_string(path) {
+        Ok(text) if !text.trim().is_empty() => {
+            serde_json::from_str::<Value>(&text).with_context(|| {
+                format!(
+                    "{} is not strict JSON; refusing to rewrite it (OpenCode JSONC comments are preserved by `opencode mcp add`)",
+                    path.display()
+                )
+            })?
+        }
+        Ok(_) => Value::Object(Map::new()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Value::Object(Map::new()),
+        Err(error) => return Err(error).with_context(|| format!("cannot read {}", path.display())),
+    };
+    let root = root
+        .as_object_mut()
+        .with_context(|| format!("{} does not hold a JSON object", path.display()))?;
+    let mcp = root
+        .entry("mcp".to_string())
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()
+        .with_context(|| format!("`mcp` in {} is not an object", path.display()))?;
+    let servers = mcp
+        .entry("servers".to_string())
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()
+        .with_context(|| format!("`mcp.servers` in {} is not an object", path.display()))?;
+    let mut merged = match servers.get(SERVER_NAME) {
+        Some(Value::Object(existing)) => existing.clone(),
+        _ => Map::new(),
+    };
+
+    if let Some(command) = &entry.command {
+        let mut argv = vec![command.clone()];
+        argv.extend(entry.args.iter().cloned());
+        merged.insert("type".into(), json!("local"));
+        merged.insert("command".into(), json!(argv));
+        if entry.env.is_empty() {
+            merged.remove("environment");
+        } else {
+            merged.insert("environment".into(), json!(&entry.env));
+        }
+        for key in ["url", "headers", "oauth"] {
+            merged.remove(key);
+        }
+    } else {
+        merged.insert("type".into(), json!("remote"));
+        merged.insert("url".into(), json!(&entry.url));
+        let has_static_auth = entry.token.is_some()
+            || merged
+                .get("headers")
+                .and_then(|headers| headers.get("Authorization"))
+                .is_some();
+        let headers = merged
+            .entry("headers".to_string())
+            .or_insert_with(|| Value::Object(Map::new()))
+            .as_object_mut()
+            .with_context(|| format!("`mcp.servers.{SERVER_NAME}.headers` must be an object"))?;
+        if let Some(authorization) = entry.authorization() {
+            headers.insert("Authorization".into(), json!(authorization));
+        }
+        if headers.is_empty() {
+            merged.remove("headers");
+        }
+        if has_static_auth {
+            // A bearer token is already the auth mechanism; OpenCode must not
+            // start a second OAuth flow for the same remote endpoint.
+            merged.insert("oauth".into(), json!(false));
+        }
+        for key in ["command", "environment"] {
+            merged.remove(key);
+        }
+    }
+    servers.insert(SERVER_NAME.to_string(), Value::Object(merged));
+
+    if dry_run {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("cannot create {}", parent.display()))?;
+    }
+    let mut output =
+        serde_json::to_string_pretty(&root).context("cannot serialize OpenCode config")?;
+    output.push('\n');
+    std::fs::write(path, output).with_context(|| format!("cannot write {}", path.display()))
+}
+
+/// Remove Memnoth from OpenCode's project config without disturbing peers.
+/// OpenCode has no `mcp remove` CLI command; JSONC is therefore left untouched
+/// and returned as an actionable manual-removal case.
+pub fn remove_opencode_for_workspace(home: &Path, workspace: &Path, dry_run: bool) -> ClientStatus {
+    let path = ClientKind::OpenCode.config_path_for(home, Some(workspace));
+    let path_text = path.display().to_string();
+    let status = |ok, registered, detail: String| ClientStatus {
+        client: ClientKind::OpenCode.name().into(),
+        path: path_text.clone(),
+        present: path.exists(),
+        registered,
+        found: registered,
+        ok,
+        detail,
+    };
+    let original = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return status(true, false, "not configured".into());
+        }
+        Err(error) => return status(false, false, format!("cannot read config: {error}")),
+    };
+    let mut root = match serde_json::from_str::<Value>(&original) {
+        Ok(root) => root,
+        Err(_error) if serde_json::from_str::<Value>(&strip_jsonc(&original)).is_ok() => {
+            return status(
+                false,
+                true,
+                "not removed: OpenCode config is JSONC; remove mcp.servers.memnoth manually to preserve comments".into(),
+            );
+        }
+        Err(error) => {
+            return status(false, false, format!("cannot parse config: {error}"));
+        }
+    };
+    let servers = root
+        .as_object_mut()
+        .and_then(|root| root.get_mut("mcp"))
+        .and_then(Value::as_object_mut)
+        .and_then(|mcp| mcp.get_mut("servers"))
+        .and_then(Value::as_object_mut);
+    let Some(servers) = servers else {
+        return status(true, false, "not configured".into());
+    };
+    if servers.remove(SERVER_NAME).is_none() {
+        return status(true, false, "not configured".into());
+    }
+    if dry_run {
+        return status(
+            true,
+            true,
+            "would remove from project OpenCode config".into(),
+        );
+    }
+    let mut output = match serde_json::to_string_pretty(&root) {
+        Ok(output) => output,
+        Err(error) => return status(false, true, format!("cannot serialize config: {error}")),
+    };
+    output.push('\n');
+    if let Err(error) = std::fs::write(&path, output) {
+        return status(false, true, format!("cannot write config: {error}"));
+    }
+    status(true, false, "removed from project OpenCode config".into())
 }
 
 fn write_codex(path: &Path, entry: &Entry, dry_run: bool) -> Result<()> {
@@ -764,16 +1000,7 @@ pub fn detect(home: &Path) -> Vec<ClientKind> {
 /// `CreateProcess` cannot start one directly.
 pub fn find_binary(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
-    let candidates: Vec<String> = if cfg!(windows) {
-        vec![
-            format!("{name}.exe"),
-            name.to_string(),
-            format!("{name}.cmd"),
-            format!("{name}.bat"),
-        ]
-    } else {
-        vec![name.to_string()]
-    };
+    let candidates = binary_candidates(name, cfg!(windows));
     for dir in std::env::split_paths(&path) {
         for candidate in &candidates {
             let path = dir.join(candidate);
@@ -785,11 +1012,33 @@ pub fn find_binary(name: &str) -> Option<PathBuf> {
     None
 }
 
+fn binary_candidates(name: &str, windows: bool) -> Vec<String> {
+    if windows {
+        vec![
+            format!("{name}.exe"),
+            format!("{name}.cmd"),
+            format!("{name}.bat"),
+            name.to_string(),
+        ]
+    } else {
+        vec![name.to_string()]
+    }
+}
+
 /// Run a host's own CLI, wrapping a shell shim where the platform needs it.
 ///
 /// Used for `claude mcp add`, because Claude Code owns its config shape and a
 /// second writer for it is a second thing that can drift.
 pub fn run_host_cli(binary: &Path, args: &[String]) -> std::io::Result<std::process::Output> {
+    run_host_cli_at(binary, args, None)
+}
+
+/// Run a host CLI from the project whose config it should edit.
+pub fn run_host_cli_at(
+    binary: &Path,
+    args: &[String],
+    current_dir: Option<&Path>,
+) -> std::io::Result<std::process::Output> {
     let extension = binary
         .extension()
         .and_then(|ext| ext.to_str())
@@ -798,9 +1047,17 @@ pub fn run_host_cli(binary: &Path, args: &[String]) -> std::io::Result<std::proc
     if cfg!(windows) && (extension == "cmd" || extension == "bat") {
         let mut command = std::process::Command::new("cmd");
         command.arg("/C").arg(binary).args(args);
+        if let Some(current_dir) = current_dir {
+            command.current_dir(current_dir);
+        }
         return command.output();
     }
-    std::process::Command::new(binary).args(args).output()
+    let mut command = std::process::Command::new(binary);
+    command.args(args);
+    if let Some(current_dir) = current_dir {
+        command.current_dir(current_dir);
+    }
+    command.output()
 }
 
 /// The exact line a person can paste, per client.
@@ -867,6 +1124,20 @@ pub fn snippet(kind: ClientKind, entry: &Entry) -> String {
                 "Zed: Command Palette -> `agent: add context server`, then paste:\n{{\n  \"{SERVER_NAME}\": {}\n}}",
                 serde_json::to_string_pretty(&entry.json()).unwrap_or_default()
             ),
+            ClientKind::OpenCode => {
+                let mut argv = vec![command.to_string()];
+                argv.extend(entry.args.iter().cloned());
+                let mut config = Map::new();
+                config.insert("type".into(), json!("local"));
+                config.insert("command".into(), json!(argv));
+                if !entry.env.is_empty() {
+                    config.insert("environment".into(), json!(&entry.env));
+                }
+                format!(
+                    "// Add under mcp.servers in opencode.json(c):\n\"{SERVER_NAME}\": {}",
+                    serde_json::to_string_pretty(&Value::Object(config)).unwrap_or_default()
+                )
+            }
         };
     }
     match kind {
@@ -886,6 +1157,11 @@ pub fn snippet(kind: ClientKind, entry: &Entry) -> String {
         ),
         ClientKind::Zed => format!(
             "Zed: Command Palette -> `agent: add context server`, then paste:\n{{\n  \"{SERVER_NAME}\": {{\n    \"url\": \"{}\",\n    \"headers\": {{ \"Authorization\": \"{}\" }}\n  }}\n}}",
+            entry.url,
+            mask_token(entry.token.as_deref())
+        ),
+        ClientKind::OpenCode => format!(
+            "// Add under mcp.servers in opencode.json(c):\n\"{SERVER_NAME}\": {{\n  \"type\": \"remote\",\n  \"url\": \"{}\",\n  \"oauth\": false,\n  \"headers\": {{ \"Authorization\": \"{}\" }}\n}}",
             entry.url,
             mask_token(entry.token.as_deref())
         ),
@@ -978,6 +1254,114 @@ mod tests {
         assert_eq!(
             root["mcpServers"][SERVER_NAME]["headers"]["Authorization"],
             "Bearer secret-token"
+        );
+    }
+
+    #[test]
+    fn opencode_local_entry_uses_project_scope_and_preserves_other_servers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.json");
+        std::fs::write(
+            &path,
+            r#"{"$schema":"https://opencode.ai/config.json","mcp":{"servers":{"other":{"type":"local","command":["node","server.js"]}}}}"#,
+        )
+        .unwrap();
+
+        write_opencode(&path, &local_entry(), false).unwrap();
+        let root: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(root["$schema"], "https://opencode.ai/config.json");
+        assert_eq!(root["mcp"]["servers"]["other"]["command"][0], "node");
+        let memnoth = &root["mcp"]["servers"][SERVER_NAME];
+        assert_eq!(memnoth["type"], "local");
+        assert_eq!(memnoth["command"][0], "/usr/local/bin/memnoth");
+        assert_eq!(memnoth["command"][1], "mcp");
+        assert_eq!(memnoth["environment"]["MEMNOTH_MCP_READ_ONLY"], "1");
+        assert!(memnoth.get("url").is_none());
+    }
+
+    #[test]
+    fn opencode_status_reads_jsonc_without_rewriting_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.jsonc");
+        let original = r#"{
+  // project defaults
+  "mcp": { "servers": {
+    "memnoth": { "type": "local", "command": ["memnoth", "mcp", "serve"] },
+  } },
+}
+"#;
+        std::fs::write(&path, original).unwrap();
+
+        let status = status_for_workspace(ClientKind::OpenCode, dir.path(), Some(dir.path()), "");
+        assert!(status.registered, "{}", status.detail);
+        assert!(status.detail.contains("local stdio"), "{}", status.detail);
+        assert!(
+            status.detail.contains("OpenCode JSONC"),
+            "{}",
+            status.detail
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[test]
+    fn opencode_writer_refuses_to_destroy_jsonc_comments() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.jsonc");
+        let original = "{\n  // preserve this note\n  \"mcp\": {}\n}\n";
+        std::fs::write(&path, original).unwrap();
+        let error = write_opencode(&path, &local_entry(), false)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("refusing to rewrite"), "{error}");
+        assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[test]
+    fn opencode_remove_preserves_other_servers_and_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.json");
+        std::fs::write(
+            &path,
+            r#"{"theme":"dark","mcp":{"servers":{"memnoth":{"type":"local","command":["memnoth"]},"other":{"type":"local","command":["node","mcp.js"]}}}}"#,
+        )
+        .unwrap();
+        let removed = remove_opencode_for_workspace(dir.path(), dir.path(), false);
+        assert!(removed.ok, "{}", removed.detail);
+        assert!(!removed.registered);
+        let root: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(root["theme"], "dark");
+        assert_eq!(root["mcp"]["servers"]["other"]["command"][0], "node");
+        assert!(root["mcp"]["servers"].get("memnoth").is_none());
+        let repeated = remove_opencode_for_workspace(dir.path(), dir.path(), false);
+        assert!(repeated.ok);
+        assert!(!repeated.registered);
+    }
+
+    #[test]
+    fn opencode_remove_refuses_to_rewrite_jsonc() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.jsonc");
+        let original = "{\n  // keep comment\n  \"mcp\": {\"servers\": {\"memnoth\": {\"type\": \"local\"}}}\n}\n";
+        std::fs::write(&path, original).unwrap();
+        let status = remove_opencode_for_workspace(dir.path(), dir.path(), false);
+        assert!(!status.ok);
+        assert!(status.registered);
+        assert!(status.detail.contains("JSONC"));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[test]
+    fn opencode_project_config_path_prefers_existing_jsonc() {
+        let dir = tempfile::tempdir().unwrap();
+        let jsonc = dir.path().join("opencode.jsonc");
+        std::fs::write(&jsonc, "{}\n").unwrap();
+        assert_eq!(
+            ClientKind::OpenCode.config_path_for(dir.path(), Some(dir.path())),
+            jsonc
+        );
+        assert_eq!(
+            ClientKind::OpenCode.config_path_for(dir.path(), None),
+            dir.path().join(".config/opencode/opencode.json")
         );
     }
 
@@ -1153,6 +1537,10 @@ mod tests {
     fn client_names_parse_and_a_typo_is_refused() {
         assert_eq!(ClientKind::from_name("CLAUDE"), Some(ClientKind::Claude));
         assert_eq!(ClientKind::from_name("cursor"), Some(ClientKind::Cursor));
+        assert_eq!(
+            ClientKind::from_name("OpenCode"),
+            Some(ClientKind::OpenCode)
+        );
         assert!(ClientKind::parse_list(&["zed".into(), "zen".into()]).is_err());
         assert_eq!(
             ClientKind::parse_list(&["claude".into(), "claude".into()])
@@ -1160,6 +1548,15 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn windows_host_cli_resolution_prefers_native_shims_to_extensionless_files() {
+        assert_eq!(
+            binary_candidates("opencode", true),
+            ["opencode.exe", "opencode.cmd", "opencode.bat", "opencode"]
+        );
+        assert_eq!(binary_candidates("opencode", false), ["opencode"]);
     }
 
     /// Zed's own settings file is JSON-with-comments, and reporting it as
