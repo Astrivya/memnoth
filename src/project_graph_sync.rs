@@ -996,6 +996,167 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_upload_already_committed_remains_recoverable_on_next_sync() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_id = "7284b093-4bb8-4d92-b661-8502dfbb46c6";
+        let root = temp.path().join("workspace");
+        let home = temp.path().join("home");
+        let graph = root.join(".memnoth/graph.db");
+        index_checkout(&root, &graph);
+        let ctx = test_context(&root, &home, graph);
+        let paths = Paths::new(&ctx, project_id);
+        let (snapshot, fingerprint) = local_snapshot(&ctx).unwrap();
+        let ciphertext = b"staged encrypted upload";
+        let pending = PendingUpload {
+            project_id: project_id.into(),
+            base_version: 0,
+            source_fingerprint: fingerprint,
+            graph_hash: content_hash(&snapshot),
+            ciphertext_hash: content_hash(ciphertext),
+        };
+        save_pending(&paths, &pending, ciphertext).unwrap();
+
+        // The previous process may have reached Cloud and then lost the
+        // response. A later run must recognize the server's matching hash,
+        // persist its cursor, and avoid uploading the same snapshot again.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let expected_hash = pending.ciphertext_hash.clone();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let (path, _) = read_http_request(&mut stream);
+            assert!(path.starts_with("GET ") && path.ends_with("/graph-sync"));
+            let mut status: ProjectGraphSyncStatus =
+                serde_json::from_slice(&status_json(project_id, 1, Some(ciphertext))).unwrap();
+            status.ciphertext_hash = Some(expected_hash);
+            reply(
+                &mut stream,
+                "200 OK",
+                "application/json",
+                &serde_json::to_vec(&status).unwrap(),
+            );
+        });
+        let mut client = CloudClient::with_base_url(&format!("http://{address}")).unwrap();
+        client.set_auth_token("test-only-token".into());
+
+        let outcome = sync_project(&ctx, &client, "phrase", "org", project_id).unwrap();
+
+        assert_eq!(outcome.version, 1);
+        assert_eq!(outcome.bytes, ciphertext.len());
+        assert!(outcome.note.contains("already committed"));
+        let cursor = load_cursor(&paths, project_id).unwrap();
+        assert_eq!(cursor.version, 1);
+        assert_eq!(cursor.ciphertext_hash, pending.ciphertext_hash);
+        assert_eq!(cursor.graph_hash, pending.graph_hash);
+        assert!(!paths.pending_state.exists());
+        assert!(!paths.pending_ciphertext.exists());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn pending_upload_from_another_workspace_is_discarded_before_current_graph_upload() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_id = "7284b093-4bb8-4d92-b661-8502dfbb46c6";
+        let home = temp.path().join("shared-home");
+        let root_a = temp.path().join("workspace-a");
+        let root_b = temp.path().join("workspace-b");
+        let graph_a = root_a.join(".memnoth/graph.db");
+        let graph_b = root_b.join(".memnoth/graph.db");
+        index_checkout(&root_a, &graph_a);
+        fs::create_dir_all(&root_b).unwrap();
+        fs::write(root_b.join("lib.rs"), "pub fn other_symbol() -> u8 { 8 }\n").unwrap();
+        if let Some(parent) = graph_b.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        let mut store_b = memnoth_codegraph::Store::open(&graph_b).unwrap();
+        memnoth_codegraph::index_full(&mut store_b, &root_b).unwrap();
+
+        let old_ctx = test_context(&root_a, &home, graph_a);
+        let (old_snapshot, old_fingerprint) = local_snapshot(&old_ctx).unwrap();
+        let paths = Paths::new(&old_ctx, project_id);
+        let old_ciphertext = b"old workspace ciphertext";
+        save_pending(
+            &paths,
+            &PendingUpload {
+                project_id: project_id.into(),
+                base_version: 0,
+                source_fingerprint: old_fingerprint,
+                graph_hash: content_hash(&old_snapshot),
+                ciphertext_hash: content_hash(old_ciphertext),
+            },
+            old_ciphertext,
+        )
+        .unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for request_index in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let (path, body) = read_http_request(&mut stream);
+                if request_index == 0 {
+                    assert!(path.starts_with("GET ") && path.ends_with("/graph-sync"));
+                    reply(
+                        &mut stream,
+                        "200 OK",
+                        "application/json",
+                        &status_json(project_id, 0, None),
+                    );
+                } else {
+                    assert!(path.starts_with("PUT ") && path.ends_with("/graph-sync"));
+                    assert!(!body.starts_with(b"SQLite format 3"));
+                    reply(
+                        &mut stream,
+                        "200 OK",
+                        "application/json",
+                        &status_json(project_id, 1, Some(&body)),
+                    );
+                }
+            }
+        });
+        let mut client = CloudClient::with_base_url(&format!("http://{address}")).unwrap();
+        client.set_auth_token("test-only-token".into());
+        let current_ctx = test_context(&root_b, &home, graph_b);
+
+        let outcome = sync_project(&current_ctx, &client, "phrase", "org", project_id).unwrap();
+
+        assert_eq!(outcome.version, 1);
+        assert!(outcome.note.contains("uploaded"));
+        let cursor = load_cursor(&paths, project_id).unwrap();
+        assert_eq!(
+            cursor.source_fingerprint,
+            source_fingerprint(&root_b, &current_ctx.graph_path).unwrap()
+        );
+        assert!(!paths.pending_state.exists());
+        assert!(!paths.pending_ciphertext.exists());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn cursor_without_newer_sync_metadata_remains_backward_compatible() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            dir: temp.path().to_path_buf(),
+            state: temp.path().join("state.json"),
+            pending_state: temp.path().join("pending.json"),
+            pending_ciphertext: temp.path().join("pending.enc"),
+        };
+        fs::write(
+            &paths.state,
+            r#"{"project_id":"project-a","version":3,"source_fingerprint":"source","ciphertext_hash":"cipher"}"#,
+        )
+        .unwrap();
+
+        let cursor = load_cursor(&paths, "project-a").unwrap();
+
+        assert_eq!(cursor.version, 3);
+        assert_eq!(cursor.graph_hash, "");
+        assert_eq!(cursor.ciphertext_hash, "cipher");
+        assert_eq!(cursor.ciphertext_bytes, None);
+        assert_eq!(cursor.synced_at_unix_secs, None);
+    }
+
+    #[test]
     fn source_fingerprint_checks_full_source_bytes_and_rejects_escape_paths() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
