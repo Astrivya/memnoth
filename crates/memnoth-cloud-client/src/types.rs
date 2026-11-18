@@ -585,6 +585,9 @@ pub struct OkResponse {
 pub struct SessionReport {
     /// The local session id. Re-posting the same id updates the same row.
     pub id: String,
+    /// Which client reported this row. Older clients omit it and remain unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     /// The conversation's name — the session file's name in the TUI.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub name: String,

@@ -315,6 +315,7 @@ fn collect_session_data(ctx: &AppContext, mode: SyncPrivacyMode) -> Result<Vec<S
 
         items.push(SessionReport {
             id: header.id,
+            source: Some("cli".to_string()),
             name: path
                 .file_stem()
                 .and_then(|stem| stem.to_str())
@@ -1029,21 +1030,21 @@ const OUTBOUND_PATHS: &[OutboundPath] = &[
         fields: &["message", "surface", "version", "os", "session_id", "repo"],
     },
     OutboundPath {
-        name: "MCP cloud ingest",
-        endpoint: "POST /api/v1/sessions",
-        when: "MCP server session lifecycle",
-        gate: "MEMNOTH_TELEMETRY=1 in the MCP host environment (unset is off)",
+        name: "hosted MCP usage metric",
+        endpoint: "POST /api/v1/ingest/batch",
+        when: "after an authenticated hosted MCP tool call",
+        gate: "a verified user token with mcp:read or mcp:write scope",
+        fields: &["one call increment", "UTC day", "org scope from the token"],
+    },
+    OutboundPath {
+        name: "local knowledge graph snapshot metric",
+        endpoint: "POST /api/v1/ingest/batch",
+        when: "after a CLI session finishes",
+        gate: "privacy.telemetry_enabled (off by default)",
         fields: &[
-            "id",
-            "workspace (absolute path)",
-            "model",
-            "status",
-            "started_at",
-            "ended_at",
-            "tokens",
-            "files",
-            "cost_micros",
-            "project_id",
+            "random workspace UUID",
+            "indexed flag",
+            "file, symbol, reference and stale-file counts",
         ],
     },
     OutboundPath {
@@ -1224,7 +1225,8 @@ mod tests {
             "sync",
             "heartbeat",
             "feedback",
-            "MCP cloud ingest",
+            "hosted MCP usage metric",
+            "local knowledge graph snapshot metric",
             "project graph sync",
             "hosted MCP request",
             "update check",

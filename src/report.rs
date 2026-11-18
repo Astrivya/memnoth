@@ -25,9 +25,10 @@ use std::io::Write;
 use std::sync::OnceLock;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
-use memnoth_cloud_client::{HeartbeatRequest, SessionReport};
+use memnoth_cloud_client::{BatchIngestRequest, HeartbeatRequest, IngestEvent, SessionReport};
 use memnoth_session::{Role, Session};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 use crate::context::AppContext;
 use crate::sync::SyncPrivacyMode;
@@ -210,6 +211,10 @@ fn send(job: &Job) {
         );
     }
 
+    if job.event == Event::Finished {
+        report_graph_snapshot(job, &client);
+    }
+
     // Liveness, alongside the row: the plane counts an instance only because it
     // beat, so a session that reports and never beats is a session the status
     // page shows as history from a machine that does not exist.
@@ -224,6 +229,104 @@ fn send(job: &Job) {
             Some(&job.ctx),
             &format!("POST /api/v1/instances/heartbeat failed: {error}"),
         );
+    }
+}
+
+/// Send aggregate graph counts only. The workspace identifier is a random
+/// local UUID; no path, host name, language, model, or graph content is sent.
+fn report_graph_snapshot(job: &Job, client: &memnoth_cloud_client::CloudClient) {
+    let status = match crate::kg::status(&job.ctx) {
+        Ok(status) => status,
+        Err(error) => {
+            append_log(
+                Some(&job.ctx),
+                &format!("cannot read graph status for telemetry: {error}"),
+            );
+            return;
+        }
+    };
+    let Some(state_dir) = job.ctx.config_path().parent() else {
+        return;
+    };
+    let workspace_id = match workspace_telemetry_id(&job.ctx.root, state_dir) {
+        Ok(id) => id,
+        Err(error) => {
+            append_log(
+                Some(&job.ctx),
+                &format!("cannot resolve local telemetry id: {error}"),
+            );
+            return;
+        }
+    };
+    let mut extra = serde_json::Map::new();
+    extra.insert("workspace_id".to_string(), json!(workspace_id));
+    extra.insert("indexed".to_string(), json!(status.indexed));
+    extra.insert("files".to_string(), json!(status.files));
+    extra.insert("symbols".to_string(), json!(status.symbols));
+    extra.insert("references".to_string(), json!(status.references));
+    extra.insert("stale_files".to_string(), json!(status.stale_files));
+    let event = IngestEvent {
+        event_id: uuid::Uuid::new_v4().to_string(),
+        kind: "kg_snapshot".to_string(),
+        surface: "cli".to_string(),
+        session_id: None,
+        at_ms: memnoth_session::now_ms() as i64,
+        extra,
+    };
+    if let Err(error) = client.ingest_batch(&BatchIngestRequest {
+        events: vec![event],
+    }) {
+        append_log(
+            Some(&job.ctx),
+            &format!("POST /api/v1/ingest/batch graph snapshot failed: {error}"),
+        );
+    }
+}
+
+fn workspace_telemetry_id(
+    root: &std::path::Path,
+    state_dir: &std::path::Path,
+) -> std::io::Result<String> {
+    use std::fs::OpenOptions;
+    use std::io::ErrorKind;
+    use std::io::Write;
+
+    let mut local_key = root.to_string_lossy().to_string();
+    if cfg!(windows) {
+        local_key.make_ascii_lowercase();
+    }
+    let key = format!("{:x}", Sha256::digest(local_key.as_bytes()));
+    let path = state_dir
+        .join("workspace-telemetry")
+        .join(format!("{key}.id"));
+    let read_existing = || -> std::io::Result<String> {
+        let id = std::fs::read_to_string(&path)?;
+        if uuid::Uuid::parse_str(id.trim()).is_err() {
+            return Err(std::io::Error::new(
+                ErrorKind::InvalidData,
+                "invalid telemetry UUID",
+            ));
+        }
+        Ok(id.trim().to_string())
+    };
+    match read_existing() {
+        Ok(id) => return Ok(id),
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(ErrorKind::InvalidInput, "missing telemetry directory")
+    })?;
+    std::fs::create_dir_all(parent)?;
+    let id = uuid::Uuid::new_v4().to_string();
+    match OpenOptions::new().write(true).create_new(true).open(&path) {
+        Ok(mut file) => {
+            file.write_all(id.as_bytes())?;
+            file.sync_all()?;
+            Ok(id)
+        }
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => read_existing(),
+        Err(error) => Err(error),
     }
 }
 
@@ -253,6 +356,7 @@ fn body(
 
     SessionReport {
         id: session.id.clone(),
+        source: Some("cli".to_string()),
         name: name.to_string(),
         repo: String::new(),
         branch: String::new(),
@@ -464,6 +568,7 @@ mod tests {
             Event::Updated,
         );
         assert_eq!(running.id, "s-test");
+        assert_eq!(running.source.as_deref(), Some("cli"));
         assert_eq!(running.status, "running");
         assert_eq!(running.tokens, 150);
         assert_eq!(running.cost_micros, 2_000);
@@ -506,6 +611,49 @@ mod tests {
             (Role::Tool, "ok".to_string()),
             (Role::Assistant, "done".to_string()),
         ]
+    }
+
+    #[test]
+    fn telemetry_workspace_id_is_stable_and_safe_under_first_use_races() {
+        let root = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let workers: Vec<_> = (0..12)
+            .map(|_| {
+                let path = root.path().to_path_buf();
+                let state = state.path().to_path_buf();
+                std::thread::spawn(move || workspace_telemetry_id(&path, &state).unwrap())
+            })
+            .collect();
+        let ids: Vec<String> = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect();
+        assert!(ids.iter().all(|id| id == &ids[0]));
+        assert!(uuid::Uuid::parse_str(&ids[0]).is_ok());
+        assert_eq!(
+            workspace_telemetry_id(root.path(), state.path()).unwrap(),
+            ids[0]
+        );
+    }
+
+    #[test]
+    fn invalid_telemetry_workspace_id_fails_closed() {
+        let root = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let mut local_key = root.path().to_string_lossy().to_string();
+        if cfg!(windows) {
+            local_key.make_ascii_lowercase();
+        }
+        let key = format!("{:x}", Sha256::digest(local_key.as_bytes()));
+        let path = state.path().join("workspace-telemetry");
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join(format!("{key}.id")), "not-a-uuid").unwrap();
+        assert_eq!(
+            workspace_telemetry_id(root.path(), state.path())
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidData
+        );
     }
 
     /// `metadata-only` is the default mode, and it must not send a single word of
