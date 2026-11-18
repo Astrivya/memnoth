@@ -325,6 +325,23 @@ jobs:
         with:
           path: artifacts
 
+      # npm trusted publishing requires Node >=22.14 and npm >=11.5.1.
+      # Disable setup-node's package-manager cache in this publishing job so
+      # auth material cannot be restored from a cache created by other code.
+      - uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
+        with:
+          node-version: 22.14.0
+          package-manager-cache: false
+
+      - name: install and verify trusted-publishing npm
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global npm@11.5.1
+          node --version | grep -Fx 'v22.14.0'
+          npm --version | grep -Fx '11.5.1'
+          node -e 'const p=require("./crates/memnoth-mcp/npm/package.json"); const expected=`${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}.git`; if(p.repository?.url!==expected) { console.error(`package repository must be exactly ${expected}`); process.exit(1) }'
+
       - name: verify archives and run linux-x86_64
         shell: bash
         run: |
@@ -469,6 +486,12 @@ jobs:
         if: ${{ steps.npm-publish-auth.outputs.configured == 'true' }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish "${{ steps.npm-package.outputs.package }}" --access public --provenance
+
+      # Once the package's trusted publisher is configured on npmjs.com, this
+      # path uses the job's OIDC identity and requires no long-lived npm token.
+      - name: publish standalone npm package with trusted publishing
+        if: ${{ steps.npm-publish-auth.outputs.configured != 'true' }}
         run: npm publish "${{ steps.npm-package.outputs.package }}" --access public --provenance
 
       # SBOM for every published artifact, generated after signing so it

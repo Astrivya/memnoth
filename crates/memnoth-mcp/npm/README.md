@@ -21,9 +21,44 @@ npx -y @astrivya/mcp --help    # sanity check that the launcher starts the bundl
 ```
 
 The published package ships the binary, so no separate Memnoth install is required. Set
-`MEMNOTH_BIN` to use a different build (for example a locally compiled one). The release
-workflow needs the repository's `NPM_TOKEN` secret to publish; without it, the verified
-tarball is attached to the GitHub release for manual publication.
+`MEMNOTH_BIN` to use a different build (for example a locally compiled one).
+
+## Release publishing setup
+
+The package metadata points to `https://github.com/Astrivya/memnoth.git`; keep this
+repository URL aligned with the GitHub repository because npm uses it to bind the
+trusted publisher. The `dist` job in `.github/workflows/release.yml` uses Node 22.14.0,
+npm 11.5.1, and `id-token: write` for npm's GitHub Actions OIDC publishing.
+
+### First publication (temporary token bootstrap)
+
+npm cannot configure a trusted publisher until the package exists. For the first
+publication only:
+
+1. Create `@astrivya/mcp` on npm by publishing the first verified release with a
+   short-lived, package-scoped npm automation token that has publish access. Do not
+   paste the token into source, a workflow file, or chat.
+2. Add it to the GitHub repository as the Actions secret `NPM_TOKEN`.
+3. Run the normal tagged release workflow. It publishes the verified tarball with
+   `NPM_TOKEN` and provenance; the same tarball is attached to the GitHub release.
+
+### Switch to trusted publishing
+
+After the package exists, open the package's settings on npmjs.com and add a trusted
+publisher with:
+
+- Provider: **GitHub Actions**
+- Organization/user: **Astrivya**
+- Repository: **memnoth**
+- Workflow file: **`.github/workflows/release.yml`**
+- GitHub environment: leave empty (the release job does not use an environment)
+
+Save the publisher, then remove `NPM_TOKEN` from the GitHub repository Actions
+secrets. The release workflow automatically takes its OIDC path when that secret is
+absent. Verify the next normal release succeeds and the npm package provenance names
+`Astrivya/memnoth` and `release.yml`; do not restore a long-lived token as routine
+publishing configuration. If the token is temporarily retained during the
+transition, it takes precedence over OIDC until it is removed.
 
 ## Client config
 
