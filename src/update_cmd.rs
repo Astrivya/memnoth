@@ -747,9 +747,9 @@ mod tests {
 
     #[test]
     fn the_notice_names_both_versions_and_the_door_to_use() {
-        let text = notice_text("0.1.0-beta.2", "0.1.0-beta.3");
+        let text = notice_text("0.1.0-beta.3", "0.1.0-beta.4");
+        assert!(text.contains("0.1.0-beta.4"), "{text}");
         assert!(text.contains("0.1.0-beta.3"), "{text}");
-        assert!(text.contains("0.1.0-beta.2"), "{text}");
         assert!(text.contains("/update"), "{text}");
         // It must not claim the session is replaced under the person's hands.
         assert!(text.contains("keeps running"), "{text}");

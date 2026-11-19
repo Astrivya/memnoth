@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-beta.4] - 2026-11-19
+
+### Fixed - Release
+
+- The artifact smoke job now checks out the tagged source before validating the
+  standalone MCP package metadata, allowing the multi-platform release to finish.
+
 ## [0.1.0-beta.3] - 2026-11-19
 
 ### Added - MCP
