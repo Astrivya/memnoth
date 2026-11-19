@@ -25,7 +25,7 @@ The published package ships the binary, so no separate Memnoth install is requir
 
 ## Release publishing setup
 
-The package metadata points to `https://github.com/Astrivya/memnoth.git`; keep this
+The package metadata points to `https://github.com/astrivya/memnoth.git`; keep this
 repository URL aligned with the GitHub repository because npm uses it to bind the
 trusted publisher. The `dist` job in `.github/workflows/release.yml` uses Node 22.14.0,
 npm 11.5.1, and `id-token: write` for npm's GitHub Actions OIDC publishing.
@@ -48,7 +48,7 @@ After the package exists, open the package's settings on npmjs.com and add a tru
 publisher with:
 
 - Provider: **GitHub Actions**
-- Organization/user: **Astrivya**
+- Organization/user: **astrivya**
 - Repository: **memnoth**
 - Workflow file: **`.github/workflows/release.yml`**
 - GitHub environment: leave empty (the release job does not use an environment)
