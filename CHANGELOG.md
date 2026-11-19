@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-beta.8] - 2026-11-19
+
+### Fixed - Release
+
+- Exercise standalone MCP package assembly with fixture archives and avoid
+  Bash `nounset` expansion before the target variable is assigned.
+
 ## [0.1.0-beta.7] - 2026-11-19
 
 ### Fixed - Release

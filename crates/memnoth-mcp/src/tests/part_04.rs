@@ -583,6 +583,10 @@ fn npm_onboarding_names_the_vault_and_distinguishes_registration_flows() {
         release_workflow.contains("bash scripts/assemble-npm-mcp.sh"),
         "the npm assembler uses Bash syntax and must be invoked with Bash"
     );
+    assert!(
+        release_workflow.contains("bash scripts/test-assemble-npm-mcp.sh"),
+        "the release smoke job must exercise the npm assembler with fixtures"
+    );
 
     let opencode = readme_lf
         .split("### Codex CLI")

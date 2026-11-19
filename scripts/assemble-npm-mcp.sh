@@ -20,7 +20,9 @@ mkdir -p "$STAGE/vendor/linux-x64" "$STAGE/vendor/linux-arm64" \
 npm pkg set "version=$VERSION" --prefix "$STAGE" >/dev/null
 
 extract_tar() {
-  local target="$1" platform="$2" archive="$ARTIFACTS/$target/memnoth-$target.tar.gz"
+  local target="$1"
+  local platform="$2"
+  local archive="$ARTIFACTS/$target/memnoth-$target.tar.gz"
   local unpack="$STAGE/unpack-$target"
   mkdir -p "$unpack"
   tar -xzf "$archive" -C "$unpack" -- memnoth-mcp
