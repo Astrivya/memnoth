@@ -9074,7 +9074,7 @@
           {
             "default": false,
             "deprecated": null,
-            "description": "Sync presence with cloud",
+            "description": "Check cloud identity reachability; presence stays local",
             "env": null,
             "hidden": false,
             "long": null,

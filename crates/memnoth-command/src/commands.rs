@@ -4057,7 +4057,10 @@ pub fn build_p0_registry() -> RegistryBuilder {
             "Show team presence (active sessions)",
             vec![
                 ParamSpec::bool("stale", "Show stale sessions only"),
-                ParamSpec::bool("sync", "Sync presence with cloud"),
+                ParamSpec::bool(
+                    "sync",
+                    "Check cloud identity reachability; presence stays local",
+                ),
             ],
             DangerLevel::Safe,
             AuthLevel::Cloud,

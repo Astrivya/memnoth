@@ -1261,7 +1261,7 @@ pub struct TeamPresenceArgs {
     /// Show stale sessions only.
     #[arg(long)]
     pub stale: bool,
-    /// Sync presence with cloud.
+    /// Check cloud identity reachability; local presence remains local.
     #[arg(long)]
     pub sync: bool,
     /// Output as JSON.

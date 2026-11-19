@@ -3,7 +3,7 @@
 //! Commands:
 //! - `mn team claim <task>` / `release` — claim/release tasks from shared board
 //! - `mn team tasks` / `mn team inbox` — list tasks and messages
-//! - `mn team presence` — show team presence with cloud sync
+//! - `mn team presence` — show local sessions and optionally probe cloud identity
 //! - `mn team lock <path>` — lock file paths for exclusive editing
 //! - `mn team handoff` — hand off tasks to team members
 //! - `mn team review` — request code reviews
@@ -310,21 +310,20 @@ pub fn presence(ctx: &AppContext, args: &crate::cli::TeamPresenceArgs) -> Result
         sessions.retain(|s| s.stale);
     }
 
-    // Sync with cloud if requested
-    let mut cloud_synced = false;
-    if args.sync
-        && let Ok(client) = crate::cloud::signed_in_client(ctx)
-    {
-        // The cloud API reports the authenticated credential and nothing more:
-        // `/api/v1/me` is the token's view of itself — subject, org scope and
-        // roles — because a key is not a user profile. So the subject stands in
-        // for the name and there is no email here to fall back on.
-        if client.me().is_ok() {
-            cloud_synced = true;
+    // `--sync` historically only probes `/api/v1/me`; it never uploads
+    // presence. Keep the option while reporting identity reachability under a
+    // truthful field and retain `cloud_synced=false` for JSON compatibility.
+    let cloud_identity_status = if !args.sync {
+        "not_requested"
+    } else {
+        match crate::cloud::signed_in_client(ctx) {
+            Ok(client) if client.me().is_ok() => "reachable",
+            Ok(_) => "unreachable",
+            Err(_) => "unavailable",
         }
-    }
+    };
 
-    let text = if sessions.is_empty() {
+    let mut text = if sessions.is_empty() {
         "No active sessions".to_string()
     } else {
         let mut parts = Vec::new();
@@ -352,6 +351,14 @@ pub fn presence(ctx: &AppContext, args: &crate::cli::TeamPresenceArgs) -> Result
         }
         parts.join("\n\n")
     };
+    text.push_str("\n\nLocal only — presence is not uploaded.");
+    if args.sync {
+        text.push_str(match cloud_identity_status {
+            "reachable" => " Cloud identity endpoint reachable.",
+            "unreachable" => " Cloud identity endpoint unreachable.",
+            _ => " Cloud identity status unavailable.",
+        });
+    }
 
     let data = json!({
         "local_sessions": sessions.iter().map(|s| json!({
@@ -363,7 +370,8 @@ pub fn presence(ctx: &AppContext, args: &crate::cli::TeamPresenceArgs) -> Result
             "stale": s.stale,
             "active_claims": s.active_claims,
         })).collect::<Vec<_>>(),
-        "cloud_synced": cloud_synced,
+        "cloud_synced": false,
+        "cloud_identity_status": cloud_identity_status,
     });
 
     Ok(Outcome::new("team.presence", text, data))

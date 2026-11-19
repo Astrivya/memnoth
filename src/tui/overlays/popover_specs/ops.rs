@@ -238,10 +238,8 @@ fn audit(data: &Value) -> Option<PopoverSpec> {
     Some(with_follows(spec, data))
 }
 
-/// `team presence` answers with local sessions and, when synced, cloud members.
-///
-/// The two lists are drawn in one window and tagged by where they came from: a
-/// local row is this machine's heartbeat, a cloud row is somebody else's.
+/// `team presence` only returns local sessions. The optional cloud check tests
+/// identity reachability; it does not upload or fetch presence.
 fn presence(data: &Value) -> Option<PopoverSpec> {
     let mut rows: Vec<PopoverRow> = Vec::new();
 
@@ -272,39 +270,26 @@ fn presence(data: &Value) -> Option<PopoverSpec> {
         rows.push(row);
     }
 
-    let cloud = list(data, "cloud_members");
-    for member in cloud {
-        let name = present(member, "name").unwrap_or_else(|| string(member, "user_id"));
-        let mut row = PopoverRow::new(name, present(member, "user_id").unwrap_or_default());
-        row.tag = Some(
-            if member
-                .get("online")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-            {
-                "online".to_string()
-            } else {
-                "offline".to_string()
-            },
-        );
-        rows.push(row);
-    }
-
     if rows.is_empty() {
         return None;
     }
 
-    let synced = data
-        .get("cloud_synced")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
     let mut spec = PopoverSpec::new(format!("Presence ({})", rows.len()), "from team.presence")
         .rows(rows)
         .button(PopoverButton::run('a', "audit", "/team audit"));
-
-    if !synced {
-        spec = spec.note("local only — the cloud roster was not read for this answer");
-    }
+    let status = data
+        .get("cloud_identity_status")
+        .and_then(Value::as_str)
+        .unwrap_or("not_requested");
+    let note = match status {
+        "reachable" => "local only — identity endpoint reachable; presence was not uploaded",
+        "unreachable" => "local only — identity endpoint unreachable; presence was not uploaded",
+        "unavailable" => {
+            "local only — cloud identity status unavailable; presence was not uploaded"
+        }
+        _ => "local only — presence was not uploaded",
+    };
+    spec = spec.note(note);
     Some(with_follows(spec, data))
 }
 
@@ -595,21 +580,22 @@ mod tests {
     }
 
     #[test]
-    fn presence_tags_a_local_heartbeat_and_a_cloud_member_differently() {
+    fn presence_does_not_show_cloud_members_from_an_identity_probe() {
         let data = json!({
             "local_sessions": [
                 { "session_id": "s1", "name": "payments", "pid": 12,
                   "project_root": "/repo", "heartbeat_age_ms": 4000, "stale": false,
                   "active_claims": 2 }
             ],
-            "cloud_synced": true,
+            "cloud_synced": false,
+            "cloud_identity_status": "reachable",
             "cloud_members": [
                 { "name": "Dana", "user_id": "u1", "online": true }
             ]
         });
 
         let spec = spec("team.presence", &data).expect("a window");
-        assert_eq!(spec.title, "Presence (2)");
+        assert_eq!(spec.title, "Presence (1)");
         assert_eq!(spec.rows[0].tag.as_deref(), Some("here"));
         assert!(spec.rows[0].detail.contains("4s ago"), "{:?}", spec.rows[0]);
         assert!(
@@ -617,8 +603,13 @@ mod tests {
             "{:?}",
             spec.rows[0]
         );
-        assert_eq!(spec.rows[1].title, "Dana");
-        assert_eq!(spec.rows[1].tag.as_deref(), Some("online"));
+        assert!(
+            spec.note
+                .as_deref()
+                .unwrap_or_default()
+                .contains("not uploaded")
+        );
+        assert!(!spec.rows.iter().any(|row| row.title == "Dana"));
     }
 
     #[test]
