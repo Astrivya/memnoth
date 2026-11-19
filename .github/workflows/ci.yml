@@ -224,6 +224,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
+          mkdir -p target
           # Integration tests use compile-time CARGO_BIN_EXE_* paths. Extract
           # into this checkout's target directory, which matches the builder's
           # workspace path, instead of nextest's temporary extraction path.
