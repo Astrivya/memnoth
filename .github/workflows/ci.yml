@@ -86,116 +86,25 @@ jobs:
       - name: Command crate registry schema
         run: cargo run --quiet -p memnoth-command -- schema --check
 
-  # nextest partitions the full test inventory into explicit slices. Every
-  # scope lists every slice in this static matrix, and --no-tests=fail makes a
-  # stale/empty shard fail visibly. Workspace doctests remain on one shard per
-  # Unix platform because nextest does not execute them.
-  test:
-    name: test (${{ matrix.label }}, ${{ matrix.shard }}/${{ matrix.shards }})
+  # Build each platform's test binaries once, archive them, then fan the same
+  # complete inventory out to execution shards. This avoids recompiling all
+  # test harnesses independently on every shard. Doctests remain explicit Cargo
+  # runs because nextest archives do not include them.
+  test-archive:
+    name: test archive (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    # Test assertions do not need DWARF/PDB debug information. Omitting these
-    # symbols reduces artifact and cache size without changing assertions or
-    # optimization.
     env:
       CARGO_PROFILE_TEST_DEBUG: "0"
     strategy:
       fail-fast: false
       matrix:
         include:
-          - label: ubuntu-latest
-            os: ubuntu-latest
-            args: --workspace
-            shard: 1
-            shards: 3
-            cache_writer: true
+          - os: ubuntu-latest
             doctests: true
-          - label: ubuntu-latest
-            os: ubuntu-latest
-            args: --workspace
-            shard: 2
-            shards: 3
-            cache_writer: false
-            doctests: false
-          - label: ubuntu-latest
-            os: ubuntu-latest
-            args: --workspace
-            shard: 3
-            shards: 3
-            cache_writer: false
-            doctests: false
-          - label: macos-latest
-            os: macos-latest
-            args: --workspace
-            shard: 1
-            shards: 3
-            cache_writer: true
+          - os: macos-latest
             doctests: true
-          - label: macos-latest
-            os: macos-latest
-            args: --workspace
-            shard: 2
-            shards: 3
-            cache_writer: false
+          - os: windows-latest
             doctests: false
-          - label: macos-latest
-            os: macos-latest
-            args: --workspace
-            shard: 3
-            shards: 3
-            cache_writer: false
-            doctests: false
-          - label: windows-latest, unit
-            os: windows-latest
-            # `--bins` here would be wrong: it forces a libtest harness onto
-            # every binary, including the fuzz targets that declare
-            # `test = false` precisely because they have no libtest entry point.
-            args: --workspace --lib
-            installer: true
-            shard: 1
-            shards: 4
-            cache_writer: true
-          - label: windows-latest, unit
-            os: windows-latest
-            args: --workspace --lib
-            shard: 2
-            shards: 4
-            cache_writer: false
-          - label: windows-latest, unit
-            os: windows-latest
-            args: --workspace --lib
-            shard: 3
-            shards: 4
-            cache_writer: false
-          - label: windows-latest, unit
-            os: windows-latest
-            args: --workspace --lib
-            shard: 4
-            shards: 4
-            cache_writer: false
-          - label: windows-latest, memnoth integration
-            os: windows-latest
-            args: --package memnoth --tests
-            shard: 1
-            shards: 2
-            cache_writer: false
-          - label: windows-latest, memnoth integration
-            os: windows-latest
-            args: --package memnoth --tests
-            shard: 2
-            shards: 2
-            cache_writer: false
-          - label: windows-latest, other integration
-            os: windows-latest
-            args: --workspace --exclude memnoth --tests
-            shard: 1
-            shards: 2
-            cache_writer: false
-          - label: windows-latest, other integration
-            os: windows-latest
-            args: --workspace --exclude memnoth --tests
-            shard: 2
-            shards: 2
-            cache_writer: false
     steps:
       - uses: actions/checkout@v4
 
@@ -203,22 +112,25 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          # Keep the existing job/OS cache identity. Only one matrix row per OS
-          # may save it: Linux and macOS each have their own writer, while the
-          # Windows unit shard is the sole writer shared by all three scopes.
           cache-workspace-crates: "true"
-          save-if: ${{ matrix.cache_writer }}
 
       - name: Install nextest
         uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
         with:
           tool: nextest@0.9.150
 
+      # Keep this inventory at workspace scope on every OS. In particular,
+      # Windows used to split unit and integration targets into separate cargo
+      # builds; archiving the workspace once preserves their union and shares
+      # that exact build across every execution shard.
+      - name: Build and archive workspace tests
+        run: cargo nextest archive --workspace --locked --archive-file nextest-archive.tar.zst
+
       # The Windows installer is shipped and run as PowerShell 5.1, but no
-      # Rust test executes it. Parse it on the Windows leg so an indentation or
-      # quoting mistake in a here-string fails here instead of at install time.
+      # Rust test executes it. Parse it on Windows so script syntax remains a
+      # required cross-platform CI check.
       - name: Windows installer parses
-        if: matrix.installer
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $errors = $null
@@ -229,23 +141,91 @@ jobs:
             exit 1
           }
 
-      # The whole workspace, not just the binary: the vault, graph and session
-      # behaviour the CLI is a thin shell over is tested in those crates.
-      # `--locked` also fails here when Cargo.lock drifts from a manifest.
-      # The output lands in the job summary: a red step that names no failing
-      # test is where a morning used to go. Pinned to bash: `set -o pipefail`
-      # is not PowerShell, and windows-latest runs run: steps in pwsh, so the
-      # step died before cargo did and the job reported failure for nothing.
-      - name: Run nextest ${{ matrix.args }} --locked
-        shell: bash
-        run: |
-          set -o pipefail
-          cargo nextest run ${{ matrix.args }} --locked --no-tests=fail --partition slice:${{ matrix.shard }}/${{ matrix.shards }} 2>&1 | tee test-output.log
-          { grep -E "FAILED|panicked at" test-output.log | head -40; } >> "$GITHUB_STEP_SUMMARY" || true
-
       - name: Run workspace doctests
         if: matrix.doctests
         run: cargo test --workspace --doc --locked
+
+      - name: Upload test archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-${{ matrix.os }}
+          path: nextest-archive.tar.zst
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  test:
+    name: test (${{ matrix.os }}, ${{ matrix.shard }}/${{ matrix.shards }})
+    runs-on: ${{ matrix.os }}
+    needs: test-archive
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            shard: 1
+            shards: 3
+          - os: ubuntu-latest
+            shard: 2
+            shards: 3
+          - os: ubuntu-latest
+            shard: 3
+            shards: 3
+          - os: macos-latest
+            shard: 1
+            shards: 3
+          - os: macos-latest
+            shard: 2
+            shards: 3
+          - os: macos-latest
+            shard: 3
+            shards: 3
+          - os: windows-latest
+            shard: 1
+            shards: 8
+          - os: windows-latest
+            shard: 2
+            shards: 8
+          - os: windows-latest
+            shard: 3
+            shards: 8
+          - os: windows-latest
+            shard: 4
+            shards: 8
+          - os: windows-latest
+            shard: 5
+            shards: 8
+          - os: windows-latest
+            shard: 6
+            shards: 8
+          - os: windows-latest
+            shard: 7
+            shards: 8
+          - os: windows-latest
+            shard: 8
+            shards: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nextest
+        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
+        with:
+          tool: nextest@0.9.150
+
+      - name: Download test archive
+        uses: actions/download-artifact@v4
+        with:
+          name: nextest-${{ matrix.os }}
+
+      # The archive was built from the complete workspace inventory on the
+      # same OS. Each shard executes a disjoint slice without invoking Cargo or
+      # recompiling test harnesses. --no-tests=fail catches stale shard counts.
+      - name: Run archived nextest shard
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo-nextest nextest run --archive-file nextest-archive.tar.zst --no-tests=fail --partition slice:${{ matrix.shard }}/${{ matrix.shards }} 2>&1 | tee test-output.log
+          { grep -E "FAILED|panicked at" test-output.log | head -40; } >> "$GITHUB_STEP_SUMMARY" || true
 
   pinned-model-ci:
     name: pinned model CI (N=3 paired, 95% bootstrap CI)
