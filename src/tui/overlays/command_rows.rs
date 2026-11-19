@@ -473,6 +473,12 @@ fn session_actions() -> Vec<CommandRow> {
             "read-only",
         ),
         (
+            "/usage",
+            "Provider-reported tokens and context for this session",
+            "runs here",
+            "read-only",
+        ),
+        (
             "/diff",
             "Review pending edits",
             "opens a surface",

@@ -2187,6 +2187,17 @@ fn submit(
             open_overlay(app, crate::tui::overlays::OverlayKind::Help);
             None
         }
+        Parsed::UsageReport => {
+            let text = crate::tui::commands::usage::render(
+                session,
+                app.context_window_size,
+                &app.context_model,
+                &app.context_provider,
+                app.reasoning_effort.as_deref(),
+            );
+            app.push(EntryRole::Answer, text);
+            None
+        }
         Parsed::ModelsOverlay => {
             open_overlay(app, crate::tui::overlays::OverlayKind::Models);
             None

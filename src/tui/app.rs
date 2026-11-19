@@ -244,6 +244,8 @@ pub enum Parsed {
     SearchOverlay,
     /// `/context`: open the context overlay.
     ContextOverlay,
+    /// `/usage`: measured provider token and context receipts for this session.
+    UsageReport,
     /// `/diff`: open the diff overlay.
     DiffOverlay,
     /// `/rewind`: open the checkpoint picker.
@@ -2015,6 +2017,8 @@ fn parse_line_inner(raw: &str, suggest: bool) -> Parsed {
                 Parsed::Search(args)
             }
         }
+        "usage" if args.is_empty() => Parsed::UsageReport,
+        "usage" => Parsed::Usage("usage: /usage".to_string()),
         "diff" => Parsed::DiffOverlay,
         "rewind" => Parsed::RewindOverlay,
         "checkpoints" => Parsed::CheckpointsOverlay,
@@ -4717,6 +4721,8 @@ mod tests {
         ));
         assert!(matches!(parse_line(":q"), Parsed::Quit));
         assert!(matches!(parse_line("/help"), Parsed::Help));
+        assert!(matches!(parse_line("/usage"), Parsed::UsageReport));
+        assert!(matches!(parse_line("/usage detail"), Parsed::Usage(_)));
     }
 
     /// The cloud groups are typed from the prompt far more often than from a

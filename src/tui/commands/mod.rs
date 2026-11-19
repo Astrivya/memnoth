@@ -34,6 +34,7 @@ pub mod rename;
 pub mod simulate;
 pub mod status;
 pub mod undo;
+pub mod usage;
 pub mod week;
 pub mod why;
 
