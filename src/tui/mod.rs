@@ -2547,28 +2547,45 @@ fn finish_verb(app: &mut App, store: &SessionStore, session: &mut Session, done:
             // into prose. It renders the same `data` the pipe gets, so the two
             // doors cannot disagree about what the verb found; the full text is
             // still what the session file keeps, so a resume reads as before.
-            match crate::tui::overlays::popover::PopoverOverlay::for_answer(
-                outcome.command,
-                &outcome.data,
-            ) {
-                Some(spec) => {
-                    let summary = spec.transcript_line();
-                    crate::tui::overlays::present(
-                        app,
-                        Box::new(crate::tui::overlays::PopoverOverlay::new(spec)),
-                    );
+            let project_browser = (outcome.command == "projects.list")
+                .then(|| {
+                    crate::tui::overlays::project_browser::ProjectBrowserOverlay::from_answer(
+                        &outcome.data,
+                    )
+                })
+                .flatten();
+            match project_browser {
+                Some(overlay) => {
+                    crate::tui::overlays::present(app, Box::new(overlay));
                     app.push(
+                        EntryRole::Answer,
+                        "projects · browse and inspect; Ctrl+Enter uses a project for this chat\n  full-screen browser opened · esc returns to chat".to_string(),
+                    );
+                    persist(app, store, session, &done.prompt, &text);
+                }
+                None => match crate::tui::overlays::popover::PopoverOverlay::for_answer(
+                    outcome.command,
+                    &outcome.data,
+                ) {
+                    Some(spec) => {
+                        let summary = spec.transcript_line();
+                        crate::tui::overlays::present(
+                            app,
+                            Box::new(crate::tui::overlays::PopoverOverlay::new(spec)),
+                        );
+                        app.push(
                         EntryRole::Answer,
                         format!(
                             "{summary}\n  opened in a window — up/down to browse, enter to act, esc to close"
                         ),
                     );
-                    persist(app, store, session, &done.prompt, &text);
-                }
-                None => {
-                    app.push(EntryRole::Answer, text.clone());
-                    persist(app, store, session, &done.prompt, &text);
-                }
+                        persist(app, store, session, &done.prompt, &text);
+                    }
+                    None => {
+                        app.push(EntryRole::Answer, text.clone());
+                        persist(app, store, session, &done.prompt, &text);
+                    }
+                },
             }
         }
         Err(text) => {

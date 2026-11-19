@@ -343,6 +343,7 @@ pub(crate) mod popover;
 /// Bespoke windows for the verb families whose rows are worth more than their
 /// fields: one file per family, dispatched from `spec_for`.
 pub(crate) mod popover_specs;
+pub(crate) mod project_browser;
 mod rewind;
 mod search;
 mod sessions;
