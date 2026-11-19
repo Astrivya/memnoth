@@ -576,6 +576,13 @@ fn npm_onboarding_names_the_vault_and_distinguishes_registration_flows() {
         assembler.contains("$REPO/crates/memnoth-mcp/npm/.") && assembler.contains("$STAGE/"),
         "the package assembler must include the shipped npm README"
     );
+    let release_workflow =
+        std::fs::read_to_string(crate_root.join("../../.github/workflows/release.yml"))
+            .expect("read release workflow");
+    assert!(
+        release_workflow.contains("bash scripts/assemble-npm-mcp.sh"),
+        "the npm assembler uses Bash syntax and must be invoked with Bash"
+    );
 
     let opencode = readme_lf
         .split("### Codex CLI")

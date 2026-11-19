@@ -477,7 +477,7 @@ jobs:
           version="${version#v}"
           out="$RUNNER_TEMP/memnoth-npm"
           mkdir -p "$out"
-          sh scripts/assemble-npm-mcp.sh "$version" artifacts "$out"
+          bash scripts/assemble-npm-mcp.sh "$version" artifacts "$out"
           package=$(find "$out" -maxdepth 1 -name '*.tgz' -print -quit)
           test -n "$package" || { echo "npm tarball was not produced" >&2; exit 1; }
           cp "$package" "dist/${{ steps.layout.outputs.tag }}/"
