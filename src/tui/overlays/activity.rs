@@ -461,6 +461,7 @@ fn agent_status(status: AgentStatus) -> &'static str {
         AgentStatus::Done => "done",
         AgentStatus::Failed => "failed",
         AgentStatus::Killed => "stopped",
+        AgentStatus::Orphaned => "orphaned",
         AgentStatus::Parked => "parked",
     }
 }

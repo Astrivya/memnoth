@@ -208,9 +208,21 @@ impl AgentDeck {
         let mut lines = vec![
             child.role.clone(),
             child.task.clone(),
-            format!("{} · depth {}", child.status.glyph(), child.depth),
+            format!("state: {} {}", child.status.glyph(), child.status.label()),
+            format!("depth: {}", child.depth),
             format!("lineage: {}", self.lineage(child)),
         ];
+        if let Some(error) = app
+            .delegator
+            .as_ref()
+            .and_then(|delegator| delegator.registry().get(&child.agent_id))
+            .and_then(|entry| entry.error.as_deref())
+        {
+            lines.push(format!("failure: {error}"));
+        }
+        if child.status == AgentStatus::Orphaned {
+            lines.push("process disappeared; revive to retry this run".to_string());
+        }
         if let Some(model) = &child.model {
             lines.push(format!("model: {model}"));
         }
@@ -650,7 +662,10 @@ impl Overlay for AgentDeck {
                 AgentStatus::Running | AgentStatus::Starting => counts[0] += 1,
                 AgentStatus::Waiting => counts[1] += 1,
                 AgentStatus::Done => counts[2] += 1,
-                AgentStatus::Failed | AgentStatus::Killed | AgentStatus::Parked => counts[3] += 1,
+                AgentStatus::Failed
+                | AgentStatus::Killed
+                | AgentStatus::Orphaned
+                | AgentStatus::Parked => counts[3] += 1,
             }
             counts
         });
@@ -795,6 +810,7 @@ impl Overlay for AgentDeck {
                         AgentStatus::Done => Color::Green,
                         AgentStatus::Failed => Color::Red,
                         AgentStatus::Waiting => Color::Yellow,
+                        AgentStatus::Orphaned => Color::Yellow,
                         AgentStatus::Killed | AgentStatus::Parked | AgentStatus::Starting => {
                             Color::DarkGray
                         }
@@ -1041,6 +1057,23 @@ mod tests {
             deck.selected_child().map(|child| child.agent_id.as_str()),
             Some(selected.agent_id.as_str())
         );
+    }
+
+    #[test]
+    fn selected_run_inspector_names_the_persisted_state() {
+        let temp = tempfile::tempdir().expect("temporary agent directory");
+        let mut delegator = memnoth_agent::Delegator::new(temp.path().join("agents"));
+        delegator
+            .root(None, "review", "inspect the change")
+            .expect("run");
+        let mut app = App::new("s", false);
+        app.delegator = Some(delegator);
+        let mut deck = AgentDeck::new();
+        deck.refresh(&app);
+
+        let details = deck.inspector_lines(&app).join("\n");
+        assert!(details.contains("state: ? waiting"), "{details}");
+        assert!(details.contains("depth: 0"), "{details}");
     }
 
     #[test]

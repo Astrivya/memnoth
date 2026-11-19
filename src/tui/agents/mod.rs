@@ -28,6 +28,8 @@ pub enum AgentStatus {
     Failed,
     /// The child was killed by the person.
     Killed,
+    /// The child process disappeared without a terminal lifecycle event.
+    Orphaned,
     /// The child is parked (suspended, resumable).
     Parked,
 }
@@ -42,7 +44,22 @@ impl AgentStatus {
             AgentStatus::Done => "✓",
             AgentStatus::Failed => "✗",
             AgentStatus::Killed => "☓",
+            AgentStatus::Orphaned => "!",
             AgentStatus::Parked => "‖",
+        }
+    }
+
+    /// Human-readable lifecycle state shown in selected-run details.
+    pub fn label(self) -> &'static str {
+        match self {
+            AgentStatus::Starting => "starting",
+            AgentStatus::Running => "running",
+            AgentStatus::Waiting => "waiting",
+            AgentStatus::Done => "returned",
+            AgentStatus::Failed => "failed",
+            AgentStatus::Killed => "stopped",
+            AgentStatus::Orphaned => "orphaned",
+            AgentStatus::Parked => "parked",
         }
     }
 
@@ -72,14 +89,7 @@ pub fn roster(app: &crate::tui::app::App) -> Vec<ChildInfo> {
             let status = delegator
                 .registry()
                 .get(&node.agent_id)
-                .map(|entry| match entry.status {
-                    memnoth_agent::runtime::RunStatus::Running => AgentStatus::Running,
-                    memnoth_agent::runtime::RunStatus::Done => AgentStatus::Done,
-                    memnoth_agent::runtime::RunStatus::Failed => AgentStatus::Failed,
-                    memnoth_agent::runtime::RunStatus::Cancelled
-                    | memnoth_agent::runtime::RunStatus::Orphaned => AgentStatus::Killed,
-                    memnoth_agent::runtime::RunStatus::Pending => AgentStatus::Waiting,
-                })
+                .map(|entry| AgentStatus::from_run_status(entry.status))
                 .unwrap_or(AgentStatus::Starting);
             ChildInfo {
                 agent_id: node.agent_id.clone(),
@@ -99,6 +109,19 @@ pub fn roster(app: &crate::tui::app::App) -> Vec<ChildInfo> {
         .collect();
     roster.sort_by_key(|child| child.spawn_seq);
     roster
+}
+
+impl AgentStatus {
+    fn from_run_status(status: memnoth_agent::runtime::RunStatus) -> Self {
+        match status {
+            memnoth_agent::runtime::RunStatus::Running => AgentStatus::Running,
+            memnoth_agent::runtime::RunStatus::Done => AgentStatus::Done,
+            memnoth_agent::runtime::RunStatus::Failed => AgentStatus::Failed,
+            memnoth_agent::runtime::RunStatus::Cancelled => AgentStatus::Killed,
+            memnoth_agent::runtime::RunStatus::Orphaned => AgentStatus::Orphaned,
+            memnoth_agent::runtime::RunStatus::Pending => AgentStatus::Waiting,
+        }
+    }
 }
 
 /// One child agent in the deck.
@@ -152,5 +175,16 @@ mod tests {
     fn an_app_without_a_delegator_has_an_empty_roster() {
         let app = crate::tui::app::App::new("s", false);
         assert!(roster(&app).is_empty());
+    }
+
+    #[test]
+    fn persisted_orphaned_status_remains_distinct_from_user_stop() {
+        let orphaned = AgentStatus::from_run_status(memnoth_agent::RunStatus::Orphaned);
+        let cancelled = AgentStatus::from_run_status(memnoth_agent::RunStatus::Cancelled);
+
+        assert_eq!(orphaned, AgentStatus::Orphaned);
+        assert_eq!(orphaned.label(), "orphaned");
+        assert_eq!(cancelled, AgentStatus::Killed);
+        assert_eq!(cancelled.label(), "stopped");
     }
 }
