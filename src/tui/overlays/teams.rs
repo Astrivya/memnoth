@@ -1,11 +1,7 @@
-//! `/teams members`: picking a team instead of pasting its id.
+//! `/teams`: browse the current org's teams and inspect read-only details.
 //!
-//! Every other team command takes an id, and the id only exists in another
-//! command's output — so the flow used to be `/teams`, read a uuid off the
-//! screen, retype it. This is the same list the org's page shows, with the row
-//! under the cursor turning into the command that already exists
-//! (`/teams members <id>`), which is why nothing here fetches a team's people
-//! itself: one implementation, two doors.
+//! Opening a row fetches its authorized detail asynchronously; it does not
+//! change team, project, or organization assignment.
 //!
 //! The list is a request, so it is read on a worker thread and drained in
 //! `on_tick`, exactly like the model browser. A synchronous fetch here freezes
@@ -15,7 +11,7 @@
 //! Keys:
 //!   type       filter by name or id
 //!   ↑/↓        move            pgup/pgdn, home/end  travel
-//!   enter      put `/teams members <id>` in the prompt and run it
+//!   enter      inspect the selected team's members and projects
 //!   ctrl+r     read the list again
 //!   esc        close
 
@@ -30,8 +26,9 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
 /// What the worker thread answers: the team list, and whether more pages exist.
 type TeamsReply = Result<(Vec<Team>, bool), String>;
+type TeamDetailReply = Result<TeamDetail, String>;
 
-use memnoth_cloud_client::Team;
+use memnoth_cloud_client::{Team, TeamDetail};
 
 use crate::context::AppContext;
 use crate::tui::app::App;
@@ -44,6 +41,12 @@ enum Loaded {
     Loading,
     Ready(Vec<Team>),
     /// The reason it could not be read, as the client worded it.
+    Failed(String),
+}
+#[derive(Debug)]
+enum DetailLoaded {
+    Loading,
+    Ready(TeamDetail),
     Failed(String),
 }
 
@@ -66,6 +69,9 @@ pub struct TeamsOverlay {
     selected: usize,
     /// First drawn line on screen, in a two-line-per-team coordinate system.
     scroll: usize,
+    detail: Option<DetailLoaded>,
+    detail_rx: Option<Receiver<TeamDetailReply>>,
+    detail_scroll: u16,
 }
 
 impl TeamsOverlay {
@@ -79,6 +85,9 @@ impl TeamsOverlay {
             filter: String::new(),
             selected: 0,
             scroll: 0,
+            detail: None,
+            detail_rx: None,
+            detail_scroll: 0,
         }
     }
 
@@ -105,6 +114,24 @@ impl TeamsOverlay {
                 Err(error) => Err(format!("{error:#}")),
             };
             let _ = tx.send(answer);
+        });
+    }
+
+    fn open_detail(&mut self, id: String) {
+        let Some(ctx) = self.ctx.clone() else {
+            self.detail = Some(DetailLoaded::Failed("no workspace context".into()));
+            return;
+        };
+        let (tx, rx) = mpsc::channel();
+        self.detail_rx = Some(rx);
+        self.detail = Some(DetailLoaded::Loading);
+        self.detail_scroll = 0;
+        std::thread::spawn(move || {
+            let result = match crate::cloud::signed_in_client(&ctx) {
+                Ok(client) => client.team(&id).map_err(|error| format!("{error:#}")),
+                Err(error) => Err(format!("{error:#}")),
+            };
+            let _ = tx.send(result);
         });
     }
 
@@ -226,6 +253,55 @@ impl TeamsOverlay {
             Loaded::Ready(_) => None,
         }
     }
+
+    fn detail_text(detail: &DetailLoaded) -> String {
+        match detail {
+            DetailLoaded::Loading => "Loading team detail…".to_string(),
+            DetailLoaded::Failed(error) => format!("Team detail unavailable\n\n{error}"),
+            DetailLoaded::Ready(detail) => {
+                let mut lines = vec![
+                    detail.team.name.clone(),
+                    detail.team.id.clone(),
+                    format!(
+                        "{} member(s) · {} project(s)",
+                        detail.team.member_count, detail.team.project_count
+                    ),
+                    format!(
+                        "You are a member: {} · You can manage: {}",
+                        detail.team.is_member, detail.can_manage
+                    ),
+                    String::new(),
+                    "Members".to_string(),
+                ];
+                if detail.members.is_empty() {
+                    lines.push("No member details returned.".into());
+                } else {
+                    for member in &detail.members {
+                        lines.push(format!(
+                            "{} · {} · org role {}",
+                            if member.name.is_empty() {
+                                &member.email
+                            } else {
+                                &member.name
+                            },
+                            member.email,
+                            member.org_role
+                        ));
+                    }
+                }
+                lines.push(String::new());
+                lines.push("Projects".to_string());
+                if detail.projects.is_empty() {
+                    lines.push("No project details returned.".into());
+                } else {
+                    for project in &detail.projects {
+                        lines.push(format!("{} · {}", project.name, project.level));
+                    }
+                }
+                lines.join("\n")
+            }
+        }
+    }
 }
 
 impl Default for TeamsOverlay {
@@ -248,6 +324,9 @@ impl Overlay for TeamsOverlay {
         self.filter.clear();
         self.selected = 0;
         self.scroll = 0;
+        self.detail = None;
+        self.detail_rx = None;
+        self.detail_scroll = 0;
     }
 
     fn on_open(&mut self, app: &mut App) {
@@ -258,6 +337,16 @@ impl Overlay for TeamsOverlay {
     /// The answer arrives here: the UI thread is the only one allowed to change
     /// what is drawn, so the worker sends and this reads.
     fn on_tick(&mut self, _app: &mut App) {
+        if let Some(rx) = self.detail_rx.take() {
+            match rx.try_recv() {
+                Ok(Ok(detail)) => self.detail = Some(DetailLoaded::Ready(detail)),
+                Ok(Err(error)) => self.detail = Some(DetailLoaded::Failed(error)),
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.detail = Some(DetailLoaded::Failed("team detail did not arrive".into()))
+                }
+                Err(mpsc::TryRecvError::Empty) => self.detail_rx = Some(rx),
+            }
+        }
         let Some(rx) = self.rx.take() else {
             return;
         };
@@ -279,10 +368,31 @@ impl Overlay for TeamsOverlay {
 
     fn hide(&mut self) {
         self.visible = false;
+        self.detail = None;
+        self.detail_rx = None;
+        self.detail_scroll = 0;
     }
 
     fn handle_key(&mut self, key: KeyEvent, app: &mut App) -> OverlayAction {
         if !self.visible {
+            return OverlayAction::None;
+        }
+        // Detail is a distinct browsing state. Never let navigation or typed
+        // characters mutate the hidden team list or leak into the chat prompt.
+        if self.detail.is_some() {
+            match key.code {
+                KeyCode::Esc => {
+                    self.detail = None;
+                    self.detail_rx = None;
+                    self.detail_scroll = 0;
+                }
+                KeyCode::Up => self.detail_scroll = self.detail_scroll.saturating_sub(1),
+                KeyCode::Down => self.detail_scroll = self.detail_scroll.saturating_add(1),
+                KeyCode::PageUp => self.detail_scroll = self.detail_scroll.saturating_sub(8),
+                KeyCode::PageDown => self.detail_scroll = self.detail_scroll.saturating_add(8),
+                KeyCode::Home => self.detail_scroll = 0,
+                _ => {}
+            }
             return OverlayAction::None;
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -320,20 +430,15 @@ impl Overlay for TeamsOverlay {
                 self.selected = self.total().saturating_sub(1);
                 OverlayAction::None
             }
-            // Enter hands the id to the verb the session already has rather than
-            // fetching the team here: `/teams members <id>` is a command, and a
-            // command that runs from one place is one command to fix.
             KeyCode::Enter => {
                 let chosen = self
                     .matches()
                     .get(self.selected)
                     .map(|team| team.id.clone());
                 if let Some(id) = chosen {
-                    app.input = format!("/teams members {id}");
-                    app.cursor = app.input.chars().count();
-                    app.pending_submit = true;
+                    self.open_detail(id);
                 }
-                OverlayAction::Close
+                OverlayAction::None
             }
             KeyCode::Backspace => {
                 if self.filter.pop().is_some() {
@@ -373,6 +478,26 @@ impl Overlay for TeamsOverlay {
         let inner = block.inner(popup);
         frame.render_widget(block, popup);
         if inner.height < 4 || inner.width < 8 {
+            return;
+        }
+
+        if let Some(detail) = &self.detail {
+            let content = Self::detail_text(detail);
+            frame.render_widget(
+                Paragraph::new(content)
+                    .wrap(Wrap { trim: true })
+                    .scroll((self.detail_scroll, 0)),
+                Rect::new(
+                    inner.x,
+                    inner.y + 2,
+                    inner.width,
+                    inner.height.saturating_sub(3),
+                ),
+            );
+            frame.render_widget(
+                Paragraph::new("Esc back to teams"),
+                Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1),
+            );
             return;
         }
 
@@ -457,7 +582,7 @@ impl Overlay for TeamsOverlay {
 
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                "Up/Down navigate  ·  Enter members  ·  Esc back",
+                "↑/↓ scroll  ·  PgUp/PgDn page  ·  Esc back",
                 Style::default().fg(Color::DarkGray),
             ))),
             hint_area,
@@ -468,7 +593,7 @@ impl Overlay for TeamsOverlay {
         vec![
             ("type", "filter by name or id"),
             ("up/down", "move"),
-            ("enter", "run `/teams members` for this team"),
+            ("enter", "inspect the selected team's details"),
             ("ctrl+r", "read the list again"),
             ("esc", "close"),
         ]
@@ -570,7 +695,7 @@ mod tests {
     }
 
     #[test]
-    fn enter_prefills_the_members_verb_for_the_highlighted_team() {
+    fn enter_opens_read_only_detail_for_the_highlighted_team() {
         let mut app = App::new("s", false);
         let mut overlay = ready(vec![
             team("platform", "id-platform", 1, 0),
@@ -579,13 +704,68 @@ mod tests {
         overlay.select_next();
 
         let action = overlay.handle_key(KeyEvent::from(KeyCode::Enter), &mut app);
-        assert!(matches!(action, OverlayAction::Close));
-        assert_eq!(app.input, "/teams members id-design");
-        assert!(
-            app.pending_submit,
-            "the row runs the verb, not just fills it"
-        );
-        assert_eq!(app.cursor, app.input.chars().count());
+        assert!(matches!(action, OverlayAction::None));
+        assert_eq!(app.input, "");
+        assert!(!app.pending_submit);
+        assert!(matches!(overlay.detail, Some(DetailLoaded::Loading)));
+    }
+
+    #[test]
+    fn detail_render_uses_returned_data_and_has_a_back_path() {
+        let mut overlay = ready(vec![team("platform", "id-platform", 1, 1)]);
+        let mut detail_team = team("platform", "id-platform", 1, 1);
+        detail_team.is_member = true;
+        overlay.detail = Some(DetailLoaded::Ready(TeamDetail {
+            team: detail_team,
+            members: vec![],
+            projects: vec![],
+            can_manage: false,
+        }));
+        let mut app = App::new("s", false);
+        let action = overlay.handle_key(KeyEvent::from(KeyCode::Esc), &mut app);
+        assert!(matches!(action, OverlayAction::None));
+        assert!(overlay.detail.is_none());
+        assert_eq!(overlay.total(), 1);
+    }
+
+    #[test]
+    fn detail_navigation_is_isolated_from_team_selection_and_prompt() {
+        let mut app = App::new("s", false);
+        let mut overlay = ready(vec![
+            team("platform", "id-platform", 1, 0),
+            team("design", "id-design", 1, 0),
+        ]);
+        overlay.selected = 1;
+        overlay.detail = Some(DetailLoaded::Ready(TeamDetail {
+            team: team("design", "id-design", 1, 0),
+            members: vec![],
+            projects: vec![],
+            can_manage: false,
+        }));
+
+        for key in [KeyCode::Down, KeyCode::PageDown, KeyCode::Char('x')] {
+            overlay.handle_key(KeyEvent::from(key), &mut app);
+        }
+
+        assert_eq!(overlay.selected, 1, "detail keys must not move the list");
+        assert_eq!(overlay.detail_scroll, 9);
+        assert!(app.input.is_empty(), "detail keys must not reach chat");
+        assert!(!app.pending_submit);
+
+        overlay.handle_key(KeyEvent::from(KeyCode::Esc), &mut app);
+        assert_eq!(overlay.selected, 1, "back restores the same team row");
+        assert_eq!(overlay.detail_scroll, 0);
+    }
+
+    #[test]
+    fn tiny_terminal_render_does_not_underflow() {
+        let mut overlay = ready(vec![team("platform", "id-platform", 1, 1)]);
+        overlay.detail = Some(DetailLoaded::Loading);
+        let backend = TestBackend::new(24, 8);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| overlay.render(frame, frame.area(), &App::new("s", false)))
+            .expect("small detail render");
     }
 
     #[test]

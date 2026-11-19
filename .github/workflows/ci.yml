@@ -75,16 +75,17 @@ jobs:
       - name: Standalone MCP package surface
         run: python3 scripts/check_surface.py
 
-  # Windows is the slowest leg by a distance: its 7m49s was 2m41s of build,
-  # 3m41s of tests and the rest setup, on the runner where process spawn and
-  # file I/O cost the most. Nothing about that shrinks by waiting, but the test
-  # half splits cleanly, so Windows runs three balanced shards: unit tests and
-  # bins, the root crate's integration tests, and every other crate's. Each
-  # shard pays the build again, which is why the split is three and not ten,
-  # and ubuntu and macOS stay single jobs where the tests only take a minute.
-  # Doc tests are deliberately not a Windows shard: `cargo test --workspace`
-  # already runs them on the ubuntu and macOS legs, and compiling every crate's
-  # doc tests on Windows cost 8m26s on its own, slower than the job it replaced.
+      # Also exercise the command crate's direct entry point without paying for
+      # another runner and another cache restore.
+      - name: Command crate docs reference
+        run: cargo run --quiet -p memnoth-command -- docs --check
+      - name: Command crate registry schema
+        run: cargo run --quiet -p memnoth-command -- schema --check
+
+  # nextest runs independent test binaries concurrently; Cargo's test runner
+  # starts them one at a time. Windows keeps three non-overlapping scopes to
+  # bound compile cost. Ubuntu and macOS also run doctests, which nextest does
+  # not execute.
   test:
     name: test (${{ matrix.label }})
     runs-on: ${{ matrix.os }}
@@ -118,6 +119,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Install nextest
+        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
+        with:
+          tool: nextest@0.9.150
+
       # The Windows installer is shipped and run as PowerShell 5.1, but no
       # Rust test executes it. Parse it on the Windows leg so an indentation or
       # quoting mistake in a here-string fails here instead of at install time.
@@ -140,29 +146,16 @@ jobs:
       # test is where a morning used to go. Pinned to bash: `set -o pipefail`
       # is not PowerShell, and windows-latest runs run: steps in pwsh, so the
       # step died before cargo did and the job reported failure for nothing.
-      - name: Run cargo test ${{ matrix.args }} --locked
+      - name: Run nextest ${{ matrix.args }} --locked
         shell: bash
         run: |
           set -o pipefail
-          cargo test ${{ matrix.args }} --locked 2>&1 | tee test-output.log
+          cargo nextest run ${{ matrix.args }} --locked 2>&1 | tee test-output.log
           { grep -E "FAILED|panicked at" test-output.log | head -40; } >> "$GITHUB_STEP_SUMMARY" || true
 
-  generated-surfaces-ci:
-    name: generated surfaces (memnoth-command)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-
-      # Generated surfaces validated against the memnoth-command crate directly.
-      # `--check` fails when the checked-in surface is stale.
-      - name: Docs reference
-        run: cargo run -p memnoth-command -- docs --check
-      - name: Registry schema
-        run: cargo run -p memnoth-command -- schema --check
+      - name: Run workspace doctests
+        if: matrix.args == '--workspace'
+        run: cargo test --workspace --doc --locked
 
   pinned-model-ci:
     name: pinned model CI (N=3 paired, 95% bootstrap CI)
