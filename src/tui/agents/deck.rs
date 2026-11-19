@@ -500,7 +500,18 @@ impl Overlay for AgentDeck {
                 .constraints([Constraint::Percentage(100), Constraint::Length(0)])
                 .split(body)
         };
-        let list_area = columns[0];
+        let (list_area, compact_detail_area) = if show_rail {
+            (columns[0], None)
+        } else if body.height >= 10 {
+            let list_height = (body.height / 3).clamp(5, 8);
+            let sections = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(list_height), Constraint::Min(4)])
+                .split(body);
+            (sections[0], Some(sections[1]))
+        } else {
+            (body, None)
+        };
         let mut rows: Vec<ListItem<'static>> = if self.mode == Mode::Inbox && inbox_len > 0 {
             app.delegator
                 .as_ref()
@@ -612,9 +623,22 @@ impl Overlay for AgentDeck {
             frame.render_stateful_widget(list, content_area, &mut self.list_state);
         }
 
-        if show_rail {
-            let rail = columns[1];
-            let rail_title = Rect { height: 1, ..rail };
+        if show_rail || compact_detail_area.is_some() {
+            let detail_area = if show_rail {
+                let rail = columns[1];
+                Rect {
+                    x: rail.x.saturating_add(1),
+                    y: rail.y,
+                    width: rail.width.saturating_sub(1),
+                    height: rail.height,
+                }
+            } else {
+                compact_detail_area.expect("compact details were allocated")
+            };
+            let detail_title = Rect {
+                height: 1,
+                ..detail_area
+            };
             frame.render_widget(
                 Paragraph::new(if self.mode == Mode::Inbox {
                     "REQUEST"
@@ -626,7 +650,7 @@ impl Overlay for AgentDeck {
                         .fg(Color::DarkGray)
                         .add_modifier(Modifier::BOLD),
                 ),
-                rail_title,
+                detail_title,
             );
             let detail = if self.mode == Mode::Inbox {
                 app.delegator
@@ -645,21 +669,17 @@ impl Overlay for AgentDeck {
             } else {
                 self.inspector_lines(app)
             };
-            let detail_area = Rect {
-                x: rail.x.saturating_add(1),
-                y: rail.y,
-                width: rail.width.saturating_sub(1),
-                height: rail.height,
-            };
             frame.render_widget(
                 Paragraph::new(detail.join("\n"))
                     .style(Style::default().fg(Color::Gray))
                     .wrap(ratatui::widgets::Wrap { trim: true })
-                    .block(
+                    .block(if show_rail {
                         Block::default()
                             .borders(Borders::LEFT)
-                            .border_style(Style::default().fg(Color::DarkGray)),
-                    ),
+                            .border_style(Style::default().fg(Color::DarkGray))
+                    } else {
+                        Block::default()
+                    }),
                 detail_area,
             );
         }
