@@ -46,6 +46,10 @@ jobs:
           components: clippy
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Preserve workspace artifacts so repeat checks avoid recompiling
+          # unchanged local crates; Cargo fingerprints still invalidate edits.
+          cache-workspace-crates: "true"
 
       # `-D warnings` across the workspace and all targets: a new warning fails
       # review here instead of accumulating in a library nobody reads.
@@ -118,6 +122,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Retain workspace test binaries across runs; Cargo fingerprints
+          # invalidate changed sources without discarding unchanged crates.
+          cache-workspace-crates: "true"
 
       - name: Install nextest
         uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
@@ -253,6 +261,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-workspace-crates: "true"
 
       - name: Build release binary
         run: cargo build --release --locked --bin memnoth
