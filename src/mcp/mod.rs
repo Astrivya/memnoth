@@ -289,6 +289,9 @@ pub fn serve(
     let db = absolute_vault(db.unwrap_or_else(|| ctx.vault_path.clone()))?;
 
     let mut command = std::process::Command::new(&binary);
+    // std::process::Command inherits the parent environment by default. This
+    // preserves the host registration's MEMNOTH_MCP_READ_ONLY value; do not
+    // call env_clear here or override it, since mcp add owns that setting.
     command.arg("--db").arg(&db);
     if http {
         command.arg("--http");
@@ -302,11 +305,6 @@ pub fn serve(
     if let Some(profile) = profile {
         command.env("MEMNOTH_MCP_PROFILE", profile.name());
     }
-    configure_read_only_env(
-        &mut command,
-        std::env::var("MEMNOTH_MCP_READ_ONLY").ok().as_deref(),
-    );
-
     let mut child = command
         .spawn()
         .with_context(|| format!("cannot start the MCP server at {}", binary.display()))?;
@@ -320,19 +318,6 @@ pub fn serve(
         }
     }
     Ok(())
-}
-
-/// Carry the host registration's access mode across the CLI-to-server process
-/// boundary. Unknown configured values fail closed; only explicit false values
-/// opt into writes.
-fn configure_read_only_env(command: &mut std::process::Command, value: Option<&str>) {
-    if let Some(value) = value {
-        let value = match value.trim().to_ascii_lowercase().as_str() {
-            "0" | "false" | "no" | "off" => "0",
-            _ => "1",
-        };
-        command.env("MEMNOTH_MCP_READ_ONLY", value);
-    }
 }
 
 /// One vault path, absolute and named, or a refusal.
@@ -1697,28 +1682,6 @@ fn stop_mcp_server() -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn serve_forwards_read_only_registration_and_fails_closed_on_unknown_values() {
-        for (configured, expected) in [("1", "1"), ("0", "0"), ("false", "0"), ("typo", "1")] {
-            let mut command = std::process::Command::new("memnoth-mcp");
-            configure_read_only_env(&mut command, Some(configured));
-            let actual = command
-                .get_envs()
-                .find(|(key, _)| *key == std::ffi::OsStr::new("MEMNOTH_MCP_READ_ONLY"))
-                .and_then(|(_, value)| value)
-                .expect("serve inherits configured access mode");
-            assert_eq!(actual, std::ffi::OsStr::new(expected));
-        }
-
-        let mut command = std::process::Command::new("memnoth-mcp");
-        configure_read_only_env(&mut command, None);
-        assert!(
-            command
-                .get_envs()
-                .all(|(key, _)| { key != std::ffi::OsStr::new("MEMNOTH_MCP_READ_ONLY") })
-        );
-    }
 
     #[test]
     fn a_single_json_text_block_is_unwrapped_for_a_shell_caller() {
