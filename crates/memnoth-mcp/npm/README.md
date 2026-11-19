@@ -184,7 +184,7 @@ selects the vault the standalone server opens.
 
 ```bash
 npx -y @astrivya/mcp@beta --version
-# 0.1.0-beta.8
+# 0.1.0-beta.9
 ```
 
 The `--version` flag works completely offline without spawning the binary.
