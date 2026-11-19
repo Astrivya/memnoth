@@ -354,7 +354,7 @@ jobs:
           npm install --global npm@11.5.1
           node --version | grep -Fx 'v22.14.0'
           npm --version | grep -Fx '11.5.1'
-          node -e 'const p=require("./crates/memnoth-mcp/npm/package.json"); const expected=`${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}.git`; if(p.repository?.url!==expected) { console.error(`package repository must be exactly ${expected}`); process.exit(1) }'
+          node -e 'const p=require("./crates/memnoth-mcp/npm/package.json"); const expected=`${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}.git`; if(typeof p.repository?.url!=="string" || p.repository.url.toLowerCase()!==expected.toLowerCase()) { console.error(`package repository must identify ${expected}`); process.exit(1) }'
 
       - name: verify archives and run linux-x86_64
         shell: bash

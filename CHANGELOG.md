@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-beta.6] - 2026-11-19
+
+### Fixed - Release
+
+- Made the standalone MCP package repository check case-insensitive so it
+  accepts GitHub's canonical organization casing.
+
 ## [0.1.0-beta.5] - 2026-11-19
 
 ### Fixed - Release
