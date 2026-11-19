@@ -44,7 +44,7 @@ publisher with:
 - Provider: **GitHub Actions**
 - Organization/user: **astrivya**
 - Repository: **memnoth**
-- Workflow file: **`.github/workflows/release.yml`**
+- Workflow file: **`release.yml`**
 - GitHub environment: leave empty (the release job does not use an environment)
 
 After saving the publisher, set the GitHub repository Actions variable
