@@ -77,42 +77,6 @@ impl AgentDeck {
         self.ordered().into_iter().nth(self.selected)
     }
 
-    fn children_lines(&self) -> Vec<ListItem<'static>> {
-        self.ordered()
-            .iter()
-            .enumerate()
-            .map(|(i, child)| {
-                let glyph = child.status.glyph();
-                let style = if i == self.selected && self.mode == Mode::Roster {
-                    Style::default().add_modifier(Modifier::REVERSED)
-                } else {
-                    Style::default()
-                };
-                let status_color = match child.status {
-                    AgentStatus::Running => Color::Cyan,
-                    AgentStatus::Done => Color::Green,
-                    AgentStatus::Failed => Color::Red,
-                    AgentStatus::Waiting => Color::Yellow,
-                    AgentStatus::Killed => Color::DarkGray,
-                    AgentStatus::Parked => Color::DarkGray,
-                    AgentStatus::Starting => Color::DarkGray,
-                };
-                let indent = if self.tree_view {
-                    "  ".repeat(child.depth)
-                } else {
-                    String::new()
-                };
-                ListItem::new(Line::from(vec![
-                    Span::styled(format!(" {} ", glyph), Style::default().fg(status_color)),
-                    Span::styled(
-                        format!(" {}{}  {}", indent, child.agent_id, child.task),
-                        style,
-                    ),
-                ]))
-            })
-            .collect()
-    }
-
     /// Inspector lines for the selected child: status, task, lineage, model,
     /// worktree, cost, and any peeked detail (log tail or receipt).
     fn inspector_lines(&self, app: &App) -> Vec<String> {
@@ -120,13 +84,9 @@ impl AgentDeck {
             return vec!["nothing selected".to_string()];
         };
         let mut lines = vec![
-            format!("{} — {}", child.agent_id, child.task),
-            format!(
-                "status {} · depth {} · session {}",
-                child.status.glyph(),
-                child.depth,
-                child.session_id.as_deref().unwrap_or("-")
-            ),
+            child.role.clone(),
+            child.task.clone(),
+            format!("{} · depth {}", child.status.glyph(), child.depth),
             format!("lineage: {}", self.lineage(child)),
         ];
         if let Some(model) = &child.model {
@@ -212,28 +172,6 @@ impl AgentDeck {
             Err(error) => format!("cannot read log: {error}"),
         }
     }
-
-    fn inbox_lines(&self, app: &App) -> Vec<String> {
-        let Some(delegator) = app.delegator.as_ref() else {
-            return Vec::new();
-        };
-        delegator
-            .attention()
-            .iter()
-            .enumerate()
-            .map(|(i, request)| {
-                let cursor = if self.mode == Mode::Inbox && i == self.inbox_selected {
-                    "▸ "
-                } else {
-                    "  "
-                };
-                format!(
-                    "{cursor}{} · {} · {}",
-                    request.kind, request.agent, request.summary
-                )
-            })
-            .collect()
-    }
 }
 
 impl Default for AgentDeck {
@@ -288,14 +226,10 @@ impl Overlay for AgentDeck {
             KeyCode::Esc => OverlayAction::Close,
             KeyCode::Char('q') => OverlayAction::Close,
             KeyCode::Tab => {
-                let inbox_len = app
-                    .delegator
-                    .as_ref()
-                    .map(|d| d.attention().len())
-                    .unwrap_or(0);
+                self.peeked = None;
                 self.mode = match self.mode {
-                    Mode::Roster if inbox_len > 0 => Mode::Inbox,
-                    _ => Mode::Roster,
+                    Mode::Roster => Mode::Inbox,
+                    Mode::Inbox => Mode::Roster,
                 };
                 OverlayAction::None
             }
@@ -305,6 +239,7 @@ impl Overlay for AgentDeck {
                         if !self.children.is_empty() {
                             self.selected = self.selected.saturating_sub(1);
                             self.list_state.select(Some(self.selected));
+                            self.peeked = None;
                         }
                     }
                     Mode::Inbox => {
@@ -319,6 +254,7 @@ impl Overlay for AgentDeck {
                         if !self.children.is_empty() {
                             self.selected = (self.selected + 1).min(self.children.len() - 1);
                             self.list_state.select(Some(self.selected));
+                            self.peeked = None;
                         }
                     }
                     Mode::Inbox => {
@@ -401,22 +337,13 @@ impl Overlay for AgentDeck {
                 OverlayAction::None
             }
             KeyCode::Char('s') => {
-                // Steer: the note lands in the child's log, where the trace
-                // shows it and the child's next step reads it.
-                if let Some(child) = self.selected_child().cloned() {
-                    let id = child.agent_id.clone();
-                    if let Some(delegator) = app.delegator.as_mut() {
-                        match delegator.steer(&id, "steered from the deck") {
-                            Ok(()) => app.push(
-                                crate::tui::app::EntryRole::Info,
-                                format!("steered {id}: note recorded in its log"),
-                            ),
-                            Err(error) => app.push(
-                                crate::tui::app::EntryRole::Error,
-                                format!("steer {id}: {error}"),
-                            ),
-                        }
-                    }
+                // Open the child composer; the user writes the actual direction
+                // there instead of recording a fixed placeholder message.
+                if self.mode == Mode::Roster
+                    && let Some(child) = self.selected_child()
+                {
+                    app.focus_agent = Some(child.agent_id.clone());
+                    return OverlayAction::Push(OverlayKind::Focus);
                 }
                 OverlayAction::None
             }
@@ -489,76 +416,273 @@ impl Overlay for AgentDeck {
 
     fn render(&mut self, frame: &mut Frame, area: Rect, app: &App) {
         frame.render_widget(Clear, area);
-
         let inbox_len = app
             .delegator
             .as_ref()
             .map(|d| d.attention().len())
             .unwrap_or(0);
-        let title = if inbox_len > 0 {
-            format!("Agent Deck — {} waiting", inbox_len)
+        let counts = self.children.iter().fold([0usize; 4], |mut counts, child| {
+            match child.status {
+                AgentStatus::Running | AgentStatus::Starting => counts[0] += 1,
+                AgentStatus::Waiting => counts[1] += 1,
+                AgentStatus::Done => counts[2] += 1,
+                AgentStatus::Failed | AgentStatus::Killed | AgentStatus::Parked => counts[3] += 1,
+            }
+            counts
+        });
+        let compact = area.width < 100;
+        let header_height = 2.min(area.height);
+        let footer_height = 1.min(area.height.saturating_sub(header_height));
+        let body_height = area.height.saturating_sub(header_height + footer_height);
+        let vertical = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(header_height),
+                Constraint::Length(body_height),
+                Constraint::Length(footer_height),
+            ])
+            .split(area);
+
+        let summary = format!(
+            "{} running  ·  {} waiting  ·  {} returned  ·  {} stopped",
+            counts[0], counts[1], counts[2], counts[3]
+        );
+        let heading = if inbox_len > 0 {
+            format!("Agent Deck   ·   {inbox_len} needs you")
         } else {
             "Agent Deck".to_string()
         };
-        let block = Block::default().title(title).borders(Borders::ALL);
-        let inner = if self.children.is_empty() && inbox_len == 0 {
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled(
+                    heading,
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(summary, Style::default().fg(Color::DarkGray))),
+            ]),
+            vertical[0],
+        );
+
+        if self.children.is_empty() && inbox_len == 0 {
+            let empty = vec![
+                Line::from(Span::styled(
+                    "No delegated runs yet",
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                Line::from("Delegate a bounded task from chat with /delegate <agent> <task>."),
+                Line::from("Runs and their returned work will appear here."),
+            ];
+            frame.render_widget(Paragraph::new(empty), vertical[1]);
             frame.render_widget(
-                Paragraph::new("no child runs — /delegate <agent> <task> spawns one").block(block),
-                area,
+                Paragraph::new("/delegate start  ·  Esc return to chat"),
+                vertical[2],
             );
             return;
-        } else {
-            block.inner(area)
-        };
-        frame.render_widget(block, area);
-
-        let mut constraints = vec![Constraint::Min(3)];
-        let mut sections = vec!["roster"];
-        if inbox_len > 0 {
-            constraints.push(Constraint::Length(3 + inbox_len as u16));
-            sections.push("inbox");
-        }
-        constraints.push(Constraint::Min(5));
-        sections.push("inspector");
-        let chunks: Vec<Rect> = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints(constraints)
-            .split(inner)
-            .to_vec();
-        let _ = sections;
-        let (roster_area, inbox_area, inspector_area) = if inbox_len > 0 {
-            (chunks[0], Some(chunks[1]), chunks[2])
-        } else {
-            (chunks[0], None, chunks[1])
-        };
-
-        let items = self.children_lines();
-        let list = List::new(items).block(Block::default().title("roster").borders(Borders::ALL));
-        frame.render_stateful_widget(list, roster_area, &mut self.list_state);
-
-        if let Some(area) = inbox_area {
-            let lines = self.inbox_lines(app);
-            let paragraph = Paragraph::new(lines.join("\n"))
-                .block(Block::default().title("attention").borders(Borders::ALL));
-            frame.render_widget(paragraph, area);
         }
 
-        let inspector = self.inspector_lines(app);
-        let paragraph = Paragraph::new(inspector.join("\n"))
-            .block(Block::default().title("inspector").borders(Borders::ALL));
-        frame.render_widget(paragraph, inspector_area);
+        let body = vertical[1];
+        let show_rail = !compact && body.width >= 100;
+        let columns = if show_rail {
+            Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(64), Constraint::Percentage(36)])
+                .split(body)
+        } else {
+            Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(100), Constraint::Length(0)])
+                .split(body)
+        };
+        let list_area = columns[0];
+        let mut rows: Vec<ListItem<'static>> = if self.mode == Mode::Inbox && inbox_len > 0 {
+            app.delegator
+                .as_ref()
+                .map(|delegator| {
+                    delegator
+                        .attention()
+                        .iter()
+                        .enumerate()
+                        .map(|(index, request)| {
+                            let selected = index == self.inbox_selected;
+                            ListItem::new(Line::from(vec![
+                                Span::styled(
+                                    if selected { "› " } else { "  " },
+                                    Style::default().fg(Color::Cyan),
+                                ),
+                                Span::styled(
+                                    format!("{}  ", request.agent),
+                                    Style::default()
+                                        .fg(Color::White)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled(
+                                    format!("{} · {}", request.kind, request.summary),
+                                    Style::default().fg(Color::Gray),
+                                ),
+                            ]))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            self.ordered()
+                .iter()
+                .enumerate()
+                .map(|(index, child)| {
+                    let selected = index == self.selected;
+                    let status_color = match child.status {
+                        AgentStatus::Running => Color::Cyan,
+                        AgentStatus::Done => Color::Green,
+                        AgentStatus::Failed => Color::Red,
+                        AgentStatus::Waiting => Color::Yellow,
+                        AgentStatus::Killed | AgentStatus::Parked | AgentStatus::Starting => {
+                            Color::DarkGray
+                        }
+                    };
+                    let indent = if self.tree_view {
+                        "  ".repeat(child.depth.min(8))
+                    } else {
+                        String::new()
+                    };
+                    ListItem::new(Line::from(vec![
+                        Span::styled(
+                            if selected { "› " } else { "  " },
+                            Style::default().fg(Color::Cyan),
+                        ),
+                        Span::styled(
+                            format!("{} ", child.status.glyph()),
+                            Style::default().fg(status_color),
+                        ),
+                        Span::styled(
+                            format!("{indent}{}", child.role),
+                            Style::default()
+                                .fg(if selected { Color::White } else { Color::Gray })
+                                .add_modifier(if selected {
+                                    Modifier::BOLD
+                                } else {
+                                    Modifier::empty()
+                                }),
+                        ),
+                        Span::styled(
+                            format!("   {}", child.task),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                    ]))
+                })
+                .collect()
+        };
+        if rows.is_empty() {
+            rows.push(ListItem::new(Line::from(Span::styled(
+                "No requests waiting for you",
+                Style::default().fg(Color::DarkGray),
+            ))));
+        }
+        let section_title = if self.mode == Mode::Inbox {
+            format!("Needs you  ({inbox_len})")
+        } else if inbox_len > 0 {
+            format!("Runs  ·  {inbox_len} needs you")
+        } else {
+            "Runs".to_string()
+        };
+        let list = List::new(rows)
+            .highlight_symbol("")
+            .highlight_style(Style::default());
+        frame.render_widget(
+            Paragraph::new(section_title).style(Style::default().fg(Color::DarkGray)),
+            Rect {
+                height: 1,
+                ..list_area
+            },
+        );
+        let content_area = Rect {
+            y: list_area.y.saturating_add(1),
+            height: list_area.height.saturating_sub(1),
+            ..list_area
+        };
+        if self.mode == Mode::Inbox {
+            frame.render_widget(list, content_area);
+        } else {
+            frame.render_stateful_widget(list, content_area, &mut self.list_state);
+        }
+
+        if show_rail {
+            let rail = columns[1];
+            let rail_title = Rect { height: 1, ..rail };
+            frame.render_widget(
+                Paragraph::new(if self.mode == Mode::Inbox {
+                    "REQUEST"
+                } else {
+                    "SELECTED RUN"
+                })
+                .style(
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                rail_title,
+            );
+            let detail = if self.mode == Mode::Inbox {
+                app.delegator
+                    .as_ref()
+                    .and_then(|d| d.attention().get(self.inbox_selected))
+                    .map(|request| {
+                        vec![
+                            format!("{} needs your input", request.agent),
+                            String::new(),
+                            format!("{} · {}", request.kind, request.summary),
+                            String::new(),
+                            "Enter opens the child run so you can respond.".to_string(),
+                        ]
+                    })
+                    .unwrap_or_else(|| vec!["No open requests.".to_string()])
+            } else {
+                self.inspector_lines(app)
+            };
+            let detail_area = Rect {
+                x: rail.x.saturating_add(1),
+                y: rail.y,
+                width: rail.width.saturating_sub(1),
+                height: rail.height,
+            };
+            frame.render_widget(
+                Paragraph::new(detail.join("\n"))
+                    .style(Style::default().fg(Color::Gray))
+                    .wrap(ratatui::widgets::Wrap { trim: true })
+                    .block(
+                        Block::default()
+                            .borders(Borders::LEFT)
+                            .border_style(Style::default().fg(Color::DarkGray)),
+                    ),
+                detail_area,
+            );
+        }
+
+        frame.render_widget(
+            Paragraph::new(if self.mode == Mode::Inbox {
+                "↑↓ select  ·  Enter respond  ·  Tab runs  ·  Esc back"
+            } else {
+                "↑↓ select  ·  Enter open  ·  Tab requests  ·  Esc back"
+            })
+            .style(Style::default().fg(Color::DarkGray)),
+            vertical[2],
+        );
     }
 
     fn help_text(&self) -> Vec<(&'static str, &'static str)> {
         vec![
             ("↑↓", "navigate"),
-            ("Enter", "focus child / answer request"),
-            ("Tab", "roster ⇄ attention inbox"),
-            ("Space", "peek (log tail)"),
-            ("m", "merge"),
-            ("p", "receipt"),
+            ("Enter", "open child / respond to request"),
+            ("Tab", "runs ⇄ needs you"),
+            ("Space", "peek recent events"),
+            ("m", "show worktree merge instructions"),
+            ("p", "show run receipt"),
             ("t", "flat/tree"),
-            ("s", "steer"),
+            ("s", "open child composer to send direction"),
             ("x", "stop one child"),
             ("r", "revive"),
             ("Ctrl+i", "interrupt subtree"),
