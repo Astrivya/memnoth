@@ -52,25 +52,85 @@ impl AgentDeck {
     }
 
     fn refresh(&mut self, app: &App) {
+        let selected_id = self.selected_child().map(|child| child.agent_id.clone());
         self.children = crate::tui::agents::roster(app);
-        if !self.children.is_empty() && self.selected >= self.children.len() {
-            self.selected = self.children.len() - 1;
+        let selected_index = selected_id.as_ref().and_then(|selected_id| {
+            self.ordered()
+                .iter()
+                .position(|child| child.agent_id == *selected_id)
+        });
+        if let Some(index) = selected_index {
+            self.selected = index;
+        } else if !self.children.is_empty() {
+            self.selected = self.selected.min(self.children.len() - 1);
+        } else {
+            self.selected = 0;
         }
         self.list_state.select(Some(self.selected));
     }
 
-    /// Roster rows in view order: tree view sorts parents before children so
-    /// indentation reads as a tree; flat view keeps spawn order.
+    /// Roster rows in view order: tree view walks actual parent links; flat
+    /// view keeps spawn order.
     fn ordered(&self) -> Vec<&ChildInfo> {
-        let mut rows: Vec<&ChildInfo> = self.children.iter().collect();
-        if self.tree_view {
-            rows.sort_by(|a, b| {
-                a.depth
-                    .cmp(&b.depth)
-                    .then_with(|| a.spawn_seq.cmp(&b.spawn_seq))
-            });
+        if !self.tree_view {
+            return self.children.iter().collect();
         }
-        rows
+
+        fn visit<'a>(
+            root: &'a ChildInfo,
+            children: &std::collections::HashMap<Option<&'a str>, Vec<&'a ChildInfo>>,
+            seen: &mut std::collections::HashSet<&'a str>,
+            ordered: &mut Vec<&'a ChildInfo>,
+        ) {
+            let mut pending = vec![root];
+            while let Some(node) = pending.pop() {
+                if !seen.insert(node.agent_id.as_str()) {
+                    continue;
+                }
+                ordered.push(node);
+                if let Some(descendants) = children.get(&Some(node.agent_id.as_str())) {
+                    pending.extend(descendants.iter().rev().copied());
+                }
+            }
+        }
+
+        let ids: std::collections::HashSet<&str> = self
+            .children
+            .iter()
+            .map(|child| child.agent_id.as_str())
+            .collect();
+        let mut children: std::collections::HashMap<Option<&str>, Vec<&ChildInfo>> =
+            std::collections::HashMap::new();
+        for child in &self.children {
+            let parent = child
+                .parent_id
+                .as_deref()
+                .filter(|parent_id| ids.contains(parent_id));
+            children.entry(parent).or_default().push(child);
+        }
+        for siblings in children.values_mut() {
+            siblings.sort_by_key(|child| child.spawn_seq);
+        }
+
+        let mut ordered = Vec::with_capacity(self.children.len());
+        let mut seen = std::collections::HashSet::with_capacity(self.children.len());
+        if let Some(roots) = children.get(&None) {
+            for root in roots {
+                visit(root, &children, &mut seen, &mut ordered);
+            }
+        }
+        // Corrupt/cyclic lineage should not hide runs. Display any unreachable
+        // nodes as deterministic roots after the valid trees.
+        let mut orphans: Vec<&ChildInfo> = self
+            .children
+            .iter()
+            .filter(|child| !seen.contains(child.agent_id.as_str()))
+            .collect();
+        orphans.sort_by_key(|child| child.spawn_seq);
+        for orphan in orphans {
+            visit(orphan, &children, &mut seen, &mut ordered);
+        }
+        ordered
     }
 
     fn selected_child(&self) -> Option<&ChildInfo> {
@@ -334,7 +394,17 @@ impl Overlay for AgentDeck {
                 OverlayAction::None
             }
             KeyCode::Char('t') => {
+                let selected_id = self.selected_child().map(|child| child.agent_id.clone());
                 self.tree_view = !self.tree_view;
+                let selected_index = selected_id.and_then(|selected_id| {
+                    self.ordered()
+                        .iter()
+                        .position(|child| child.agent_id == selected_id)
+                });
+                if let Some(index) = selected_index {
+                    self.selected = index;
+                    self.list_state.select(Some(index));
+                }
                 OverlayAction::None
             }
             KeyCode::Char('s') => {
@@ -717,6 +787,110 @@ impl Overlay for AgentDeck {
 mod tests {
     use super::*;
     use crossterm::event::KeyModifiers;
+
+    #[test]
+    fn refresh_keeps_the_selected_run_when_roster_order_changes() {
+        let temp = tempfile::tempdir().expect("temporary agent directory");
+        let mut delegator = memnoth_agent::Delegator::new(temp.path().join("agents"));
+        let root = delegator.root(None, "main", "parent run").unwrap();
+        let sibling_root = delegator.root(None, "review", "another root").unwrap();
+        let selected = delegator
+            .spawn(Some(&root.agent_id), None, "scout", "selected child")
+            .unwrap();
+
+        let mut app = App::new("s", false);
+        app.delegator = Some(delegator);
+        let mut deck = AgentDeck::new();
+        deck.refresh(&app);
+        deck.selected = deck
+            .ordered()
+            .iter()
+            .position(|child| child.agent_id == selected.agent_id)
+            .unwrap();
+        deck.list_state.select(Some(deck.selected));
+
+        // Tree mode groups the actual child below its parent while refresh
+        // brings in another root and descendant.
+        deck.tree_view = true;
+        app.delegator
+            .as_mut()
+            .unwrap()
+            .spawn(Some(&sibling_root.agent_id), None, "test", "new descendant")
+            .unwrap();
+        deck.refresh(&app);
+
+        assert_eq!(
+            deck.selected_child().map(|child| child.agent_id.as_str()),
+            Some(selected.agent_id.as_str())
+        );
+        assert_eq!(deck.list_state.selected(), Some(deck.selected));
+    }
+
+    #[test]
+    fn changing_flat_tree_order_keeps_the_same_run_selected() {
+        let temp = tempfile::tempdir().expect("temporary agent directory");
+        let mut delegator = memnoth_agent::Delegator::new(temp.path().join("agents"));
+        let root = delegator.root(None, "main", "parent run").unwrap();
+        delegator.root(None, "review", "another root").unwrap();
+        let child = delegator
+            .spawn(Some(&root.agent_id), None, "scout", "nested run")
+            .unwrap();
+        let mut app = App::new("s", false);
+        app.delegator = Some(delegator);
+        let mut deck = AgentDeck::new();
+        deck.refresh(&app);
+        deck.selected = deck
+            .ordered()
+            .iter()
+            .position(|run| run.agent_id == child.agent_id)
+            .unwrap();
+
+        deck.handle_key(
+            KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
+            &mut app,
+        );
+
+        assert!(deck.tree_view);
+        assert_eq!(deck.selected, 1, "child moves ahead of the later root");
+        assert_eq!(
+            deck.selected_child().map(|run| run.agent_id.as_str()),
+            Some(child.agent_id.as_str())
+        );
+    }
+
+    #[test]
+    fn tree_order_keeps_each_child_inside_its_actual_parent_group() {
+        let temp = tempfile::tempdir().expect("temporary agent directory");
+        let mut delegator = memnoth_agent::Delegator::new(temp.path().join("agents"));
+        let first = delegator.root(None, "first", "first root").unwrap();
+        let second = delegator.root(None, "second", "second root").unwrap();
+        let first_child = delegator
+            .spawn(Some(&first.agent_id), None, "child", "belongs to first")
+            .unwrap();
+        let second_child = delegator
+            .spawn(Some(&second.agent_id), None, "child", "belongs to second")
+            .unwrap();
+        let mut app = App::new("s", false);
+        app.delegator = Some(delegator);
+        let mut deck = AgentDeck::new();
+        deck.tree_view = true;
+        deck.refresh(&app);
+
+        let order: Vec<&str> = deck
+            .ordered()
+            .iter()
+            .map(|run| run.agent_id.as_str())
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                first.agent_id.as_str(),
+                first_child.agent_id.as_str(),
+                second.agent_id.as_str(),
+                second_child.agent_id.as_str(),
+            ]
+        );
+    }
 
     #[test]
     fn opening_attention_keeps_it_pending_until_focus_sends_a_response() {
