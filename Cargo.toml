@@ -15,7 +15,7 @@
 
 [package]
 name = "memnoth"
-version = "0.1.0-beta.6"
+version = "0.1.0-beta.7"
 edition = "2024"
 license = "Apache-2.0"
 description = "Terminal agent, bi-temporal vault, code graph and MCP server"
@@ -54,9 +54,9 @@ clap_mangen = "0.2"
 crossterm = "0.28"
 dirs = "6"
 flate2 = "1"
-memnoth-command = { version = "0.1.0-beta.6", path = "crates/memnoth-command" }
-memnoth-codegraph = { version = "0.1.0-beta.6", path = "crates/memnoth-codegraph" }
-memnoth-update = { version = "0.1.0-beta.6", path = "crates/memnoth-update" }
+memnoth-command = { version = "0.1.0-beta.7", path = "crates/memnoth-command" }
+memnoth-codegraph = { version = "0.1.0-beta.7", path = "crates/memnoth-codegraph" }
+memnoth-update = { version = "0.1.0-beta.7", path = "crates/memnoth-update" }
 ratatui = "0.29"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = [
@@ -72,25 +72,25 @@ toml = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"] }
 uuid = { version = "1", features = ["v4"] }
 walkdir = "2"
-memnoth-capability = { version = "0.1.0-beta.6", path = "crates/memnoth-capability" }
-memnoth-context = { version = "0.1.0-beta.6", path = "crates/memnoth-context" }
-memnoth-coord = { version = "0.1.0-beta.6", path = "crates/memnoth-coord" }
-memnoth-engine = { version = "0.1.0-beta.6", path = "crates/memnoth-engine" }
-memnoth-harness-api = { version = "0.1.0-beta.6", path = "crates/memnoth-harness-api" }
-memnoth-transport = { version = "0.1.0-beta.6", path = "crates/memnoth-transport" }
-memnoth-mcp-client = { version = "0.1.0-beta.6", path = "crates/memnoth-mcp-client" }
-memnoth-sandbox = { version = "0.1.0-beta.6", path = "crates/memnoth-sandbox" }
-memnoth-search = { version = "0.1.0-beta.6", path = "crates/memnoth-search" }
-memnoth-agent = { version = "0.1.0-beta.6", path = "crates/memnoth-agent" }
-memnoth-session = { version = "0.1.0-beta.6", path = "crates/memnoth-session" }
-memnoth-cloud-client = { version = "0.1.0-beta.6", path = "crates/memnoth-cloud-client" }
-memnoth-ui = { version = "0.1.0-beta.6", path = "crates/memnoth-ui" }
-memnoth-auth = { version = "0.1.0-beta.6", path = "crates/memnoth-auth" }
-memnoth-provider-config = { version = "0.1.0-beta.6", path = "crates/memnoth-provider-config" }
-memnoth-lsp = { version = "0.1.0-beta.6", path = "crates/memnoth-lsp" }
-memnoth-provider-registry = { version = "0.1.0-beta.6", path = "crates/memnoth-provider-registry" }
-memnoth-skills = { version = "0.1.0-beta.6", path = "crates/memnoth-skills" }
-memnoth-worktree = { version = "0.1.0-beta.6", path = "crates/memnoth-worktree" }
+memnoth-capability = { version = "0.1.0-beta.7", path = "crates/memnoth-capability" }
+memnoth-context = { version = "0.1.0-beta.7", path = "crates/memnoth-context" }
+memnoth-coord = { version = "0.1.0-beta.7", path = "crates/memnoth-coord" }
+memnoth-engine = { version = "0.1.0-beta.7", path = "crates/memnoth-engine" }
+memnoth-harness-api = { version = "0.1.0-beta.7", path = "crates/memnoth-harness-api" }
+memnoth-transport = { version = "0.1.0-beta.7", path = "crates/memnoth-transport" }
+memnoth-mcp-client = { version = "0.1.0-beta.7", path = "crates/memnoth-mcp-client" }
+memnoth-sandbox = { version = "0.1.0-beta.7", path = "crates/memnoth-sandbox" }
+memnoth-search = { version = "0.1.0-beta.7", path = "crates/memnoth-search" }
+memnoth-agent = { version = "0.1.0-beta.7", path = "crates/memnoth-agent" }
+memnoth-session = { version = "0.1.0-beta.7", path = "crates/memnoth-session" }
+memnoth-cloud-client = { version = "0.1.0-beta.7", path = "crates/memnoth-cloud-client" }
+memnoth-ui = { version = "0.1.0-beta.7", path = "crates/memnoth-ui" }
+memnoth-auth = { version = "0.1.0-beta.7", path = "crates/memnoth-auth" }
+memnoth-provider-config = { version = "0.1.0-beta.7", path = "crates/memnoth-provider-config" }
+memnoth-lsp = { version = "0.1.0-beta.7", path = "crates/memnoth-lsp" }
+memnoth-provider-registry = { version = "0.1.0-beta.7", path = "crates/memnoth-provider-registry" }
+memnoth-skills = { version = "0.1.0-beta.7", path = "crates/memnoth-skills" }
+memnoth-worktree = { version = "0.1.0-beta.7", path = "crates/memnoth-worktree" }
 axum = "0.8"
 notify = "8"
 tower-http = { version = "0.6", features = ["cors"] }
@@ -158,6 +158,6 @@ license = "Apache-2.0"
 # release contract is one version stated in both the root package and here, and
 # `tests/version_surfaces.rs` fails when the two disagree. Removing it to quiet
 # the warning removes the check.
-version = "0.1.0-beta.6"
+version = "0.1.0-beta.7"
 repository = "https://github.com/astrivya/memnoth"
 homepage = "https://memnoth.astrivya.ai"
