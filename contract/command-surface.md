@@ -1,6 +1,6 @@
 # Memnoth CLI Command Reference
 
-Version: 0.1.0-beta.11
+Version: 0.1.0-beta.12
 
 ---
 

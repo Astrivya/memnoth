@@ -1,6 +1,6 @@
 [package]
 name = "memnoth-lsp"
-version = "0.1.0-beta.11"
+version = "0.1.0-beta.12"
 edition = "2024"
 license = "Apache-2.0"
 description = "memnoth language-server client: JSON-RPC over stdio, lifecycle, document sync"
@@ -8,7 +8,7 @@ repository = "https://github.com/astrivya/memnoth"
 
 [dependencies]
 anyhow = "1"
-memnoth-codegraph = { version = "0.1.0-beta.11", path = "../memnoth-codegraph" }
+memnoth-codegraph = { version = "0.1.0-beta.12", path = "../memnoth-codegraph" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
