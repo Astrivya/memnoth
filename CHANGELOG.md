@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-beta.9] - 2026-11-19
+
+### Fixed - Release
+
+- Run npm metadata and pack operations from the staged package directory.
+
 ## [0.1.0-beta.8] - 2026-11-19
 
 ### Fixed - Release

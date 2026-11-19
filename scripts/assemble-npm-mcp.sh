@@ -17,7 +17,6 @@ cp -R "$REPO/crates/memnoth-mcp/npm/." "$STAGE/"
 mkdir -p "$STAGE/vendor/linux-x64" "$STAGE/vendor/linux-arm64" \
   "$STAGE/vendor/darwin-x64" "$STAGE/vendor/darwin-arm64" \
   "$STAGE/vendor/win32-x64" "$OUTPUT"
-npm pkg set "version=$VERSION" --prefix "$STAGE" >/dev/null
 
 extract_tar() {
   local target="$1"
@@ -43,6 +42,10 @@ unzip -p "$windows_archive" memnoth-mcp.exe \
 "$STAGE/vendor/linux-x64/memnoth-mcp" --version
 "$STAGE/vendor/linux-x64/memnoth-mcp" --selftest --db "$STAGE/npm-smoke.db"
 node "$STAGE/bin/memnoth-mcp.js" --version
-npm pack --dry-run --prefix "$STAGE" >/dev/null
-artifact="$(npm pack --prefix "$STAGE" --pack-destination "$OUTPUT")"
-printf 'assembled %s/%s\n' "$OUTPUT" "$artifact"
+(
+  cd "$STAGE"
+  npm pkg set "version=$VERSION" >/dev/null
+  npm pack --dry-run >/dev/null
+  artifact="$(npm pack --pack-destination "$OUTPUT")"
+  printf 'assembled %s/%s\n' "$OUTPUT" "$artifact"
+)
