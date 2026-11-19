@@ -373,7 +373,7 @@ impl Overlay for TeamsOverlay {
         self.detail_scroll = 0;
     }
 
-    fn handle_key(&mut self, key: KeyEvent, app: &mut App) -> OverlayAction {
+    fn handle_key(&mut self, key: KeyEvent, _app: &mut App) -> OverlayAction {
         if !self.visible {
             return OverlayAction::None;
         }
@@ -707,7 +707,10 @@ mod tests {
         assert!(matches!(action, OverlayAction::None));
         assert_eq!(app.input, "");
         assert!(!app.pending_submit);
-        assert!(matches!(overlay.detail, Some(DetailLoaded::Loading)));
+        assert!(matches!(
+            overlay.detail,
+            Some(DetailLoaded::Failed(ref error)) if error == "no workspace context"
+        ));
     }
 
     #[test]
