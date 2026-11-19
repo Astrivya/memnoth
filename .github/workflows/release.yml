@@ -473,25 +473,29 @@ jobs:
         id: npm-publish-auth
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TRUSTED_PUBLISHING: ${{ vars.NPM_TRUSTED_PUBLISHING }}
         shell: bash
         run: |
           if [ -n "$NPM_TOKEN" ]; then
-            echo 'configured=true' >> "$GITHUB_OUTPUT"
+            echo 'mode=token' >> "$GITHUB_OUTPUT"
+          elif [ "$NPM_TRUSTED_PUBLISHING" = 'true' ]; then
+            echo 'mode=oidc' >> "$GITHUB_OUTPUT"
           else
-            echo 'configured=false' >> "$GITHUB_OUTPUT"
-            echo 'NPM_TOKEN is not configured; the tested tarball is attached to the GitHub release artifacts.'
+            echo 'mode=skip' >> "$GITHUB_OUTPUT"
+            echo 'npm publishing is not configured; the verified tarball will ship as a GitHub release asset.'
           fi
 
       - name: publish standalone npm package
-        if: ${{ steps.npm-publish-auth.outputs.configured == 'true' }}
+        if: ${{ steps.npm-publish-auth.outputs.mode == 'token' }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish "${{ steps.npm-package.outputs.package }}" --access public --provenance
 
-      # Once the package's trusted publisher is configured on npmjs.com, this
-      # path uses the job's OIDC identity and requires no long-lived npm token.
+      # Enable this repository variable only after registering the matching
+      # trusted publisher on npm. This prevents missing first-publish auth from
+      # failing the otherwise verified GitHub release.
       - name: publish standalone npm package with trusted publishing
-        if: ${{ steps.npm-publish-auth.outputs.configured != 'true' }}
+        if: ${{ steps.npm-publish-auth.outputs.mode == 'oidc' }}
         run: npm publish "${{ steps.npm-package.outputs.package }}" --access public --provenance
 
       # SBOM for every published artifact, generated after signing so it

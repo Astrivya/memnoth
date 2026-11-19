@@ -72,6 +72,8 @@ jobs:
         run: cargo run --quiet -- schema --output contract/commands.json --check
       - name: Bash completion
         run: cargo run --quiet -- completion show --shell bash --output completions/memnoth.bash --check
+      - name: Standalone MCP package surface
+        run: python3 scripts/check_surface.py
 
   # Windows is the slowest leg by a distance: its 7m49s was 2m41s of build,
   # 3m41s of tests and the rest setup, on the runner where process spawn and
