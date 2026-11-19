@@ -224,7 +224,10 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          cargo-nextest nextest run --archive-file nextest-archive.tar.zst --no-tests=fail --partition slice:${{ matrix.shard }}/${{ matrix.shards }} 2>&1 | tee test-output.log
+          # Integration tests use compile-time CARGO_BIN_EXE_* paths. Extract
+          # into this checkout's target directory, which matches the builder's
+          # workspace path, instead of nextest's temporary extraction path.
+          cargo-nextest nextest run --archive-file nextest-archive.tar.zst --extract-to target --no-tests=fail --partition slice:${{ matrix.shard }}/${{ matrix.shards }} 2>&1 | tee test-output.log
           { grep -E "FAILED|panicked at" test-output.log | head -40; } >> "$GITHUB_STEP_SUMMARY" || true
 
   pinned-model-ci:
