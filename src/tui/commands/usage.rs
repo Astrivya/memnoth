@@ -30,6 +30,8 @@ struct ModelUsage {
 struct UsageSnapshot {
     session_id: String,
     session_model: String,
+    active_provider: Option<String>,
+    active_model: String,
     session_age_ms: u64,
     messages: MessageCounts,
     completed_turns: usize,
@@ -108,6 +110,8 @@ struct ContextWindow {
     provider: Option<String>,
     occupancy_tokens: Option<u64>,
     limit_tokens: Option<u64>,
+    remaining_tokens: Option<u64>,
+    over_limit_tokens: Option<u64>,
     limit_source: Option<String>,
     status: &'static str,
 }
@@ -218,11 +222,18 @@ fn snapshot(
     });
     let limit_tokens = context_matches.then_some(context_window_size).flatten();
     let limit_source = limit_tokens.and(context_window_source.map(str::to_owned));
+    let occupancy_tokens = latest.and_then(|receipt| receipt.context_window_used);
     let context_window = ContextWindow {
         model: latest.and_then(|receipt| receipt.context_window_model.clone()),
         provider: latest.and_then(|receipt| receipt.provider_id.clone()),
-        occupancy_tokens: latest.and_then(|receipt| receipt.context_window_used),
+        occupancy_tokens,
         limit_tokens,
+        remaining_tokens: occupancy_tokens
+            .zip(limit_tokens)
+            .map(|(used, limit)| limit.saturating_sub(used)),
+        over_limit_tokens: occupancy_tokens
+            .zip(limit_tokens)
+            .and_then(|(used, limit)| (used > limit).then(|| used - limit)),
         limit_source,
         status: if latest
             .and_then(|receipt| receipt.context_window_used)
@@ -329,6 +340,12 @@ fn snapshot(
     UsageSnapshot {
         session_id: session.id.clone(),
         session_model: session.model.clone(),
+        active_provider: (!context_provider.is_empty()).then(|| context_provider.to_string()),
+        active_model: if context_model.is_empty() {
+            session.model.clone()
+        } else {
+            context_model.to_string()
+        },
         session_age_ms: elapsed_ms,
         messages,
         completed_turns: total_turns,
@@ -565,10 +582,15 @@ fn sum(values: impl Iterator<Item = u64>) -> u64 {
 
 fn render_text(snapshot: &UsageSnapshot) -> String {
     let mut out = format!(
-        "usage · {}\nsession  {} · age {}\ncompleted turns  {} · messages {} user / {} assistant / {} tool\n",
+        "usage · {}\nsession  {} · age {}\nactive  {} · {}\ncompleted turns  {} · messages {} user / {} assistant / {} tool\n",
         snapshot.session_id,
         snapshot.session_model,
         duration(snapshot.session_age_ms),
+        snapshot
+            .active_provider
+            .as_deref()
+            .unwrap_or("provider not selected"),
+        snapshot.active_model,
         snapshot.completed_turns,
         snapshot.messages.user,
         snapshot.messages.assistant,
@@ -714,10 +736,15 @@ fn render_text(snapshot: &UsageSnapshot) -> String {
         snapshot.context_window.limit_tokens,
     ) {
         (Some(used), Some(limit)) if limit > 0 => out.push_str(&format!(
-            "last request  {} / {} tokens · {:.1}% · {}\n",
+            "last request  {} / {} tokens · {:.1}% · {} remaining{} · {}\n",
             grouped(used),
             grouped(limit),
             used as f64 * 100.0 / limit as f64,
+            grouped(snapshot.context_window.remaining_tokens.unwrap_or_default()),
+            snapshot
+                .context_window
+                .over_limit_tokens
+                .map_or_else(String::new, |over| format!(" · {} over", grouped(over))),
             snapshot
                 .context_window
                 .limit_source
@@ -889,6 +916,7 @@ mod tests {
     fn text_includes_exact_identity_effort_usage_activity_latency_and_source() {
         let text = render_text(&session_with(vec![receipt()]));
         for expected in [
+            "active  gateway · vendor/model:free",
             "kilo · vendor/model:free",
             "effort high",
             "latest completed turn",
@@ -904,6 +932,7 @@ mod tests {
             "turn latency  avg 1.2s",
             "output throughput",
             "provider model catalog",
+            "90,000 remaining",
             "~$0.001234 estimate",
             "not provider-billed cost",
         ] {
@@ -950,8 +979,12 @@ mod tests {
         assert_eq!(value["latest_turn"]["provider_requests"]["value"], 2);
         assert_eq!(value["latest_turn"]["tool_calls"]["value"], 1);
         assert_eq!(value["latest_turn"]["latency_ms"]["value"], 1_200);
+        assert_eq!(value["active_provider"], "gateway");
+        assert_eq!(value["active_model"], "vendor/model:free");
         assert_eq!(value["reasoning_output_tokens"]["value"], 23);
         assert_eq!(value["cache_read_tokens"]["value"], 0);
+        assert_eq!(value["context_window"]["remaining_tokens"], 90_000);
+        assert!(value["context_window"]["over_limit_tokens"].is_null());
         assert_eq!(value["cost"]["status"], "estimate");
         assert_eq!(value["rate_limits"]["status"], "not reported");
         assert_eq!(
@@ -997,6 +1030,27 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("/ 100,000 tokens"), "{text}");
+    }
+
+    #[test]
+    fn context_overflow_reports_zero_remaining_and_the_overage_without_underflow() {
+        let mut row = receipt();
+        row.context_window_used = Some(100_050);
+        let text = render_text(&session_with(vec![row.clone()]));
+        assert!(text.contains("0 remaining · 50 over"), "{text}");
+
+        let value: serde_json::Value = serde_json::from_str(&render(
+            &session_with(vec![row]),
+            Some(100_000),
+            "vendor/model:free",
+            "gateway",
+            Some("provider model catalog"),
+            Some("medium"),
+            true,
+        ))
+        .unwrap();
+        assert_eq!(value["context_window"]["remaining_tokens"], 0);
+        assert_eq!(value["context_window"]["over_limit_tokens"], 50);
     }
 
     #[test]
