@@ -26,7 +26,7 @@ pub(crate) fn spec(command: &str, data: &Value) -> Option<PopoverSpec> {
     }
 }
 
-/// The org's projects, one row each, Enter files this machine under it.
+/// The org's projects, one row each. Enter inspects; `u` changes filing scope.
 fn projects(data: &Value) -> Option<PopoverSpec> {
     let rows = list(data, "projects")
         .iter()
@@ -45,8 +45,9 @@ fn projects(data: &Value) -> Option<PopoverSpec> {
             if let Some(members) = project.get("member_count").and_then(Value::as_i64) {
                 detail.push(format!("{members} member(s)"));
             }
-            PopoverRow::new(string(project, "name"), detail.join(" · "))
-                .running(format!("/projects use {id}"))
+            PopoverRow::new(string(project, "name"), detail.join(" · ")).shortcut(
+                PopoverButton::run('u', "use", format!("/projects use {id}")),
+            )
         })
         .collect::<Vec<_>>();
 
@@ -56,12 +57,12 @@ fn projects(data: &Value) -> Option<PopoverSpec> {
 
     let spec = PopoverSpec::new(
         format!("Projects ({})", rows.len()),
-        "from projects.list — enter files this machine's sessions under a project",
+        "from projects.list — inspect a project; use is a separate action",
     )
     .rows(rows)
     .note("`/projects create <name>` adds one; `mn projects use --clear` stops filing")
     .button(PopoverButton::run(
-        'u',
+        'a',
         "unassigned",
         "/projects unassigned",
     ));
@@ -141,7 +142,7 @@ mod tests {
         spec(command, &data).expect("a window for this answer")
     }
 
-    /// Every project is a row whose Enter is the verb that files under it.
+    /// Inspecting a project does not change the active filing scope.
     #[test]
     fn a_project_row_files_this_machine_under_it() {
         let spec = lines(
@@ -156,8 +157,9 @@ mod tests {
         assert_eq!(row.title, "acme-api");
         assert!(row.detail.contains("id 3f2a"), "{}", row.detail);
         assert!(row.detail.contains("4 member(s)"), "{}", row.detail);
+        assert_eq!(row.action, None);
         assert_eq!(
-            row.action,
+            row.shortcut.as_ref().map(|button| button.action.clone()),
             Some(PopoverAction::Run("/projects use 3f2a".into()))
         );
     }

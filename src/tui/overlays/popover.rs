@@ -57,6 +57,8 @@ pub struct PopoverRow {
     pub tag: Option<String>,
     /// What Enter does on this row. `None` draws the footer button as disabled.
     pub action: Option<PopoverAction>,
+    /// Explicit row-scoped action, separate from Enter's inspect behavior.
+    pub shortcut: Option<PopoverButton>,
     /// A section divider: drawn, never selected, never acted on.
     pub header: bool,
 }
@@ -69,6 +71,7 @@ impl PopoverRow {
             detail: detail.into(),
             tag: None,
             action: None,
+            shortcut: None,
             header: false,
         }
     }
@@ -80,6 +83,7 @@ impl PopoverRow {
             detail: String::new(),
             tag: None,
             action: None,
+            shortcut: None,
             header: true,
         }
     }
@@ -93,6 +97,12 @@ impl PopoverRow {
     /// Make Enter run this line.
     pub fn running(mut self, line: impl Into<String>) -> Self {
         self.action = Some(PopoverAction::Run(line.into()));
+        self
+    }
+
+    /// Attach a row-scoped action that never runs implicitly on Enter.
+    pub fn shortcut(mut self, button: PopoverButton) -> Self {
+        self.shortcut = Some(button);
         self
     }
 }
@@ -318,12 +328,17 @@ impl PopoverOverlay {
 
         match self.spec.rows.get(self.selected).filter(|row| !row.header) {
             Some(row) => {
-                let label = match &row.action {
-                    Some(PopoverAction::Run(_)) => "run",
-                    Some(PopoverAction::Open(_)) => "open",
-                    None => "nothing to run",
+                let (label, enabled) = match &row.action {
+                    Some(PopoverAction::Run(_)) => ("run", true),
+                    Some(PopoverAction::Open(_)) => ("open", true),
+                    None if row.shortcut.is_some() => ("inspect", true),
+                    None => ("nothing to run", false),
                 };
-                spans.push(chip(format!("⏎ {label}"), row.action.is_some()));
+                spans.push(chip(format!("enter {label}"), enabled));
+                if let Some(button) = &row.shortcut {
+                    spans.push(Span::raw(" "));
+                    spans.push(chip(format!("{} {}", button.key, button.label), true));
+                }
             }
             None => spans.push(chip("⏎ —".to_string(), false)),
         }
@@ -407,14 +422,36 @@ impl Overlay for PopoverOverlay {
             KeyCode::Enter => match self.selected_action().cloned() {
                 Some(action) => self.act(action, app),
                 None => {
-                    // A button that looks dead but says nothing is the thing this
-                    // window exists to avoid: say which row has no action.
-                    self.status =
-                        Some("this row has nothing to run — j/k moves, esc closes".to_string());
+                    let status = self
+                        .spec
+                        .rows
+                        .get(self.selected)
+                        .and_then(|row| row.shortcut.as_ref())
+                        .map(|button| {
+                            format!(
+                                "details are shown above — press {} to {}",
+                                button.key, button.label
+                            )
+                        })
+                        .unwrap_or_else(|| {
+                            "this row has nothing to run — j/k moves, esc closes".to_string()
+                        });
+                    self.status = Some(status);
                     OverlayAction::None
                 }
             },
             KeyCode::Char(ch) if !ctrl => {
+                let row_button = self
+                    .spec
+                    .rows
+                    .get(self.selected)
+                    .filter(|row| !row.header)
+                    .and_then(|row| row.shortcut.as_ref())
+                    .filter(|button| button.key == ch)
+                    .cloned();
+                if let Some(button) = row_button {
+                    return self.act(button.action, app);
+                }
                 let button = self
                     .spec
                     .buttons
@@ -1510,6 +1547,41 @@ mod tests {
             app.pending_submit,
             "the row runs the verb, not just fills it"
         );
+    }
+
+    #[test]
+    fn project_enter_inspects_and_u_is_the_explicit_scope_change() {
+        let data = serde_json::json!({
+            "projects": [{ "id": "p-1", "name": "payments", "visibility": "restricted" }]
+        });
+        let mut app = app();
+        let mut overlay = PopoverOverlay::new(
+            PopoverOverlay::for_answer("projects.list", &data).expect("project list"),
+        );
+        overlay.show();
+
+        assert_eq!(
+            overlay.handle_key(KeyEvent::from(KeyCode::Enter), &mut app),
+            OverlayAction::None
+        );
+        assert!(
+            app.input.is_empty(),
+            "inspection must not change filing scope"
+        );
+        assert!(
+            overlay
+                .status
+                .as_deref()
+                .unwrap()
+                .contains("press u to use")
+        );
+
+        assert_eq!(
+            overlay.handle_key(KeyEvent::from(KeyCode::Char('u')), &mut app),
+            OverlayAction::Close
+        );
+        assert_eq!(app.input, "/projects use p-1");
+        assert!(app.pending_submit);
     }
 
     #[test]
