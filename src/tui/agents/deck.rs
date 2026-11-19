@@ -639,7 +639,7 @@ impl Overlay for AgentDeck {
             (body, None)
         };
         let visible = self.visible();
-        let mut rows: Vec<ListItem<'static>> = if self.mode == Mode::Inbox && inbox_len > 0 {
+        let mut rows: Vec<ListItem<'static>> = if self.mode == Mode::Inbox {
             app.delegator
                 .as_ref()
                 .map(|delegator| {
@@ -1031,5 +1031,29 @@ mod tests {
         assert_eq!(app.focus_agent.as_deref(), Some(child.agent_id.as_str()));
         assert_eq!(app.focus_attention.as_deref(), Some(request.id.as_str()));
         assert_eq!(app.delegator.as_ref().unwrap().attention(), &[request]);
+    }
+
+    #[test]
+    fn empty_attention_view_does_not_fall_back_to_the_roster() {
+        let app = App::new("s", false);
+        let mut deck = AgentDeck::new();
+        deck.mode = Mode::Inbox;
+        deck.refresh(&app);
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| deck.render(frame, frame.area(), &app))
+            .expect("draw agent deck");
+        let buffer = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+        assert!(text.contains("No requests waiting for you"), "{text}");
+        assert!(!text.contains("No delegated runs yet"), "{text}");
     }
 }
