@@ -2700,6 +2700,7 @@ fn start_turn(
     app.stream_answer = None;
     app.stream_answer_first = None;
     app.stream_think = None;
+    app.stream_reasoning_boundary = None;
     app.busy = true;
 
     // A window of the conversation, not all of it: eight exchanges are enough

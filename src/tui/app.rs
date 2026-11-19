@@ -541,6 +541,9 @@ pub struct App {
     pub stream_answer_first: Option<usize>,
     /// The live thinking entry the stream is writing, if any.
     pub stream_think: Option<usize>,
+    /// First transcript index after the latest tool. Reasoning resumed after a
+    /// tool belongs in that later phase, before its answer.
+    pub stream_reasoning_boundary: Option<usize>,
     /// When the turn in flight started, for the busy line's elapsed time.
     pub turn_started_ms: i64,
     /// A write waiting for the person's yes, rendered as a modal.
@@ -828,6 +831,7 @@ impl App {
             stream_answer: None,
             stream_answer_first: None,
             stream_think: None,
+            stream_reasoning_boundary: None,
             turn_started_ms: 0,
             approval: None,
             context: String::new(),
@@ -1002,27 +1006,29 @@ impl App {
                     expanded: false,
                     stats: None,
                 };
-                // Thinking belongs before the answer it produced, always.
-                // The push used to put the block wherever the delta landed:
-                // when a provider emits reasoning after the first answer
-                // chunk, the thinking calendarised itself *under* the
-                // response it explained. If this turn's answer already
-                // exists, the block inserts ahead of it.
-                let index = match self.stream_answer_first {
-                    Some(first) if first < self.entries.len() => {
-                        self.entries.insert(first, entry);
-                        for position in [&mut self.stream_answer, &mut self.stream_answer_first]
-                            .into_iter()
-                            .flatten()
-                        {
+                // If reasoning arrives after its answer delta, put it before
+                // that phase's answer. Before the first tool this is the first
+                // answer segment; after a tool it is the current segment, so a
+                // later reasoning phase cannot jump above earlier work.
+                let anchor = if let Some(boundary) = self.stream_reasoning_boundary {
+                    self.stream_answer.filter(|answer| *answer >= boundary)
+                } else {
+                    self.stream_answer_first
+                };
+                let index = if let Some(anchor) = anchor.filter(|i| *i < self.entries.len()) {
+                    self.entries.insert(anchor, entry);
+                    for position in [&mut self.stream_answer, &mut self.stream_answer_first]
+                        .into_iter()
+                        .flatten()
+                    {
+                        if *position >= anchor {
                             *position += 1;
                         }
-                        first
                     }
-                    _ => {
-                        self.entries.push(entry);
-                        self.entries.len() - 1
-                    }
+                    anchor
+                } else {
+                    self.entries.push(entry);
+                    self.entries.len() - 1
                 };
                 self.stream_think = Some(index);
                 index
@@ -1068,6 +1074,7 @@ impl App {
         self.stream_answer = None;
         self.stream_answer_first = None;
         self.stream_think = None;
+        self.stream_reasoning_boundary = None;
     }
 
     /// Append a child's card to the parent timeline: the delegation row a person
@@ -1092,7 +1099,12 @@ impl App {
         {
             entry.live = false;
         }
+        // A tool ends the current reasoning phase. Any provider reasoning
+        // that follows gets its own block after this tool in transcript order.
+        self.collapse_thinking();
+        self.stream_think = None;
         self.push(EntryRole::Tool, text);
+        self.stream_reasoning_boundary = Some(self.entries.len());
         // A running row is live: it carries its elapsed time until the round
         // lands, so a turn that works is a turn that reports its own pace.
         if let Some(entry) = self.entries.last_mut() {
@@ -5062,6 +5074,61 @@ mod tests {
         // The tool row sits between the two segments, in the order it happened.
         assert!(answers[0] < 1 && answers[1] > 1);
         assert_eq!(app.entries[1].role, EntryRole::Tool);
+    }
+
+    #[test]
+    fn reasoning_after_a_tool_gets_a_new_block_in_its_own_timeline_phase() {
+        let mut app = App::new("s", false);
+        app.append_reasoning_delta("reasoning before tool");
+        app.append_stream_delta("answer before tool");
+        app.push_tool("kg search first");
+        // Some providers deliver a reasoning delta after the first answer
+        // chunk of a phase. It still belongs before that phase's answer, but
+        // after the tool and all earlier turn activity.
+        app.append_stream_delta("answer after tool");
+        app.append_reasoning_delta("reasoning after tool");
+
+        let timeline: Vec<(EntryRole, &str)> = app
+            .entries
+            .iter()
+            .map(|entry| (entry.role, entry.text.as_str()))
+            .collect();
+        assert_eq!(
+            timeline,
+            vec![
+                (EntryRole::Thinking, "reasoning before tool"),
+                (EntryRole::Answer, "answer before tool"),
+                (EntryRole::Tool, "kg search first"),
+                (EntryRole::Thinking, "reasoning after tool"),
+                (EntryRole::Answer, "answer after tool"),
+            ]
+        );
+    }
+
+    #[test]
+    fn each_tool_closes_its_reasoning_phase_without_mutating_earlier_blocks() {
+        let mut app = App::new("s", false);
+        app.append_reasoning_delta("inspect");
+        app.push_tool("read file A");
+        app.append_reasoning_delta("compare");
+        app.push_tool("read file B");
+        app.append_reasoning_delta("synthesize");
+
+        let timeline: Vec<(EntryRole, &str)> = app
+            .entries
+            .iter()
+            .map(|entry| (entry.role, entry.text.as_str()))
+            .collect();
+        assert_eq!(
+            timeline,
+            vec![
+                (EntryRole::Thinking, "inspect"),
+                (EntryRole::Tool, "read file A"),
+                (EntryRole::Thinking, "compare"),
+                (EntryRole::Tool, "read file B"),
+                (EntryRole::Thinking, "synthesize"),
+            ]
+        );
     }
 
     #[test]
