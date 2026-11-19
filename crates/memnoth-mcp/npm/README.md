@@ -46,6 +46,8 @@ publisher with:
 - Repository: **memnoth**
 - Workflow file: **`release.yml`**
 - GitHub environment: leave empty (the release job does not use an environment)
+- Allowed actions: enable **`npm publish`**. New publishers default to staged publishing,
+  while the release workflow publishes tags directly.
 
 After saving the publisher, set the GitHub repository Actions variable
 `NPM_TRUSTED_PUBLISHING` to `true`, then remove any `NPM_TOKEN` Actions secret.
