@@ -5646,11 +5646,7 @@ struct CrossEncoder;
 impl CrossEncoder {
     /// Mirrors `memnoth_embedding::CrossEncoder::rerank`. Unreachable in a
     /// build without the semantic stack — the guard, not a code path.
-    fn rerank(
-        &self,
-        _query: &str,
-        _candidates: &[(String, String)],
-    ) -> anyhow::Result<Vec<(String, f32)>> {
+    fn rerank(&self, _query: &str, _candidates: &[String]) -> anyhow::Result<Option<Vec<f32>>> {
         unreachable!("no cross-encoder without the `semantic` feature")
     }
 }
