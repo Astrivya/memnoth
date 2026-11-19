@@ -152,6 +152,9 @@ use memnoth_engine::{Entity, EntityKind, MemoryEngine};
 /// and the client's capabilities carried on **every request** in `_meta`
 /// (SEP-2575, the 2026-07-28 revision).
 const LATEST_PROTOCOL_VERSION: &str = "2026-07-28";
+/// The lifecycle-era protocol supported for hosts that still default to
+/// `initialize` (including OpenCode's default protocol mode).
+const LEGACY_PROTOCOL_VERSION: &str = "2025-11-25";
 
 /// Revisions a stateless request may declare. Anything else is refused with
 /// `UnsupportedProtocolVersionError` and the supported list, so the client can
@@ -828,6 +831,10 @@ where
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     let mut lines = BufReader::new(stdin).lines();
+    // A stdio process is a single connection. `initialize` selects the
+    // legacy response envelope for the rest of this process; modern clients
+    // can still start directly with `server/discover` or another RPC.
+    let mut legacy = false;
     while let Some(line) = lines.next_line().await? {
         if line.trim().is_empty() {
             continue;
@@ -836,7 +843,23 @@ where
             Ok(v) => v,
             Err(_) => continue,
         };
+        match msg.get("method").and_then(Value::as_str) {
+            Some("initialize") => {
+                if let Some(resp) = legacy_initialize(&msg) {
+                    legacy = resp.get("result").is_some();
+                    stdout.write_all(resp.to_string().as_bytes()).await?;
+                    stdout.write_all(b"\n").await?;
+                    stdout.flush().await?;
+                }
+                continue;
+            }
+            // The initialized notification is the second half of the 2025
+            // lifecycle. JSON-RPC notifications are acknowledged by silence.
+            Some("notifications/initialized") => continue,
+            _ => {}
+        }
         if let Some(resp) = maybe_agent_response(profile, agent.as_deref(), &msg).await {
+            let resp = if legacy { legacy_response(resp) } else { resp };
             stdout.write_all(resp.to_string().as_bytes()).await?;
             stdout.write_all(b"\n").await?;
             stdout.flush().await?;
@@ -858,6 +881,7 @@ where
         // the user, so the multi-round-trip state omits the claim rather than
         // inventing an identity (see `mrtr`).
         if let Some(resp) = handle_message_for_profile(&engine, &coord, profile, msg, None, vault) {
+            let resp = if legacy { legacy_response(resp) } else { resp };
             stdout.write_all(resp.to_string().as_bytes()).await?;
             stdout.write_all(b"\n").await?;
             stdout.flush().await?;
@@ -874,6 +898,80 @@ where
         }
     }
     Ok(())
+}
+
+/// Answer the legacy initialize handshake on stdio only. HTTP remains modern
+/// only and continues to reject `initialize` in its transport validator.
+fn legacy_initialize(msg: &Value) -> Option<Value> {
+    let id = msg.get("id")?.clone();
+    if !id.is_string() && !id.is_number() {
+        return Some(json!({
+            "jsonrpc": "2.0",
+            "id": null,
+            "error": { "code": -32600, "message": "initialize requires a string or numeric request id" }
+        }));
+    }
+    let invalid = |message: &str| {
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": { "code": -32602, "message": message }
+        })
+    };
+    if msg.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+        return Some(invalid("initialize requires JSON-RPC 2.0"));
+    }
+    let Some(params) = msg.get("params").and_then(Value::as_object) else {
+        return Some(invalid("initialize params must be an object"));
+    };
+    if !params.get("protocolVersion").is_some_and(Value::is_string) {
+        return Some(invalid("initialize requires a string protocolVersion"));
+    }
+    if !params.get("capabilities").is_some_and(Value::is_object) {
+        return Some(invalid("initialize requires an object capabilities"));
+    }
+    let Some(client_info) = params.get("clientInfo").and_then(Value::as_object) else {
+        return Some(invalid("initialize requires an object clientInfo"));
+    };
+    if !client_info.get("name").is_some_and(Value::is_string)
+        || !client_info.get("version").is_some_and(Value::is_string)
+    {
+        return Some(invalid("clientInfo requires string name and version"));
+    }
+    let result = json!({
+        "protocolVersion": LEGACY_PROTOCOL_VERSION,
+        "capabilities": base_capabilities(),
+        "serverInfo": server_info(),
+        "instructions": SERVER_INSTRUCTIONS,
+    });
+    Some(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
+}
+
+/// Remove modern-only envelope and cache fields from ordinary results. An
+/// interim result has no valid 2025 representation, so return an explicit
+/// error instead of a success the legacy host cannot continue.
+fn legacy_response(mut response: Value) -> Value {
+    if response
+        .pointer("/result/resultType")
+        .is_some_and(|kind| kind.as_str().is_some_and(|kind| kind != "complete"))
+    {
+        let id = response.get("id").cloned().unwrap_or(Value::Null);
+        return json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {
+                "code": -32000,
+                "message": "This operation requires MCP 2026-07-28; configure the host to use modern protocol mode.",
+            }
+        });
+    }
+    if let Some(result) = response.get_mut("result").and_then(Value::as_object_mut) {
+        result.remove("resultType");
+        result.remove("_meta");
+        result.remove("ttlMs");
+        result.remove("cacheScope");
+    }
+    response
 }
 
 /// Intercept `agent_*` tools/call requests before the synchronous dispatcher:
@@ -987,12 +1085,12 @@ pub(crate) fn handle_message_for_profile(
         "ping" => Ok(json!({})),
         // REQUIRED by the 2026-07-28 revision: the one RPC every server must
         // implement, advertising the revisions it speaks, its capabilities and
-        // its identity. It is the only probe: there is no `initialize`
-        // handshake in this revision, and no legacy era is served, so a
-        // client learns the named version (`2026-07-28`) here and then
-        // declares it in `_meta` (stdio) or `MCP-Protocol-Version` (HTTP)
-        // on every later request. Callable without a version declaration,
-        // because it is how a client learns which version to declare.
+        // its identity. Modern clients learn the named version
+        // (`2026-07-28`) here and then declare it in `_meta` (stdio) or
+        // `MCP-Protocol-Version` (HTTP) on every later request. Callable
+        // without a version declaration because it is how a client learns
+        // which version to declare. Legacy lifecycle negotiation is supported
+        // separately by the stdio adapter for older MCP hosts.
         "server/discover" => Ok(json!({
             "protocolVersions": supported_protocol_versions(),
             "capabilities": server_capabilities(),

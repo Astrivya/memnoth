@@ -511,7 +511,7 @@ fn registry_manifest_profile_counts_match_the_table() {
                 package_readme
                     .lines()
                     .any(|line| line.starts_with(&format!("| `{name}` | {actual} |"))),
-                "npm/README.md must publish the actual {name} profile size ({actual})"
+                "standalone MCP docs must publish the actual {name} profile size ({actual})"
             );
         }
     }
@@ -533,7 +533,73 @@ fn registry_manifest_profile_counts_match_the_table() {
     );
     assert!(
         package_readme.contains(&format!("default profile is `{}`", default_profile.name())),
-        "npm/README.md must document the standalone server's default profile"
+        "standalone MCP docs must document the server's default profile"
+    );
+}
+
+#[test]
+fn npm_onboarding_names_the_vault_and_distinguishes_registration_flows() {
+    let crate_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let readme =
+        std::fs::read_to_string(crate_root.join("npm/README.md")).expect("read npm package README");
+    let readme_lf = readme.replace("\r\n", "\n");
+    let readme_one_line = readme.split_whitespace().collect::<Vec<_>>().join(" ");
+    for required in [
+        "memnoth vault init",
+        "memnoth vault status",
+        "MEMNOTH_MCP_DB",
+        "absolute/path/to/.memnoth/vault.db",
+        "standalone packaged server",
+        "CLI-managed",
+        "memnoth mcp add --local --clients opencode",
+        "do not add both entries",
+        "[mcp_servers.memnoth]",
+        "codex mcp add memnoth",
+        "servers",
+        "claude mcp add --transport stdio",
+        "MEMNOTH_MCP_READ_ONLY=1",
+        "2025-11-25",
+        "2026-07-28",
+        "server/discover",
+    ] {
+        assert!(
+            readme_one_line.contains(required),
+            "canonical standalone MCP docs must explain onboarding: missing `{required}`"
+        );
+    }
+
+    assert!(crate_root.join("npm/README.md").is_file());
+    let assembler = std::fs::read_to_string(crate_root.join("../../scripts/assemble-npm-mcp.sh"))
+        .expect("read npm package assembler");
+    assert!(
+        assembler.contains("$REPO/crates/memnoth-mcp/npm/.") && assembler.contains("$STAGE/"),
+        "the package assembler must include the shipped npm README"
+    );
+
+    let opencode = readme_lf
+        .split("### Codex CLI")
+        .next()
+        .expect("OpenCode section precedes Codex instructions");
+    assert!(
+        opencode.contains("\"mcp\": {\n    \"servers\": {"),
+        "OpenCode V2 requires the mcp.servers nesting"
+    );
+    assert!(
+        !opencode.contains("\"protocol\""),
+        "the host should work in OpenCode's default legacy protocol mode"
+    );
+
+    let launcher = std::fs::read_to_string(crate_root.join("npm/bin/memnoth-mcp.js"))
+        .expect("read npm launcher");
+    let env_precedence = launcher
+        .find("const binary = fromEnv || bundled || \"memnoth\";")
+        .expect("explicit MEMNOTH_BIN must override bundled and PATH binaries");
+    let server_mode = launcher
+        .find("const standalone = !fromEnv && Boolean(bundled);")
+        .expect("only the bundled server binary skips `mcp serve`");
+    assert!(
+        env_precedence < server_mode,
+        "launcher must resolve the selected binary before deciding its invocation mode"
     );
 }
 
@@ -706,8 +772,20 @@ fn registry_manifest_schema_cost_cannot_drift() {
 
 #[test]
 fn registry_manifest_matches_what_the_server_advertises() {
+    let registry_manifest = manifest();
     let published =
-        manifest()["_meta"]["io.modelcontextprotocol.registry/publisher-provided"].clone();
+        registry_manifest["_meta"]["io.modelcontextprotocol.registry/publisher-provided"].clone();
+    assert_eq!(
+        published["stdioLifecycleVersions"],
+        json!(["2025-11-25", "2026-07-28"])
+    );
+    let db_env = registry_manifest["packages"][0]["environmentVariables"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|variable| variable["name"] == "MEMNOTH_MCP_DB")
+        .expect("registry install must ask for the required vault path");
+    assert_eq!(db_env["isRequired"], true);
     let versions: Vec<&str> = published["protocolVersions"]
         .as_array()
         .unwrap()

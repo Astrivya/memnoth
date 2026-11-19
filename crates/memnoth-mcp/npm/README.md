@@ -8,20 +8,22 @@ The release package bundles the server binary in `vendor/<platform>-<arch>/memno
 checksummed CLI archives and runs the Linux binary's MCP self-test before publishing.
 The launcher resolution order is:
 
-1. **Bundled binary** (`vendor/<platform>-<arch>/memnoth-mcp`) — most hermetic, works offline
-2. **`MEMNOTH_BIN` environment variable** — explicit override for unusual install locations
+1. **`MEMNOTH_BIN` environment variable** — explicit path to a `memnoth` CLI build; overrides the bundled copy
+2. **Bundled binary** (`vendor/<platform>-<arch>/memnoth-mcp`) — works offline
 3. **`memnoth` on `PATH`** — what `cargo install` and release installers produce
 
-If no bundled binary is present for this platform, it falls back to `MEMNOTH_BIN` then `PATH`.
+The bundled standalone binary is used when `MEMNOTH_BIN` is unset. If the package has no bundled
+binary for the current platform, the launcher falls back to `memnoth` on `PATH`.
 
 ## Install
 
 ```bash
-npx -y @astrivya/mcp --help    # sanity check that the launcher starts the bundled server
+npx -y @astrivya/mcp --help    # show server options; does not start a server
 ```
 
-The published package ships the binary, so no separate Memnoth install is required. Set
-`MEMNOTH_BIN` to use a different build (for example a locally compiled one).
+The published package ships the server binary, so no separate Memnoth install is required.
+`MEMNOTH_BIN` is for maintainers or users who deliberately want to run a different full `memnoth`
+CLI build; that CLI is started as `memnoth mcp serve`.
 
 ## Release publishing setup
 
@@ -61,8 +63,14 @@ retained during the transition, it takes precedence over OIDC until it is remove
 ## Client config
 
 This is a standalone stdio server for MCP hosts such as OpenCode, Codex, Claude
-Code, Cursor, and Zed. Use the host's local MCP server configuration format.
-The default profile is `memory`; the example starts read-only:
+Code, Cursor, and Zed. It must be pointed at one vault file; it never guesses a
+default. If you do not have a vault yet, run `memnoth vault init` and
+`memnoth vault status`, then copy the absolute vault file path shown by status.
+Creating a new vault requires the Memnoth CLI once; after that, the packaged
+MCP server runs independently. You can also point it at a vault file already
+created on another machine.
+Use that path below in place of `/absolute/path/to/.memnoth/vault.db`. The
+default profile is `memory`; this example starts read-only:
 
 ```json
 {
@@ -71,6 +79,7 @@ The default profile is `memory`; the example starts read-only:
       "command": "npx",
       "args": ["-y", "@astrivya/mcp"],
       "env": {
+        "MEMNOTH_MCP_DB": "/absolute/path/to/.memnoth/vault.db",
         "MEMNOTH_MCP_PROFILE": "memory",
         "MEMNOTH_MCP_READ_ONLY": "1"
       }
@@ -79,13 +88,97 @@ The default profile is `memory`; the example starts read-only:
 }
 ```
 
-For OpenCode, use the corresponding `mcp.servers` entry with `type: "local"`,
-`command: ["npx", "-y", "@astrivya/mcp"]`, and the same values under
-`environment`. The CLI can create and verify a project-scoped entry for you:
-`memnoth mcp add --local --clients opencode`.
+For OpenCode, add this to `opencode.json` (replace the vault placeholder with
+the absolute path from `memnoth vault status`):
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "servers": {
+      "memnoth": {
+        "type": "local",
+        "command": ["npx", "-y", "@astrivya/mcp"],
+        "environment": {
+          "MEMNOTH_MCP_DB": "/absolute/path/to/.memnoth/vault.db",
+          "MEMNOTH_MCP_PROFILE": "memory",
+          "MEMNOTH_MCP_READ_ONLY": "1"
+        }
+      }
+    }
+  }
+}
+```
+
+For Codex CLI, use the add command:
+
+```sh
+codex mcp add memnoth \
+  --env MEMNOTH_MCP_DB=/absolute/path/to/.memnoth/vault.db \
+  --env MEMNOTH_MCP_PROFILE=memory \
+  --env MEMNOTH_MCP_READ_ONLY=1 \
+  -- npx -y @astrivya/mcp
+```
+
+Or add this to `~/.codex/config.toml` or a project `.codex/config.toml`:
+
+```toml
+[mcp_servers.memnoth]
+command = "npx"
+args = ["-y", "@astrivya/mcp"]
+
+[mcp_servers.memnoth.env]
+MEMNOTH_MCP_DB = "/absolute/path/to/.memnoth/vault.db"
+MEMNOTH_MCP_PROFILE = "memory"
+MEMNOTH_MCP_READ_ONLY = "1"
+```
+
+For Claude Code, register a local stdio server from the project directory:
+
+```sh
+claude mcp add --transport stdio \
+  --env MEMNOTH_MCP_DB=/absolute/path/to/.memnoth/vault.db \
+  --env MEMNOTH_MCP_PROFILE=memory \
+  --env MEMNOTH_MCP_READ_ONLY=1 \
+  memnoth -- npx -y @astrivya/mcp
+```
+
+For Zed, add the equivalent entry to its settings JSON:
+
+```json
+{
+  "context_servers": {
+    "memnoth": {
+      "command": "npx",
+      "args": ["-y", "@astrivya/mcp"],
+      "env": {
+        "MEMNOTH_MCP_DB": "/absolute/path/to/.memnoth/vault.db",
+        "MEMNOTH_MCP_PROFILE": "memory",
+        "MEMNOTH_MCP_READ_ONLY": "1"
+      }
+    }
+  }
+}
+```
+
+This npm setup launches the standalone packaged server from the host's config.
+Separately, `memnoth mcp add --local --clients opencode` is the CLI-managed
+registration flow: it writes a local Memnoth CLI server entry (including its
+resolved vault path) into OpenCode's config. Use one setup flow; do not add both
+entries unless you intentionally want two servers.
+
+## Protocol compatibility
+
+The stdio server supports both MCP lifecycles. Hosts that begin with
+`initialize` negotiate the legacy `2025-11-25` response shape; hosts using the
+stateless `server/discover` flow use `2026-07-28`. This lets hosts that still
+default to the legacy lifecycle connect without changing the modern protocol
+used by newer clients. The hosted HTTP endpoint uses the modern stateless
+protocol.
 
 The published package includes the server binary for supported platforms, so
-the Memnoth CLI is optional. Set `MEMNOTH_MCP_DB` to select a specific vault.
+the Memnoth CLI is optional when running the MCP server. `MEMNOTH_MCP_DB`
+selects the vault the standalone server opens.
 
 ## Offline version check
 

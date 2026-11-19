@@ -1,16 +1,183 @@
 use super::*;
 
 #[test]
-fn initialize_is_removed_and_discover_is_the_only_probe() {
+fn in_process_dispatch_requires_discover_and_does_not_handle_initialize() {
     let (e, c) = setup();
-    // The legacy handshake is gone: `initialize` is an unknown method, not a
-    // negotiated era.
+    // Lifecycle negotiation is available only at the stdio transport boundary.
     let resp = handle_message(&e, &c, rpc(1, "initialize", json!({}))).unwrap();
     assert_eq!(resp["error"]["code"], -32601);
     // `server/discover` advertises exactly the one named revision.
     let resp = handle_message(&e, &c, rpc(2, "server/discover", json!({}))).unwrap();
     assert_eq!(resp["result"]["serverInfo"]["name"], "memnoth");
     assert_eq!(resp["result"]["protocolVersions"], json!(["2026-07-28"]));
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn stdio_supports_legacy_initialize_and_legacy_tools_list() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let _queue = hold_notification_queue();
+    let (engine, coord) = setup();
+    let (mut request_tx, request_rx) = tokio::io::duplex(16_384);
+    let (response_tx, response_rx) = tokio::io::duplex(65_536);
+    let server = tokio::spawn(serve(
+        engine,
+        coord,
+        Profile::Memory,
+        None,
+        request_rx,
+        response_tx,
+        None,
+    ));
+    let mut responses = BufReader::new(response_rx);
+
+    let malformed = json!({
+        "jsonrpc": "2.0",
+        "id": 0,
+        "method": "initialize",
+        "params": {"protocolVersion": "2025-11-25"}
+    });
+    request_tx
+        .write_all(format!("{malformed}\n").as_bytes())
+        .await
+        .unwrap();
+    request_tx.flush().await.unwrap();
+    let mut line = String::new();
+    responses.read_line(&mut line).await.unwrap();
+    let rejected: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(rejected["error"]["code"], -32602);
+
+    let modern_probe = json!({
+        "jsonrpc": "2.0",
+        "id": 9,
+        "method": "tools/list",
+        "params": {}
+    });
+    request_tx
+        .write_all(format!("{modern_probe}\n").as_bytes())
+        .await
+        .unwrap();
+    request_tx.flush().await.unwrap();
+    line.clear();
+    responses.read_line(&mut line).await.unwrap();
+    let modern: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(modern["result"]["resultType"], "complete");
+
+    let initialize = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "clientInfo": {"name": "legacy-smoke", "version": "1.0"}
+        }
+    });
+    request_tx
+        .write_all(format!("{initialize}\n").as_bytes())
+        .await
+        .unwrap();
+    request_tx.flush().await.unwrap();
+    line.clear();
+    responses.read_line(&mut line).await.unwrap();
+    let initialized: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(initialized["result"]["protocolVersion"], "2025-11-25");
+    assert_eq!(initialized["result"]["serverInfo"]["name"], "memnoth");
+    assert!(initialized["result"]["capabilities"]["tools"].is_object());
+    assert!(initialized["result"].get("resultType").is_none());
+    assert!(initialized["result"].get("_meta").is_none());
+
+    let notification = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
+    let tools_list = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/list",
+        "params": {}
+    });
+    request_tx
+        .write_all(format!("{notification}\n{tools_list}\n").as_bytes())
+        .await
+        .unwrap();
+    request_tx.flush().await.unwrap();
+    line.clear();
+    responses.read_line(&mut line).await.unwrap();
+    let listed: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(listed["id"], 2);
+    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 21);
+    assert!(listed["result"].get("resultType").is_none());
+    assert!(listed["result"].get("_meta").is_none());
+    assert!(listed["result"].get("ttlMs").is_none());
+    assert!(listed["result"].get("cacheScope").is_none());
+
+    drop(request_tx);
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn legacy_stdio_lifecycle_keeps_the_profile_tool_boundary() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let _queue = hold_notification_queue();
+    let (engine, coord) = setup();
+    let (mut request_tx, request_rx) = tokio::io::duplex(16_384);
+    let (response_tx, response_rx) = tokio::io::duplex(65_536);
+    let server = tokio::spawn(serve(
+        engine,
+        coord,
+        Profile::Micro,
+        None,
+        request_rx,
+        response_tx,
+        None,
+    ));
+    let mut responses = BufReader::new(response_rx);
+
+    let initialize = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "clientInfo": {"name": "legacy-boundary-smoke", "version": "1.0"}
+        }
+    });
+    request_tx
+        .write_all(format!("{initialize}\n").as_bytes())
+        .await
+        .unwrap();
+    request_tx.flush().await.unwrap();
+    let mut line = String::new();
+    responses.read_line(&mut line).await.unwrap();
+    let _: Value = serde_json::from_str(&line).unwrap();
+
+    let forbidden = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {"name": "coord_task_create", "arguments": {}}
+    });
+    request_tx
+        .write_all(format!("{forbidden}\n").as_bytes())
+        .await
+        .unwrap();
+    request_tx.flush().await.unwrap();
+    line.clear();
+    responses.read_line(&mut line).await.unwrap();
+    let denied: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(denied["id"], 2);
+    assert_eq!(denied["result"]["isError"], true, "{denied}");
+    assert!(
+        denied["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("MEMNOTH_MCP_PROFILE")
+    );
+
+    drop(request_tx);
+    server.await.unwrap().unwrap();
 }
 
 #[test]
