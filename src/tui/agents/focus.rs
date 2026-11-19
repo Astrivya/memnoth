@@ -182,10 +182,22 @@ impl Overlay for AgentFocus {
             .clone()
             .or_else(|| rows.first().map(|child| child.agent_id.clone()));
         let Some(id) = chosen else {
+            app.focus_attention = None;
             self.transcript
                 .push("no child runs — /delegate <agent> <task> spawns one".to_string());
             return;
         };
+        let stale_attention = app.focus_attention.as_ref().is_some_and(|attention_id| {
+            !app.delegator.as_ref().is_some_and(|delegator| {
+                delegator
+                    .attention()
+                    .iter()
+                    .any(|request| request.id == *attention_id && request.run_id == id)
+            })
+        });
+        if stale_attention {
+            app.focus_attention = None;
+        }
         self.load(app, &id);
     }
 
@@ -198,6 +210,7 @@ impl Overlay for AgentFocus {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
                 self.restore_parent(app);
+                app.focus_attention = None;
                 OverlayAction::Close
             }
             KeyCode::Enter => {
@@ -448,5 +461,32 @@ mod tests {
                 .iter()
                 .any(|event| event.event == "steer")
         );
+    }
+
+    #[test]
+    fn backing_out_keeps_the_request_pending_and_forgets_answer_target() {
+        let temp = tempfile::tempdir().expect("temporary agent directory");
+        let mut delegator = memnoth_agent::Delegator::new(temp.path().join("agents"));
+        let child = delegator
+            .root(None, "review", "inspect the change")
+            .expect("child run");
+        let request = delegator
+            .queue_attention(&child.agent_id, "question", "Which API should I check?")
+            .expect("attention request");
+
+        let mut app = App::new("s", false);
+        app.delegator = Some(delegator);
+        app.focus_agent = Some(child.agent_id.clone());
+        app.focus_attention = Some(request.id.clone());
+        let mut focus = AgentFocus::new();
+        focus.on_open(&mut app);
+
+        assert!(matches!(
+            focus.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut app),
+            OverlayAction::Close
+        ));
+
+        assert!(app.focus_attention.is_none());
+        assert_eq!(app.delegator.as_ref().unwrap().attention(), &[request]);
     }
 }
