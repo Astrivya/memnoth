@@ -17,6 +17,7 @@ jobs:
   publish:
     name: Build, smoke, and publish linux/amd64 + linux/arm64
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -71,3 +72,44 @@ jobs:
             --cache-from type=gha,scope=memnoth-mcp-image \
             --cache-to type=gha,scope=memnoth-mcp-image,mode=max \
             --push image-context
+
+      - name: Wait for production deployment and smoke public MCP discovery
+        shell: bash
+        env:
+          MCP_ORIGIN: https://memnoth.astrivya.ai
+        run: |
+          set -euo pipefail
+          state_url="$MCP_ORIGIN/dist/deployed-mcp.json"
+          deployed=""
+          for _ in $(seq 1 60); do
+            deployed="$(curl -fsS --max-time 10 "$state_url" 2>/dev/null || true)"
+            if printf '%s' "$deployed" | python3 -c '
+          import json, os, sys
+          try:
+              state = json.load(sys.stdin)
+          except Exception:
+              raise SystemExit(1)
+          raise SystemExit(0 if state.get("status") == "ok" and state.get("revision") == os.environ["GITHUB_SHA"] else 1)
+          '; then
+              break
+            fi
+            sleep 10
+          done
+          printf '%s' "$deployed" | python3 -c '
+          import json, os, sys
+          state = json.load(sys.stdin)
+          if state.get("status") != "ok" or state.get("revision") != os.environ["GITHUB_SHA"]:
+              raise SystemExit("production did not report the published MCP revision")
+          print("production MCP revision verified:", state["revision"])
+          '
+
+          metadata="$(curl -fsS --max-time 15 "$MCP_ORIGIN/.well-known/oauth-protected-resource")"
+          printf '%s' "$metadata" | python3 -c '
+          import json, sys
+          value = json.load(sys.stdin)
+          if value.get("resource") != "https://memnoth.astrivya.ai/mcp" or not value.get("authorization_servers"):
+              raise SystemExit("MCP OAuth protected-resource metadata is invalid")
+          '
+          status="$(curl -sS --max-time 15 -o /dev/null -w '%{http_code}' "$MCP_ORIGIN/mcp")"
+          [[ "$status" == 401 ]] || { echo "unauthenticated MCP endpoint returned HTTP $status" >&2; exit 1; }
+          echo "production MCP OAuth discovery and unauthenticated challenge passed"
