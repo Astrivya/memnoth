@@ -138,6 +138,29 @@ impl SyncQueue {
         Ok(())
     }
 
+    /// Keep at most one pending upload per local session. A failed upload is
+    /// already queued for retry; enqueueing the same session on the next sync
+    /// should refresh its report instead of creating another retry row.
+    fn enqueue_session(&mut self, item: SessionReport) -> Result<()> {
+        if let Some(queued) = self
+            .items
+            .iter_mut()
+            .find(|queued| queued.item.id == item.id)
+        {
+            queued.item = item;
+            return Ok(());
+        }
+
+        self.push(QueuedSyncItem {
+            id: uuid::Uuid::new_v4().to_string(),
+            item,
+            attempts: 0,
+            created_at: now_secs(),
+            last_attempt: None,
+            last_error: None,
+        })
+    }
+
     /// Pop the next item for processing
     pub fn pop(&mut self) -> Option<QueuedSyncItem> {
         self.items.pop_front().inspect(|item| {
@@ -674,15 +697,7 @@ pub fn run_sync(ctx: &AppContext, args: &SyncArgs) -> Result<Outcome> {
     let mut queue = SyncQueue::load(&queue_path)?;
 
     for item in new_items {
-        let queued = QueuedSyncItem {
-            id: uuid::Uuid::new_v4().to_string(),
-            item,
-            attempts: 0,
-            created_at: now_secs(),
-            last_attempt: None,
-            last_error: None,
-        };
-        queue.push(queued)?;
+        queue.enqueue_session(item)?;
     }
 
     queue.save(&queue_path)?;
@@ -741,15 +756,7 @@ fn run_watch_mode(
                 let queued_count = new_items.len();
                 let mut queue = SyncQueue::load(queue_path)?;
                 for item in new_items {
-                    let queued = QueuedSyncItem {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        item,
-                        attempts: 0,
-                        created_at: now_secs(),
-                        last_attempt: None,
-                        last_error: None,
-                    };
-                    queue.push(queued)?;
+                    queue.enqueue_session(item)?;
                 }
                 queue.save(queue_path)?;
                 println!("Queued {} new items", queued_count);
@@ -1205,6 +1212,33 @@ mod tests {
 
         // Should not exceed max entries
         assert!(queue.items.len() <= MAX_QUEUE_ENTRIES);
+    }
+
+    #[test]
+    fn enqueueing_a_pending_session_refreshes_it_without_duplicating_retry() {
+        let mut queue = SyncQueue::new();
+        let report = SessionReport {
+            id: "session-1".into(),
+            model: "old-model".into(),
+            ..SessionReport::default()
+        };
+        queue
+            .enqueue_session(report.clone())
+            .expect("first enqueue succeeds");
+        queue.items[0].attempts = 2;
+        let queued_id = queue.items[0].id.clone();
+
+        queue
+            .enqueue_session(SessionReport {
+                model: "new-model".into(),
+                ..report
+            })
+            .expect("refresh succeeds");
+
+        assert_eq!(queue.items.len(), 1);
+        assert_eq!(queue.items[0].id, queued_id);
+        assert_eq!(queue.items[0].item.model, "new-model");
+        assert_eq!(queue.items[0].attempts, 2);
     }
 
     #[test]
