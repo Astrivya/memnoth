@@ -1,6 +1,6 @@
 [package]
 name = "memnoth-skills"
-version = "0.1.0-beta.10"
+version = "0.1.0-beta.11"
 edition = "2024"
 publish = false
 license.workspace = true
@@ -11,9 +11,9 @@ name = "memnoth_skills"
 path = "src/lib.rs"
 
 [dependencies]
-memnoth-command = { version = "0.1.0-beta.10", path = "../memnoth-command" }
-memnoth-capability = { version = "0.1.0-beta.10", path = "../memnoth-capability" }
-memnoth-context = { version = "0.1.0-beta.10", path = "../memnoth-context" }
+memnoth-command = { version = "0.1.0-beta.11", path = "../memnoth-command" }
+memnoth-capability = { version = "0.1.0-beta.11", path = "../memnoth-capability" }
+memnoth-context = { version = "0.1.0-beta.11", path = "../memnoth-context" }
 regex = "1"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }

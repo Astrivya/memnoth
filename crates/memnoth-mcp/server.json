@@ -132,7 +132,7 @@
       "transport": {
         "type": "stdio"
       },
-      "version": "0.1.0-beta.10"
+      "version": "0.1.0-beta.11"
     }
   ],
   "repository": {
@@ -140,6 +140,6 @@
     "url": "https://github.com/astrivya/memnoth"
   },
   "title": "Memnoth",
-  "version": "0.1.0-beta.10",
+  "version": "0.1.0-beta.11",
   "websiteUrl": "https://memnoth.astrivya.ai"
 }
