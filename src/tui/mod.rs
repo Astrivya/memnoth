@@ -116,6 +116,10 @@ struct Busy {
     model: String,
     /// Provider preset that answered, for matching saved context usage.
     context_provider: String,
+    /// Provider kind on the wire, distinct from a local named preset.
+    provider_id: String,
+    /// The configured effort used by this completed turn.
+    reasoning_effort: Option<String>,
     /// The rates that turn is billed at, for the session's cost estimate.
     pricing: Option<provider::Pricing>,
 }
@@ -917,6 +921,7 @@ fn refresh_provider_status(ctx: &AppContext, app: &mut App, session: &Session) {
         Err(_) => {
             app.reasoning_effort = None;
             app.context_window_size = None;
+            app.context_window_source = None;
             app.context_model.clear();
             app.context_provider.clear();
             app.context_window_override_active = false;
@@ -973,6 +978,18 @@ fn schedule_context_discovery(app: &mut App, settings: &provider::Settings) {
         .unwrap_or_else(|| settings.kind.name().to_string());
     app.context_window_override_active = settings.context_window_override.is_some();
     app.context_window_size = settings.known_context_window().map(|size| size as u64);
+    app.context_window_source = if app.context_window_override_active {
+        Some("user configured override".to_string())
+    } else if app
+        .context_window_cache
+        .contains_key(&context_cache_key(&app.context_provider, &settings.model))
+    {
+        Some("provider model catalog".to_string())
+    } else if memnoth_provider_registry::context_window_for(&settings.model).is_some() {
+        Some("built-in model catalog".to_string())
+    } else {
+        None
+    };
 
     let cache_key = context_cache_key(&app.context_provider, &settings.model);
     if !app.context_window_override_active
@@ -1017,10 +1034,15 @@ fn apply_context_metadata(app: &mut App, result: &crate::tui::app::ModelsLoaded)
     }
     for model in &result.models {
         if let Some(window) = model.context_window {
-            app.context_window_cache.insert(
-                context_cache_key(&result.provider, &model.id),
-                u64::from(window),
-            );
+            let key = context_cache_key(&result.provider, &model.id);
+            app.context_window_cache
+                .insert(key.clone(), u64::from(window));
+            if app.context_discovery_key.is_some()
+                && app.context_model.eq_ignore_ascii_case(&model.id)
+                && app.context_provider.eq_ignore_ascii_case(&result.provider)
+            {
+                app.context_window_source = Some("provider model catalog".to_string());
+            }
         }
     }
     if app.context_window_override_active
@@ -2187,13 +2209,15 @@ fn submit(
             open_overlay(app, crate::tui::overlays::OverlayKind::Help);
             None
         }
-        Parsed::UsageReport => {
+        Parsed::UsageReport { json } => {
             let text = crate::tui::commands::usage::render(
                 session,
                 app.context_window_size,
                 &app.context_model,
                 &app.context_provider,
+                app.context_window_source.as_deref(),
                 app.reasoning_effort.as_deref(),
+                json,
             );
             app.push(EntryRole::Answer, text);
             None
@@ -2748,6 +2772,8 @@ fn start_turn(
     history.reverse();
 
     let model = settings.model.clone();
+    let provider_id = settings.kind.name().to_string();
+    let reasoning_effort = settings.reasoning_effort.clone();
     let context_provider = settings
         .provider_name
         .clone()
@@ -2821,6 +2847,8 @@ fn start_turn(
         prompt: asked,
         model,
         context_provider,
+        provider_id,
+        reasoning_effort,
         pricing,
     })
 }
@@ -2915,6 +2943,23 @@ fn settle(
                 context_window_used: answer.context_window_used,
                 context_window_model: Some(busy.model.clone()),
                 context_window_provider: Some(busy.context_provider.clone()),
+                provider_id: Some(busy.provider_id.clone()),
+                reasoning_effort: Some(
+                    busy.reasoning_effort
+                        .clone()
+                        .unwrap_or_else(|| "provider default".to_string()),
+                ),
+                duration_ms: Some(elapsed.max(0) as u64),
+                provider_requests: Some(answer.provider_requests),
+                tool_calls: Some(tools.min(u32::MAX as usize) as u32),
+                provider_reasoning_tokens: answer.reasoning_tokens,
+                provider_cache_read_tokens: answer.cache_read_tokens,
+                provider_cache_write_tokens: answer.cache_write_tokens,
+                provider_usage_reported: Some(
+                    answer.input_usage_reported || answer.output_usage_reported,
+                ),
+                provider_input_reported: Some(answer.input_usage_reported),
+                provider_output_reported: Some(answer.output_usage_reported),
                 output_tokens: output,
                 cache_read_tokens: 0,
                 cache_write_tokens: 0,
@@ -3879,6 +3924,17 @@ mod tests {
             context_window_used: Some(input),
             context_window_model: None,
             context_window_provider: None,
+            provider_id: None,
+            reasoning_effort: None,
+            duration_ms: None,
+            provider_requests: None,
+            tool_calls: None,
+            provider_reasoning_tokens: None,
+            provider_cache_read_tokens: None,
+            provider_cache_write_tokens: None,
+            provider_usage_reported: None,
+            provider_input_reported: None,
+            provider_output_reported: None,
             output_tokens: output,
             cache_read_tokens: 0,
             cache_write_tokens: 0,

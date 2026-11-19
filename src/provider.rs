@@ -1003,6 +1003,16 @@ pub struct Answer {
     pub context_window_used: Option<u64>,
     /// Completion tokens reported by the provider.
     pub output_tokens: u64,
+    /// Whether at least one provider response included input/output usage.
+    pub input_usage_reported: bool,
+    pub output_usage_reported: bool,
+    /// Number of HTTP request attempts completed for this turn, including a
+    /// non-streaming retry when a provider refuses the stream format.
+    pub provider_requests: u32,
+    /// Provider-reported token categories. `None` means the wire did not report it.
+    pub reasoning_tokens: Option<u64>,
+    pub cache_read_tokens: Option<u64>,
+    pub cache_write_tokens: Option<u64>,
     /// How many tool rounds it took (0 for an immediate answer).
     pub rounds: usize,
     /// The full system prompt text sent to the provider this turn.
@@ -1027,6 +1037,12 @@ impl Answer {
     /// Accounting for the session file.
     pub fn usage(&self) -> (u64, u64) {
         (self.input_tokens, self.output_tokens)
+    }
+}
+
+fn add_reported(total: &mut Option<u64>, value: Option<u64>) {
+    if let Some(value) = value {
+        *total = Some(total.unwrap_or(0).saturating_add(value));
     }
 }
 
@@ -2223,6 +2239,7 @@ pub fn run_turn_attached(
         // network about to be used, and refuse a private answer.
         crate::net_guard::validate_before_request(&url)
             .map_err(|error| anyhow::anyhow!("refusing the provider request: {error}"))?;
+        conversation.provider_requests = conversation.provider_requests.saturating_add(1);
         // The stream is tried first; a gateway that never starts one falls
         // back to the whole-reply path. Deltas go to the harness stream as
         // they land, so the screen and `ask --jsonl` read the same events.
@@ -2251,7 +2268,15 @@ pub fn run_turn_attached(
         let step = match streamed {
             Err(crate::provider_stream::StreamError::Fatal(error)) => return Err(error),
             Ok(outcome) => {
-                conversation.add_usage(outcome.input_tokens, outcome.output_tokens);
+                conversation.add_usage(ProviderUsage {
+                    input: outcome.input_tokens,
+                    output: outcome.output_tokens,
+                    input_reported: outcome.input_reported,
+                    output_reported: outcome.output_reported,
+                    reasoning: outcome.reasoning_tokens,
+                    cache_read: outcome.cache_read_tokens,
+                    cache_write: outcome.cache_write_tokens,
+                });
                 if !outcome.reasoning.is_empty() {
                     emit(ApiEvent::ReasoningDone {
                         session_id: session_id.clone(),
@@ -2272,6 +2297,7 @@ pub fn run_turn_attached(
                 }
             }
             Err(crate::provider_stream::StreamError::Fallback(_)) => {
+                conversation.provider_requests = conversation.provider_requests.saturating_add(1);
                 let reply = post_json(
                     &client,
                     &url,
@@ -2295,6 +2321,12 @@ pub fn run_turn_attached(
                 input_tokens: conversation.input_tokens,
                 context_window_used: conversation.context_window_used,
                 output_tokens: conversation.output_tokens,
+                input_usage_reported: conversation.input_usage_reported,
+                output_usage_reported: conversation.output_usage_reported,
+                provider_requests: conversation.provider_requests,
+                reasoning_tokens: conversation.reasoning_tokens,
+                cache_read_tokens: conversation.cache_read_tokens,
+                cache_write_tokens: conversation.cache_write_tokens,
                 rounds: round,
                 prompt: format!("{}\n\n{}", conversation.prefix, conversation.tail),
                 prefix_hash: conversation.receipt.prefix_hash,
@@ -2355,6 +2387,12 @@ pub fn run_turn_attached(
             input_tokens: conversation.input_tokens,
             context_window_used: conversation.context_window_used,
             output_tokens: conversation.output_tokens,
+            input_usage_reported: conversation.input_usage_reported,
+            output_usage_reported: conversation.output_usage_reported,
+            provider_requests: conversation.provider_requests,
+            reasoning_tokens: conversation.reasoning_tokens,
+            cache_read_tokens: conversation.cache_read_tokens,
+            cache_write_tokens: conversation.cache_write_tokens,
             rounds: MAX_ROUNDS,
             prompt: format!("{}\n\n{}", conversation.prefix, conversation.tail),
             prefix_hash: conversation.receipt.prefix_hash,
@@ -2372,6 +2410,7 @@ pub fn run_turn_attached(
     let (body, url, headers) = conversation.request_final();
     crate::net_guard::validate_before_request(&url)
         .map_err(|error| anyhow::anyhow!("refusing the provider request: {error}"))?;
+    conversation.provider_requests = conversation.provider_requests.saturating_add(1);
     if let Ok(reply) = post_json(
         &client,
         &url,
@@ -2394,6 +2433,12 @@ pub fn run_turn_attached(
             input_tokens: conversation.input_tokens,
             context_window_used: conversation.context_window_used,
             output_tokens: conversation.output_tokens,
+            input_usage_reported: conversation.input_usage_reported,
+            output_usage_reported: conversation.output_usage_reported,
+            provider_requests: conversation.provider_requests,
+            reasoning_tokens: conversation.reasoning_tokens,
+            cache_read_tokens: conversation.cache_read_tokens,
+            cache_write_tokens: conversation.cache_write_tokens,
             rounds: MAX_ROUNDS,
             prompt: format!("{}\n\n{}", conversation.prefix, conversation.tail),
             prefix_hash: conversation.receipt.prefix_hash,
@@ -2586,6 +2631,16 @@ fn attachment_blocks(kind: Kind, file: &Attachment) -> Vec<Value> {
     }
 }
 
+struct ProviderUsage {
+    input: u64,
+    output: u64,
+    input_reported: bool,
+    output_reported: bool,
+    reasoning: Option<u64>,
+    cache_read: Option<u64>,
+    cache_write: Option<u64>,
+}
+
 struct Conversation<'a> {
     settings: &'a Settings,
     history: &'a [Exchange],
@@ -2602,6 +2657,12 @@ struct Conversation<'a> {
     input_tokens: u64,
     context_window_used: Option<u64>,
     output_tokens: u64,
+    input_usage_reported: bool,
+    output_usage_reported: bool,
+    provider_requests: u32,
+    reasoning_tokens: Option<u64>,
+    cache_read_tokens: Option<u64>,
+    cache_write_tokens: Option<u64>,
     /// Tool results delivered this turn, newest last. Bodies older than
     /// `TOOL_RESULT_MAX_AGE_MS` are replaced by a re-call hint while the call
     /// stays on the record, so age-based eviction never loses the fact that a
@@ -2644,6 +2705,12 @@ impl<'a> Conversation<'a> {
             input_tokens: 0,
             context_window_used: None,
             output_tokens: 0,
+            input_usage_reported: false,
+            output_usage_reported: false,
+            provider_requests: 0,
+            reasoning_tokens: None,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
             tool_results: Vec::new(),
             receipt,
             attachments,
@@ -2832,12 +2899,48 @@ impl<'a> Conversation<'a> {
     }
 
     /// Add streamed usage to the turn's accounting, in one place.
-    fn add_usage(&mut self, input: u64, output: u64) {
-        self.input_tokens += input;
-        if input > 0 {
-            self.context_window_used = Some(input);
+    fn add_usage(&mut self, usage: ProviderUsage) {
+        self.input_tokens += usage.input;
+        self.input_usage_reported |= usage.input_reported;
+        self.output_usage_reported |= usage.output_reported;
+        if usage.input > 0 {
+            self.context_window_used = Some(usage.input);
         }
-        self.output_tokens += output;
+        self.output_tokens += usage.output;
+        add_reported(&mut self.reasoning_tokens, usage.reasoning);
+        add_reported(&mut self.cache_read_tokens, usage.cache_read);
+        add_reported(&mut self.cache_write_tokens, usage.cache_write);
+    }
+
+    fn record_usage(&mut self, usage: &Value, anthropic: bool) {
+        let (input, output) = if anthropic {
+            (
+                usage["input_tokens"].as_u64(),
+                usage["output_tokens"].as_u64(),
+            )
+        } else {
+            (
+                usage["prompt_tokens"].as_u64(),
+                usage["completion_tokens"].as_u64(),
+            )
+        };
+        self.add_usage(ProviderUsage {
+            input: input.unwrap_or(0),
+            output: output.unwrap_or(0),
+            input_reported: input.is_some(),
+            output_reported: output.is_some(),
+            reasoning: usage["completion_tokens_details"]["reasoning_tokens"].as_u64(),
+            cache_read: if anthropic {
+                usage["cache_read_input_tokens"].as_u64()
+            } else {
+                usage["prompt_tokens_details"]["cached_tokens"].as_u64()
+            },
+            cache_write: if anthropic {
+                usage["cache_creation_input_tokens"].as_u64()
+            } else {
+                None
+            },
+        });
     }
 
     /// Read one response: the text, the tool calls, and the accounting.
@@ -2846,11 +2949,10 @@ impl<'a> Conversation<'a> {
             Kind::Anthropic => {
                 let usage = &reply["usage"];
                 let input = usage["input_tokens"].as_u64().unwrap_or(0);
-                self.input_tokens += input;
+                self.record_usage(usage, true);
                 if input > 0 {
                     self.context_window_used = Some(input);
                 }
-                self.output_tokens += usage["output_tokens"].as_u64().unwrap_or(0);
 
                 let blocks = reply["content"].as_array().with_context(|| {
                     format!(
@@ -2894,11 +2996,10 @@ impl<'a> Conversation<'a> {
             Kind::OpenAi | Kind::Kilo => {
                 let usage = &reply["usage"];
                 let input = usage["prompt_tokens"].as_u64().unwrap_or(0);
-                self.input_tokens += input;
+                self.record_usage(usage, false);
                 if input > 0 {
                     self.context_window_used = Some(input);
                 }
-                self.output_tokens += usage["completion_tokens"].as_u64().unwrap_or(0);
 
                 let message = &reply["choices"][0]["message"];
                 if message.is_null() {
@@ -2946,11 +3047,10 @@ impl<'a> Conversation<'a> {
             Kind::Memnoth => {
                 let usage = &reply["usage"];
                 let input = usage["prompt_tokens"].as_u64().unwrap_or(0);
-                self.input_tokens += input;
+                self.record_usage(usage, false);
                 if input > 0 {
                     self.context_window_used = Some(input);
                 }
-                self.output_tokens += usage["completion_tokens"].as_u64().unwrap_or(0);
 
                 let message = &reply["choices"][0]["message"];
                 if message.is_null() {
@@ -3770,7 +3870,12 @@ mod tests {
         let mut conversation = Conversation::new(&settings, Path::new("/ws"), &[], "what breaks?");
         let reply = json!({
             "stop_reason": "tool_use",
-            "usage": { "input_tokens": 11, "output_tokens": 4 },
+            "usage": {
+                "input_tokens": 11,
+                "output_tokens": 4,
+                "cache_read_input_tokens": 3,
+                "cache_creation_input_tokens": 2
+            },
             "content": [
                 { "type": "text", "text": "Looking." },
                 { "type": "tool_use", "id": "t1", "name": "kg_impact", "input": { "symbol": "A" } }
@@ -3782,6 +3887,10 @@ mod tests {
         assert_eq!(step.calls[0].id, "t1");
         assert_eq!(conversation.input_tokens, 11);
         assert_eq!(conversation.output_tokens, 4);
+        assert!(conversation.input_usage_reported);
+        assert!(conversation.output_usage_reported);
+        assert_eq!(conversation.cache_read_tokens, Some(3));
+        assert_eq!(conversation.cache_write_tokens, Some(2));
 
         conversation.record_round(
             step.raw_content,
@@ -3816,12 +3925,21 @@ mod tests {
                     }]
                 }
             }],
-            "usage": { "prompt_tokens": 7, "completion_tokens": 2 }
+            "usage": {
+                "prompt_tokens": 7,
+                "completion_tokens": 2,
+                "prompt_tokens_details": {"cached_tokens": 5},
+                "completion_tokens_details": {"reasoning_tokens": 1}
+            }
         });
         let step = conversation.absorb(&reply).unwrap();
         assert_eq!(step.calls.len(), 1);
         assert_eq!(step.calls[0].input["query"], "Engine");
         assert_eq!(conversation.input_tokens, 7);
+        assert!(conversation.input_usage_reported);
+        assert!(conversation.output_usage_reported);
+        assert_eq!(conversation.cache_read_tokens, Some(5));
+        assert_eq!(conversation.reasoning_tokens, Some(1));
 
         conversation.record_round(
             step.raw_content,

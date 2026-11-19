@@ -87,6 +87,39 @@ pub struct TurnReceipt {
     pub context_window_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window_provider: Option<String>,
+    /// Stable provider kind used for the request (as opposed to a local preset alias).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
+    /// Reasoning effort actually selected for this completed turn, when configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    /// End-to-end elapsed time from turn submission through settlement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    /// Number of provider HTTP request attempts completed for this turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_requests: Option<u32>,
+    /// Number of tool calls issued by the model during this turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<u32>,
+    /// Provider-reported output reasoning tokens, when the usage payload reports them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_reasoning_tokens: Option<u64>,
+    /// Provider-reported cached input tokens, when the usage payload reports them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_cache_read_tokens: Option<u64>,
+    /// Provider-reported cache creation/write tokens, when the usage payload reports them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_cache_write_tokens: Option<u64>,
+    /// Whether the provider returned input/output token counts for this turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_usage_reported: Option<bool>,
+    /// Whether input tokens were explicitly present in provider usage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_input_reported: Option<bool>,
+    /// Whether output tokens were explicitly present in provider usage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_output_reported: Option<bool>,
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
     pub cache_write_tokens: u64,
@@ -638,6 +671,17 @@ mod tests {
             context_window_used: Some(100),
             context_window_model: Some("m".into()),
             context_window_provider: Some("provider".into()),
+            provider_id: Some("openai".into()),
+            reasoning_effort: Some("high".into()),
+            duration_ms: Some(1_200),
+            provider_requests: Some(2),
+            tool_calls: Some(1),
+            provider_reasoning_tokens: Some(4),
+            provider_cache_read_tokens: Some(0),
+            provider_cache_write_tokens: Some(3),
+            provider_usage_reported: Some(true),
+            provider_input_reported: Some(true),
+            provider_output_reported: Some(true),
             output_tokens: 20,
             cache_read_tokens: 80,
             cache_write_tokens: 5,
@@ -733,6 +777,17 @@ mod tests {
             context_window_used: None,
             context_window_model: None,
             context_window_provider: None,
+            provider_id: None,
+            reasoning_effort: None,
+            duration_ms: None,
+            provider_requests: None,
+            tool_calls: None,
+            provider_reasoning_tokens: None,
+            provider_cache_read_tokens: None,
+            provider_cache_write_tokens: None,
+            provider_usage_reported: None,
+            provider_input_reported: None,
+            provider_output_reported: None,
             output_tokens: 5,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
@@ -849,6 +904,17 @@ mod tests {
             context_window_used: None,
             context_window_model: None,
             context_window_provider: None,
+            provider_id: None,
+            reasoning_effort: None,
+            duration_ms: None,
+            provider_requests: None,
+            tool_calls: None,
+            provider_reasoning_tokens: None,
+            provider_cache_read_tokens: None,
+            provider_cache_write_tokens: None,
+            provider_usage_reported: None,
+            provider_input_reported: None,
+            provider_output_reported: None,
             output_tokens: 5,
             cache_read_tokens: 0,
             cache_write_tokens: 0,

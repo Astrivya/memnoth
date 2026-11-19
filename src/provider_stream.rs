@@ -43,6 +43,11 @@ pub(crate) struct StreamOutcome {
     pub reasoning: String,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    pub input_reported: bool,
+    pub output_reported: bool,
+    pub reasoning_tokens: Option<u64>,
+    pub cache_read_tokens: Option<u64>,
+    pub cache_write_tokens: Option<u64>,
 }
 
 /// One piece of a stream, as it lands.
@@ -218,6 +223,11 @@ struct OpenAiStream {
     calls: Vec<PartialCall>,
     input_tokens: u64,
     output_tokens: u64,
+    input_reported: bool,
+    output_reported: bool,
+    reasoning_tokens: Option<u64>,
+    cache_read_tokens: Option<u64>,
+    cache_write_tokens: Option<u64>,
     finish_reason: Option<String>,
 }
 
@@ -229,13 +239,28 @@ impl OpenAiStream {
             calls,
             input_tokens,
             output_tokens,
+            input_reported,
+            output_reported,
+            reasoning_tokens,
+            cache_read_tokens,
             finish_reason,
+            ..
         } = self;
         if let Some(usage) = payload.get("usage").filter(|usage| !usage.is_null()) {
-            *input_tokens = usage["prompt_tokens"].as_u64().unwrap_or(*input_tokens);
-            *output_tokens = usage["completion_tokens"]
-                .as_u64()
-                .unwrap_or(*output_tokens);
+            if let Some(input) = usage["prompt_tokens"].as_u64() {
+                *input_tokens = input;
+                *input_reported = true;
+            }
+            if let Some(output) = usage["completion_tokens"].as_u64() {
+                *output_tokens = output;
+                *output_reported = true;
+            }
+            if let Some(value) = usage["completion_tokens_details"]["reasoning_tokens"].as_u64() {
+                *reasoning_tokens = Some(value);
+            }
+            if let Some(value) = usage["prompt_tokens_details"]["cached_tokens"].as_u64() {
+                *cache_read_tokens = Some(value);
+            }
         }
         for choice in payload["choices"].as_array().into_iter().flatten() {
             // A gateway that ignored `stream` sent the whole message instead
@@ -315,6 +340,11 @@ impl OpenAiStream {
             calls,
             input_tokens,
             output_tokens,
+            input_reported,
+            output_reported,
+            reasoning_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
             finish_reason,
         } = self;
         if text.trim().is_empty() && calls.iter().all(|call| call.name.is_empty()) {
@@ -358,6 +388,11 @@ impl OpenAiStream {
             reasoning,
             input_tokens,
             output_tokens,
+            input_reported,
+            output_reported,
+            reasoning_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
         }
     }
 }
@@ -383,6 +418,11 @@ struct AnthropicStream {
     blocks: Vec<Block>,
     input_tokens: u64,
     output_tokens: u64,
+    input_reported: bool,
+    output_reported: bool,
+    reasoning_tokens: Option<u64>,
+    cache_read_tokens: Option<u64>,
+    cache_write_tokens: Option<u64>,
     stop_reason: Option<String>,
 }
 
@@ -401,14 +441,31 @@ impl AnthropicStream {
             blocks,
             input_tokens,
             output_tokens,
+            input_reported,
+            output_reported,
+            cache_read_tokens,
+            cache_write_tokens,
             stop_reason,
+            ..
         } = self;
         // A gateway that ignored `stream` sent the whole message: read its
         // blocks as the chunk they are, so one code path serves both.
         if payload["content"].is_array() {
             let usage = &payload["usage"];
-            *input_tokens = usage["input_tokens"].as_u64().unwrap_or(*input_tokens);
-            *output_tokens = usage["output_tokens"].as_u64().unwrap_or(*output_tokens);
+            if let Some(input) = usage["input_tokens"].as_u64() {
+                *input_tokens = input;
+                *input_reported = true;
+            }
+            if let Some(output) = usage["output_tokens"].as_u64() {
+                *output_tokens = output;
+                *output_reported = true;
+            }
+            if let Some(value) = usage["cache_read_input_tokens"].as_u64() {
+                *cache_read_tokens = Some(value);
+            }
+            if let Some(value) = usage["cache_creation_input_tokens"].as_u64() {
+                *cache_write_tokens = Some(value);
+            }
             if let Some(reason) = payload["stop_reason"].as_str() {
                 *stop_reason = Some(reason.to_string());
             }
@@ -439,7 +496,16 @@ impl AnthropicStream {
         match payload["type"].as_str().unwrap_or_default() {
             "message_start" => {
                 let usage = &payload["message"]["usage"];
-                *input_tokens = usage["input_tokens"].as_u64().unwrap_or(*input_tokens);
+                if let Some(input) = usage["input_tokens"].as_u64() {
+                    *input_tokens = input;
+                    *input_reported = true;
+                }
+                if let Some(value) = usage["cache_read_input_tokens"].as_u64() {
+                    *cache_read_tokens = Some(value);
+                }
+                if let Some(value) = usage["cache_creation_input_tokens"].as_u64() {
+                    *cache_write_tokens = Some(value);
+                }
             }
             "content_block_start" => {
                 let content = &payload["content_block"];
@@ -499,7 +565,10 @@ impl AnthropicStream {
                     *stop_reason = Some(reason.to_string());
                 }
                 let usage = &payload["usage"];
-                *output_tokens = usage["output_tokens"].as_u64().unwrap_or(*output_tokens);
+                if let Some(output) = usage["output_tokens"].as_u64() {
+                    *output_tokens = output;
+                    *output_reported = true;
+                }
             }
             _ => {}
         }
@@ -510,6 +579,11 @@ impl AnthropicStream {
             blocks,
             input_tokens,
             output_tokens,
+            input_reported,
+            output_reported,
+            reasoning_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
             stop_reason,
         } = self;
         let mut text = String::new();
@@ -563,6 +637,11 @@ impl AnthropicStream {
             reasoning,
             input_tokens,
             output_tokens,
+            input_reported,
+            output_reported,
+            reasoning_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
         }
     }
 }
@@ -625,6 +704,36 @@ mod tests {
                 Delta::Reasoning("two".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn usage_categories_are_present_only_when_the_provider_reports_them() {
+        let mut delta = |_| {};
+        let known = reduce_openai(
+            &[json!({
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 4,
+                    "prompt_tokens_details": {"cached_tokens": 3},
+                    "completion_tokens_details": {"reasoning_tokens": 2}
+                },
+                "choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]
+            })],
+            &mut delta,
+        );
+        assert!(known.input_reported);
+        assert!(known.output_reported);
+        assert_eq!(known.cache_read_tokens, Some(3));
+        assert_eq!(known.reasoning_tokens, Some(2));
+
+        let unknown = reduce_openai(
+            &[json!({"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]})],
+            &mut delta,
+        );
+        assert!(!unknown.input_reported);
+        assert!(!unknown.output_reported);
+        assert_eq!(unknown.cache_read_tokens, None);
+        assert_eq!(unknown.reasoning_tokens, None);
     }
 
     #[test]

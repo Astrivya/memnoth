@@ -474,7 +474,7 @@ fn session_actions() -> Vec<CommandRow> {
         ),
         (
             "/usage",
-            "Provider-reported tokens and context for this session",
+            "Session tokens, requests, tools, latency and context; /usage --json",
             "runs here",
             "read-only",
         ),

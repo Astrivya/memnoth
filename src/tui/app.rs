@@ -245,7 +245,9 @@ pub enum Parsed {
     /// `/context`: open the context overlay.
     ContextOverlay,
     /// `/usage`: measured provider token and context receipts for this session.
-    UsageReport,
+    UsageReport {
+        json: bool,
+    },
     /// `/diff`: open the diff overlay.
     DiffOverlay,
     /// `/rewind`: open the checkpoint picker.
@@ -559,6 +561,8 @@ pub struct App {
     /// Last provider-reported prompt size and known model window.
     pub context_window_used: Option<u64>,
     pub context_window_size: Option<u64>,
+    /// Where the active model's context limit came from, if known.
+    pub context_window_source: Option<String>,
     pub context_model: String,
     pub context_provider: String,
     pub context_window_override_active: bool,
@@ -844,6 +848,7 @@ impl App {
             model: String::new(),
             context_window_used: None,
             context_window_size: None,
+            context_window_source: None,
             context_model: String::new(),
             context_provider: String::new(),
             context_window_override_active: false,
@@ -2017,8 +2022,9 @@ fn parse_line_inner(raw: &str, suggest: bool) -> Parsed {
                 Parsed::Search(args)
             }
         }
-        "usage" if args.is_empty() => Parsed::UsageReport,
-        "usage" => Parsed::Usage("usage: /usage".to_string()),
+        "usage" if args.is_empty() => Parsed::UsageReport { json: false },
+        "usage" if args.len() == 1 && args[0] == "--json" => Parsed::UsageReport { json: true },
+        "usage" => Parsed::Usage("usage: /usage [--json]".to_string()),
         "diff" => Parsed::DiffOverlay,
         "rewind" => Parsed::RewindOverlay,
         "checkpoints" => Parsed::CheckpointsOverlay,
@@ -4721,7 +4727,14 @@ mod tests {
         ));
         assert!(matches!(parse_line(":q"), Parsed::Quit));
         assert!(matches!(parse_line("/help"), Parsed::Help));
-        assert!(matches!(parse_line("/usage"), Parsed::UsageReport));
+        assert!(matches!(
+            parse_line("/usage"),
+            Parsed::UsageReport { json: false }
+        ));
+        assert!(matches!(
+            parse_line("/usage --json"),
+            Parsed::UsageReport { json: true }
+        ));
         assert!(matches!(parse_line("/usage detail"), Parsed::Usage(_)));
     }
 
