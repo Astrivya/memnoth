@@ -407,6 +407,8 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
 
       # Every target's artifact lands in its own directory, which is the shape
       # `dist.sh` searches: `download-artifact` is not asked to merge them
@@ -451,6 +453,18 @@ jobs:
           # here rather than after the upload.
           if [ "$tag" != "v$manifest_version" ]; then
             echo "tag $tag does not match Cargo.toml version v$manifest_version" >&2
+            exit 1
+          fi
+
+          # A version label must describe the exact source being built. A
+          # manual run from `main` cannot attach its assets to an older tag.
+          if [ "${GITHUB_REF_TYPE:-}" != "tag" ] || [ "$GITHUB_REF_NAME" != "$tag" ]; then
+            echo "release must run from the matching source tag $tag" >&2
+            exit 1
+          fi
+          tag_commit=$(git rev-parse "${GITHUB_REF}^{commit}")
+          if [ "$tag_commit" != "$GITHUB_SHA" ]; then
+            echo "tag $tag points to $tag_commit, but this run checks out $GITHUB_SHA" >&2
             exit 1
           fi
 
@@ -501,19 +515,6 @@ jobs:
             echo 'mode=skip' >> "$GITHUB_OUTPUT"
             echo 'npm publishing is not configured; the verified tarball will ship as a GitHub release asset.'
           fi
-
-      - name: publish standalone npm package
-        if: ${{ steps.npm-publish-auth.outputs.mode == 'token' }}
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish "${{ steps.npm-package.outputs.package }}" --access public --provenance
-
-      # Enable this repository variable only after registering the matching
-      # trusted publisher on npm. This prevents missing first-publish auth from
-      # failing the otherwise verified GitHub release.
-      - name: publish standalone npm package with trusted publishing
-        if: ${{ steps.npm-publish-auth.outputs.mode == 'oidc' }}
-        run: npm publish "${{ steps.npm-package.outputs.package }}" --access public --provenance
 
       # SBOM for every published artifact, generated after signing so it
       # describes the exact bytes shipped. CycloneDX and SPDX are produced side
@@ -574,6 +575,22 @@ jobs:
             dist/install.sh
             dist/install.ps1
             dist/SHA256SUMS
+
+      # Publish only after the matching source tag and complete GitHub draft
+      # with its validated assets exist. A registry failure then leaves a
+      # recoverable draft instead of an unpaired public package version.
+      - name: publish standalone npm package
+        if: ${{ steps.npm-publish-auth.outputs.mode == 'token' }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish "${{ steps.npm-package.outputs.package }}" --access public --provenance
+
+      # Enable this repository variable only after registering the matching
+      # trusted publisher on npm. This prevents missing first-publish auth from
+      # failing the otherwise verified GitHub release.
+      - name: publish standalone npm package with trusted publishing
+        if: ${{ steps.npm-publish-auth.outputs.mode == 'oidc' }}
+        run: npm publish "${{ steps.npm-package.outputs.package }}" --access public --provenance
 
   # SLSA provenance for the release, attesting that the published artifacts
   # were produced by this workflow from the tagged commit.
