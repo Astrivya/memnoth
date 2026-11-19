@@ -537,6 +537,7 @@ jobs:
             base="${base%.zip}"
             syft "$artifact" -o cyclonedx-json="${base}.sbom.cdx.json" > /dev/null
             syft "$artifact" -o spdx-json="${base}.sbom.spdx.json" > /dev/null
+          done
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
