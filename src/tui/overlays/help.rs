@@ -299,6 +299,16 @@ impl HelpOverlay {
         global.add_binding(KeyBinding::new("Ctrl+D", "Quit", "Exit the session"));
         global.add_binding(KeyBinding::new("Ctrl+L", "Clear", "Clear the transcript"));
         global.add_binding(KeyBinding::new(
+            "Alt+A",
+            "Agent Deck",
+            "Inspect delegated runs and requests",
+        ));
+        global.add_binding(KeyBinding::new(
+            "Alt+T",
+            "Run trace",
+            "Inspect tool-call and agent activity",
+        ));
+        global.add_binding(KeyBinding::new(
             "↑/↓",
             "History",
             "Navigate command history",
@@ -1210,6 +1220,8 @@ mod tests {
         assert!(text.contains("Shift+Tab"), "{text}");
         assert!(text.contains("Model / effort"), "{text}");
         assert!(text.contains("Shift+Enter"), "{text}");
+        assert!(text.contains("Alt+A"), "{text}");
+        assert!(text.contains("Alt+T"), "{text}");
     }
 
     #[test]

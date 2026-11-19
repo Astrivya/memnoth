@@ -356,14 +356,9 @@ impl Overlay for TeamsOverlay {
         if !self.visible || area.width < 24 || area.height < 8 {
             return;
         }
-        // A picker, not a browser: wide enough for an id on its own line, short
-        // enough that the prompt behind it stays visible and the choice reads as
-        // one step rather than a page to be in.
-        let width = (area.width as u32 * 76 / 100).clamp(40, area.width as u32) as u16;
-        let height = (area.height as u32 * 60 / 100).clamp(8, area.height as u32) as u16;
-        let x = area.x + (area.width.saturating_sub(width)) / 2;
-        let y = area.y + (area.height.saturating_sub(height)) / 2;
-        let popup = Rect::new(x, y, width, height);
+        // Use the full content area: browsing teams is a page in the TUI, not a
+        // small dialog that hides the list and leaves an unusable prompt behind.
+        let popup = area;
         frame.render_widget(Clear, popup);
 
         let block = Block::default()
@@ -373,7 +368,7 @@ impl Overlay for TeamsOverlay {
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             )
-            .borders(Borders::ALL)
+            .borders(Borders::NONE)
             .border_style(Style::default().fg(Color::DarkGray));
         let inner = block.inner(popup);
         frame.render_widget(block, popup);
@@ -381,13 +376,13 @@ impl Overlay for TeamsOverlay {
             return;
         }
 
-        let filter_area = Rect::new(inner.x, inner.y, inner.width, 1);
+        let filter_area = Rect::new(inner.x, inner.y + 2, inner.width, 1);
         let hint_area = Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1);
         let body_area = Rect::new(
             inner.x,
-            inner.y + 1,
+            inner.y + 3,
             inner.width,
-            inner.height.saturating_sub(2),
+            inner.height.saturating_sub(4),
         );
 
         let count = if self.filter.is_empty() {
@@ -462,7 +457,7 @@ impl Overlay for TeamsOverlay {
 
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                " type filters  |  Up/Down move  |  Enter shows its members  |  ctrl+r reload  |  Esc close",
+                "Up/Down navigate  ·  Enter members  ·  Esc back",
                 Style::default().fg(Color::DarkGray),
             ))),
             hint_area,
@@ -483,6 +478,8 @@ impl Overlay for TeamsOverlay {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     fn team(name: &str, id: &str, members: i64, projects: i64) -> Team {
         Team {
@@ -520,6 +517,31 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn team_browser_uses_the_full_area_without_a_dialog_frame() {
+        let mut overlay = ready(vec![team("platform", "id-platform", 4, 2)]);
+        let backend = TestBackend::new(72, 20);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| overlay.render(frame, frame.area(), &App::new("s", false)))
+            .expect("draw team browser");
+
+        let buffer = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+        assert!(text.contains("teams"), "{text}");
+        assert!(text.contains("platform"), "{text}");
+        assert!(
+            !text.contains('┌'),
+            "the full-screen browser has no box: {text}"
+        );
     }
 
     #[test]
