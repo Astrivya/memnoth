@@ -14,6 +14,7 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 cp -R "$REPO/crates/memnoth-mcp/npm/." "$STAGE/"
+cp "$REPO/LICENSE" "$STAGE/LICENSE"
 mkdir -p "$STAGE/vendor/linux-x64" "$STAGE/vendor/linux-arm64" \
   "$STAGE/vendor/darwin-x64" "$STAGE/vendor/darwin-arm64" \
   "$STAGE/vendor/win32-x64" "$OUTPUT"

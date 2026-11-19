@@ -46,6 +46,7 @@ bash "$REPO/scripts/assemble-npm-mcp.sh" 0.1.0-beta.fixture "$ARTIFACTS" "$OUTPU
 package="$(find "$OUTPUT" -maxdepth 1 -name '*.tgz' -print -quit)"
 test -n "$package"
 for path in \
+  package/LICENSE \
   package/vendor/linux-x64/memnoth-mcp \
   package/vendor/linux-arm64/memnoth-mcp \
   package/vendor/darwin-x64/memnoth-mcp \
@@ -53,4 +54,6 @@ for path in \
   package/vendor/win32-x64/memnoth-mcp.exe; do
   tar -tzf "$package" | grep -Fx "$path" >/dev/null
 done
+license="$(tar -xOf "$package" package/package.json | node -e 'let data=""; process.stdin.on("data", chunk => data += chunk); process.stdin.on("end", () => process.stdout.write(JSON.parse(data).license ?? ""));')"
+test "$license" = "Apache-2.0"
 echo 'standalone npm assembler fixture smoke passed'
