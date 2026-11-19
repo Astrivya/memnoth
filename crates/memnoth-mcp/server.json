@@ -97,8 +97,8 @@
       }
     }
   },
-  "description": "Memory, coordination and code intelligence for coding agents. A bi-temporal knowledge-graph vault (history, as-of queries, contradiction detection), a code graph that answers a flow question with verbatim line-numbered source in one call, and first-writer-wins path claims so parallel agents stop colliding.",
-  "name": "ai.astrivya.memnoth",
+  "description": "Local-first memory, code intelligence, and multi-agent coordination for coding agents.",
+  "name": "ai.astrivya/memnoth",
   "packages": [
     {
       "environmentVariables": [
@@ -132,7 +132,7 @@
       "transport": {
         "type": "stdio"
       },
-      "version": "0.1.0-beta.2"
+      "version": "0.1.0-beta.3"
     }
   ],
   "repository": {
@@ -140,6 +140,6 @@
     "url": "https://github.com/astrivya/memnoth"
   },
   "title": "Memnoth",
-  "version": "0.1.0-beta.2",
+  "version": "0.1.0-beta.3",
   "websiteUrl": "https://memnoth.astrivya.ai"
 }

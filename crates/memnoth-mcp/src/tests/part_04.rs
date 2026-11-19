@@ -558,6 +558,7 @@ fn npm_onboarding_names_the_vault_and_distinguishes_registration_flows() {
         "servers",
         "claude mcp add --transport stdio",
         "MEMNOTH_MCP_READ_ONLY=1",
+        "@astrivya/mcp@beta",
         "2025-11-25",
         "2026-07-28",
         "server/discover",
@@ -773,6 +774,20 @@ fn registry_manifest_schema_cost_cannot_drift() {
 #[test]
 fn registry_manifest_matches_what_the_server_advertises() {
     let registry_manifest = manifest();
+    let registry_name = registry_manifest["name"]
+        .as_str()
+        .expect("registry server name is a string");
+    assert_eq!(
+        registry_name.split('/').count(),
+        2,
+        "MCP registry names use a namespace/server separator"
+    );
+    assert!(
+        registry_manifest["description"]
+            .as_str()
+            .is_some_and(|description| description.chars().count() <= 100),
+        "MCP registry server descriptions are limited to 100 characters"
+    );
     let published =
         registry_manifest["_meta"]["io.modelcontextprotocol.registry/publisher-provided"].clone();
     assert_eq!(

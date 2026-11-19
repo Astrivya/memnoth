@@ -33,6 +33,10 @@ fn a_written_man_page_matches_and_an_edited_one_is_stale() {
     let page = std::fs::read_to_string(&path).unwrap();
     assert!(page.contains(".TH"), "roff starts with a title:\n{page}");
     assert!(page.contains("memnoth"), "the page names the binary");
+    assert!(
+        page.lines().all(|line| line.trim_end() == line),
+        "generated man pages should not contain trailing whitespace"
+    );
 
     let fresh = run(&["docs", "--man", "--output", &text, "--check"], &home);
     assert!(

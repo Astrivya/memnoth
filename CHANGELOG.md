@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-beta.3] - 2026-11-19
+
+### Added - MCP
+
+- The standalone `@astrivya/mcp` package now supports both the legacy stdio
+  initialization flow and modern stateless discovery, with setup examples for
+  Codex, OpenCode, Claude Code, and Zed.
+- Registry setup now requests the vault path and the launcher accepts an
+  explicit `MEMNOTH_BIN` override.
+
 ### Added - MCP
 
 - `memnoth mcp add --local --db <vault>` registers a local stdio MCP server scoped

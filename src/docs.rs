@@ -58,7 +58,12 @@ fn run_man(args: &DocsArgs) -> Result<Outcome, ErrorOutcome> {
     let mut buffer = Vec::new();
     man.render(&mut buffer)
         .map_err(|error| ErrorOutcome::new(ExitCode::Unexpected, error.to_string()))?;
-    let page = String::from_utf8_lossy(&buffer).into_owned();
+    let page = String::from_utf8_lossy(&buffer)
+        .lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
 
     if args.check {
         return check(
