@@ -867,11 +867,14 @@ fn report_authenticated_call(
     };
     let headers = match cloud_ingest_headers(&authorization) {
         Ok(headers) => headers,
-        Err(_) => return,
+        Err(_) => {
+            tracing::warn!("MCP cloud usage report skipped: invalid authorization header");
+            return;
+        }
     };
     tokio::spawn(async move {
         let client = CLIENT.get_or_init(reqwest::Client::new).clone();
-        let _ = client
+        match client
             .post(endpoint)
             .headers(headers)
             .timeout(std::time::Duration::from_secs(3))
@@ -884,7 +887,17 @@ fn report_authenticated_call(
                 }]
             }))
             .send()
-            .await;
+            .await
+        {
+            Ok(response) if !response.status().is_success() => {
+                tracing::warn!(
+                    status = response.status().as_u16(),
+                    "MCP cloud usage report rejected"
+                );
+            }
+            Ok(_) => {}
+            Err(_) => tracing::warn!("MCP cloud usage report failed to reach cloud"),
+        }
     });
 }
 
