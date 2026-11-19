@@ -152,46 +152,6 @@ impl AgentFocus {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crossterm::event::KeyModifiers;
-
-    #[test]
-    fn successful_response_clears_only_the_request_being_answered() {
-        let temp = tempfile::tempdir().expect("temporary agent directory");
-        let mut delegator = memnoth_agent::Delegator::new(temp.path().join("agents"));
-        let child = delegator
-            .root(None, "review", "inspect the change")
-            .expect("child run");
-        let request = delegator
-            .queue_attention(&child.agent_id, "question", "Which API should I check?")
-            .expect("attention request");
-
-        let mut app = App::new("s", false);
-        app.delegator = Some(delegator);
-        app.focus_agent = Some(child.agent_id.clone());
-        app.focus_attention = Some(request.id.clone());
-        let mut focus = AgentFocus::new();
-        focus.on_open(&mut app);
-        focus.set_draft("Check the session API.".to_string());
-
-        focus.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut app);
-
-        assert!(app.delegator.as_ref().unwrap().attention().is_empty());
-        assert!(app.focus_attention.is_none());
-        assert!(
-            app.delegator
-                .as_ref()
-                .unwrap()
-                .read_log(&child.agent_id)
-                .unwrap()
-                .iter()
-                .any(|event| event.event == "steer")
-        );
-    }
-}
-
 impl Default for AgentFocus {
     fn default() -> Self {
         Self::new()
@@ -448,5 +408,45 @@ impl AgentFocus {
         self.transcript
             .push("steered — note recorded, draft cleared".to_string());
         self.load(app, &id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::KeyModifiers;
+
+    #[test]
+    fn successful_response_clears_only_the_request_being_answered() {
+        let temp = tempfile::tempdir().expect("temporary agent directory");
+        let mut delegator = memnoth_agent::Delegator::new(temp.path().join("agents"));
+        let child = delegator
+            .root(None, "review", "inspect the change")
+            .expect("child run");
+        let request = delegator
+            .queue_attention(&child.agent_id, "question", "Which API should I check?")
+            .expect("attention request");
+
+        let mut app = App::new("s", false);
+        app.delegator = Some(delegator);
+        app.focus_agent = Some(child.agent_id.clone());
+        app.focus_attention = Some(request.id.clone());
+        let mut focus = AgentFocus::new();
+        focus.on_open(&mut app);
+        focus.set_draft("Check the session API.".to_string());
+
+        focus.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut app);
+
+        assert!(app.delegator.as_ref().unwrap().attention().is_empty());
+        assert!(app.focus_attention.is_none());
+        assert!(
+            app.delegator
+                .as_ref()
+                .unwrap()
+                .read_log(&child.agent_id)
+                .unwrap()
+                .iter()
+                .any(|event| event.event == "steer")
+        );
     }
 }
