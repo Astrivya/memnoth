@@ -31,6 +31,10 @@ pub struct AgentDeck {
     list_state: ListState,
     /// Tree order (parents first, indented) versus spawn order.
     tree_view: bool,
+    /// Case-insensitive filter over role, task, run ID and model.
+    query: String,
+    /// The `/` filter field currently owns keyboard input.
+    searching: bool,
     mode: Mode,
     inbox_selected: usize,
     /// Peaked detail (log tail or receipt) shown in the inspector.
@@ -45,6 +49,8 @@ impl AgentDeck {
             selected: 0,
             list_state: ListState::default(),
             tree_view: false,
+            query: String::new(),
+            searching: false,
             mode: Mode::Roster,
             inbox_selected: 0,
             peeked: None,
@@ -55,16 +61,14 @@ impl AgentDeck {
         let selected_id = self.selected_child().map(|child| child.agent_id.clone());
         self.children = crate::tui::agents::roster(app);
         let selected_index = selected_id.as_ref().and_then(|selected_id| {
-            self.ordered()
+            self.visible()
                 .iter()
                 .position(|child| child.agent_id == *selected_id)
         });
         if let Some(index) = selected_index {
             self.selected = index;
-        } else if !self.children.is_empty() {
-            self.selected = self.selected.min(self.children.len() - 1);
         } else {
-            self.selected = 0;
+            self.selected = self.selected.min(self.visible().len().saturating_sub(1));
         }
         self.list_state.select(Some(self.selected));
     }
@@ -133,8 +137,26 @@ impl AgentDeck {
         ordered
     }
 
+    /// The current roster slice after the optional search filter.
+    fn visible(&self) -> Vec<&ChildInfo> {
+        let query = self.query.trim().to_lowercase();
+        self.ordered()
+            .into_iter()
+            .filter(|child| {
+                query.is_empty()
+                    || child.role.to_lowercase().contains(&query)
+                    || child.task.to_lowercase().contains(&query)
+                    || child.agent_id.to_lowercase().contains(&query)
+                    || child
+                        .model
+                        .as_deref()
+                        .is_some_and(|model| model.to_lowercase().contains(&query))
+            })
+            .collect()
+    }
+
     fn selected_child(&self) -> Option<&ChildInfo> {
-        self.ordered().into_iter().nth(self.selected)
+        self.visible().into_iter().nth(self.selected)
     }
 
     /// Inspector lines for the selected child: status, task, lineage, model,
@@ -263,7 +285,7 @@ impl Overlay for AgentDeck {
         let newest = self.children.iter().map(|child| child.spawn_seq).max();
         if let Some(newest) = newest
             && let Some(index) = self
-                .ordered()
+                .visible()
                 .iter()
                 .position(|child| child.spawn_seq == newest)
         {
@@ -282,9 +304,39 @@ impl Overlay for AgentDeck {
     }
 
     fn handle_key(&mut self, key: KeyEvent, app: &mut App) -> OverlayAction {
+        if self.searching {
+            match key.code {
+                KeyCode::Esc | KeyCode::Enter => self.searching = false,
+                KeyCode::Backspace => {
+                    self.query.pop();
+                    self.selected = 0;
+                }
+                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.query.clear();
+                    self.selected = 0;
+                }
+                KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.query.push(ch);
+                    self.selected = 0;
+                }
+                _ => {}
+            }
+            self.list_state.select(Some(self.selected));
+            return OverlayAction::None;
+        }
         match key.code {
+            KeyCode::Esc if !self.query.is_empty() => {
+                self.query.clear();
+                self.selected = 0;
+                self.list_state.select(Some(0));
+                OverlayAction::None
+            }
             KeyCode::Esc => OverlayAction::Close,
             KeyCode::Char('q') => OverlayAction::Close,
+            KeyCode::Char('/') if self.mode == Mode::Roster => {
+                self.searching = true;
+                OverlayAction::None
+            }
             KeyCode::Tab => {
                 self.peeked = None;
                 self.mode = match self.mode {
@@ -296,7 +348,8 @@ impl Overlay for AgentDeck {
             KeyCode::Up => {
                 match self.mode {
                     Mode::Roster => {
-                        if !self.children.is_empty() {
+                        let len = self.visible().len();
+                        if len > 0 {
                             self.selected = self.selected.saturating_sub(1);
                             self.list_state.select(Some(self.selected));
                             self.peeked = None;
@@ -311,8 +364,9 @@ impl Overlay for AgentDeck {
             KeyCode::Down => {
                 match self.mode {
                     Mode::Roster => {
-                        if !self.children.is_empty() {
-                            self.selected = (self.selected + 1).min(self.children.len() - 1);
+                        let len = self.visible().len();
+                        if len > 0 {
+                            self.selected = (self.selected + 1).min(len - 1);
                             self.list_state.select(Some(self.selected));
                             self.peeked = None;
                         }
@@ -397,7 +451,7 @@ impl Overlay for AgentDeck {
                 let selected_id = self.selected_child().map(|child| child.agent_id.clone());
                 self.tree_view = !self.tree_view;
                 let selected_index = selected_id.and_then(|selected_id| {
-                    self.ordered()
+                    self.visible()
                         .iter()
                         .position(|child| child.agent_id == selected_id)
                 });
@@ -519,7 +573,9 @@ impl Overlay for AgentDeck {
             "{} running  ·  {} waiting  ·  {} returned  ·  {} stopped",
             counts[0], counts[1], counts[2], counts[3]
         );
-        let heading = if inbox_len > 0 {
+        let heading = if self.searching {
+            format!("Agent Deck   ·   /{}", self.query)
+        } else if inbox_len > 0 {
             format!("Agent Deck   ·   {inbox_len} needs you")
         } else {
             "Agent Deck".to_string()
@@ -582,6 +638,7 @@ impl Overlay for AgentDeck {
         } else {
             (body, None)
         };
+        let visible = self.visible();
         let mut rows: Vec<ListItem<'static>> = if self.mode == Mode::Inbox && inbox_len > 0 {
             app.delegator
                 .as_ref()
@@ -613,7 +670,7 @@ impl Overlay for AgentDeck {
                 })
                 .unwrap_or_default()
         } else {
-            self.ordered()
+            visible
                 .iter()
                 .enumerate()
                 .map(|(index, child)| {
@@ -659,6 +716,16 @@ impl Overlay for AgentDeck {
                 })
                 .collect()
         };
+        if self.mode == Mode::Roster && rows.is_empty() {
+            rows.push(ListItem::new(Line::from(Span::styled(
+                if self.query.is_empty() {
+                    "No delegated runs yet"
+                } else {
+                    "No runs match this search"
+                },
+                Style::default().fg(Color::DarkGray),
+            ))));
+        }
         if rows.is_empty() {
             rows.push(ListItem::new(Line::from(Span::styled(
                 "No requests waiting for you",
@@ -667,6 +734,13 @@ impl Overlay for AgentDeck {
         }
         let section_title = if self.mode == Mode::Inbox {
             format!("Needs you  ({inbox_len})")
+        } else if !self.query.is_empty() {
+            format!(
+                "Runs  ·  {} of {}  ·  {}",
+                visible.len(),
+                self.children.len(),
+                self.query
+            )
         } else if inbox_len > 0 {
             format!("Runs  ·  {inbox_len} needs you")
         } else {
@@ -758,7 +832,7 @@ impl Overlay for AgentDeck {
             Paragraph::new(if self.mode == Mode::Inbox {
                 "↑↓ select  ·  Enter respond  ·  Tab runs  ·  Esc back"
             } else {
-                "↑↓ select  ·  Enter open  ·  Tab requests  ·  Esc back"
+                "↑↓ select  ·  / search  ·  Enter open  ·  Esc back"
             })
             .style(Style::default().fg(Color::DarkGray)),
             vertical[2],
@@ -768,6 +842,7 @@ impl Overlay for AgentDeck {
     fn help_text(&self) -> Vec<(&'static str, &'static str)> {
         vec![
             ("↑↓", "navigate"),
+            ("/", "search runs"),
             ("Enter", "open child / respond to request"),
             ("Tab", "runs ⇄ needs you"),
             ("Space", "peek recent events"),
@@ -889,6 +964,49 @@ mod tests {
                 second_child.agent_id.as_str(),
             ]
         );
+    }
+
+    #[test]
+    fn search_filters_roster_and_preserves_the_selected_run_on_refresh() {
+        let temp = tempfile::tempdir().expect("temporary agent directory");
+        let mut delegator = memnoth_agent::Delegator::new(temp.path().join("agents"));
+        let first = delegator
+            .root(None, "review", "inspect the API")
+            .expect("first run");
+        delegator
+            .root(None, "builder", "update the docs")
+            .expect("second run");
+        let mut app = App::new("s", false);
+        app.delegator = Some(delegator);
+        let mut deck = AgentDeck::new();
+        deck.refresh(&app);
+
+        deck.handle_key(
+            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+            &mut app,
+        );
+        for ch in "api".chars() {
+            deck.handle_key(
+                KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+                &mut app,
+            );
+        }
+
+        assert_eq!(deck.visible().len(), 1);
+        assert_eq!(
+            deck.selected_child().map(|run| run.agent_id.as_str()),
+            Some(first.agent_id.as_str())
+        );
+        deck.refresh(&app);
+        assert_eq!(deck.selected, 0);
+        assert_eq!(deck.visible().len(), 1);
+
+        deck.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut app);
+        assert!(!deck.searching);
+        assert_eq!(deck.query, "api");
+        deck.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut app);
+        assert!(deck.query.is_empty());
+        assert_eq!(deck.visible().len(), 2);
     }
 
     #[test]
