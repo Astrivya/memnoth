@@ -35,6 +35,8 @@ pub struct AgentDeck {
     query: String,
     /// The `/` filter field currently owns keyboard input.
     searching: bool,
+    /// Case-insensitive filter over the source-backed attention request fields.
+    inbox_query: String,
     mode: Mode,
     inbox_selected: usize,
     /// Peaked detail (log tail or receipt) shown in the inspector.
@@ -51,6 +53,7 @@ impl AgentDeck {
             tree_view: false,
             query: String::new(),
             searching: false,
+            inbox_query: String::new(),
             mode: Mode::Roster,
             inbox_selected: 0,
             peeked: None,
@@ -157,6 +160,32 @@ impl AgentDeck {
 
     fn selected_child(&self) -> Option<&ChildInfo> {
         self.visible().into_iter().nth(self.selected)
+    }
+
+    /// Attention requests in their original inbox order, filtered by fields
+    /// supplied by the delegator. Keep indices so Enter addresses the original
+    /// request rather than a copied or synthesized row.
+    fn visible_attention_indices(&self, app: &App) -> Vec<usize> {
+        let query = self.inbox_query.trim().to_lowercase();
+        app.delegator
+            .as_ref()
+            .map(|delegator| {
+                delegator
+                    .attention()
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, request)| {
+                        (query.is_empty()
+                            || request.agent.to_lowercase().contains(&query)
+                            || request.kind.to_lowercase().contains(&query)
+                            || request.summary.to_lowercase().contains(&query)
+                            || request.run_id.to_lowercase().contains(&query)
+                            || request.id.to_lowercase().contains(&query))
+                        .then_some(index)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Inspector lines for the selected child: status, task, lineage, model,
@@ -296,7 +325,28 @@ impl Overlay for AgentDeck {
 
     fn on_tick(&mut self, app: &mut App) {
         // A run that finishes while the deck is open lands without a keypress.
+        let selected_request_id = self
+            .visible_attention_indices(app)
+            .get(self.inbox_selected)
+            .and_then(|index| {
+                app.delegator
+                    .as_ref()?
+                    .attention()
+                    .get(*index)
+                    .map(|request| request.id.clone())
+            });
         self.refresh(app);
+        let visible = self.visible_attention_indices(app);
+        self.inbox_selected = selected_request_id
+            .and_then(|id| {
+                visible.iter().position(|index| {
+                    app.delegator
+                        .as_ref()
+                        .and_then(|delegator| delegator.attention().get(*index))
+                        .is_some_and(|request| request.id == id)
+                })
+            })
+            .unwrap_or_else(|| self.inbox_selected.min(visible.len().saturating_sub(1)));
     }
 
     fn hide(&mut self) {
@@ -308,21 +358,51 @@ impl Overlay for AgentDeck {
             match key.code {
                 KeyCode::Esc => {
                     self.searching = false;
-                    self.query.clear();
-                    self.selected = 0;
+                    match self.mode {
+                        Mode::Roster => {
+                            self.query.clear();
+                            self.selected = 0;
+                        }
+                        Mode::Inbox => {
+                            self.inbox_query.clear();
+                            self.inbox_selected = 0;
+                        }
+                    }
                 }
                 KeyCode::Enter => self.searching = false,
-                KeyCode::Backspace => {
-                    self.query.pop();
-                    self.selected = 0;
-                }
+                KeyCode::Backspace => match self.mode {
+                    Mode::Roster => {
+                        self.query.pop();
+                        self.selected = 0;
+                    }
+                    Mode::Inbox => {
+                        self.inbox_query.pop();
+                        self.inbox_selected = 0;
+                    }
+                },
                 KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.query.clear();
-                    self.selected = 0;
+                    match self.mode {
+                        Mode::Roster => {
+                            self.query.clear();
+                            self.selected = 0;
+                        }
+                        Mode::Inbox => {
+                            self.inbox_query.clear();
+                            self.inbox_selected = 0;
+                        }
+                    }
                 }
                 KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.query.push(ch);
-                    self.selected = 0;
+                    match self.mode {
+                        Mode::Roster => {
+                            self.query.push(ch);
+                            self.selected = 0;
+                        }
+                        Mode::Inbox => {
+                            self.inbox_query.push(ch);
+                            self.inbox_selected = 0;
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -330,15 +410,28 @@ impl Overlay for AgentDeck {
             return OverlayAction::None;
         }
         match key.code {
-            KeyCode::Esc if !self.query.is_empty() => {
-                self.query.clear();
-                self.selected = 0;
-                self.list_state.select(Some(0));
+            KeyCode::Esc
+                if match self.mode {
+                    Mode::Roster => !self.query.is_empty(),
+                    Mode::Inbox => !self.inbox_query.is_empty(),
+                } =>
+            {
+                match self.mode {
+                    Mode::Roster => {
+                        self.query.clear();
+                        self.selected = 0;
+                        self.list_state.select(Some(0));
+                    }
+                    Mode::Inbox => {
+                        self.inbox_query.clear();
+                        self.inbox_selected = 0;
+                    }
+                }
                 OverlayAction::None
             }
             KeyCode::Esc => OverlayAction::Close,
             KeyCode::Char('q') => OverlayAction::Close,
-            KeyCode::Char('/') if self.mode == Mode::Roster => {
+            KeyCode::Char('/') => {
                 self.searching = true;
                 OverlayAction::None
             }
@@ -377,11 +470,7 @@ impl Overlay for AgentDeck {
                         }
                     }
                     Mode::Inbox => {
-                        let len = app
-                            .delegator
-                            .as_ref()
-                            .map(|d| d.attention().len())
-                            .unwrap_or(0);
+                        let len = self.visible_attention_indices(app).len();
                         if len > 0 {
                             self.inbox_selected = (self.inbox_selected + 1).min(len - 1);
                         }
@@ -393,10 +482,10 @@ impl Overlay for AgentDeck {
                 if self.mode == Mode::Inbox {
                     // Keep it pending while the user reviews and drafts a
                     // response. Focus removes it only after the steer succeeds.
-                    if let Some(request) = app
-                        .delegator
-                        .as_ref()
-                        .and_then(|d| d.attention().get(self.inbox_selected))
+                    if let Some(request) = self
+                        .visible_attention_indices(app)
+                        .get(self.inbox_selected)
+                        .and_then(|index| app.delegator.as_ref()?.attention().get(*index))
                         .cloned()
                     {
                         app.focus_agent = Some(request.run_id.clone());
@@ -579,7 +668,11 @@ impl Overlay for AgentDeck {
             counts[0], counts[1], counts[2], counts[3]
         );
         let heading = if self.searching {
-            format!("Agent Deck   ·   /{}", self.query)
+            let query = match self.mode {
+                Mode::Roster => &self.query,
+                Mode::Inbox => &self.inbox_query,
+            };
+            format!("Agent Deck   ·   /{query}")
         } else if inbox_len > 0 {
             format!("Agent Deck   ·   {inbox_len} needs you")
         } else {
@@ -644,17 +737,23 @@ impl Overlay for AgentDeck {
             (body, None)
         };
         let visible = self.visible();
+        let visible_attention = self.visible_attention_indices(app);
+        let inbox_total = app
+            .delegator
+            .as_ref()
+            .map(|delegator| delegator.attention().len())
+            .unwrap_or(0);
         let mut rows: Vec<ListItem<'static>> = if self.mode == Mode::Inbox {
             app.delegator
                 .as_ref()
                 .map(|delegator| {
-                    delegator
-                        .attention()
+                    visible_attention
                         .iter()
                         .enumerate()
-                        .map(|(index, request)| {
-                            let selected = index == self.inbox_selected;
-                            ListItem::new(Line::from(vec![
+                        .filter_map(|(visible_index, source_index)| {
+                            let request = delegator.attention().get(*source_index)?;
+                            let selected = visible_index == self.inbox_selected;
+                            Some(ListItem::new(Line::from(vec![
                                 Span::styled(
                                     if selected { "› " } else { "  " },
                                     Style::default().fg(Color::Cyan),
@@ -669,7 +768,7 @@ impl Overlay for AgentDeck {
                                     format!("{} · {}", request.kind, request.summary),
                                     Style::default().fg(Color::Gray),
                                 ),
-                            ]))
+                            ])))
                         })
                         .collect()
                 })
@@ -731,14 +830,25 @@ impl Overlay for AgentDeck {
                 Style::default().fg(Color::DarkGray),
             ))));
         }
-        if rows.is_empty() {
+        if self.mode == Mode::Inbox && rows.is_empty() && !self.inbox_query.is_empty() {
+            rows.push(ListItem::new(Line::from(Span::styled(
+                "No requests match this search",
+                Style::default().fg(Color::DarkGray),
+            ))));
+        } else if rows.is_empty() {
             rows.push(ListItem::new(Line::from(Span::styled(
                 "No requests waiting for you",
                 Style::default().fg(Color::DarkGray),
             ))));
         }
-        let section_title = if self.mode == Mode::Inbox {
-            format!("Needs you  ({inbox_len})")
+        let section_title = if self.mode == Mode::Inbox && !self.inbox_query.is_empty() {
+            format!(
+                "Needs you  ·  {} of {inbox_total}  ·  {}",
+                visible_attention.len(),
+                self.inbox_query
+            )
+        } else if self.mode == Mode::Inbox {
+            format!("Needs you  ({inbox_total})")
         } else if !self.query.is_empty() {
             let counts = format!("Runs  ·  {} of {}", visible.len(), self.children.len());
             if self.searching {
@@ -767,7 +877,9 @@ impl Overlay for AgentDeck {
             ..list_area
         };
         if self.mode == Mode::Inbox {
-            frame.render_widget(list, content_area);
+            let mut inbox_state = ListState::default();
+            inbox_state.select(Some(self.inbox_selected));
+            frame.render_stateful_widget(list, content_area, &mut inbox_state);
         } else {
             frame.render_stateful_widget(list, content_area, &mut self.list_state);
         }
@@ -802,9 +914,9 @@ impl Overlay for AgentDeck {
                 detail_title,
             );
             let detail = if self.mode == Mode::Inbox {
-                app.delegator
-                    .as_ref()
-                    .and_then(|d| d.attention().get(self.inbox_selected))
+                visible_attention
+                    .get(self.inbox_selected)
+                    .and_then(|index| app.delegator.as_ref()?.attention().get(*index))
                     .map(|request| {
                         vec![
                             format!("{} needs your input", request.agent),
@@ -835,9 +947,21 @@ impl Overlay for AgentDeck {
 
         frame.render_widget(
             Paragraph::new(if self.mode == Mode::Inbox {
-                "↑↓ select  ·  Enter respond  ·  Tab runs  ·  Esc back"
+                if self.searching {
+                    "type to filter  ·  Enter finish  ·  Esc clear  ·  Ctrl+U clear"
+                } else if !self.inbox_query.is_empty() {
+                    "↑↓ select  ·  / search  ·  Enter respond  ·  Esc clear filter"
+                } else {
+                    "↑↓ select  ·  / search  ·  Enter respond  ·  Tab runs  ·  Esc back"
+                }
             } else {
-                "↑↓ select  ·  / search  ·  Enter open  ·  Esc back"
+                if self.searching {
+                    "type to filter  ·  Enter finish  ·  Esc clear  ·  Ctrl+U clear"
+                } else if !self.query.is_empty() {
+                    "↑↓ select  ·  / search  ·  Enter open  ·  Esc clear filter"
+                } else {
+                    "↑↓ select  ·  / search  ·  Enter open  ·  Esc back"
+                }
             })
             .style(Style::default().fg(Color::DarkGray)),
             vertical[2],
@@ -1041,6 +1165,92 @@ mod tests {
     }
 
     #[test]
+    fn inbox_search_filters_source_requests_and_enter_opens_the_matching_request() {
+        let temp = tempfile::tempdir().expect("temporary agent directory");
+        let mut delegator = memnoth_agent::Delegator::new(temp.path().join("agents"));
+        let billing = delegator
+            .root(None, "review", "check billing")
+            .expect("billing run");
+        let first = delegator
+            .queue_attention(&billing.agent_id, "permission", "Allow database migration?")
+            .expect("permission request");
+        let api = delegator
+            .root(None, "scout", "inspect API")
+            .expect("API run");
+        let second = delegator
+            .queue_attention(
+                &api.agent_id,
+                "question",
+                "Which endpoint should I inspect?",
+            )
+            .expect("question request");
+
+        let mut app = App::new("s", false);
+        app.delegator = Some(delegator);
+        let mut deck = AgentDeck::new();
+        deck.mode = Mode::Inbox;
+        deck.handle_key(
+            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+            &mut app,
+        );
+        for ch in "ENDPOINT".chars() {
+            deck.handle_key(
+                KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+                &mut app,
+            );
+        }
+
+        assert_eq!(deck.visible_attention_indices(&app), vec![1]);
+        deck.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut app);
+        assert!(!deck.searching, "first Enter commits the filter");
+        let action = deck.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut app);
+        assert!(matches!(action, OverlayAction::Push(OverlayKind::Focus)));
+        assert_eq!(app.focus_agent.as_deref(), Some(api.agent_id.as_str()));
+        assert_eq!(app.focus_attention.as_deref(), Some(second.id.as_str()));
+        let requests = app.delegator.as_ref().unwrap().attention();
+        assert_eq!(requests, &[first, second]);
+    }
+
+    #[test]
+    fn inbox_search_backspace_clear_and_refresh_never_invent_or_resolve_requests() {
+        let temp = tempfile::tempdir().expect("temporary agent directory");
+        let mut delegator = memnoth_agent::Delegator::new(temp.path().join("agents"));
+        let run = delegator.root(None, "reviewer", "check API").expect("run");
+        let request = delegator
+            .queue_attention(&run.agent_id, "question", "Which API?")
+            .expect("request");
+        let mut app = App::new("s", false);
+        app.delegator = Some(delegator);
+        let mut deck = AgentDeck::new();
+        deck.mode = Mode::Inbox;
+        deck.handle_key(
+            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+            &mut app,
+        );
+        for ch in "missing".chars() {
+            deck.handle_key(
+                KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+                &mut app,
+            );
+        }
+        assert!(deck.visible_attention_indices(&app).is_empty());
+
+        deck.handle_key(
+            KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+            &mut app,
+        );
+        assert_eq!(deck.visible_attention_indices(&app), vec![0]);
+        deck.on_tick(&mut app);
+        assert_eq!(deck.inbox_selected, 0);
+        assert_eq!(app.delegator.as_ref().unwrap().attention(), &[request]);
+
+        deck.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut app);
+        assert!(!deck.searching);
+        assert!(deck.inbox_query.is_empty());
+        assert_eq!(deck.visible_attention_indices(&app), vec![0]);
+    }
+
+    #[test]
     fn empty_attention_view_does_not_fall_back_to_the_roster() {
         let app = App::new("s", false);
         let mut deck = AgentDeck::new();
@@ -1062,5 +1272,36 @@ mod tests {
         }
         assert!(text.contains("No requests waiting for you"), "{text}");
         assert!(!text.contains("No delegated runs yet"), "{text}");
+    }
+
+    #[test]
+    fn inbox_search_renders_an_explicit_empty_filter_result() {
+        let temp = tempfile::tempdir().expect("temporary agent directory");
+        let mut delegator = memnoth_agent::Delegator::new(temp.path().join("agents"));
+        let run = delegator.root(None, "reviewer", "check API").expect("run");
+        delegator
+            .queue_attention(&run.agent_id, "question", "Which API?")
+            .expect("request");
+        let mut app = App::new("s", false);
+        app.delegator = Some(delegator);
+        let mut deck = AgentDeck::new();
+        deck.mode = Mode::Inbox;
+        deck.inbox_query = "absent".to_string();
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| deck.render(frame, frame.area(), &app))
+            .expect("draw agent deck");
+        let buffer = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+        assert!(text.contains("No requests match this search"), "{text}");
+        assert!(text.contains("0 of 1"), "{text}");
     }
 }
