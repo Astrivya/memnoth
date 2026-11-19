@@ -28,7 +28,6 @@ pub struct AgentDeck {
     visible: bool,
     children: Vec<ChildInfo>,
     selected: usize,
-    list_state: ListState,
     /// Tree order (parents first, indented) versus spawn order.
     tree_view: bool,
     /// Case-insensitive filter over role, task, run ID and model.
@@ -49,7 +48,6 @@ impl AgentDeck {
             visible: false,
             children: Vec::new(),
             selected: 0,
-            list_state: ListState::default(),
             tree_view: false,
             query: String::new(),
             searching: false,
@@ -73,7 +71,6 @@ impl AgentDeck {
         } else {
             self.selected = self.selected.min(self.visible().len().saturating_sub(1));
         }
-        self.list_state.select(Some(self.selected));
     }
 
     /// Roster rows in view order: tree view walks actual parent links; flat
@@ -160,6 +157,20 @@ impl AgentDeck {
 
     fn selected_child(&self) -> Option<&ChildInfo> {
         self.visible().into_iter().nth(self.selected)
+    }
+
+    /// Bound rendered roster rows to the available terminal height. The full
+    /// selection index stays stable while only a centered viewport is built.
+    fn row_window(total: usize, selected: usize, viewport: usize) -> std::ops::Range<usize> {
+        let count = total.min(viewport);
+        if count == 0 {
+            return 0..0;
+        }
+        let start = selected
+            .min(total.saturating_sub(1))
+            .saturating_sub(count / 2)
+            .min(total - count);
+        start..start + count
     }
 
     /// Attention requests in their original inbox order, filtered by fields
@@ -302,7 +313,6 @@ impl Overlay for AgentDeck {
 
     fn show(&mut self) {
         self.visible = true;
-        self.list_state.select(Some(0));
     }
 
     fn on_open(&mut self, app: &mut App) {
@@ -320,7 +330,6 @@ impl Overlay for AgentDeck {
         {
             self.selected = index;
         }
-        self.list_state.select(Some(self.selected));
     }
 
     fn on_tick(&mut self, app: &mut App) {
@@ -406,7 +415,6 @@ impl Overlay for AgentDeck {
                 }
                 _ => {}
             }
-            self.list_state.select(Some(self.selected));
             return OverlayAction::None;
         }
         match key.code {
@@ -420,7 +428,6 @@ impl Overlay for AgentDeck {
                     Mode::Roster => {
                         self.query.clear();
                         self.selected = 0;
-                        self.list_state.select(Some(0));
                     }
                     Mode::Inbox => {
                         self.inbox_query.clear();
@@ -449,7 +456,6 @@ impl Overlay for AgentDeck {
                         let len = self.visible().len();
                         if len > 0 {
                             self.selected = self.selected.saturating_sub(1);
-                            self.list_state.select(Some(self.selected));
                             self.peeked = None;
                         }
                     }
@@ -465,7 +471,6 @@ impl Overlay for AgentDeck {
                         let len = self.visible().len();
                         if len > 0 {
                             self.selected = (self.selected + 1).min(len - 1);
-                            self.list_state.select(Some(self.selected));
                             self.peeked = None;
                         }
                     }
@@ -551,7 +556,6 @@ impl Overlay for AgentDeck {
                 });
                 if let Some(index) = selected_index {
                     self.selected = index;
-                    self.list_state.select(Some(index));
                 }
                 OverlayAction::None
             }
@@ -743,6 +747,9 @@ impl Overlay for AgentDeck {
             .as_ref()
             .map(|delegator| delegator.attention().len())
             .unwrap_or(0);
+        let viewport = list_area.height.saturating_sub(1) as usize;
+        let roster_window = Self::row_window(visible.len(), self.selected, viewport);
+        let inbox_window = Self::row_window(visible_attention.len(), self.inbox_selected, viewport);
         let mut rows: Vec<ListItem<'static>> = if self.mode == Mode::Inbox {
             app.delegator
                 .as_ref()
@@ -750,6 +757,8 @@ impl Overlay for AgentDeck {
                     visible_attention
                         .iter()
                         .enumerate()
+                        .skip(inbox_window.start)
+                        .take(inbox_window.len())
                         .filter_map(|(visible_index, source_index)| {
                             let request = delegator.attention().get(*source_index)?;
                             let selected = visible_index == self.inbox_selected;
@@ -777,6 +786,8 @@ impl Overlay for AgentDeck {
             visible
                 .iter()
                 .enumerate()
+                .skip(roster_window.start)
+                .take(roster_window.len())
                 .map(|(index, child)| {
                     let selected = index == self.selected;
                     let status_color = match child.status {
@@ -876,13 +887,18 @@ impl Overlay for AgentDeck {
             height: list_area.height.saturating_sub(1),
             ..list_area
         };
-        if self.mode == Mode::Inbox {
-            let mut inbox_state = ListState::default();
-            inbox_state.select(Some(self.inbox_selected));
-            frame.render_stateful_widget(list, content_area, &mut inbox_state);
-        } else {
-            frame.render_stateful_widget(list, content_area, &mut self.list_state);
-        }
+        let mut list_state = ListState::default();
+        let selected_in_window = match self.mode {
+            Mode::Roster if !visible.is_empty() => {
+                Some(self.selected.saturating_sub(roster_window.start))
+            }
+            Mode::Inbox if !visible_attention.is_empty() => {
+                Some(self.inbox_selected.saturating_sub(inbox_window.start))
+            }
+            _ => None,
+        };
+        list_state.select(selected_in_window);
+        frame.render_stateful_widget(list, content_area, &mut list_state);
 
         if show_rail || compact_detail_area.is_some() {
             let detail_area = if show_rail {
@@ -1012,7 +1028,6 @@ mod tests {
             .iter()
             .position(|child| child.agent_id == selected.agent_id)
             .unwrap();
-        deck.list_state.select(Some(deck.selected));
 
         // Add a descendant to another branch while the selected run stays put.
         app.delegator
@@ -1026,7 +1041,18 @@ mod tests {
             deck.selected_child().map(|child| child.agent_id.as_str()),
             Some(selected.agent_id.as_str())
         );
-        assert_eq!(deck.list_state.selected(), Some(deck.selected));
+    }
+
+    #[test]
+    fn high_fanout_roster_window_is_bounded_and_keeps_selection_visible() {
+        let middle = AgentDeck::row_window(10_000, 5_000, 12);
+        assert_eq!(middle.len(), 12);
+        assert!(middle.contains(&5_000));
+
+        let end = AgentDeck::row_window(10_000, 9_999, 12);
+        assert_eq!(end, 9_988..10_000);
+
+        assert_eq!(AgentDeck::row_window(10, 0, 0), 0..0);
     }
 
     #[test]
