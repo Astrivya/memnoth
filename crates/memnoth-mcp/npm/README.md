@@ -30,19 +30,13 @@ repository URL aligned with the GitHub repository because npm uses it to bind th
 trusted publisher. The `dist` job in `.github/workflows/release.yml` uses Node 22.14.0,
 npm 11.5.1, and `id-token: write` for npm's GitHub Actions OIDC publishing.
 
-### First publication (temporary token bootstrap)
+### One-time first publication and trusted publisher setup
 
 npm cannot configure a trusted publisher until the package exists. For the first
-publication only:
-
-1. Create `@astrivya/mcp` on npm by publishing the first verified release with a
-   short-lived, package-scoped npm automation token that has publish access. Do not
-   paste the token into source, a workflow file, or chat.
-2. Add it to the GitHub repository as the Actions secret `NPM_TOKEN`.
-3. Run the normal tagged release workflow. It publishes the verified tarball with
-   `NPM_TOKEN` and provenance; the same tarball is attached to the GitHub release.
-
-### Switch to trusted publishing
+publication only, publish the verified release tarball interactively from a
+maintainer's npm account that has publish access to the `astrivya` organization.
+Do not add an npm token to GitHub Actions or commit local npm credentials. After
+the package exists:
 
 After the package exists, open the package's settings on npmjs.com and add a trusted
 publisher with:
@@ -54,7 +48,7 @@ publisher with:
 - GitHub environment: leave empty (the release job does not use an environment)
 
 After saving the publisher, set the GitHub repository Actions variable
-`NPM_TRUSTED_PUBLISHING` to `true`, then remove `NPM_TOKEN` from Actions secrets.
+`NPM_TRUSTED_PUBLISHING` to `true`, then remove any `NPM_TOKEN` Actions secret.
 The workflow uses OIDC only when that variable is enabled. With neither publishing
 method configured, it skips npm publication and still attaches the verified package
 tarball to the GitHub release. Verify the next normal publish succeeds and the npm
