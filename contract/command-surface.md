@@ -2777,7 +2777,7 @@ memnoth teams presence
 **Optional arguments:**
 
 - `--stale` (bool) — Show stale sessions only (default: false)
-- `--sync` (bool) — Sync presence with cloud (default: false)
+- `--sync` (bool) — Check cloud identity reachability; presence stays local (default: false)
 
 **Overlay:** `None` | **Danger:** `Safe` | **Auth:** `Cloud`
 

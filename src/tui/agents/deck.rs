@@ -789,7 +789,7 @@ mod tests {
     use crossterm::event::KeyModifiers;
 
     #[test]
-    fn refresh_keeps_the_selected_run_when_roster_order_changes() {
+    fn refresh_keeps_the_selected_run_when_a_child_is_added() {
         let temp = tempfile::tempdir().expect("temporary agent directory");
         let mut delegator = memnoth_agent::Delegator::new(temp.path().join("agents"));
         let root = delegator.root(None, "main", "parent run").unwrap();
@@ -801,6 +801,7 @@ mod tests {
         let mut app = App::new("s", false);
         app.delegator = Some(delegator);
         let mut deck = AgentDeck::new();
+        deck.tree_view = true;
         deck.refresh(&app);
         deck.selected = deck
             .ordered()
@@ -809,9 +810,7 @@ mod tests {
             .unwrap();
         deck.list_state.select(Some(deck.selected));
 
-        // Tree mode groups the actual child below its parent while refresh
-        // brings in another root and descendant.
-        deck.tree_view = true;
+        // Add a descendant to another branch while the selected run stays put.
         app.delegator
             .as_mut()
             .unwrap()
