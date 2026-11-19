@@ -924,7 +924,11 @@ fn legacy_initialize(msg: &Value) -> Option<Value> {
     let Some(params) = msg.get("params").and_then(Value::as_object) else {
         return Some(invalid("initialize params must be an object"));
     };
-    if !params.get("protocolVersion").is_some_and(Value::is_string) {
+    if !params
+        .get("protocolVersion")
+        .and_then(Value::as_str)
+        .is_some_and(|version| !version.trim().is_empty())
+    {
         return Some(invalid("initialize requires a string protocolVersion"));
     }
     if !params.get("capabilities").is_some_and(Value::is_object) {
@@ -933,8 +937,14 @@ fn legacy_initialize(msg: &Value) -> Option<Value> {
     let Some(client_info) = params.get("clientInfo").and_then(Value::as_object) else {
         return Some(invalid("initialize requires an object clientInfo"));
     };
-    if !client_info.get("name").is_some_and(Value::is_string)
-        || !client_info.get("version").is_some_and(Value::is_string)
+    if !client_info
+        .get("name")
+        .and_then(Value::as_str)
+        .is_some_and(|name| !name.trim().is_empty())
+        || !client_info
+            .get("version")
+            .and_then(Value::as_str)
+            .is_some_and(|version| !version.trim().is_empty())
     {
         return Some(invalid("clientInfo requires string name and version"));
     }
