@@ -306,7 +306,12 @@ impl Overlay for AgentDeck {
     fn handle_key(&mut self, key: KeyEvent, app: &mut App) -> OverlayAction {
         if self.searching {
             match key.code {
-                KeyCode::Esc | KeyCode::Enter => self.searching = false,
+                KeyCode::Esc => {
+                    self.searching = false;
+                    self.query.clear();
+                    self.selected = 0;
+                }
+                KeyCode::Enter => self.searching = false,
                 KeyCode::Backspace => {
                     self.query.pop();
                     self.selected = 0;
@@ -593,7 +598,7 @@ impl Overlay for AgentDeck {
             vertical[0],
         );
 
-        if self.children.is_empty() && inbox_len == 0 {
+        if self.mode == Mode::Roster && self.children.is_empty() && inbox_len == 0 {
             let empty = vec![
                 Line::from(Span::styled(
                     "No delegated runs yet",
@@ -1003,10 +1008,12 @@ mod tests {
 
         deck.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut app);
         assert!(!deck.searching);
-        assert_eq!(deck.query, "api");
-        deck.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut app);
         assert!(deck.query.is_empty());
         assert_eq!(deck.visible().len(), 2);
+        assert!(matches!(
+            deck.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut app),
+            OverlayAction::Close
+        ));
     }
 
     #[test]
