@@ -735,12 +735,12 @@ impl Overlay for AgentDeck {
         let section_title = if self.mode == Mode::Inbox {
             format!("Needs you  ({inbox_len})")
         } else if !self.query.is_empty() {
-            format!(
-                "Runs  ·  {} of {}  ·  {}",
-                visible.len(),
-                self.children.len(),
-                self.query
-            )
+            let counts = format!("Runs  ·  {} of {}", visible.len(), self.children.len());
+            if self.searching {
+                counts
+            } else {
+                format!("{counts}  ·  {}", self.query)
+            }
         } else if inbox_len > 0 {
             format!("Runs  ·  {inbox_len} needs you")
         } else {
