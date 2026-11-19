@@ -86,12 +86,12 @@ jobs:
       - name: Command crate registry schema
         run: cargo run --quiet -p memnoth-command -- schema --check
 
-  # nextest runs independent test binaries concurrently; Cargo's test runner
-  # starts them one at a time. Windows keeps three non-overlapping scopes to
-  # bound compile cost. Ubuntu and macOS also run doctests, which nextest does
-  # not execute.
+  # nextest partitions the full test inventory into explicit slices. Every
+  # scope lists every slice in this static matrix, and --no-tests=fail makes a
+  # stale/empty shard fail visibly. Workspace doctests remain on one shard per
+  # Unix platform because nextest does not execute them.
   test:
-    name: test (${{ matrix.label }})
+    name: test (${{ matrix.label }}, ${{ matrix.shard }}/${{ matrix.shards }})
     runs-on: ${{ matrix.os }}
     # Test assertions do not need DWARF/PDB debug information. Omitting these
     # symbols reduces artifact and cache size without changing assertions or
@@ -105,9 +105,45 @@ jobs:
           - label: ubuntu-latest
             os: ubuntu-latest
             args: --workspace
+            shard: 1
+            shards: 3
+            cache_writer: true
+            doctests: true
+          - label: ubuntu-latest
+            os: ubuntu-latest
+            args: --workspace
+            shard: 2
+            shards: 3
+            cache_writer: false
+            doctests: false
+          - label: ubuntu-latest
+            os: ubuntu-latest
+            args: --workspace
+            shard: 3
+            shards: 3
+            cache_writer: false
+            doctests: false
           - label: macos-latest
             os: macos-latest
             args: --workspace
+            shard: 1
+            shards: 3
+            cache_writer: true
+            doctests: true
+          - label: macos-latest
+            os: macos-latest
+            args: --workspace
+            shard: 2
+            shards: 3
+            cache_writer: false
+            doctests: false
+          - label: macos-latest
+            os: macos-latest
+            args: --workspace
+            shard: 3
+            shards: 3
+            cache_writer: false
+            doctests: false
           - label: windows-latest, unit
             os: windows-latest
             # `--bins` here would be wrong: it forces a libtest harness onto
@@ -115,12 +151,51 @@ jobs:
             # `test = false` precisely because they have no libtest entry point.
             args: --workspace --lib
             installer: true
+            shard: 1
+            shards: 4
+            cache_writer: true
+          - label: windows-latest, unit
+            os: windows-latest
+            args: --workspace --lib
+            shard: 2
+            shards: 4
+            cache_writer: false
+          - label: windows-latest, unit
+            os: windows-latest
+            args: --workspace --lib
+            shard: 3
+            shards: 4
+            cache_writer: false
+          - label: windows-latest, unit
+            os: windows-latest
+            args: --workspace --lib
+            shard: 4
+            shards: 4
+            cache_writer: false
           - label: windows-latest, memnoth integration
             os: windows-latest
             args: --package memnoth --tests
+            shard: 1
+            shards: 2
+            cache_writer: false
+          - label: windows-latest, memnoth integration
+            os: windows-latest
+            args: --package memnoth --tests
+            shard: 2
+            shards: 2
+            cache_writer: false
           - label: windows-latest, other integration
             os: windows-latest
             args: --workspace --exclude memnoth --tests
+            shard: 1
+            shards: 2
+            cache_writer: false
+          - label: windows-latest, other integration
+            os: windows-latest
+            args: --workspace --exclude memnoth --tests
+            shard: 2
+            shards: 2
+            cache_writer: false
     steps:
       - uses: actions/checkout@v4
 
@@ -128,9 +203,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          # Retain workspace test binaries across runs; Cargo fingerprints
-          # invalidate changed sources without discarding unchanged crates.
+          # Keep the existing job/OS cache identity. Only one matrix row per OS
+          # may save it: Linux and macOS each have their own writer, while the
+          # Windows unit shard is the sole writer shared by all three scopes.
           cache-workspace-crates: "true"
+          save-if: ${{ matrix.cache_writer }}
 
       - name: Install nextest
         uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
@@ -163,11 +240,11 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          cargo nextest run ${{ matrix.args }} --locked 2>&1 | tee test-output.log
+          cargo nextest run ${{ matrix.args }} --locked --no-tests=fail --partition slice:${{ matrix.shard }}/${{ matrix.shards }} 2>&1 | tee test-output.log
           { grep -E "FAILED|panicked at" test-output.log | head -40; } >> "$GITHUB_STEP_SUMMARY" || true
 
       - name: Run workspace doctests
-        if: matrix.args == '--workspace'
+        if: matrix.doctests
         run: cargo test --workspace --doc --locked
 
   pinned-model-ci:
