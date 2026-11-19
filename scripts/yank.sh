@@ -7,7 +7,7 @@
 # update can pick the bad one. The yanked directory carries a YANKED marker with
 # the reason and the time, which is what an operator reads three weeks later.
 #
-#   ./yank.sh 0.1.0-beta.4 --out dist --reason "broken completions"
+#   ./yank.sh 0.1.0-beta.5 --out dist --reason "broken completions"
 #
 # Exit codes: 0 yanked, 1 nothing to point `latest` at, 2 usage.
 set -euo pipefail

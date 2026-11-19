@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-beta.5] - 2026-11-19
+
+### Fixed - Release
+
+- Regenerated the man page version footer so the published command reference
+  matches this release.
+
 ## [0.1.0-beta.4] - 2026-11-19
 
 ### Fixed - Release
