@@ -211,7 +211,7 @@ jobs:
             artifact="$artifact.zip"
             # A relative destination: 7z is a native executable and Git Bash
             # mangles a POSIX absolute path into something it cannot open.
-            (cd "$stage" && 7z a -tzip "../../$artifact.zip" memnoth.exe memnoth-mcp.exe README.md > /dev/null)
+            (cd "$stage" && 7z a -tzip "../../$artifact" memnoth.exe memnoth-mcp.exe README.md > /dev/null)
           else
             artifact="$artifact.tar.gz"
             tar -czf "$artifact" -C "$stage" memnoth memnoth-mcp README.md
