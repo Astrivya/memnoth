@@ -272,21 +272,21 @@ impl Overlay for AgentDeck {
             }
             KeyCode::Enter => {
                 if self.mode == Mode::Inbox {
-                    // Answering a request removes it from the inbox and opens
-                    // the child at the prompt that answers it (W13-23).
-                    if let Some(delegator) = app.delegator.as_mut()
-                        && let Some(id) = delegator
-                            .attention()
-                            .get(self.inbox_selected)
-                            .map(|r| r.id.clone())
-                        && let Some(taken) = delegator.take_attention(&id)
+                    // Keep it pending while the user reviews and drafts a
+                    // response. Focus removes it only after the steer succeeds.
+                    if let Some(request) = app
+                        .delegator
+                        .as_ref()
+                        .and_then(|d| d.attention().get(self.inbox_selected))
+                        .cloned()
                     {
-                        app.focus_agent = Some(taken.run_id.clone());
+                        app.focus_agent = Some(request.run_id.clone());
+                        app.focus_attention = Some(request.id.clone());
                         app.push(
                             crate::tui::app::EntryRole::Info,
                             format!(
-                                "attention {} answered at {} — focus opened",
-                                taken.id, taken.run_id
+                                "attention {} opened for {} — still waiting for your response",
+                                request.id, request.run_id
                             ),
                         );
                         return OverlayAction::Push(OverlayKind::Focus);
@@ -298,6 +298,7 @@ impl Overlay for AgentDeck {
                 if let Some(child) = self.selected_child() {
                     app.focus_agent = Some(child.agent_id.clone());
                 }
+                app.focus_attention = None;
                 OverlayAction::Push(OverlayKind::Focus)
             }
             KeyCode::Char(' ') => {
@@ -343,6 +344,7 @@ impl Overlay for AgentDeck {
                     && let Some(child) = self.selected_child()
                 {
                     app.focus_agent = Some(child.agent_id.clone());
+                    app.focus_attention = None;
                     return OverlayAction::Push(OverlayKind::Focus);
                 }
                 OverlayAction::None
@@ -688,5 +690,35 @@ impl Overlay for AgentDeck {
             ("Ctrl+i", "interrupt subtree"),
             ("Esc/q", "close"),
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::KeyModifiers;
+
+    #[test]
+    fn opening_attention_keeps_it_pending_until_focus_sends_a_response() {
+        let temp = tempfile::tempdir().expect("temporary agent directory");
+        let mut delegator = memnoth_agent::Delegator::new(temp.path().join("agents"));
+        let child = delegator
+            .root(None, "review", "inspect the change")
+            .expect("child run");
+        let request = delegator
+            .queue_attention(&child.agent_id, "question", "Which API should I check?")
+            .expect("attention request");
+
+        let mut app = App::new("s", false);
+        app.delegator = Some(delegator);
+        let mut deck = AgentDeck::new();
+        deck.mode = Mode::Inbox;
+
+        let action = deck.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut app);
+
+        assert!(matches!(action, OverlayAction::Push(OverlayKind::Focus)));
+        assert_eq!(app.focus_agent.as_deref(), Some(child.agent_id.as_str()));
+        assert_eq!(app.focus_attention.as_deref(), Some(request.id.as_str()));
+        assert_eq!(app.delegator.as_ref().unwrap().attention(), &[request]);
     }
 }

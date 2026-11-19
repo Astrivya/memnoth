@@ -648,6 +648,9 @@ pub struct App {
     pub delegation_root: Option<String>,
     /// The child the Focus overlay is showing, chosen in the Deck or Trace.
     pub focus_agent: Option<String>,
+    /// Attention request being answered in Focus; it stays in the inbox until
+    /// the user successfully sends a response to that child.
+    pub focus_attention: Option<String>,
     /// Channel for provider test results from background threads
     pub provider_test_tx: mpsc::Sender<ProviderTestResult>,
     pub provider_test_rx: mpsc::Receiver<ProviderTestResult>,
@@ -831,6 +834,7 @@ impl App {
             delegator: None,
             delegation_root: None,
             focus_agent: None,
+            focus_attention: None,
             model: String::new(),
             context_window_used: None,
             context_window_size: None,
