@@ -249,7 +249,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          artifact=$(ls memnoth-${{ matrix.target }}.tar.gz memnoth-${{ matrix.target }}.zip 2>/dev/null | head -n 1)
+          artifact=""
+          for candidate in "memnoth-${{ matrix.target }}.tar.gz" "memnoth-${{ matrix.target }}.zip"; do
+            if [ -f "$candidate" ]; then
+              artifact="$candidate"
+              break
+            fi
+          done
           [ -n "$artifact" ] || { echo "no macOS archive to notarize" >&2; exit 1; }
           xcrun notarytool store-credentials "memnoth" \
               --apple-id "$APPLE_ID" \
@@ -293,7 +299,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          artifact=$(ls memnoth-${{ matrix.target }}.tar.gz memnoth-${{ matrix.target }}.zip 2>/dev/null | head -n 1)
+          artifact=""
+          for candidate in "memnoth-${{ matrix.target }}.tar.gz" "memnoth-${{ matrix.target }}.zip"; do
+            if [ -f "$candidate" ]; then
+              artifact="$candidate"
+              break
+            fi
+          done
           [ -n "$artifact" ] || { echo "no archive to digest" >&2; exit 1; }
           if command -v sha256sum > /dev/null 2>&1; then
             digest=$(sha256sum "$artifact" | awk '{print $1}')
