@@ -469,9 +469,24 @@ fn tasks_update_is_acknowledged_rather_than_unknown() {
 
 #[test]
 fn registry_manifest_profile_counts_match_the_table() {
+    let root = manifest();
     let published =
-        manifest()["_meta"]["io.modelcontextprotocol.registry/publisher-provided"]["profiles"]
-            .clone();
+        root["_meta"]["io.modelcontextprotocol.registry/publisher-provided"]["profiles"].clone();
+    let package_profile_description = root["packages"][0]["environmentVariables"]
+        .as_array()
+        .and_then(|variables| {
+            variables
+                .iter()
+                .find(|variable| variable["name"].as_str() == Some("MEMNOTH_MCP_PROFILE"))
+        })
+        .and_then(|variable| variable["description"].as_str())
+        .expect("server.json must describe the npm package's MCP profile setting");
+    let package_readme = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("npm/README.md"),
+    )
+    .expect("read the npm package README");
+    let default_profile = Profile::parse_strict(None)
+        .expect("the standalone server must have a valid default profile");
     for (name, profile) in [
         ("micro", Profile::Micro),
         ("memory", Profile::Memory),
@@ -487,7 +502,39 @@ fn registry_manifest_profile_counts_match_the_table() {
             "server.json publishes the wrong size for '{name}': a registry entry that \
                  overstates the surface is how a host installs a tool list it then cannot afford"
         );
+        if name != "agent" {
+            assert!(
+                package_profile_description.contains(&format!("{name}={actual}")),
+                "server.json's npm package description must publish the actual {name} profile size ({actual})"
+            );
+            assert!(
+                package_readme
+                    .lines()
+                    .any(|line| line.starts_with(&format!("| `{name}` | {actual} |"))),
+                "npm/README.md must publish the actual {name} profile size ({actual})"
+            );
+        }
     }
+    assert!(
+        package_profile_description.contains(&format!("Default: {}", default_profile.name())),
+        "server.json's npm package description must match the standalone server's default profile"
+    );
+    assert_eq!(
+        root["packages"][0]["environmentVariables"]
+            .as_array()
+            .and_then(|variables| {
+                variables
+                    .iter()
+                    .find(|variable| variable["name"].as_str() == Some("MEMNOTH_MCP_PROFILE"))
+            })
+            .and_then(|variable| variable["default"].as_str()),
+        Some(default_profile.name()),
+        "server.json must expose the standalone server's default MCP profile"
+    );
+    assert!(
+        package_readme.contains(&format!("default profile is `{}`", default_profile.name())),
+        "npm/README.md must document the standalone server's default profile"
+    );
 }
 
 /// The `//!` profile table at the top of this file is the first surface a

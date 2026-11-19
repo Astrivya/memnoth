@@ -358,7 +358,7 @@ pub enum Profile {
     /// Code-intelligence profile: the KG navigation verbs, the same index
     /// health set, and the filesystem/git toolbox.
     Code,
-    /// Full profile: every non-agent tool (51). There is deliberately NO
+    /// Full profile: every non-agent tool (47). There is deliberately NO
     /// allowlist for Full — `allows` is unconditional for it, so a new tool
     /// is reachable the moment it is defined; never a second list.
     Full,

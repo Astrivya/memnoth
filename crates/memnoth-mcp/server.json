@@ -111,8 +111,8 @@
             "coord",
             "full"
           ],
-          "default": "full",
-          "description": "Tool surface to expose: micro (4 tools), memory (21), code (26), coord (12), full (52), agent (6, HTTP only). Default: full.",
+          "default": "memory",
+          "description": "Tool surface to expose: micro=4, memory=21, code=19, coord=14, full=47. Default: memory.",
           "name": "MEMNOTH_MCP_PROFILE"
         }
       ],
