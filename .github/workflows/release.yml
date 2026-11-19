@@ -551,8 +551,8 @@ jobs:
       #
       #   curl -fsSL https://github.com/astrivya/memnoth/releases/latest/download/install.sh | sh
       #
-      # A staging host is MEMNOTH_INSTALL_BASE=https://<host>/dist, which is the
-      # tree inside memnoth-dist-<tag>.tar.gz.
+      # A staging host can serve the uploaded `dist/` artifact tree directly at
+      # MEMNOTH_INSTALL_BASE=https://<host>/dist.
       #
       # A tag push creates a draft. Publishing is a human action, so an
       # automated run can never make an unverified build "latest".
@@ -574,7 +574,6 @@ jobs:
             dist/install.sh
             dist/install.ps1
             dist/SHA256SUMS
-            memnoth-dist-${{ steps.layout.outputs.tag }}.tar.gz
 
   # SLSA provenance for the release, attesting that the published artifacts
   # were produced by this workflow from the tagged commit.
