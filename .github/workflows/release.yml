@@ -703,3 +703,70 @@ jobs:
       - uses: actions/attest-build-provenance@v1
         with:
           subject-path: "dist/**"
+
+  # Post-publish contract check. `dist` has already published the npm package
+  # and attached the assets; this job re-reads the bundle this run actually
+  # built and checks that every install surface still agrees: the manifest,
+  # the version in Cargo.toml, the five archives and their sidecars, the two
+  # installers, and npm's `latest` dist-tag. It runs the same check a human can
+  # run locally — it does not keep a second target list in this workflow.
+  #
+  # The check is stdlib-only Python, so there is nothing to install here. It
+  # exits non-zero only on a FAIL. A null minisign signature is a WARN: the
+  # signing secret is not configured on every runner, and refusing to publish
+  # over that would change release behaviour silently. The summary step below
+  # says so explicitly. Enable `--require-signature` only after
+  # MEMNOTH_MINISIGN_SECRET_KEY is provisioned for this workflow.
+  install-surface:
+    name: install surface check
+    needs: dist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # The same dist artifact the release attached, so the check describes the
+      # bytes users download rather than a rebuild.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: memnoth-dist-${{ needs.dist.outputs.tag }}
+          path: dist
+
+      - name: verify freshly built install surface
+        run: python3 scripts/check-install-surface.py --local dist --cargo Cargo.toml
+
+      # Opt-in: the site that serves /dist may be updated after the release job
+      # finishes. Enable MEMNOTH_CHECK_LIVE_INSTALL_SURFACE only once the
+      # deployment serves this tag; a live check fails closed when offline.
+      - name: verify deployed install surface
+        if: ${{ vars.MEMNOTH_CHECK_LIVE_INSTALL_SURFACE == 'true' }}
+        env:
+          LIVE_BASE: ${{ vars.MEMNOTH_INSTALL_BASE || 'https://memnoth.astrivya.ai/dist' }}
+        run: python3 scripts/check-install-surface.py --live "$LIVE_BASE" --cargo Cargo.toml
+
+      - name: record signature policy in the job summary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "### Install surface"
+            echo
+            echo "Verified the freshly built \`dist/\` bundle against Cargo.toml, the"
+            echo "two installers and npm's \`latest\` dist-tag."
+            if python3 -c 'import json,sys; d=json.load(open("dist/latest/manifest.json")); sys.exit(0 if d.get("signatures",{}).get("minisign") else 1)'; then
+              echo
+              echo "The release is minisign-signed; \`mn update\` can verify it."
+            else
+              echo
+              echo "> **WARNING:** this release has a null \`signatures.minisign\`."
+              echo "> \`mn update\` refuses an unsigned release, so it installs from the"
+              echo "> script but cannot self-update. This check reports a WARN rather"
+              echo "> than a FAIL because the signing secret is not configured on every"
+              echo "> runner. \`--require-signature\` is intentionally not used here;"
+              echo "> make it a gate only after \`MEMNOTH_MINISIGN_SECRET_KEY\` exists."
+            fi
+            echo
+            echo "The web \`/download\` page check (\`--web-root\`) is not run here:"
+            echo "that page lives in the web repository. Run the script with"
+            echo "\`--web-root\` from a checkout that has both repositories."
+          } >> "$GITHUB_STEP_SUMMARY"
