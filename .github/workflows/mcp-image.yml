@@ -64,7 +64,7 @@ jobs:
 
   build-arm64:
     name: Build linux/arm64 MCP server
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-22.04-arm
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -83,7 +83,13 @@ jobs:
         run: |
           work="$(mktemp -d)"
           cargo build --release --locked --target aarch64-unknown-linux-gnu -p memnoth-mcp
-          target/aarch64-unknown-linux-gnu/release/memnoth-mcp \
+          binary=target/aarch64-unknown-linux-gnu/release/memnoth-mcp
+          max_glibc="$(readelf -W --version-info "$binary" | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' | sort -Vu | tail -n1)"
+          if [[ -n "$max_glibc" ]] && dpkg --compare-versions "${max_glibc#GLIBC_}" gt 2.36; then
+            echo "arm64 binary requires $max_glibc, newer than Debian Bookworm's glibc 2.36" >&2
+            exit 1
+          fi
+          "$binary" \
             --selftest --db "$work/smoke.db"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -160,14 +166,24 @@ jobs:
           deployed=""
           for _ in $(seq 1 60); do
             deployed="$(curl -fsS --max-time 10 "$state_url" 2>/dev/null || true)"
-            if printf '%s' "$deployed" | python3 -c '
+            marker_state="$(printf '%s' "$deployed" | python3 -c '
           import json, os, sys
           try:
               state = json.load(sys.stdin)
           except Exception:
-              raise SystemExit(1)
-          raise SystemExit(0 if state.get("status") == "ok" and state.get("revision") == os.environ["GITHUB_SHA"] else 1)
-          '; then
+              raise SystemExit(0)
+          if state.get("revision") != os.environ["GITHUB_SHA"]:
+              raise SystemExit(0)
+          if state.get("status") == "failed":
+              print("failed: " + str(state.get("detail") or "deployment rolled back"))
+          elif state.get("status") == "ok":
+              print("ok")
+          ' 2>/dev/null || true)"
+            if [[ "$marker_state" == failed:* ]]; then
+              echo "production reported this revision failed: ${marker_state#failed: }" >&2
+              exit 1
+            fi
+            if [[ "$marker_state" == ok ]]; then
               break
             fi
             sleep 10
