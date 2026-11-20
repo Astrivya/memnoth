@@ -23,6 +23,14 @@ name: release
 #   * the Windows archive is Authenticode-signed when a certificate is
 #     configured; without one it ships unsigned, which is the honest default.
 #
+# The minisign secret key is a GitHub Actions secret named
+# `MEMNOTH_MINISIGN_SECRET_KEY`. dist.sh reads that variable as a PATH to a key
+# file, not as the key itself, so this workflow writes the secret into a 0600
+# temp file and exports only the path. The matching PUBLIC key is public: it is
+# committed as `minisign.pub` in this repository, served by the site at
+# `/minisign.pub`, and compiled into every shipped binary as
+# `MEMNOTH_MINISIGN_PUBKEY` so `mn update` verifies against it by default.
+#
 # SBOM (CycloneDX + SPDX) and SLSA provenance are generated for every
 # published artifact.
 #
@@ -85,6 +93,11 @@ jobs:
     name: build (${{ matrix.target }})
     needs: verify
     runs-on: ${{ matrix.os }}
+    env:
+      # Compiled into every shipped binary by option_env! in memnoth-update, so
+      # `mn update` verifies SHA256SUMS against our key without any configuration.
+      # The matching secret key never appears in a build job.
+      MEMNOTH_MINISIGN_PUBKEY: 'RWSDhmQUkjBxUYq1DlNa3BJFOxAvo1X9S2lg2IGwLiIh/x7Dbc+f6oHt'
     strategy:
       fail-fast: false
       matrix:
@@ -118,7 +131,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          key: ${{ matrix.target }}
+          # The suffix forces one clean rebuild so the baked-in pubkey above is
+          # actually compiled into the artifacts. It is a cache key, not an
+          # artifact name; the build matrix and filenames are unchanged.
+          key: ${{ matrix.target }}-pubkey1
 
       # Two packages, not one. `memnoth mcp serve` execs a separate
       # `memnoth-mcp` server, so an archive that carries only `memnoth` has no
@@ -444,14 +460,35 @@ jobs:
         with:
           path: artifacts
 
+      # dist.sh treats MEMNOTH_MINISIGN_SECRET_KEY as a PATH to a key file
+      # (`minisign -S -s "$MEMNOTH_MINISIGN_SECRET_KEY"`). The GitHub secret holds
+      # the key's CONTENT, so write it to a 0600 file here and export only that
+      # path. The content is never echoed or passed as the variable's value.
+      - name: install minisign
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends minisign
+
+      - name: write minisign signing key
+        env:
+          MEMNOTH_MINISIGN_KEY_CONTENT: ${{ secrets.MEMNOTH_MINISIGN_SECRET_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          key_file="$RUNNER_TEMP/memnoth-minisign.key"
+          printf '%s\n' "$MEMNOTH_MINISIGN_KEY_CONTENT" > "$key_file"
+          chmod 600 "$key_file"
+          echo "MEMNOTH_MINISIGN_SECRET_KEY=$key_file" >> "$GITHUB_ENV"
+
       - name: assemble dist
         id: layout
         shell: bash
-        env:
-          # dist.sh signs SHA256SUMS with minisign when this is set, and the
-          # signature is embedded in manifest.json for `mn update` to verify.
-          MEMNOTH_MINISIGN_SECRET_KEY: ${{ secrets.MEMNOTH_MINISIGN_SECRET_KEY }}
         run: |
+          # dist.sh reads MEMNOTH_MINISIGN_SECRET_KEY as the 0600 key-file path
+          # exported above: it signs SHA256SUMS and embeds the signature in
+          # manifest.json for `mn update` to verify before downloading anything.
           set -euo pipefail
           manifest_version=$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -n 1)
           if [ -z "$manifest_version" ]; then
@@ -511,6 +548,11 @@ jobs:
           echo "channel=$channel" >> "$GITHUB_OUTPUT"
           echo "publishing $tag on the $channel channel"
           MEMNOTH_CHANNEL="$channel" sh scripts/dist.sh --from artifacts --version "$tag" --out dist
+
+      - name: remove minisign signing key
+        if: always()
+        shell: bash
+        run: rm -f "$RUNNER_TEMP/memnoth-minisign.key"
 
       - name: assemble standalone npm package
         id: npm-package
@@ -602,6 +644,50 @@ jobs:
             dist/install.sh
             dist/install.ps1
             dist/SHA256SUMS
+
+      # The one-line commands fetch the website's /dist copies, but a user who
+      # downloads an installer from the release must get the exact bytes this
+      # run built. --clobber replaces a stale asset left by a re-published tag.
+      - name: re-upload installers from this dist bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.layout.outputs.tag }}"
+          gh release upload "$tag" \
+            dist/install.sh \
+            dist/install.ps1 \
+            --clobber \
+            --repo "$GITHUB_REPOSITORY"
+
+      # Prove what users download matches this bundle: pull both assets back
+      # and compare bytes. cmp covers size and hash; a mismatch fails the job.
+      - name: verify release installers match dist bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.layout.outputs.tag }}"
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
+            --json assets --jq '.assets[] | [.name, .size] | @tsv'
+          verify="$(mktemp -d)"
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" \
+            --pattern 'install.sh' \
+            --pattern 'install.ps1' \
+            --dir "$verify"
+          for installer in install.sh install.ps1; do
+            test -f "$verify/$installer" || {
+              echo "release is missing asset $installer" >&2
+              exit 1
+            }
+            cmp "dist/$installer" "$verify/$installer" || {
+              echo "release asset $installer differs from dist/$installer" >&2
+              exit 1
+            }
+          done
+          echo "release installers byte-for-byte match the freshly built dist bundle"
 
       - name: choose non-regressing npm channel tag
         id: npm-publish-tag
@@ -712,11 +798,10 @@ jobs:
   # run locally — it does not keep a second target list in this workflow.
   #
   # The check is stdlib-only Python, so there is nothing to install here. It
-  # exits non-zero only on a FAIL. A null minisign signature is a WARN: the
-  # signing secret is not configured on every runner, and refusing to publish
-  # over that would change release behaviour silently. The summary step below
-  # says so explicitly. Enable `--require-signature` only after
-  # MEMNOTH_MINISIGN_SECRET_KEY is provisioned for this workflow.
+  # exits non-zero only on a FAIL. The signing key is now provisioned for this
+  # workflow, so the freshly built bundle is checked with `--require-signature`:
+  # a null minisign signature is a FAIL here, not a WARN. The summary step below
+  # still records the signature state for the release.
   install-surface:
     name: install surface check
     needs: dist
@@ -732,7 +817,7 @@ jobs:
           path: dist
 
       - name: verify freshly built install surface
-        run: python3 scripts/check-install-surface.py --local dist --cargo Cargo.toml
+        run: python3 scripts/check-install-surface.py --local dist --cargo Cargo.toml --require-signature
 
       # Opt-in: the site that serves /dist may be updated after the release job
       # finishes. Enable MEMNOTH_CHECK_LIVE_INSTALL_SURFACE only once the
@@ -760,10 +845,10 @@ jobs:
               echo
               echo "> **WARNING:** this release has a null \`signatures.minisign\`."
               echo "> \`mn update\` refuses an unsigned release, so it installs from the"
-              echo "> script but cannot self-update. This check reports a WARN rather"
-              echo "> than a FAIL because the signing secret is not configured on every"
-              echo "> runner. \`--require-signature\` is intentionally not used here;"
-              echo "> make it a gate only after \`MEMNOTH_MINISIGN_SECRET_KEY\` exists."
+              echo "> script but cannot self-update. The local check above runs with"
+              echo "> \`--require-signature\` and has failed this job; this note only"
+              echo "> describes a stale or manually assembled \`dist/\`, not a bundle"
+              echo "> this workflow produced."
             fi
             echo
             echo "The web \`/download\` page check (\`--web-root\`) is not run here:"
