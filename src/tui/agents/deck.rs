@@ -15,6 +15,22 @@ use crate::tui::agents::{AgentStatus, ChildInfo};
 use crate::tui::app::App;
 use crate::tui::overlays::{Overlay, OverlayAction, OverlayKind};
 
+fn truncate_row(text: &str, width: usize) -> String {
+    let mut chars = text.chars();
+    let value: String = chars.by_ref().take(width).collect();
+    if chars.next().is_some() && width > 0 {
+        format!(
+            "{}…",
+            value
+                .chars()
+                .take(width.saturating_sub(1))
+                .collect::<String>()
+        )
+    } else {
+        value
+    }
+}
+
 /// Which list the cursor is on: the roster, or the attention inbox.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
@@ -200,11 +216,15 @@ impl AgentDeck {
     }
 
     /// Inspector lines for the selected child: status, task, lineage, model,
-    /// worktree, cost, and any peeked detail (log tail or receipt).
+    /// worktree, cost, recent event names, and any explicitly peeked detail.
     fn inspector_lines(&self, app: &App) -> Vec<String> {
         let Some(child) = self.selected_child() else {
             return vec!["nothing selected".to_string()];
         };
+        let events = app
+            .delegator
+            .as_ref()
+            .map(|delegator| delegator.read_log(&child.agent_id));
         let mut lines = vec![
             child.role.clone(),
             child.task.clone(),
@@ -229,14 +249,54 @@ impl AgentDeck {
         if let Some(worktree) = &child.worktree {
             lines.push(format!("worktree: {worktree}"));
         }
-        if let Some(cost) = self.cost_of(app, child) {
+        if let Some(cost) = events
+            .as_ref()
+            .and_then(|result| result.as_ref().ok())
+            .and_then(|events| Self::cost_from_events(events))
+        {
             lines.push(format!("cost: {cost}"));
         }
+        lines.push(String::new());
+        lines.push("recent activity".to_string());
+        lines.extend(match events.as_ref() {
+            None => vec!["no activity yet".to_string()],
+            Some(Err(_)) => vec!["activity unavailable".to_string()],
+            Some(Ok(events)) => Self::activity_lines(events),
+        });
         if let Some(peeked) = &self.peeked {
             lines.push("---".to_string());
             lines.extend(peeked.lines().map(str::to_string));
         }
         lines
+    }
+
+    /// Show recent event kinds without their payloads. Payloads can contain
+    /// user text, paths, or tool output; Space remains the explicit opt-in for
+    /// the existing detailed log peek.
+    fn activity_lines(events: &[memnoth_agent::ChildEvent]) -> Vec<String> {
+        if events.is_empty() {
+            return vec!["waiting for the first event".to_string()];
+        }
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+            .unwrap_or_default();
+        events
+            .iter()
+            .rev()
+            .take(5)
+            .map(|event| {
+                let age_seconds = now_ms.saturating_sub(event.at_ms).max(0) / 1_000;
+                let age = if age_seconds < 60 {
+                    format!("{age_seconds}s ago")
+                } else if age_seconds < 3_600 {
+                    format!("{}m ago", age_seconds / 60)
+                } else {
+                    format!("{}h ago", age_seconds / 3_600)
+                };
+                format!("{}  ·  {age}", event.event)
+            })
+            .collect()
     }
 
     /// The root-to-child path, so a high fan-out reads as lineage rather than
@@ -258,9 +318,7 @@ impl AgentDeck {
     }
 
     /// Cost from the child's `run.done` receipt, when it has one.
-    fn cost_of(&self, app: &App, child: &ChildInfo) -> Option<String> {
-        let delegator = app.delegator.as_ref()?;
-        let events = delegator.read_log(&child.agent_id).ok()?;
+    fn cost_from_events(events: &[memnoth_agent::ChildEvent]) -> Option<String> {
         let done = events.iter().find(|e| e.event == "run.done")?;
         let value: serde_json::Value = serde_json::from_str(&done.detail).ok()?;
         let tokens = value.get("cost")?.get("tokens")?.as_u64()?;
@@ -495,6 +553,61 @@ impl Overlay for AgentDeck {
                 }
                 OverlayAction::None
             }
+            KeyCode::PageUp | KeyCode::PageDown => {
+                let page = 8usize;
+                let forward = key.code == KeyCode::PageDown;
+                match self.mode {
+                    Mode::Roster => {
+                        let len = self.visible().len();
+                        if forward {
+                            self.selected = self
+                                .selected
+                                .saturating_add(page)
+                                .min(len.saturating_sub(1));
+                        } else {
+                            self.selected = self.selected.saturating_sub(page);
+                        }
+                        self.peeked = None;
+                    }
+                    Mode::Inbox => {
+                        let len = self.visible_attention_indices(app).len();
+                        if forward {
+                            self.inbox_selected = self
+                                .inbox_selected
+                                .saturating_add(page)
+                                .min(len.saturating_sub(1));
+                        } else {
+                            self.inbox_selected = self.inbox_selected.saturating_sub(page);
+                        }
+                    }
+                }
+                OverlayAction::None
+            }
+            KeyCode::Home | KeyCode::End => {
+                let end = key.code == KeyCode::End;
+                match self.mode {
+                    Mode::Roster => {
+                        self.selected = if end {
+                            self.visible().len().saturating_sub(1)
+                        } else {
+                            0
+                        };
+                        self.peeked = None;
+                    }
+                    Mode::Inbox => {
+                        self.inbox_selected = if end {
+                            self.visible_attention_indices(app).len().saturating_sub(1)
+                        } else {
+                            0
+                        };
+                    }
+                }
+                OverlayAction::None
+            }
+            KeyCode::F(5) => {
+                self.refresh(app);
+                OverlayAction::None
+            }
             KeyCode::Enter => {
                 if self.mode == Mode::Inbox {
                     // Keep it pending while the user reviews and drafts a
@@ -657,18 +770,16 @@ impl Overlay for AgentDeck {
             .as_ref()
             .map(|d| d.attention().len())
             .unwrap_or(0);
-        let counts = self.children.iter().fold([0usize; 4], |mut counts, child| {
-            match child.status {
-                AgentStatus::Running | AgentStatus::Starting => counts[0] += 1,
-                AgentStatus::Waiting => counts[1] += 1,
-                AgentStatus::Done => counts[2] += 1,
-                AgentStatus::Failed
-                | AgentStatus::Killed
-                | AgentStatus::Orphaned
-                | AgentStatus::Parked => counts[3] += 1,
-            }
-            counts
-        });
+        let active = self
+            .children
+            .iter()
+            .filter(|child| matches!(child.status, AgentStatus::Running | AgentStatus::Starting))
+            .count();
+        let waiting = self
+            .children
+            .iter()
+            .filter(|child| child.status == AgentStatus::Waiting)
+            .count();
         let compact = area.width < 100;
         let header_height = 2.min(area.height);
         let footer_height = 1.min(area.height.saturating_sub(header_height));
@@ -683,8 +794,8 @@ impl Overlay for AgentDeck {
             .split(area);
 
         let summary = format!(
-            "{} running  ·  {} waiting  ·  {} returned  ·  {} stopped",
-            counts[0], counts[1], counts[2], counts[3]
+            "{} runs  ·  {active} active  ·  {waiting} waiting",
+            self.children.len()
         );
         let heading = if self.searching {
             let query = match self.mode {
@@ -762,7 +873,12 @@ impl Overlay for AgentDeck {
             .as_ref()
             .map(|delegator| delegator.attention().len())
             .unwrap_or(0);
-        let viewport = list_area.height.saturating_sub(1) as usize;
+        let row_height = if self.mode == Mode::Roster && list_area.width < 72 {
+            2
+        } else {
+            1
+        };
+        let viewport = list_area.height.saturating_sub(1) as usize / row_height;
         let roster_window = Self::row_window(visible.len(), self.selected, viewport);
         let inbox_window = Self::row_window(visible_attention.len(), self.inbox_selected, viewport);
         let mut rows: Vec<ListItem<'static>> = if self.mode == Mode::Inbox {
@@ -820,30 +936,58 @@ impl Overlay for AgentDeck {
                     } else {
                         String::new()
                     };
-                    ListItem::new(Line::from(vec![
-                        Span::styled(
-                            if selected { "› " } else { "  " },
-                            Style::default().fg(Color::Cyan),
-                        ),
-                        Span::styled(
-                            format!("{} ", child.status.glyph()),
-                            Style::default().fg(status_color),
-                        ),
-                        Span::styled(
-                            format!("{indent}{}", child.role),
-                            Style::default()
-                                .fg(if selected { Color::White } else { Color::Gray })
-                                .add_modifier(if selected {
-                                    Modifier::BOLD
-                                } else {
-                                    Modifier::empty()
-                                }),
-                        ),
-                        Span::styled(
-                            format!("   {}", child.task),
-                            Style::default().fg(Color::DarkGray),
-                        ),
-                    ]))
+                    let marker = Span::styled(
+                        if selected { "› " } else { "  " },
+                        Style::default().fg(Color::Cyan),
+                    );
+                    let glyph = Span::styled(
+                        format!("{} ", child.status.glyph()),
+                        Style::default().fg(status_color),
+                    );
+                    let role = Span::styled(
+                        format!("{indent}{}", child.role),
+                        Style::default()
+                            .fg(if selected { Color::White } else { Color::Gray })
+                            .add_modifier(if selected {
+                                Modifier::BOLD
+                            } else {
+                                Modifier::empty()
+                            }),
+                    );
+                    if list_area.width < 72 {
+                        ListItem::new(vec![
+                            Line::from(vec![marker, glyph, role]),
+                            Line::from(vec![
+                                Span::raw("    "),
+                                Span::styled(
+                                    truncate_row(
+                                        &child.task,
+                                        list_area.width.saturating_sub(5) as usize,
+                                    ),
+                                    Style::default().fg(Color::DarkGray),
+                                ),
+                            ]),
+                        ])
+                    } else {
+                        ListItem::new(Line::from(vec![
+                            marker,
+                            glyph,
+                            role,
+                            Span::styled(
+                                format!(
+                                    "   {}",
+                                    truncate_row(
+                                        &child.task,
+                                        list_area
+                                            .width
+                                            .saturating_sub(child.role.chars().count() as u16 + 7)
+                                            as usize,
+                                    )
+                                ),
+                                Style::default().fg(Color::DarkGray),
+                            ),
+                        ]))
+                    }
                 })
                 .collect()
         };
@@ -918,19 +1062,26 @@ impl Overlay for AgentDeck {
 
         if show_rail || compact_detail_area.is_some() {
             let detail_area = if show_rail {
-                let rail = columns[1];
-                Rect {
-                    x: rail.x.saturating_add(1),
-                    y: rail.y,
-                    width: rail.width.saturating_sub(1),
-                    height: rail.height,
-                }
+                columns[1]
             } else {
                 compact_detail_area.expect("compact details were allocated")
             };
+            if show_rail {
+                frame.render_widget(
+                    Block::default()
+                        .borders(Borders::LEFT)
+                        .border_style(Style::default().fg(Color::DarkGray)),
+                    detail_area,
+                );
+            }
+            let inset = if show_rail { 2 } else { 0 };
+            let content_x = detail_area.x.saturating_add(inset);
+            let content_width = detail_area.width.saturating_sub(inset);
             let detail_title = Rect {
-                height: 1,
-                ..detail_area
+                x: content_x,
+                y: detail_area.y,
+                width: content_width,
+                height: 1.min(detail_area.height),
             };
             frame.render_widget(
                 Paragraph::new(if self.mode == Mode::Inbox {
@@ -962,18 +1113,17 @@ impl Overlay for AgentDeck {
             } else {
                 self.inspector_lines(app)
             };
+            let detail_content = Rect {
+                x: content_x,
+                y: detail_area.y.saturating_add(1),
+                width: content_width,
+                height: detail_area.height.saturating_sub(1),
+            };
             frame.render_widget(
                 Paragraph::new(detail.join("\n"))
                     .style(Style::default().fg(Color::Gray))
-                    .wrap(ratatui::widgets::Wrap { trim: true })
-                    .block(if show_rail {
-                        Block::default()
-                            .borders(Borders::LEFT)
-                            .border_style(Style::default().fg(Color::DarkGray))
-                    } else {
-                        Block::default()
-                    }),
-                detail_area,
+                    .wrap(ratatui::widgets::Wrap { trim: true }),
+                detail_content,
             );
         }
 
@@ -982,17 +1132,19 @@ impl Overlay for AgentDeck {
                 if self.searching {
                     "type to filter  ·  Enter finish  ·  Esc clear  ·  Ctrl+U clear"
                 } else if !self.inbox_query.is_empty() {
-                    "↑↓ select  ·  / search  ·  Enter respond  ·  Esc clear filter"
+                    "↑↓ move  ·  Enter review  ·  / search  ·  Esc clear"
                 } else {
-                    "↑↓ select  ·  / search  ·  Enter respond  ·  Tab runs  ·  Esc back"
+                    "↑↓ move  ·  Enter review  ·  / search  ·  Tab runs"
                 }
             } else {
                 if self.searching {
                     "type to filter  ·  Enter finish  ·  Esc clear  ·  Ctrl+U clear"
                 } else if !self.query.is_empty() {
-                    "↑↓ select  ·  / search  ·  Enter open  ·  Esc clear filter"
+                    "↑↓ move  ·  Enter open  ·  / search  ·  Esc clear"
+                } else if area.width < 72 {
+                    "↑↓ move  ·  Enter open  ·  Tab view  ·  Esc close"
                 } else {
-                    "↑↓ select  ·  / search  ·  Enter open  ·  Esc back"
+                    "↑↓ move  ·  Enter open  ·  F5 refresh  ·  r revive  ·  x stop  ·  Tab inbox  ·  Esc close"
                 }
             })
             .style(Style::default().fg(Color::DarkGray)),
@@ -1003,6 +1155,9 @@ impl Overlay for AgentDeck {
     fn help_text(&self) -> Vec<(&'static str, &'static str)> {
         vec![
             ("↑↓", "navigate"),
+            ("Home/End", "first / last run"),
+            ("PgUp/PgDn", "move by page"),
+            ("F5", "refresh roster"),
             ("/", "search runs"),
             ("Enter", "open child / respond to request"),
             ("Tab", "runs ⇄ needs you"),
@@ -1074,6 +1229,232 @@ mod tests {
         let details = deck.inspector_lines(&app).join("\n");
         assert!(details.contains("state: ? waiting"), "{details}");
         assert!(details.contains("depth: 0"), "{details}");
+        assert!(details.contains("recent activity"), "{details}");
+    }
+
+    #[test]
+    fn default_activity_shows_event_names_without_event_payloads() {
+        let temp = tempfile::tempdir().expect("temporary agent directory");
+        let mut delegator = memnoth_agent::Delegator::new(temp.path().join("agents"));
+        let run = delegator
+            .root(None, "review", "inspect the change")
+            .unwrap();
+        delegator
+            .queue_attention(&run.agent_id, "question", "private prompt payload")
+            .expect("attention event");
+        let mut app = App::new("s", false);
+        app.delegator = Some(delegator);
+        let mut deck = AgentDeck::new();
+        deck.refresh(&app);
+
+        let run = deck.selected_child().unwrap();
+        let events = app
+            .delegator
+            .as_ref()
+            .unwrap()
+            .read_log(&run.agent_id)
+            .unwrap();
+        let activity = AgentDeck::activity_lines(&events).join("\n");
+        assert!(activity.contains("attention.queued"), "{activity}");
+        assert!(!activity.contains("private prompt payload"), "{activity}");
+    }
+
+    #[test]
+    fn explicit_refresh_updates_roster_and_keeps_selected_identity() {
+        let temp = tempfile::tempdir().expect("temporary agent directory");
+        let mut delegator = memnoth_agent::Delegator::new(temp.path().join("agents"));
+        let first = delegator.root(None, "first", "first task").unwrap();
+        let mut app = App::new("s", false);
+        app.delegator = Some(delegator);
+        let mut deck = AgentDeck::new();
+        deck.refresh(&app);
+        app.delegator
+            .as_mut()
+            .unwrap()
+            .root(None, "second", "second task")
+            .unwrap();
+
+        deck.handle_key(KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE), &mut app);
+
+        assert_eq!(deck.children.len(), 2);
+        assert_eq!(deck.selected_child().unwrap().agent_id, first.agent_id);
+    }
+
+    #[test]
+    fn stop_and_revive_keys_only_change_the_selected_run() {
+        let temp = tempfile::tempdir().expect("temporary agent directory");
+        let mut delegator = memnoth_agent::Delegator::new(temp.path().join("agents"));
+        let selected = delegator.root(None, "selected", "selected task").unwrap();
+        let sibling = delegator.root(None, "sibling", "sibling task").unwrap();
+        let mut app = App::new("s", false);
+        app.delegator = Some(delegator);
+        let mut deck = AgentDeck::new();
+        deck.refresh(&app);
+        deck.selected = deck
+            .visible()
+            .iter()
+            .position(|child| child.agent_id == selected.agent_id)
+            .unwrap();
+
+        deck.handle_key(
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+            &mut app,
+        );
+        assert_eq!(
+            app.delegator
+                .as_ref()
+                .unwrap()
+                .registry()
+                .get(&selected.agent_id)
+                .unwrap()
+                .status,
+            memnoth_agent::RunStatus::Cancelled
+        );
+        assert_eq!(
+            app.delegator
+                .as_ref()
+                .unwrap()
+                .registry()
+                .get(&sibling.agent_id)
+                .unwrap()
+                .status,
+            memnoth_agent::RunStatus::Pending
+        );
+
+        deck.handle_key(
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
+            &mut app,
+        );
+        assert_eq!(
+            app.delegator
+                .as_ref()
+                .unwrap()
+                .registry()
+                .get(&selected.agent_id)
+                .unwrap()
+                .status,
+            memnoth_agent::RunStatus::Pending
+        );
+    }
+
+    #[test]
+    fn enter_opens_the_selected_run_without_changing_the_parent_draft() {
+        let temp = tempfile::tempdir().expect("temporary agent directory");
+        let mut delegator = memnoth_agent::Delegator::new(temp.path().join("agents"));
+        let first = delegator.root(None, "first", "first task").unwrap();
+        let second = delegator.root(None, "second", "second task").unwrap();
+        let mut app = App::new("s", false);
+        app.input = "preserve this parent draft".to_string();
+        app.delegator = Some(delegator);
+        let mut deck = AgentDeck::new();
+        deck.refresh(&app);
+        deck.selected = deck
+            .visible()
+            .iter()
+            .position(|child| child.agent_id == second.agent_id)
+            .unwrap();
+
+        let action = deck.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut app);
+
+        assert!(matches!(action, OverlayAction::Push(OverlayKind::Focus)));
+        assert_eq!(app.focus_agent.as_deref(), Some(second.agent_id.as_str()));
+        assert_ne!(app.focus_agent.as_deref(), Some(first.agent_id.as_str()));
+        assert_eq!(app.input, "preserve this parent draft");
+    }
+
+    #[test]
+    fn roster_navigation_supports_home_end_and_page_keys() {
+        let temp = tempfile::tempdir().expect("temporary agent directory");
+        let mut delegator = memnoth_agent::Delegator::new(temp.path().join("agents"));
+        for index in 0..12 {
+            delegator
+                .root(None, &format!("agent-{index}"), "task")
+                .unwrap();
+        }
+        let mut app = App::new("s", false);
+        app.delegator = Some(delegator);
+        let mut deck = AgentDeck::new();
+        deck.refresh(&app);
+
+        deck.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE), &mut app);
+        assert_eq!(deck.selected, 11);
+        deck.handle_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE), &mut app);
+        assert_eq!(deck.selected, 3);
+        deck.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE), &mut app);
+        assert_eq!(deck.selected, 0);
+        deck.handle_key(
+            KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+            &mut app,
+        );
+        assert_eq!(deck.selected, 8);
+    }
+
+    #[test]
+    fn narrow_roster_uses_two_lines_per_run_without_clipping_the_task_row() {
+        let temp = tempfile::tempdir().expect("temporary agent directory");
+        let mut delegator = memnoth_agent::Delegator::new(temp.path().join("agents"));
+        delegator
+            .root(None, "scout", "inspect the narrow terminal layout")
+            .unwrap();
+        let mut app = App::new("s", false);
+        app.delegator = Some(delegator);
+        let mut deck = AgentDeck::new();
+        deck.refresh(&app);
+
+        let backend = ratatui::backend::TestBackend::new(60, 24);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| deck.render(frame, frame.area(), &app))
+            .expect("draw narrow agent deck");
+        let buffer = terminal.backend().buffer();
+        let text = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("scout"), "{text}");
+        assert!(
+            text.contains("inspect the narrow terminal layout"),
+            "{text}"
+        );
+        assert!(text.contains("recent activity"), "{text}");
+    }
+
+    #[test]
+    fn wide_deck_uses_a_borderless_roster_and_selected_run_rail() {
+        let temp = tempfile::tempdir().expect("temporary agent directory");
+        let mut delegator = memnoth_agent::Delegator::new(temp.path().join("agents"));
+        delegator
+            .root(None, "review", "inspect the selected run")
+            .unwrap();
+        let mut app = App::new("s", false);
+        app.delegator = Some(delegator);
+        let mut deck = AgentDeck::new();
+        deck.refresh(&app);
+
+        let backend = ratatui::backend::TestBackend::new(120, 32);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| deck.render(frame, frame.area(), &app))
+            .expect("draw wide agent deck");
+        let buffer = terminal.backend().buffer();
+        let text = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("Agent Deck"), "{text}");
+        assert!(text.contains("SELECTED RUN"), "{text}");
+        assert!(text.contains("recent activity"), "{text}");
+        assert!(!text.contains('┌') && !text.contains('┐'), "{text}");
+        assert!(text.contains("1 runs  ·  0 active  ·  1 waiting"), "{text}");
     }
 
     #[test]
