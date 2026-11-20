@@ -110,8 +110,22 @@ jobs:
             archive_args: --workspace
             doctests: true
           - os: windows-latest
-            scope: cli
-            archive_args: -p memnoth
+            scope: cli-lib
+            archive_args: -p memnoth --lib
+            doctests: false
+          - os: windows-latest
+            scope: cli-extra
+            archive_args: >-
+              -p memnoth --bins
+              --test ask_verb --test cli --test completion_check
+              --test config_explain --test demo_verb --test destructive_no_tty
+              --test docs_check --test docs_man --test exit_code_table
+              --test exit_codes --test help_verb --test provider
+              --test registry_parity --test release_manifest
+              --test schema_verb --test security --test slash_hierarchy
+              --test surfaces --test sync_crypto --test tui_pty
+              --test update_local_release --test version_surfaces
+              --test version_verb
             doctests: false
           - os: windows-latest
             scope: core
@@ -123,7 +137,14 @@ jobs:
               -p memnoth-lsp -p memnoth-mcp -p memnoth-mcp-auth
             doctests: false
           - os: windows-latest
-            scope: rest
+            scope: rest-a
+            archive_args: >-
+              -p memnoth-command-macros -p memnoth-embedding-wasm
+              -p memnoth-transport -p memnoth-mcp-client -p memnoth-protocol-v2
+              -p memnoth-sandbox -p memnoth-search -p memnoth-ui
+            doctests: false
+          - os: windows-latest
+            scope: rest-b
             archive_args: >-
               --workspace --exclude memnoth --exclude memnoth-agent
               --exclude memnoth-capability --exclude memnoth-engine
@@ -133,6 +154,10 @@ jobs:
               --exclude memnoth-skills --exclude memnoth-harness-api
               --exclude memnoth-ingest --exclude memnoth-lsp
               --exclude memnoth-mcp --exclude memnoth-mcp-auth
+              --exclude memnoth-command-macros --exclude memnoth-embedding-wasm
+              --exclude memnoth-transport --exclude memnoth-mcp-client
+              --exclude memnoth-protocol-v2 --exclude memnoth-sandbox
+              --exclude memnoth-search --exclude memnoth-ui
             doctests: false
     steps:
       - uses: actions/checkout@v4
@@ -148,7 +173,7 @@ jobs:
         with:
           tool: nextest@0.9.150
 
-      # The Windows `cli`, `core`, and `rest` scopes are a disjoint union of the
+      # Windows package and target scopes are a disjoint union of the
       # workspace packages. Both archives are executed by every Windows shard,
       # and each archive is partitioned independently so their test sets are
       # both covered across the complete shard matrix.
@@ -247,17 +272,13 @@ jobs:
         with:
           name: nextest-${{ matrix.os }}-workspace
 
-      - name: Download Windows CLI test archive
+      - name: Download Windows test archives
         if: matrix.os == 'windows-latest'
         uses: actions/download-artifact@v4
         with:
-          name: nextest-${{ matrix.os }}-cli
-
-      - name: Download remaining Windows test archive
-        if: matrix.os == 'windows-latest'
-        uses: actions/download-artifact@v4
-        with:
-          name: nextest-${{ matrix.os }}-rest
+          pattern: nextest-${{ matrix.os }}-*
+          path: .
+          merge-multiple: true
 
       # Each shard executes a disjoint slice without invoking Cargo or
       # recompiling test harnesses. On Windows the two package-disjoint archives
@@ -273,7 +294,7 @@ jobs:
           # Windows archives share dependency paths, so allow identical build
           # artifacts from the second archive to replace the first extraction.
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            archives=(nextest-cli.tar.zst nextest-core.tar.zst nextest-rest.tar.zst)
+            archives=(nextest-cli-lib.tar.zst nextest-cli-extra.tar.zst nextest-core.tar.zst nextest-rest-a.tar.zst nextest-rest-b.tar.zst)
             no_tests=pass
           else
             archives=(nextest-workspace.tar.zst)
