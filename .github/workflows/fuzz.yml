@@ -33,9 +33,13 @@ env:
 
 jobs:
   fuzz:
-    name: fuzz targets
+    name: fuzz ${{ matrix.target }}
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [config, mcp_framing, diff_parsing, provider_url, sync_manifest, frontmatter, security]
     steps:
       - uses: actions/checkout@v4
 
@@ -48,33 +52,31 @@ jobs:
 
       # The corpus is committed as seed input; this carries forward what each
       # run discovers so the next one starts ahead instead of from the seeds.
+      # Each target owns its cache path/key so parallel matrix jobs cannot
+      # read or write the same corpus.
       - name: Restore corpus
         uses: actions/cache@v4
         with:
-          path: fuzz/corpus
-          key: fuzz-corpus-${{ github.run_id }}
-          restore-keys: fuzz-corpus-
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
 
       # libFuzzer reads its own arguments with a single leading dash. The job
       # used to pass `--max_total_time=60`, which libFuzzer answered with
       # "did you mean '-max_total_time=60'" and then ignored, so every target
       # ran unbounded until the job timeout killed it.
-      - name: Fuzz each target
+      - name: Fuzz target
         env:
           BUDGET: ${{ inputs.seconds || '300' }}
-        run: |
-          for target in config mcp_framing diff_parsing provider_url sync_manifest frontmatter security; do
-            echo "::group::$target"
-            cargo fuzz run "$target" -O -- "-max_total_time=$BUDGET"
-            echo "::endgroup::"
-          done
+        run: cargo fuzz run "${{ matrix.target }}" -O -- "-max_total_time=$BUDGET"
 
       # A crashing input is written to fuzz/artifacts/<target>/ and a run that
-      # lost it would have to rediscover it from nothing.
+      # lost it would have to rediscover it from nothing. Artifact names and
+      # paths are per-target so parallel uploads do not conflict.
       - name: Keep reproducers
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: fuzz-artifacts
-          path: fuzz/artifacts
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}
           if-no-files-found: ignore
