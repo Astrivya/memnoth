@@ -43,7 +43,7 @@ pub fn ensure_config_dir() -> anyhow::Result<PathBuf> {
         .expect("home directory must be resolvable")
         .join(".memnoth");
 
-    std::fs::create_dir_all(&path)?;
+    ensure_directory(&path)?;
 
     #[cfg(windows)]
     {
@@ -73,4 +73,37 @@ pub fn ensure_config_dir() -> anyhow::Result<PathBuf> {
     }
 
     Ok(path)
+}
+
+fn ensure_directory(path: &std::path::Path) -> std::io::Result<()> {
+    if path.is_dir() {
+        return Ok(());
+    }
+    match std::fs::create_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && path.is_dir() => {
+            // A concurrent caller may have created the directory after the
+            // first check. Accept an existing directory/reparse point, but
+            // keep returning errors for files and broken links.
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(test)]
+mod config_dir_tests {
+    use super::ensure_directory;
+
+    #[test]
+    fn ensure_directory_accepts_existing_directory_and_rejects_file() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let existing = temp.path().join("existing");
+        std::fs::create_dir(&existing).expect("create directory");
+        ensure_directory(&existing).expect("existing directory is valid");
+
+        let file = temp.path().join("file");
+        std::fs::write(&file, b"file").expect("create file");
+        assert!(ensure_directory(&file).is_err());
+    }
 }

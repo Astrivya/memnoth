@@ -266,7 +266,9 @@ impl FileCredentialStore {
     /// Create a new file credential store at a custom path.
     pub async fn at_path(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
-        ensure_config_dir()?;
+        if path == default_credentials_path() {
+            ensure_config_dir()?;
+        }
 
         let store = Self {
             path,
