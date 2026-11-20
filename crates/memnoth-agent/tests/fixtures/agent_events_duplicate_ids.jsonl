@@ -1,0 +1,3 @@
+{"event":"run.start","agent_id":"d","at_ms":1,"detail":"a","id":"d:1","seq":1,"run_id":"d","session_id":"s-1","turn_id":null,"parent_id":null,"source":"delegator","state":"started","version":1}
+{"event":"tool.use","agent_id":"d","at_ms":2,"detail":"b","id":"d:2","seq":2,"run_id":"d","session_id":"s-1","turn_id":null,"parent_id":null,"source":"delegator","state":"tool_use","version":1}
+{"event":"run.done","agent_id":"d","at_ms":3,"detail":"c","id":"d:1","seq":3,"run_id":"d","session_id":"s-1","turn_id":null,"parent_id":null,"source":"delegator","state":"completed","version":1}

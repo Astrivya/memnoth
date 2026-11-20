@@ -1,0 +1,2 @@
+{"event":"run.start","agent_id":"t","at_ms":1,"detail":"go","id":"t:1","seq":1,"run_id":"t","session_id":"s-1","turn_id":null,"parent_id":null,"source":"delegator","state":"started","version":1}
+{"event":"tool.result","agent_id":"t","at_ms":2,"detail":"orphan_result","id":"t:2","seq":2,"run_id":"t","session_id":"s-1","turn_id":null,"parent_id":null,"source":"delegator","state":"unknown","version":1}

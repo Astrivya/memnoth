@@ -1,0 +1,3 @@
+{"event":"run.spawn","agent_id":"mix","at_ms":1,"detail":"spawn","id":"mix:1","seq":1,"run_id":"mix","session_id":"s-1","turn_id":null,"parent_id":null,"source":"delegator","state":"spawned","version":1}
+{"event":"tool.use","agent_id":"mix","at_ms":2,"detail":"legacy_tool"}
+{"event":"run.done","agent_id":"mix","at_ms":3,"detail":"done","id":"mix:2","seq":2,"run_id":"mix","session_id":"s-1","turn_id":null,"parent_id":null,"source":"delegator","state":"completed","version":1}
