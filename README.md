@@ -28,17 +28,23 @@ Memnoth keeps decisions, corrections, and the reasons behind them in a vault tha
 ## Install
 
 ```bash
-# Linux, macOS, Git Bash, WSL
+# Linux, macOS, Git Bash, WSL (POSIX sh works too: replace "| bash" with "| sh")
 curl -fsSL https://memnoth.astrivya.ai/install | bash
+
+# Windows (PowerShell): in production this URL serves the full installer
+irm https://memnoth.astrivya.ai/install.ps1 | iex
 
 # From source
 git clone https://github.com/astrivya/memnoth && cd memnoth/CLI && cargo install --path .
 
-# Windows: download memnoth-x86_64-pc-windows-msvc.zip
+# Or download a release archive by hand: memnoth-<triple>.zip on Windows and
+# memnoth-<triple>.tar.gz elsewhere. The five published triples are
+# x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu (both gnu, not musl),
+# x86_64-apple-darwin, aarch64-apple-darwin and x86_64-pc-windows-msvc.
 # https://github.com/astrivya/memnoth/releases
 ```
 
-The installer checks the release checksum and installs one binary under two names, `memnoth` and `mn`.
+The installer verifies the release's SHA-256 digest and installs one binary under two names, `memnoth` and `mn`; it also installs `memnoth-mcp` beside it when the archive carries one. The published **0.1.1** release is **unsigned**: both one-liners still verify the checksum and install, but `mn update` refuses an unsigned release until a new signed release is published. On Windows the root `/install.ps1` serves the full installer in production (the small bootstrap in the web repo is only what a plain web build serves).
 
 Add the MCP server to your editor without installing anything:
 
@@ -93,7 +99,9 @@ With a provider configured, the session runs a model turn over the same verbs yo
 ## MCP
 
 ```bash
-memnoth mcp add --clients cursor,codex   # omit --clients to detect installed clients
+memnoth mcp add --local --clients claude,cursor,codex,zed,opencode
+# --clients is comma-separated; omit it to detect installed clients.
+# --local registers a read-only stdio server against this vault, with no account or token.
 memnoth mcp doctor                       # what is registered, with which profile, and where
 ```
 
@@ -173,7 +181,7 @@ Good places to start:
 git clone https://github.com/astrivya/memnoth
 cd memnoth/CLI
 cargo build --release
-cargo test --workspace        # binary + 23 crates
+cargo test --workspace --locked        # binary + all workspace crates
 cargo fmt --all -- --check && cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
