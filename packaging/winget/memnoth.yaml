@@ -1,8 +1,19 @@
-# memnoth winget manifest
-# This file is a template - actual values (PackageVersion, InstallerUrl, InstallerSha256)
-# are populated by the release workflow during publish
+# memnoth winget manifest.
+#
+# Source template: packaging/winget/memnoth.yaml. The release workflow's
+# `populate winget manifest` step writes a filled copy to dist/<tag>/winget.yaml
+# with PackageVersion, the InstallerUrl tag, DisplayVersion and InstallerSha256
+# taken from the Windows zip built in that run. Submit the filled copy to
+# winget-pkgs, never this template: an unfilled digest will not pass review.
+#
+# Publishing is a human step: after the draft release is verified and made
+# public, download `winget.yaml` from that release and open the winget-pkgs PR
+# at manifests/a/Astrivya/memnoth/<version>/memnoth.yaml.
+#
+# ProductCode and UpgradeCode are stable identities, not release data, so they
+# are real GUIDs here. UpgradeCode must not change between versions.
 PackageIdentifier: Astrivya.memnoth
-PackageVersion: 0.1.0-beta.1
+PackageVersion: 0.1.1
 PackageName: memnoth
 PackageLocale: en-US
 Publisher: Astrivya
@@ -38,16 +49,16 @@ Commands:
 Installers:
   - Architecture: x64
     InstallerType: zip
-    InstallerUrl: https://github.com/astrivya/memnoth/releases/download/v0.1.0-beta.1/memnoth-x86_64-pc-windows-msvc.zip
+    InstallerUrl: https://github.com/astrivya/memnoth/releases/download/v0.1.1/memnoth-x86_64-pc-windows-msvc.zip
     InstallerSha256: PLACEHOLDER_SHA256
     Commands:
       - memnoth
       - mn
     AppsAndFeaturesEntries:
       - DisplayName: memnoth
-        DisplayVersion: 0.1.0-beta.1
-        ProductCode: "{PLACEHOLDER_PRODUCT_CODE}"
-        UpgradeCode: "{PLACEHOLDER_UPGRADE_CODE}"
+        DisplayVersion: 0.1.1
+        ProductCode: "{8E0EEFFA-AA06-5286-AC10-17D69C26E0B4}"
+        UpgradeCode: "{821F9114-6745-52E7-8FA9-BC8467DB16E5}"
     ExpectedReturnCodes:
       - InstallerReturnCode: 0
         ReturnResponse: success

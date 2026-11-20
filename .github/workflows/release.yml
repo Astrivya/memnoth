@@ -614,6 +614,41 @@ jobs:
         shell: bash
         run: rm -f "$RUNNER_TEMP/memnoth-minisign.key"
 
+      # The checked-in winget manifest is a template: its digest and version
+      # cannot be known until a release is built. Fill it from the Windows zip
+      # this run actually produced and attach the result as one *new* asset
+      # named `winget.yaml` beside that zip. No existing asset is renamed or
+      # replaced: the five archives, both installers and SHA256SUMS keep their
+      # names. Publishing to winget-pkgs stays a human step, described in the
+      # manifest header.
+      - name: populate winget manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.layout.outputs.tag }}"
+          version="${tag#v}"
+          zip="dist/$tag/memnoth-x86_64-pc-windows-msvc.zip"
+          [ -f "$zip" ] || { echo "no Windows zip at $zip; cannot fill the winget manifest" >&2; exit 1; }
+          sha=$(sha256sum "$zip" | awk '{print $1}')
+          [ "${#sha}" -eq 64 ] || { echo "bad SHA-256 for $zip: $sha" >&2; exit 1; }
+          case "$sha" in
+            *[!0-9a-f]*) echo "bad SHA-256 for $zip: $sha" >&2; exit 1 ;;
+          esac
+          out="dist/$tag/winget.yaml"
+          sed \
+            -e "s|^PackageVersion: .*|PackageVersion: $version|" \
+            -e "s|releases/download/[^/]*/|releases/download/$tag/|" \
+            -e "s|^    InstallerSha256: .*|    InstallerSha256: $sha|" \
+            -e "s|^        DisplayVersion: .*|        DisplayVersion: $version|" \
+            packaging/winget/memnoth.yaml > "$out"
+          # A placeholder published as an asset is worse than no manifest: the
+          # winget-pkgs pipeline would reject it. Fail here instead.
+          if grep -q 'PLACEHOLDER' "$out"; then
+            echo "winget manifest still contains a PLACEHOLDER after templating" >&2
+            exit 1
+          fi
+          grep -E '^(PackageVersion|    InstallerSha256|        DisplayVersion):' "$out"
+
       - name: assemble standalone npm package
         id: npm-package
         shell: bash
