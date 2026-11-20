@@ -361,7 +361,7 @@ jobs:
           npm install --global npm@11.5.1
           node --version | grep -Fx 'v22.14.0'
           npm --version | grep -Fx '11.5.1'
-          node -e 'const p=require("./crates/memnoth-mcp/npm/package.json"); const expected=`${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}.git`; if(typeof p.repository?.url!=="string" || p.repository.url.toLowerCase()!==expected.toLowerCase()) { console.error(`package repository must identify ${expected}`); process.exit(1) }'
+          node -e 'const p=require("./crates/memnoth-mcp/npm/package.json"); const expected=`${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}`; if(p.repository?.url!==expected) { console.error(`package repository must exactly match provenance URL ${expected}`); process.exit(1) }'
 
       - name: exercise npm assembler with fixture artifacts
         run: bash scripts/test-assemble-npm-mcp.sh
