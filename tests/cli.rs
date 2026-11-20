@@ -131,10 +131,9 @@ fn version_and_help_exit_zero() {
     let sandbox = Sandbox::new();
     let version = sandbox.run(&["--version"]);
     assert_eq!(version.code(), 0);
-    assert!(
-        version.text().starts_with("memnoth 0.1.0"),
-        "{}",
-        version.text()
+    assert_eq!(
+        version.text().trim(),
+        format!("memnoth {}", env!("CARGO_PKG_VERSION"))
     );
     let help = sandbox.run(&["--help"]);
     assert_eq!(help.code(), 0);

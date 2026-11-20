@@ -1,6 +1,6 @@
 [package]
 name = "memnoth-mcp"
-version = "0.1.0-beta.12"
+version = "0.1.1"
 # Spelled out rather than inherited: this crate is excluded from the workspace
 # (five of its path dependencies are not published here), and an excluded
 # package cannot resolve `workspace = true`. Inheriting would hide the real
@@ -29,21 +29,21 @@ serde_json = "1"
 anyhow = "1"
 # The tool-exposure table lives here so the server and the agent router answer
 # from one dataset instead of two lists that drift.
-memnoth-capability = { version = "0.1.0-beta.12", path = "../memnoth-capability" }
-memnoth-engine = { version = "0.1.0-beta.12", path = "../memnoth-engine" }
-memnoth-ingest = { version = "0.1.0-beta.12", path = "../memnoth-ingest" }
-memnoth-coord = { version = "0.1.0-beta.12", path = "../memnoth-coord" }
-memnoth-codegraph = { version = "0.1.0-beta.12", path = "../memnoth-codegraph", default-features = false }
+memnoth-capability = { version = "0.1.1", path = "../memnoth-capability" }
+memnoth-engine = { version = "0.1.1", path = "../memnoth-engine" }
+memnoth-ingest = { version = "0.1.1", path = "../memnoth-ingest" }
+memnoth-coord = { version = "0.1.1", path = "../memnoth-coord" }
+memnoth-codegraph = { version = "0.1.1", path = "../memnoth-codegraph", default-features = false }
 # W2.1: the cross-encoder reranker (`CrossEncoder::rerank`) and the embedding
 # primitives live here. Optional, behind this crate's `semantic` feature: the
 # dense arm and the reranker are the only things that need an ONNX runtime, and
 # both already have an "unavailable" path (`dense_ranking` -> `None`,
 # `cross_encoder()` -> `None`), so a minimal-profile build skips the whole
 # tract stack instead of paying for it in a crate that never runs it.
-memnoth-embedding = { version = "0.1.0-beta.12", path = "../memnoth-embedding", optional = true }
-memnoth-harness-api = { version = "0.1.0-beta.12", path = "../memnoth-harness-api" }
-memnoth-transport = { version = "0.1.0-beta.12", path = "../memnoth-transport" }
-memnoth-mcp-auth = { version = "0.1.0-beta.12", path = "../memnoth-mcp-auth", features = ["prometheus"] }
+memnoth-embedding = { version = "0.1.1", path = "../memnoth-embedding", optional = true }
+memnoth-harness-api = { version = "0.1.1", path = "../memnoth-harness-api" }
+memnoth-transport = { version = "0.1.1", path = "../memnoth-transport" }
+memnoth-mcp-auth = { version = "0.1.1", path = "../memnoth-mcp-auth", features = ["prometheus"] }
 rusqlite = { version = "0.41", features = ["bundled"] }
 url = "2"
 # The cloud ingest's HTTP client. Required, not optional: the previous

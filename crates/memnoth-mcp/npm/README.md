@@ -18,7 +18,7 @@ binary for the current platform, the launcher falls back to `memnoth` on `PATH`.
 ## Install
 
 ```bash
-npx -y @astrivya/mcp@beta --help    # show server options; does not start a server
+npx -y @astrivya/mcp@latest --help    # show server options; does not start a server
 ```
 
 The published package ships the server binary, so no separate Memnoth install is required.
@@ -77,7 +77,7 @@ default profile is `memory`; this example starts read-only:
   "mcpServers": {
     "memnoth": {
       "command": "npx",
-      "args": ["-y", "@astrivya/mcp@beta"],
+      "args": ["-y", "@astrivya/mcp@latest"],
       "env": {
         "MEMNOTH_MCP_DB": "/absolute/path/to/.memnoth/vault.db",
         "MEMNOTH_MCP_PROFILE": "memory",
@@ -98,7 +98,7 @@ the absolute path from `memnoth vault status`):
     "servers": {
       "memnoth": {
         "type": "local",
-        "command": ["npx", "-y", "@astrivya/mcp@beta"],
+        "command": ["npx", "-y", "@astrivya/mcp@latest"],
         "environment": {
           "MEMNOTH_MCP_DB": "/absolute/path/to/.memnoth/vault.db",
           "MEMNOTH_MCP_PROFILE": "memory",
@@ -117,7 +117,7 @@ codex mcp add memnoth \
   --env MEMNOTH_MCP_DB=/absolute/path/to/.memnoth/vault.db \
   --env MEMNOTH_MCP_PROFILE=memory \
   --env MEMNOTH_MCP_READ_ONLY=1 \
-  -- npx -y @astrivya/mcp@beta
+  -- npx -y @astrivya/mcp@latest
 ```
 
 Or add this to `~/.codex/config.toml` or a project `.codex/config.toml`:
@@ -125,7 +125,7 @@ Or add this to `~/.codex/config.toml` or a project `.codex/config.toml`:
 ```toml
 [mcp_servers.memnoth]
 command = "npx"
-args = ["-y", "@astrivya/mcp@beta"]
+args = ["-y", "@astrivya/mcp@latest"]
 
 [mcp_servers.memnoth.env]
 MEMNOTH_MCP_DB = "/absolute/path/to/.memnoth/vault.db"
@@ -140,7 +140,7 @@ claude mcp add --transport stdio \
   --env MEMNOTH_MCP_DB=/absolute/path/to/.memnoth/vault.db \
   --env MEMNOTH_MCP_PROFILE=memory \
   --env MEMNOTH_MCP_READ_ONLY=1 \
-  memnoth -- npx -y @astrivya/mcp@beta
+  memnoth -- npx -y @astrivya/mcp@latest
 ```
 
 For Zed, add the equivalent entry to its settings JSON:
@@ -150,7 +150,7 @@ For Zed, add the equivalent entry to its settings JSON:
   "context_servers": {
     "memnoth": {
       "command": "npx",
-      "args": ["-y", "@astrivya/mcp@beta"],
+      "args": ["-y", "@astrivya/mcp@latest"],
       "env": {
         "MEMNOTH_MCP_DB": "/absolute/path/to/.memnoth/vault.db",
         "MEMNOTH_MCP_PROFILE": "memory",
@@ -183,8 +183,8 @@ selects the vault the standalone server opens.
 ## Offline version check
 
 ```bash
-npx -y @astrivya/mcp@beta --version
-# 0.1.0-beta.12
+npx -y @astrivya/mcp@latest --version
+# 0.1.1
 ```
 
 The `--version` flag works completely offline without spawning the binary.

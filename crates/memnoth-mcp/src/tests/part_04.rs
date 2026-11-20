@@ -558,7 +558,7 @@ fn npm_onboarding_names_the_vault_and_distinguishes_registration_flows() {
         "servers",
         "claude mcp add --transport stdio",
         "MEMNOTH_MCP_READ_ONLY=1",
-        "@astrivya/mcp@beta",
+        "@astrivya/mcp@latest",
         "2025-11-25",
         "2026-07-28",
         "server/discover",
