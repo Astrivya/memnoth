@@ -109,6 +109,9 @@ $ErrorActionPreference = 'Stop'
 # Progress preference for cleaner output
 $ProgressPreference = 'SilentlyContinue'
 
+# A trailing slash would otherwise produce `//v0.1.1/…` in every URL.
+$BaseUrl = $BaseUrl.TrimEnd('/')
+
 # ------------------------------------------------------------ helpers
 function Write-Log {
     param(
@@ -226,13 +229,41 @@ function Get-InstallerWorkDirectory {
     throw 'No writable temporary directory with at least 128 MiB free. Set MEMNOTH_TEMP_DIR to a directory on a volume with enough space.'
 }
 
+function ConvertTo-ReleaseDir {
+    param([string]$Version)
+    # dist.sh names release directories with a leading `v`, while `mn version`
+    # and the manifest's `version` field carry the bare semver. Accept both.
+    if ($Version -eq 'latest' -or $Version.StartsWith('v')) { return $Version }
+    return "v$Version"
+}
+
 function Resolve-Version {
     param([string]$Channel, [string]$Version, [string]$BaseUrl)
     if ($Version -ne 'latest') {
-        return $Version
+        return (ConvertTo-ReleaseDir $Version)
     }
-    # For 'latest', we need to determine the latest version for the channel
-    # GitHub releases API: latest release per channel is tagged appropriately
+
+    $normalizedBase = $BaseUrl.TrimEnd('/')
+
+    # A dist tree states its own latest version in <base>/latest/manifest.json —
+    # the same document `mn update` reads. Use it for every non-GitHub base: the
+    # old code always called api.github.com, so `-BaseUrl <staging host>` still
+    # resolved against GitHub and installed the wrong release.
+    if ($normalizedBase -notlike '*/releases/download') {
+        $manifestUrl = "$normalizedBase/latest/manifest.json"
+        Write-Log "Resolving latest version from $manifestUrl"
+        try {
+            $latestManifest = Invoke-RestMethod -Uri $manifestUrl -UseBasicParsing -ErrorAction Stop
+            if ($latestManifest -and $latestManifest.version) {
+                return (ConvertTo-ReleaseDir ([string]$latestManifest.version))
+            }
+        } catch {
+            Write-Log "No usable manifest at $manifestUrl : $_" 'Warn'
+        }
+        Fail "Cannot resolve 'latest' at ${normalizedBase}: no manifest.json there"
+    }
+
+    # GitHub has no `latest` tag; its API is the only place that names one.
     $apiUrl = "https://api.github.com/repos/astrivya/memnoth/releases"
     Write-Log "Resolving latest version for channel '$Channel'..."
     try {
@@ -269,24 +300,25 @@ function Install-ViaWinget {
     }
 
     $pkgId = 'Astrivya.memnoth'
-    $args = @('install', '--id', $pkgId, '--source', 'winget', '--accept-source-agreements', '--accept-package-agreements')
+    # Do not overwrite the automatic $args variable; use a named argument list.
+    $wingetArgs = @('install', '--id', $pkgId, '--source', 'winget', '--accept-source-agreements', '--accept-package-agreements')
 
     if ($Version -ne 'latest') {
-        $args += '--version', $Version.TrimStart('v')
+        $wingetArgs += '--version', $Version.TrimStart('v')
     }
 
     if ($Force) {
-        $args += '--force'
+        $wingetArgs += '--force'
     }
 
     if ($Preview) {
-        Write-Log "[Preview] Would run: winget $($args -join ' ')"
+        Write-Log "[Preview] Would run: winget $($wingetArgs -join ' ')"
         return
     }
 
-    Write-Log "Running: winget $($args -join ' ')"
+    Write-Log "Running: winget $($wingetArgs -join ' ')"
     try {
-        $result = & winget @args
+        $result = & winget @wingetArgs
         $exitCode = $LASTEXITCODE
         if ($exitCode -ne 0) {
             Fail "winget install failed with exit code $exitCode"
@@ -316,6 +348,7 @@ Write-Log "Resolved version: $resolvedVersion"
 $target = 'x86_64-pc-windows-msvc'
 $artifact = "memnoth-$target.zip"
 $expectedFromManifest = $null
+$releaseManifest = $null
 $manifestUrl = "$BaseUrl/$resolvedVersion/manifest.json"
 try {
     $releaseManifest = Invoke-RestMethod -Uri $manifestUrl -UseBasicParsing -ErrorAction Stop
@@ -327,6 +360,9 @@ try {
     }
 } catch {
     Write-Log "No manifest at $manifestUrl; using sidecar checksum" 'Debug'
+}
+if ($releaseManifest -and $releaseManifest.signatures -and -not $releaseManifest.signatures.minisign) {
+    Write-Log "This release is unsigned; a script install verifies its SHA-256 digest, but 'mn update' will refuse it until a signature is published." 'Warn'
 }
 $archiveUrl = "$BaseUrl/$resolvedVersion/$artifact"
 $checksumUrl = "$archiveUrl.sha256"
@@ -362,7 +398,9 @@ try {
             if ($csStatus -ne 0 -or -not (Test-Path $checksumPath) -or (Get-Item $checksumPath).Length -eq 0) {
                 Fail "Checksum not found at $checksumUrl; refusing to install unverified binary. Use -NoVerify to skip."
             }
-            $expected = (Get-Content $checksumPath -Raw).Split(' ')[0].ToLowerInvariant()
+            # Trim first: a BOM or trailing newline in a sidecar must not become
+            # part of the digest and turn a good download into a false mismatch.
+            $expected = (Get-Content $checksumPath -Raw).Trim().Split(' ')[0].ToLowerInvariant()
         }
         if (-not $expected) { Fail "Could not read expected checksum" }
         $actual = Get-Sha256 $archivePath

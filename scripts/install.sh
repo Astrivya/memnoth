@@ -13,6 +13,11 @@
 #   MEMNOTH_VERSION       which release to install          (default: latest)
 #   MEMNOTH_INSTALL_DIR   where the binary lands            (default: ~/.local/bin)
 #   MEMNOTH_TEMP_DIR      where downloads are staged        (default: writable system temp)
+#   MEMNOTH_TARGET        force one of the five built triples (tests / staging only)
+#
+# A local dist tree is a valid base: pass either a POSIX path under Git Bash
+# (`/d/path/to/dist`) or a `file://` URL. No HTTP server is needed to test a
+# release locally, and no curl/wget is used for that path.
 #
 # Nothing here falls back to a package manager, a `cargo install`, or a
 # "latest from the default branch" build. Those install something that is not
@@ -51,9 +56,14 @@ Installs two names for one binary: memnoth, and mn beside it.
 
 Environment:
   MEMNOTH_INSTALL_BASE  directory holding <version>/<artifact> (default: the
-                        GitHub release for this repository)
-  MEMNOTH_VERSION       release to install (default: latest)
+                        GitHub release for this repository). A local path or a
+                        file:// URL works too; no HTTP server is required.
+  MEMNOTH_VERSION       release to install (default: latest). A bare semver is
+                        mapped to the v-prefixed release directory.
   MEMNOTH_INSTALL_DIR   destination directory (default: ~/.local/bin)
+  MEMNOTH_TEMP_DIR      download staging directory (default: system temp)
+  MEMNOTH_TARGET        one of the five published triples; overrides uname for
+                        cross-platform testing. Not needed for normal installs.
 USAGE
 }
 
@@ -70,51 +80,79 @@ case "${1:-}" in
 esac
 
 # ---------------------------------------------------------------- platform
-KERNEL=$(uname -s 2>/dev/null || echo unknown)
-MACHINE=$(uname -m 2>/dev/null || echo unknown)
+# There are exactly five triples this product builds. Deriving the archive
+# extension, the unpacker and the binary name from the triple — instead of from
+# three separate `case` arms — is what keeps a new target from being half
+# wired: one string decides all four, and an unknown string is a hard error.
+if [ -n "${MEMNOTH_TARGET:-}" ]; then
+    case "$MEMNOTH_TARGET" in
+        x86_64-unknown-linux-gnu | aarch64-unknown-linux-gnu \
+        | x86_64-apple-darwin | aarch64-apple-darwin | x86_64-pc-windows-msvc)
+            TARGET=$MEMNOTH_TARGET
+            ;;
+        *)
+            fail "unsupported MEMNOTH_TARGET=$MEMNOTH_TARGET. Supported: x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, x86_64-apple-darwin, aarch64-apple-darwin, x86_64-pc-windows-msvc."
+            ;;
+    esac
+else
+    KERNEL=$(uname -s 2>/dev/null || echo unknown)
+    MACHINE=$(uname -m 2>/dev/null || echo unknown)
 
-case "$KERNEL" in
-    Linux)
-        case "$MACHINE" in
-            x86_64 | amd64) TARGET="x86_64-unknown-linux-gnu" ;;
-            aarch64 | arm64) TARGET="aarch64-unknown-linux-gnu" ;;
-            *)
-                fail "no build for Linux on $MACHINE. Supported: x86_64, aarch64."
-                ;;
-        esac
-        EXT="tar.gz"
-        UNPACK_CMD="tar -xzf"
-        BINARY_NAME="memnoth"
-        ;;
-    Darwin)
-        case "$MACHINE" in
-            x86_64) TARGET="x86_64-apple-darwin" ;;
-            arm64 | aarch64) TARGET="aarch64-apple-darwin" ;;
-            *)
-                fail "no build for macOS on $MACHINE. Supported: x86_64, arm64."
-                ;;
-        esac
-        EXT="tar.gz"
-        UNPACK_CMD="tar -xzf"
-        BINARY_NAME="memnoth"
-        ;;
-    MINGW* | MSYS* | CYGWIN*)
-        case "$MACHINE" in
-            x86_64 | amd64) TARGET="x86_64-pc-windows-msvc" ;;
-            *)
-                fail "no build for Windows on $MACHINE. Supported: x86_64."
-                ;;
-        esac
+    case "$KERNEL" in
+        Linux)
+            case "$MACHINE" in
+                x86_64 | amd64) TARGET="x86_64-unknown-linux-gnu" ;;
+                aarch64 | arm64) TARGET="aarch64-unknown-linux-gnu" ;;
+                *) fail "no build for Linux on $MACHINE. Supported: x86_64, aarch64." ;;
+            esac
+            ;;
+        Darwin)
+            case "$MACHINE" in
+                x86_64) TARGET="x86_64-apple-darwin" ;;
+                arm64 | aarch64) TARGET="aarch64-apple-darwin" ;;
+                *) fail "no build for macOS on $MACHINE. Supported: x86_64, arm64." ;;
+            esac
+            ;;
+        MINGW* | MSYS* | CYGWIN*)
+            case "$MACHINE" in
+                x86_64 | amd64) TARGET="x86_64-pc-windows-msvc" ;;
+                *) fail "no build for Windows on $MACHINE. Supported: x86_64." ;;
+            esac
+            ;;
+        *)
+            fail "no build for this platform ($KERNEL $MACHINE). Supported: Linux (x86_64, aarch64), macOS (x86_64, arm64), Windows (x86_64)."
+            ;;
+    esac
+fi
+
+case "$TARGET" in
+    x86_64-pc-windows-msvc)
         EXT="zip"
         UNPACK_CMD="unzip -q"
         BINARY_NAME="memnoth.exe"
+        SUFFIX=".exe"
         ;;
     *)
-        fail "no build for this platform ($KERNEL $MACHINE). Supported: Linux (x86_64, aarch64), macOS (x86_64, arm64), Windows (x86_64)."
+        EXT="tar.gz"
+        UNPACK_CMD="tar -xzf"
+        BINARY_NAME="memnoth"
+        SUFFIX=""
         ;;
 esac
 
 ARTIFACT="memnoth-$TARGET.$EXT"
+
+# dist.sh names release directories with a leading `v`; `mn version` and the
+# manifest's `version` field print the bare semver. Both spellings must reach
+# the same directory, or `MEMNOTH_VERSION=0.1.1` is a 404 against a tree that
+# plainly holds v0.1.1.
+RELEASE_DIR=$VERSION
+if [ "$VERSION" != "latest" ]; then
+    case "$VERSION" in
+        v*) ;;
+        *) RELEASE_DIR="v$VERSION" ;;
+    esac
+fi
 
 # The version segment is the one part of the path that is not simply "$VERSION":
 # on GitHub, `latest` is the `releases/latest/download` redirect, not a tag.
@@ -123,10 +161,10 @@ case "$BASE" in
         if [ "$VERSION" = "latest" ]; then
             ARTIFACT_BASE="${BASE%/download}/latest/download"
         else
-            ARTIFACT_BASE="$BASE/$VERSION"
+            ARTIFACT_BASE="$BASE/$RELEASE_DIR"
         fi
         ;;
-    *) ARTIFACT_BASE="$BASE/$VERSION" ;;
+    *) ARTIFACT_BASE="$BASE/$RELEASE_DIR" ;;
 esac
 
 ARCHIVE_URL="$ARTIFACT_BASE/$ARTIFACT"
@@ -159,10 +197,26 @@ if [ -z "$WORK" ] && [ -n "${HOME:-}" ]; then WORK=$(try_work_dir "$HOME/.cache/
 [ -n "$WORK" ] || fail "no writable temporary directory with at least 128 MiB free; set MEMNOTH_TEMP_DIR to a directory on a volume with enough space"
 trap 'rm -rf "$WORK"' 0 1 2 3 15
 
-# 0 = downloaded, 2 = the server says the path does not exist, 1 = anything else.
+# 0 = downloaded, 2 = the source says the path does not exist, 1 = anything else.
 fetch() {
     url_source=$1
     url_dest=$2
+
+    # A dist tree is a directory, not necessarily an HTTP host. Copy from disk
+    # when the base is a local path or file:// URL: curl has no useful HTTP
+    # status code for file:// (it returns 000), so mixing the two would make a
+    # perfectly good local release look like a server error.
+    case "$url_source" in
+        file://*) local_source=${url_source#file://} ;;
+        *://*) local_source="" ;;
+        *) local_source=$url_source ;;
+    esac
+    if [ -n "$local_source" ]; then
+        [ -f "$local_source" ] || return 2
+        cp "$local_source" "$url_dest" 2> /dev/null || return 1
+        return 0
+    fi
+
     if command -v curl >/dev/null 2>&1; then
         http_code=$(curl -sSL --output "$url_dest" --write-out '%{http_code}' "$url_source") || return 1
         case "$http_code" in
@@ -218,6 +272,12 @@ if [ "$MANIFEST_STATUS" -eq 0 ] && [ -s "$WORK/manifest.json" ]; then
             CHECKSUM_URL="$ARCHIVE_URL.sha256"
             printf 'memnoth: using manifest target %s\n' "$TARGET"
         fi
+    fi
+    # Be honest about the trust boundary. A script install checks the digest
+    # served with this release; it does not check a signature, and an unsigned
+    # release is one `mn update` deliberately refuses.
+    if grep -F '"minisign": null' "$WORK/manifest.json" > /dev/null 2>&1; then
+        printf 'memnoth: notice: this release is unsigned; this script verifies the archive digest, but `mn update` will refuse it until a signature is published\n' >&2
     fi
 fi
 
@@ -294,14 +354,8 @@ if [ -z "${BINARY:-}" ] || [ ! -f "$BINARY" ]; then
     fail "the archive does not contain a memnoth binary"
 fi
 
-# Windows resolves an executable by its `.exe` extension: installing a file
-# named `memnoth` gives a binary Git Bash can run and the rest of the system
-# cannot find. The suffix travels with the platform, not with the caller.
-if [ "$EXT" = "zip" ]; then
-    SUFFIX=".exe"
-else
-    SUFFIX=""
-fi
+# Windows resolves an executable by its `.exe` extension; SUFFIX was derived
+# from the target triple above, so it travels with the platform, not the caller.
 MNN="$INSTALL_DIR/memnoth$SUFFIX"
 MNSHORT="$INSTALL_DIR/mn$SUFFIX"
 

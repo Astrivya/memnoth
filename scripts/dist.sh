@@ -53,7 +53,14 @@ dist.sh — build the installer's dist bundle
   --help              this text
 
 The bundle is: install.sh, install.ps1, <version>/<artifact> (+ .sha256),
-latest/ (the same files), and SHA256SUMS. Serve it at the installer's base URL.
+latest/ (the same files), SHA256SUMS and manifest.json. Serve it at the
+installer's base URL.
+
+A minisign signature is required: set MEMNOTH_MINISIGN_SECRET_KEY (and have
+minisign on PATH) or the build fails. MEMNOTH_ALLOW_UNSIGNED=1 is an explicit
+local/test-only escape hatch; the resulting release installs from the scripts
+but `mn update` refuses it. `checksums.sha256` in the manifest is the digest of
+the x86_64 Linux archive, matching what the /download page displays.
 USAGE
 }
 
@@ -223,7 +230,9 @@ json_string() {
 
 # Fail closed, like the client: a release whose signature nobody can check is a
 # release `mn update` refuses, so publishing one silently would be publishing
-# something no installed binary can use.
+# something no installed binary can use. A release job that has no signing key
+# must say so explicitly; an accidental omission is now a build failure rather
+# than a bundle that looks publishable and quietly breaks every self-update.
 SIGNATURE_JSON=null
 if [ -n "${MEMNOTH_MINISIGN_SECRET_KEY:-}" ]; then
     command -v minisign > /dev/null 2>&1 || fail "MEMNOTH_MINISIGN_SECRET_KEY is set but minisign is not installed"
@@ -231,6 +240,20 @@ if [ -n "${MEMNOTH_MINISIGN_SECRET_KEY:-}" ]; then
         -x "$WORK/SHA256SUMS.minisig" -c "memnoth $VERSION" > /dev/null 2>&1 \
         || fail "cannot sign SHA256SUMS with MEMNOTH_MINISIGN_SECRET_KEY"
     SIGNATURE_JSON=$(json_string "$(cat "$WORK/SHA256SUMS.minisig")")
+elif [ "${MEMNOTH_ALLOW_UNSIGNED:-0}" != "1" ]; then
+    fail "no MEMNOTH_MINISIGN_SECRET_KEY: refusing to publish an unsigned bundle that \`mn update\` would reject. Configure the signing key in the release job, or set MEMNOTH_ALLOW_UNSIGNED=1 for a local/test-only bundle."
+else
+    printf 'dist: WARNING: publishing an UNSIGNED bundle (MEMNOTH_ALLOW_UNSIGNED=1); script installs still work but `mn update` will refuse this release\n' >&2
+fi
+
+# `checksums.sha256` is a documented alias, not an aggregate: it is the digest
+# of the x86_64 Linux archive, which is exactly what web/src/routes/download.tsx
+# labels "SHA-256 of the x86_64 Linux archive" and what the updater falls back
+# to when a target carries no per-artifact digest. It must describe a real file
+# in this bundle, never the digest of SHA256SUMS and never an empty placeholder.
+CHECKSUM_ALIAS=$(awk '$1 == "memnoth-x86_64-unknown-linux-gnu.tar.gz" {print $2; exit}' "$DIGESTS")
+if [ -z "$CHECKSUM_ALIAS" ]; then
+    printf 'dist: WARNING: this bundle has no x86_64 Linux archive; `checksums.sha256` will be empty and the /download page has no digest to show\n' >&2
 fi
 
 MANIFEST="$WORK/manifest.json"
@@ -276,7 +299,7 @@ done
             "$triple" "$name" "$digest"
     done < "$DIGESTS"
     printf '\n  ],\n'
-    printf '  "checksums": {"sha256": ""},\n'
+    printf '  "checksums": {"sha256": "%s"},\n' "$CHECKSUM_ALIAS"
     printf '  "signatures": {"minisign": %s, "cosign": null},\n' "$SIGNATURE_JSON"
     printf '  "published_at": "%s",\n' "$PUBLISHED_AT"
     printf '  "notes": %s\n' "$(json_string "${MEMNOTH_RELEASE_NOTES:-}")"
@@ -294,7 +317,8 @@ printf '  %s/SHA256SUMS\n' "$OUT"
 if [ "$SIGNATURE_JSON" = "null" ]; then
     printf '\n  WARNING: SHA256SUMS is unsigned. `mn update` refuses an unsigned\n'
     printf '  release, so this bundle installs from the script but cannot be\n'
-    printf '  updated. Set MEMNOTH_MINISIGN_SECRET_KEY to sign it.\n\n'
+    printf '  updated. It reached this point only through MEMNOTH_ALLOW_UNSIGNED=1;\n'
+    printf '  set MEMNOTH_MINISIGN_SECRET_KEY to make it updatable.\n\n'
 else
     printf '  %s/SHA256SUMS.minisig (published inside manifest.json)\n\n' "$OUT"
 fi
