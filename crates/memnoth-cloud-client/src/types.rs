@@ -920,6 +920,13 @@ pub struct ProjectGraphSyncStatus {
     pub updated_at: Option<String>,
 }
 
+/// Cloud-issued ordering revision reserved before creating an encrypted graph snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectGraphSyncRevision {
+    pub project_id: String,
+    pub revision: i64,
+}
+
 /// Generic error response from the API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiErrorResponse {

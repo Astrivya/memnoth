@@ -14,10 +14,10 @@ pub use types::{
     IngestCounts, IngestEvent, InstanceCounts, Invite, InviteCreated, InvitesResponse,
     KeysResponse, McpTokenResponse, Me, Member, MemberAdded, MembersResponse, ModelInfo,
     ModelUsage, OkResponse, OrgEnvelope, OrgInfo, OrgSwitch, OrganizationInfo,
-    OrganizationsResponse, PlaneStatus, ProjectEnvelope, ProjectGraphSyncStatus, ProjectInfo,
-    ProjectSettings, ProjectUsage, ProjectsResponse, RevokeKeyResponse, SessionReport,
-    SyncManifestAck, SyncManifestList, SyncManifestSummary, SyncObjectAck, Team, TeamDetail,
-    TeamEnvelope, TeamMember, TeamProject, TeamsResponse,
+    OrganizationsResponse, PlaneStatus, ProjectEnvelope, ProjectGraphSyncRevision,
+    ProjectGraphSyncStatus, ProjectInfo, ProjectSettings, ProjectUsage, ProjectsResponse,
+    RevokeKeyResponse, SessionReport, SyncManifestAck, SyncManifestList, SyncManifestSummary,
+    SyncObjectAck, Team, TeamDetail, TeamEnvelope, TeamMember, TeamProject, TeamsResponse,
 };
 
 /// Response from GET /api/v1/models
@@ -770,6 +770,18 @@ impl CloudClient {
         Self::handle_response(response)
     }
 
+    /// Reserve a durable project-scoped revision before creating an encrypted graph snapshot.
+    pub fn reserve_project_graph_sync_revision(
+        &self,
+        project_id: &str,
+    ) -> CloudResult<ProjectGraphSyncRevision> {
+        let response = self.post(
+            &format!("projects/{project_id}/graph-sync/revisions"),
+            &serde_json::json!({}),
+        )?;
+        Self::handle_response(response)
+    }
+
     /// Download a versioned encrypted graph snapshot.
     pub fn project_graph_sync_snapshot(
         &self,
@@ -787,7 +799,13 @@ impl CloudClient {
         base_version: i64,
         ciphertext: &[u8],
         ciphertext_hash: &str,
+        graph_revision: i64,
     ) -> CloudResult<ProjectGraphSyncStatus> {
+        if graph_revision <= 0 {
+            return Err(CloudError::ConfigError(
+                "graph snapshot revision must be positive".into(),
+            ));
+        }
         let url = self
             .base_url
             .join(&format!("projects/{project_id}/graph-sync"))
@@ -805,6 +823,11 @@ impl CloudClient {
         headers.insert(
             "x-memnoth-base-version",
             HeaderValue::from_str(&base_version.to_string())
+                .map_err(|e| CloudError::ConfigError(e.to_string()))?,
+        );
+        headers.insert(
+            "x-memnoth-graph-revision",
+            HeaderValue::from_str(&graph_revision.to_string())
                 .map_err(|e| CloudError::ConfigError(e.to_string()))?,
         );
         let response = self
@@ -1160,6 +1183,7 @@ mod tests {
             .match_header("content-type", "application/octet-stream")
             .match_header("x-memnoth-ciphertext-hash", hash.as_str())
             .match_header("x-memnoth-base-version", "4")
+            .match_header("x-memnoth-graph-revision", "7")
             .match_body(body.to_vec())
             .with_status(200)
             .with_body(format!(
@@ -1170,9 +1194,60 @@ mod tests {
         client.set_auth_token("test-token".into());
 
         let status = client
-            .put_project_graph_sync_snapshot(project, 4, body, &hash)
+            .put_project_graph_sync_snapshot(project, 4, body, &hash, 7)
             .unwrap();
         assert_eq!(status.version, 5);
+        mock.assert();
+    }
+
+    #[test]
+    fn graph_revision_is_reserved_from_project_endpoint() {
+        let mut server = mockito::Server::new();
+        let project = "c9e6b28b-7906-4321-b843-72f60db8aafd";
+        let mock = server
+            .mock(
+                "POST",
+                format!("/api/v1/projects/{project}/graph-sync/revisions").as_str(),
+            )
+            .match_header("authorization", "Bearer test-token")
+            .with_status(200)
+            .with_body(format!(r#"{{"project_id":"{project}","revision":19}}"#))
+            .create();
+        let mut client = CloudClient::with_base_url(&server.url()).unwrap();
+        client.set_auth_token("test-token".into());
+
+        let reservation = client.reserve_project_graph_sync_revision(project).unwrap();
+
+        assert_eq!(reservation.project_id, project);
+        assert_eq!(reservation.revision, 19);
+        mock.assert();
+    }
+
+    #[test]
+    fn stale_graph_revision_replay_is_a_conflict() {
+        let mut server = mockito::Server::new();
+        let project = "c9e6b28b-7906-4321-b843-72f60db8aafd";
+        let body = b"old encrypted graph";
+        let hash = "b".repeat(64);
+        let mock = server
+            .mock(
+                "PUT",
+                format!("/api/v1/projects/{project}/graph-sync").as_str(),
+            )
+            .match_header("x-memnoth-graph-revision", "3")
+            .match_header("x-memnoth-base-version", "1")
+            .match_body(body.to_vec())
+            .with_status(409)
+            .with_body("graph snapshot revision is stale")
+            .create();
+        let mut client = CloudClient::with_base_url(&server.url()).unwrap();
+        client.set_auth_token("test-token".into());
+
+        let error = client
+            .put_project_graph_sync_snapshot(project, 1, body, &hash, 3)
+            .unwrap_err();
+
+        assert!(matches!(error, CloudError::ClientError { status: 409, .. }));
         mock.assert();
     }
 }

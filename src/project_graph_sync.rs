@@ -46,6 +46,8 @@ struct PendingUpload {
     source_fingerprint: String,
     graph_hash: String,
     ciphertext_hash: String,
+    #[serde(default)]
+    graph_revision: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -255,6 +257,12 @@ pub fn sync_project(
     {
         let key = OrgKey::derive(phrase, &project_graph_salt(org, &project_id))
             .context("deriving the project graph encryption key")?;
+        // Reserve before framing/encrypting the snapshot. Persist the revision with
+        // pending ciphertext so retries cannot accidentally reuse a stale ordering.
+        let revision = client.reserve_project_graph_sync_revision(&project_id)?;
+        if revision.project_id != project_id || revision.revision <= 0 {
+            bail!("Cloud returned an invalid project graph sync revision");
+        }
         let plaintext = Zeroizing::new(frame(&project_id, &fingerprint, &snapshot)?);
         let ciphertext =
             Zeroizing::new(encrypt(&key, &plaintext).context("encrypting project graph snapshot")?);
@@ -268,6 +276,7 @@ pub fn sync_project(
             source_fingerprint: fingerprint,
             graph_hash,
             ciphertext_hash: hash,
+            graph_revision: Some(revision.revision),
         };
         save_pending(&paths, &pending, &ciphertext)?;
         return commit_pending(
@@ -702,17 +711,33 @@ fn commit_pending(
     project_id: &str,
     paths: &Paths,
     cursor: &mut Cursor,
-    pending: PendingUpload,
+    mut pending: PendingUpload,
     ciphertext: Zeroizing<Vec<u8>>,
 ) -> Result<SyncOutcome> {
     if content_hash(&ciphertext) != pending.ciphertext_hash {
         bail!("pending encrypted graph upload failed its local hash check");
     }
+    let revision = match pending.graph_revision {
+        Some(revision) if revision > 0 => revision,
+        Some(_) => bail!("pending encrypted graph upload has an invalid Cloud revision"),
+        None => {
+            // Upgrade a pre-revision pending upload once and persist the reservation
+            // before its first replay. Older pending files remain readable.
+            let reservation = client.reserve_project_graph_sync_revision(project_id)?;
+            if reservation.project_id != project_id || reservation.revision <= 0 {
+                bail!("Cloud returned an invalid project graph sync revision");
+            }
+            pending.graph_revision = Some(reservation.revision);
+            save_pending(paths, &pending, &ciphertext)?;
+            reservation.revision
+        }
+    };
     let ack = client.put_project_graph_sync_snapshot(
         project_id,
         pending.base_version,
         &ciphertext,
         &pending.ciphertext_hash,
+        revision,
     )?;
     validate_status(&ack, project_id)?;
     if ack.version <= pending.base_version
@@ -986,6 +1011,14 @@ mod tests {
         .unwrap()
     }
 
+    fn revision_json(project_id: &str, revision: i64) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "project_id": project_id,
+            "revision": revision,
+        }))
+        .unwrap()
+    }
+
     #[test]
     fn two_checkouts_upload_ciphertext_and_restore_verified_graph() {
         let first = tempfile::tempdir().unwrap();
@@ -1010,10 +1043,10 @@ mod tests {
         let server_upload_count = Arc::clone(&upload_count);
         let expected_project = project_id.to_string();
         let server = std::thread::spawn(move || {
-            // Initial upload (status + PUT), two rejected downloads (status +
+            // Initial upload (status + reservation + PUT), two rejected downloads (status +
             // snapshot each), a successful restore (status + snapshot), and
             // one replay check (status only; it must not upload again).
-            for _ in 0..9 {
+            for _ in 0..10 {
                 let (mut stream, _) = listener.accept().unwrap();
                 let (path, body) = read_http_request(&mut stream);
                 assert!(
@@ -1028,6 +1061,13 @@ mod tests {
                         "200 OK",
                         "application/json",
                         &status_json(&expected_project, version, ciphertext.as_deref()),
+                    );
+                } else if path.ends_with("/graph-sync/revisions") && path.starts_with("POST ") {
+                    reply(
+                        &mut stream,
+                        "200 OK",
+                        "application/json",
+                        &revision_json(&expected_project, 1),
                     );
                 } else if path.ends_with("/graph-sync") && path.starts_with("PUT ") {
                     server_upload_count.fetch_add(1, Ordering::SeqCst);
@@ -1259,6 +1299,7 @@ mod tests {
             source_fingerprint: "source-hash".into(),
             graph_hash: "graph-hash".into(),
             ciphertext_hash: content_hash(ciphertext),
+            graph_revision: None,
         };
         save_pending(&paths, &pending, ciphertext).unwrap();
 
@@ -1294,6 +1335,7 @@ mod tests {
             source_fingerprint: fingerprint,
             graph_hash: content_hash(&snapshot),
             ciphertext_hash: content_hash(ciphertext),
+            graph_revision: None,
         };
         save_pending(&paths, &pending, ciphertext).unwrap();
 
@@ -1364,6 +1406,7 @@ mod tests {
                 source_fingerprint: old_fingerprint,
                 graph_hash: content_hash(&old_snapshot),
                 ciphertext_hash: content_hash(old_ciphertext),
+                graph_revision: None,
             },
             old_ciphertext,
         )
@@ -1372,7 +1415,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = std::thread::spawn(move || {
-            for request_index in 0..2 {
+            for request_index in 0..3 {
                 let (mut stream, _) = listener.accept().unwrap();
                 let (path, body) = read_http_request(&mut stream);
                 if request_index == 0 {
@@ -1382,6 +1425,13 @@ mod tests {
                         "200 OK",
                         "application/json",
                         &status_json(project_id, 0, None),
+                    );
+                } else if path.starts_with("POST ") && path.ends_with("/graph-sync/revisions") {
+                    reply(
+                        &mut stream,
+                        "200 OK",
+                        "application/json",
+                        &revision_json(project_id, 1),
                     );
                 } else {
                     assert!(path.starts_with("PUT ") && path.ends_with("/graph-sync"));
