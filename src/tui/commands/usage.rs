@@ -1153,7 +1153,7 @@ mod tests {
     #[test]
     fn text_and_json_are_rendered_from_the_same_semantic_snapshot() {
         let session = session_with(vec![receipt()]);
-        let expected = serde_json::to_value(snapshot(
+        let mut expected = serde_json::to_value(snapshot(
             &session,
             Some(100_000),
             "vendor/model:free",
@@ -1162,7 +1162,7 @@ mod tests {
             Some("medium"),
         ))
         .unwrap();
-        let actual: serde_json::Value = serde_json::from_str(&render(
+        let mut actual: serde_json::Value = serde_json::from_str(&render(
             &session,
             Some(100_000),
             "vendor/model:free",
@@ -1172,6 +1172,16 @@ mod tests {
             true,
         ))
         .unwrap();
+
+        // Session age is sampled when each rendering is created, so the two
+        // snapshots can legitimately differ by a few milliseconds. Compare
+        // every stable semantic field and validate the sampled age separately.
+        let actual_age = actual["session_age_ms"].as_u64().unwrap();
+        let expected_age = expected["session_age_ms"].as_u64().unwrap();
+        assert!(actual_age > 0);
+        assert!(expected_age > 0);
+        actual.as_object_mut().unwrap().remove("session_age_ms");
+        expected.as_object_mut().unwrap().remove("session_age_ms");
         assert_eq!(actual, expected);
 
         let text = render_text(&session);
