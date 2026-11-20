@@ -15,6 +15,17 @@
 #   MEMNOTH_TEMP_DIR      where downloads are staged        (default: writable system temp)
 #   MEMNOTH_TARGET        force one of the five built triples (tests / staging only)
 #
+# Flags:
+#   --setup (aliases --with-setup, -setup)  after installing, run `mn setup --yes` once.
+#                                 Off by default. A failed setup is reported as
+#                                 a warning with its last lines; the binaries
+#                                 stay installed and `mn setup` can be rerun.
+#
+# If a release asset cannot be fetched from MEMNOTH_INSTALL_BASE, the same
+# release path is retried once against the canonical GitHub release base
+# (https://github.com/astrivya/memnoth/releases/download). The retry is always
+# announced, and the archive is still checksum-verified after the fallback.
+#
 # A local dist tree is a valid base: pass either a POSIX path under Git Bash
 # (`/d/path/to/dist`) or a `file://` URL. No HTTP server is needed to test a
 # release locally, and no curl/wget is used for that path.
@@ -37,6 +48,9 @@ set -eu
 # publishes to. A mirror of the dist tree is
 # `MEMNOTH_INSTALL_BASE=https://<host>/dist`.
 BASE="${MEMNOTH_INSTALL_BASE:-https://github.com/astrivya/memnoth/releases/download}"
+# The canonical release host is the last-resort source. Kept separate from BASE
+# so a staging/site mirror can be tried first and GitHub only as a fallback.
+CANONICAL_BASE="https://github.com/astrivya/memnoth/releases/download"
 VERSION="${MEMNOTH_VERSION:-latest}"
 if [ -n "${MEMNOTH_INSTALL_DIR:-}" ]; then
     INSTALL_DIR="$MEMNOTH_INSTALL_DIR"
@@ -64,6 +78,16 @@ Environment:
   MEMNOTH_TEMP_DIR      download staging directory (default: system temp)
   MEMNOTH_TARGET        one of the five published triples; overrides uname for
                         cross-platform testing. Not needed for normal installs.
+
+Flags:
+  --setup, --with-setup, -setup  after installing, run `mn setup --yes` once.
+                         Off by default. A failed setup is a warning, not a
+                         failed install; rerun it any time with `mn setup`.
+
+Source fallback:
+  If an asset cannot be fetched from MEMNOTH_INSTALL_BASE, the same release path
+  is retried once against https://github.com/astrivya/memnoth/releases/download.
+  The switch is announced and the archive is still checksum-verified.
 USAGE
 }
 
@@ -72,12 +96,20 @@ fail() {
     exit 1
 }
 
-case "${1:-}" in
-    -h | --help)
-        usage
-        exit 0
-        ;;
-esac
+# --setup is opt-in: without it the installer behaves exactly as before.
+SETUP=0
+SETUP_OK=0
+for arg do
+    case "$arg" in
+        -h | --help)
+            usage
+            exit 0
+            ;;
+        --setup | --with-setup | -setup)
+            SETUP=1
+            ;;
+    esac
+done
 
 # ---------------------------------------------------------------- platform
 # There are exactly five triples this product builds. Deriving the archive
@@ -156,20 +188,31 @@ fi
 
 # The version segment is the one part of the path that is not simply "$VERSION":
 # on GitHub, `latest` is the `releases/latest/download` redirect, not a tag.
-case "$BASE" in
-    */releases/download)
-        if [ "$VERSION" = "latest" ]; then
-            ARTIFACT_BASE="${BASE%/download}/latest/download"
-        else
-            ARTIFACT_BASE="$BASE/$RELEASE_DIR"
-        fi
-        ;;
-    *) ARTIFACT_BASE="$BASE/$RELEASE_DIR" ;;
-esac
+# Reusing this derivation for the canonical base keeps the fallback on the same
+# logical release path (including the `latest` redirect) as the primary source.
+artifact_base_for() {
+    ab_base=$1
+    case "$ab_base" in
+        */releases/download)
+            if [ "$VERSION" = "latest" ]; then
+                printf '%s' "${ab_base%/download}/latest/download"
+            else
+                printf '%s' "$ab_base/$RELEASE_DIR"
+            fi
+            ;;
+        *) printf '%s' "$ab_base/$RELEASE_DIR" ;;
+    esac
+}
+
+ARTIFACT_BASE=$(artifact_base_for "$BASE")
+FALLBACK_ARTIFACT_BASE=$(artifact_base_for "$CANONICAL_BASE")
 
 ARCHIVE_URL="$ARTIFACT_BASE/$ARTIFACT"
 CHECKSUM_URL="$ARCHIVE_URL.sha256"
 MANIFEST_URL="$ARTIFACT_BASE/manifest.json"
+FALLBACK_ARCHIVE_URL="$FALLBACK_ARTIFACT_BASE/$ARTIFACT"
+FALLBACK_CHECKSUM_URL="$FALLBACK_ARCHIVE_URL.sha256"
+FALLBACK_MANIFEST_URL="$FALLBACK_ARTIFACT_BASE/manifest.json"
 
 # Select a writable volume before downloading. Require 128 MiB where df
 # reports capacity so a small probe cannot succeed on an almost-full volume.
@@ -234,6 +277,29 @@ fetch() {
     fail "needs curl or wget to download the release"
 }
 
+# Try the configured source first; only on failure retry the same release path
+# against the canonical GitHub release base. The switch is never silent: the
+# fallback URL is printed to stderr. Checksums are computed over whatever bytes
+# end up in $2, so a fallback download is verified exactly like a primary one.
+fetch_with_fallback() {
+    ff_url=$1
+    ff_dest=$2
+    ff_fallback=$3
+
+    fetch "$ff_url" "$ff_dest"
+    ff_status=$?
+    if [ "$ff_status" -eq 0 ]; then
+        return 0
+    fi
+    # The default BASE is already the canonical host: no second source exists.
+    if [ "$ff_fallback" = "$ff_url" ]; then
+        return "$ff_status"
+    fi
+    printf 'memnoth: notice: source %s failed; retrying from %s\n' "$ff_url" "$ff_fallback" >&2
+    fetch "$ff_fallback" "$ff_dest"
+    return $?
+}
+
 missing_release() {
     cat >&2 <<EOF
 memnoth: no release is published at
@@ -258,7 +324,7 @@ EOF
 MANIFEST_ARTIFACT=""
 MANIFEST_SHA=""
 set +e
-fetch "$MANIFEST_URL" "$WORK/manifest.json"
+fetch_with_fallback "$MANIFEST_URL" "$WORK/manifest.json" "$FALLBACK_MANIFEST_URL"
 MANIFEST_STATUS=$?
 set -e
 if [ "$MANIFEST_STATUS" -eq 0 ] && [ -s "$WORK/manifest.json" ]; then
@@ -270,6 +336,8 @@ if [ "$MANIFEST_STATUS" -eq 0 ] && [ -s "$WORK/manifest.json" ]; then
             ARTIFACT="$MANIFEST_ARTIFACT"
             ARCHIVE_URL="$ARTIFACT_BASE/$ARTIFACT"
             CHECKSUM_URL="$ARCHIVE_URL.sha256"
+            FALLBACK_ARCHIVE_URL="$FALLBACK_ARTIFACT_BASE/$ARTIFACT"
+            FALLBACK_CHECKSUM_URL="$FALLBACK_ARCHIVE_URL.sha256"
             printf 'memnoth: using manifest target %s\n' "$TARGET"
         fi
     fi
@@ -283,7 +351,7 @@ fi
 
 printf 'memnoth: downloading %s\n' "$ARCHIVE_URL"
 set +e
-fetch "$ARCHIVE_URL" "$WORK/$ARTIFACT"
+fetch_with_fallback "$ARCHIVE_URL" "$WORK/$ARTIFACT" "$FALLBACK_ARCHIVE_URL"
 FETCH_STATUS=$?
 set -e
 
@@ -316,7 +384,7 @@ if [ -n "$MANIFEST_SHA" ]; then
     printf 'memnoth: checksum from manifest\n'
 else
     set +e
-    fetch "$CHECKSUM_URL" "$WORK/$ARTIFACT.sha256"
+    fetch_with_fallback "$CHECKSUM_URL" "$WORK/$ARTIFACT.sha256" "$FALLBACK_CHECKSUM_URL"
     CHECKSUM_STATUS=$?
     set -e
 
@@ -391,6 +459,47 @@ fi
 printf 'memnoth: installed %s (and %s)\n' "$MNN" "$MNSHORT"
 "$MNN" --version || fail "the installed binary does not run"
 "$MNSHORT" --version > /dev/null || fail "the installed mn alias does not run"
+
+# ------------------------------------------------------------ optional setup
+# Opt-in only. The binaries are already installed by this point, so a failed
+# setup must never turn a successful install into a failed one: report it with
+# the captured last lines and point at the recoverable `mn setup` command.
+if [ "$SETUP" -eq 1 ]; then
+    printf '\nmemnoth: running setup --yes (opt-in)\n'
+    SETUP_LOG="$WORK/setup.log"
+    set +e
+    "$MNN" setup --yes > "$SETUP_LOG" 2>&1
+    SETUP_STATUS=$?
+    set -e
+    if [ "$SETUP_STATUS" -eq 0 ]; then
+        printf 'memnoth: setup --yes completed\n'
+        SETUP_OK=1
+    else
+        printf 'memnoth: warning: setup --yes exited %s; the binaries are installed and you can retry with `mn setup`.\n' "$SETUP_STATUS" >&2
+        printf 'memnoth: setup output (last lines):\n' >&2
+        tail -n 15 "$SETUP_LOG" >&2 2> /dev/null || true
+        printf 'memnoth: setup reason shown above; the install itself succeeded\n' >&2
+    fi
+fi
+
+# ------------------------------------------------------------ next steps
+# Only copyable commands, no prose. The MCP line is printed only when the
+# installed binary actually advertises both flags it needs.
+printf '\nmemnoth: Next:\n'
+printf '  mn doctor\n'
+if [ "$SETUP_OK" -eq 1 ]; then
+    printf '  mn setup --yes  (already ran during install)\n'
+else
+    printf '  mn setup --yes\n'
+fi
+MCP_HELP=$("$MNN" mcp add --help 2> /dev/null || true)
+case "$MCP_HELP" in
+    *--local*)
+        case "$MCP_HELP" in
+            *--clients*) printf '  mn mcp add --local --clients claude,cursor,codex,zed\n' ;;
+        esac
+        ;;
+esac
 
 case ":${PATH:-}:" in
     *":$INSTALL_DIR:"*) ;;

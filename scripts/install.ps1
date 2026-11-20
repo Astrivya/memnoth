@@ -6,6 +6,10 @@
     Downloads, verifies, and installs memnoth CLI from GitHub releases.
     Installs to %LOCALAPPDATA%\memnoth\bin, adds to user PATH, creates 'mn' alias.
 
+    If an asset cannot be fetched from -BaseUrl, the same release path is retried
+    once against https://github.com/astrivya/memnoth/releases/download. The
+    retry is always announced and the archive is still SHA-256 verified.
+
 .PARAMETER Channel
     Release channel: 'stable', 'beta', 'nightly', 'winget'. Default: 'stable'.
     Use 'winget' to install via Windows Package Manager (winget).
@@ -36,6 +40,11 @@
 
 .PARAMETER UseWinget
     Install via Windows Package Manager (winget). Equivalent to -Channel winget.
+
+.PARAMETER Setup
+    After installing, run `mn setup --yes` once. Off by default. A failed setup
+    is a warning with its last lines, not a failed install; rerun with `mn setup`.
+    Also accepted from the one-liner as --setup (and -setup, --with-setup).
 
 .EXAMPLE
     # Install latest stable release
@@ -72,10 +81,26 @@
 .EXAMPLE
     # Preview winget installation
     .\install.ps1 -UseWinget -Preview
+
+.EXAMPLE
+    # Install and run first-run setup (named switch)
+    .\install.ps1 -Setup
+
+.EXAMPLE
+    # Install and run first-run setup from the one-line download form
+    & ([scriptblock]::Create((irm https://memnoth.astrivya.ai/install.ps1))) --setup
 #>
 
 [CmdletBinding()]
 param(
+    # Windows PowerShell 5.1 binds a double-dash token such as --setup as a
+    # POSITIONAL argument, not as a named switch, so a one-liner that forwards
+    # --setup would otherwise fail validation on $Channel before the body runs.
+    # Capture leftover positional tokens here; the setup detector below reads
+    # them. All named parameters still bind normally.
+    [Parameter(Position = 0, ValueFromRemainingArguments = $true)]
+    [string[]]$RawArgs,
+
     [ValidateSet('stable', 'beta', 'nightly', 'winget')]
     [string]$Channel = 'stable',
 
@@ -98,7 +123,10 @@ param(
 
     [switch]$Preview,
 
-    [switch]$UseWinget
+    [switch]$UseWinget,
+
+    [Alias('WithSetup', 'with-setup')]
+    [switch]$Setup
 )
 
 # Enable strict mode for better error handling
@@ -111,6 +139,26 @@ $ProgressPreference = 'SilentlyContinue'
 
 # A trailing slash would otherwise produce `//v0.1.1/…` in every URL.
 $BaseUrl = $BaseUrl.TrimEnd('/')
+
+# Last-resort source. Kept separate from BaseUrl so a site mirror or staging
+# host is always tried first and GitHub is used only when that source fails.
+$CanonicalBase = 'https://github.com/astrivya/memnoth/releases/download'
+
+# --setup is opt-in. Accept the declared switch (-Setup) and the literal tokens
+# a one-liner can forward, whether they arrive as named parameters, as raw
+# positional args (--setup), or in $args. Named parameters and argument
+# forwarding are otherwise untouched.
+$setupTokens = @('--setup', '-setup', '-Setup', '--with-setup', '-with-setup')
+$doSetup = [bool]$Setup
+if (-not $doSetup) {
+    foreach ($token in @($RawArgs) + @($args)) {
+        if ($setupTokens -contains [string]$token) {
+            $doSetup = $true
+            break
+        }
+    }
+}
+$setupOk = $false
 
 # ------------------------------------------------------------ helpers
 function Write-Log {
@@ -154,7 +202,8 @@ function Invoke-Download {
     param(
         [Parameter(Mandatory = $true)][string]$Url,
         [Parameter(Mandatory = $true)][string]$OutFile,
-        [string]$Proxy
+        [string]$Proxy,
+        [switch]$Quiet
     )
     $params = @{
         Uri         = $Url
@@ -184,9 +233,36 @@ function Invoke-Download {
             }
         }
         if ($status -eq 404) { return 2 }
+        if ($Quiet) {
+            Write-Log "Primary source failed for $Url : $_" 'Warn'
+            return 1
+        }
         Fail "Download failed for $Url : $_"
     }
     return 0
+}
+
+# Try the configured source first; only on failure retry the same release path
+# against the canonical GitHub release base. The switch is never silent, and
+# checksum verification runs over whatever bytes land in OutFile, so the
+# fallback download is trusted no more than the primary one.
+function Invoke-DownloadWithFallback {
+    param(
+        [Parameter(Mandatory = $true)][string]$Url,
+        [Parameter(Mandatory = $true)][string]$OutFile,
+        [string]$Proxy,
+        [string]$FallbackUrl
+    )
+    $status = Invoke-Download -Url $Url -OutFile $OutFile -Proxy $Proxy -Quiet
+    if ($status -eq 0 -or [string]::IsNullOrEmpty($FallbackUrl) -or $FallbackUrl -eq $Url) {
+        return $status
+    }
+    Write-Log "Primary source failed; retrying from $FallbackUrl" 'Warn'
+    $fallbackStatus = Invoke-Download -Url $FallbackUrl -OutFile $OutFile -Proxy $Proxy -Quiet
+    if ($fallbackStatus -ne 0) {
+        Write-Log "Fallback source also failed for $OutFile (status $fallbackStatus)" 'Error'
+    }
+    return $fallbackStatus
 }
 
 function Get-InstallerWorkDirectory {
@@ -251,6 +327,7 @@ function Resolve-Version {
     # resolved against GitHub and installed the wrong release.
     if ($normalizedBase -notlike '*/releases/download') {
         $manifestUrl = "$normalizedBase/latest/manifest.json"
+        $fallbackManifestUrl = "$CanonicalBase/latest/manifest.json"
         Write-Log "Resolving latest version from $manifestUrl"
         try {
             $latestManifest = Invoke-RestMethod -Uri $manifestUrl -UseBasicParsing -ErrorAction Stop
@@ -259,6 +336,17 @@ function Resolve-Version {
             }
         } catch {
             Write-Log "No usable manifest at $manifestUrl : $_" 'Warn'
+        }
+        if ($fallbackManifestUrl -ne $manifestUrl) {
+            Write-Log "Retrying version resolution from $fallbackManifestUrl" 'Warn'
+            try {
+                $latestManifest = Invoke-RestMethod -Uri $fallbackManifestUrl -UseBasicParsing -ErrorAction Stop
+                if ($latestManifest -and $latestManifest.version) {
+                    return (ConvertTo-ReleaseDir ([string]$latestManifest.version))
+                }
+            } catch {
+                Write-Log "No usable manifest at $fallbackManifestUrl : $_" 'Warn'
+            }
         }
         Fail "Cannot resolve 'latest' at ${normalizedBase}: no manifest.json there"
     }
@@ -350,22 +438,39 @@ $artifact = "memnoth-$target.zip"
 $expectedFromManifest = $null
 $releaseManifest = $null
 $manifestUrl = "$BaseUrl/$resolvedVersion/manifest.json"
+$fallbackManifestUrl = "$CanonicalBase/$resolvedVersion/manifest.json"
 try {
     $releaseManifest = Invoke-RestMethod -Uri $manifestUrl -UseBasicParsing -ErrorAction Stop
-    $manifestTarget = $releaseManifest.targets | Where-Object { $_.triple -eq $target } | Select-Object -First 1
-    if ($manifestTarget -and $manifestTarget.filename) {
-        $artifact = $manifestTarget.filename
-        if ($manifestTarget.sha256) { $expectedFromManifest = [string]$manifestTarget.sha256 }
-        Write-Log "Using manifest target $target ($artifact)"
-    }
 } catch {
-    Write-Log "No manifest at $manifestUrl; using sidecar checksum" 'Debug'
+    Write-Log "No manifest at $manifestUrl" 'Debug'
+    if ($fallbackManifestUrl -ne $manifestUrl) {
+        Write-Log "Retrying manifest from $fallbackManifestUrl" 'Warn'
+        try {
+            $releaseManifest = Invoke-RestMethod -Uri $fallbackManifestUrl -UseBasicParsing -ErrorAction Stop
+        } catch {
+            Write-Log "No manifest at $fallbackManifestUrl; using sidecar checksum" 'Debug'
+        }
+    }
+}
+if ($releaseManifest) {
+    try {
+        $manifestTarget = $releaseManifest.targets | Where-Object { $_.triple -eq $target } | Select-Object -First 1
+        if ($manifestTarget -and $manifestTarget.filename) {
+            $artifact = $manifestTarget.filename
+            if ($manifestTarget.sha256) { $expectedFromManifest = [string]$manifestTarget.sha256 }
+            Write-Log "Using manifest target $target ($artifact)"
+        }
+    } catch {
+        Write-Log "Manifest had no usable target for $target; using sidecar checksum" 'Debug'
+    }
 }
 if ($releaseManifest -and $releaseManifest.signatures -and -not $releaseManifest.signatures.minisign) {
     Write-Log "This release is unsigned; a script install verifies its SHA-256 digest, but 'mn update' will refuse it until a signature is published." 'Warn'
 }
 $archiveUrl = "$BaseUrl/$resolvedVersion/$artifact"
 $checksumUrl = "$archiveUrl.sha256"
+$fallbackArchiveUrl = "$CanonicalBase/$resolvedVersion/$artifact"
+$fallbackChecksumUrl = "$fallbackArchiveUrl.sha256"
 
 # Working directory. Prefer MEMNOTH_TEMP_DIR, then fall back across the normal
 # Windows temp locations. A unique directory avoids deleting or reusing a
@@ -381,7 +486,7 @@ try {
 try {
     # -------------------------------------------------------- download archive
     $archivePath = Join-Path $workDir $artifact
-    $status = Invoke-Download -Url $archiveUrl -OutFile $archivePath -Proxy $Proxy
+    $status = Invoke-DownloadWithFallback -Url $archiveUrl -OutFile $archivePath -Proxy $Proxy -FallbackUrl $fallbackArchiveUrl
     if ($status -eq 2) {
         Fail "Release not found: $archiveUrl`nCheck version/channel: $resolvedVersion / $Channel"
     }
@@ -394,7 +499,7 @@ try {
             Write-Log "Checksum from manifest"
         } else {
             $checksumPath = Join-Path $workDir "$artifact.sha256"
-            $csStatus = Invoke-Download -Url $checksumUrl -OutFile $checksumPath -Proxy $Proxy
+            $csStatus = Invoke-DownloadWithFallback -Url $checksumUrl -OutFile $checksumPath -Proxy $Proxy -FallbackUrl $fallbackChecksumUrl
             if ($csStatus -ne 0 -or -not (Test-Path $checksumPath) -or (Get-Item $checksumPath).Length -eq 0) {
                 Fail "Checksum not found at $checksumUrl; refusing to install unverified binary. Use -NoVerify to skip."
             }
@@ -511,8 +616,51 @@ try {
                     Write-Log "Alias 'mn' verified"
                 }
             }
+            # -------------------------------------------------------- optional setup
+            # Opt-in only. The binaries are installed by now, so a failed setup
+            # stays a warning: report the captured last lines and point at the
+            # recoverable `mn setup` command instead of failing the install.
+            if ($doSetup) {
+                Write-Log "Running setup --yes (opt-in)..."
+                try {
+                    $setupLines = @(& $installedBinary setup --yes *>&1 | ForEach-Object { $_.ToString() })
+                    $setupExit = $LASTEXITCODE
+                    if ($setupExit -eq 0) {
+                        Write-Log "setup --yes completed"
+                        $setupOk = $true
+                    } else {
+                        Write-Log "setup --yes exited $setupExit; binaries are installed and you can retry with 'mn setup'." 'Warn'
+                        Write-Log "setup output (last lines):" 'Warn'
+                        $setupLines | Select-Object -Last 15 | ForEach-Object { Write-Log $_ 'Warn' }
+                        Write-Log "setup reason shown above; the install itself succeeded" 'Warn'
+                    }
+                } catch {
+                    Write-Log "setup --yes failed: $($_.Exception.Message); binaries are installed and you can retry with 'mn setup'." 'Warn'
+                }
+            }
+
             Write-Log "Installation complete!" 'Info'
-            Write-Log "Run 'memnoth --help' or 'mn --help' to get started"
+
+            # -------------------------------------------------------- next steps
+            # Copyable commands only, no marketing prose. The MCP line is shown
+            # only when the installed binary advertises both flags it needs.
+            Write-Host ''
+            Write-Log 'Next:' 'Info'
+            Write-Host '  mn doctor'
+            if ($setupOk) {
+                Write-Host '  mn setup --yes  (already ran during install)'
+            } else {
+                Write-Host '  mn setup --yes'
+            }
+            $mcpHelp = ''
+            try {
+                $mcpHelp = (& $installedBinary mcp add --help 2>$null | Out-String -Width 4096)
+            } catch {
+                $mcpHelp = ''
+            }
+            if ($mcpHelp -match '--local' -and $mcpHelp -match '--clients') {
+                Write-Host '  mn mcp add --local --clients claude,cursor,codex,zed'
+            }
         } else {
             Fail "Installation verification failed: binary not found at $installedBinary"
         }
