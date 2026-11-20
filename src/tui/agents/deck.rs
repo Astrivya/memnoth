@@ -256,16 +256,17 @@ impl AgentDeck {
         {
             lines.push(format!("cost: {cost}"));
         }
-        lines.push(String::new());
-        lines.push("recent activity".to_string());
-        lines.extend(match events.as_ref() {
-            None => vec!["no activity yet".to_string()],
-            Some(Err(_)) => vec!["activity unavailable".to_string()],
-            Some(Ok(events)) => Self::activity_lines(events),
-        });
         if let Some(peeked) = &self.peeked {
             lines.push("---".to_string());
             lines.extend(peeked.lines().map(str::to_string));
+        } else {
+            lines.push(String::new());
+            lines.push("recent activity".to_string());
+            lines.extend(match events.as_ref() {
+                None => vec!["no activity yet".to_string()],
+                Some(Err(_)) => vec!["activity unavailable".to_string()],
+                Some(Ok(events)) => Self::activity_lines(events),
+            });
         }
         lines
     }
@@ -1230,6 +1231,11 @@ mod tests {
         assert!(details.contains("state: ? waiting"), "{details}");
         assert!(details.contains("depth: 0"), "{details}");
         assert!(details.contains("recent activity"), "{details}");
+
+        deck.peeked = Some("{\"summary\": \"receipt visible\"}".to_string());
+        let peek = deck.inspector_lines(&app).join("\n");
+        assert!(peek.contains("receipt visible"), "{peek}");
+        assert!(!peek.contains("recent activity"), "{peek}");
     }
 
     #[test]
