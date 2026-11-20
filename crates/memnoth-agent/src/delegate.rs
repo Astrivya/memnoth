@@ -16,6 +16,7 @@
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
@@ -50,6 +51,12 @@ pub const MAX_LIVE_CHILDREN: usize = 16;
 /// Concurrency is not the only runaway: a parent that spawns, waits, and spawns
 /// again never exceeds the live cap while still producing an unbounded tree.
 pub const MAX_SPAWNS_PER_SESSION: usize = 64;
+
+static ATTENTION_REVISION: AtomicU64 = AtomicU64::new(1);
+
+fn next_attention_revision() -> u64 {
+    ATTENTION_REVISION.fetch_add(1, Ordering::Relaxed)
+}
 
 fn now_ms() -> i64 {
     SystemTime::now()
@@ -145,6 +152,9 @@ pub struct Delegator {
     attention: Vec<AttentionRequest>,
     /// Monotonic counter behind the `attn-N` ids.
     attention_seq: u64,
+    /// O(1) change token for attention inbox readers. Globally advanced so a
+    /// replacement Delegator cannot reuse another instance's cache key.
+    attention_revision: u64,
 }
 
 impl Delegator {
@@ -183,6 +193,7 @@ impl Delegator {
             spawn_seq: 0,
             attention: Vec::new(),
             attention_seq: 0,
+            attention_revision: next_attention_revision(),
         }
     }
 
@@ -405,6 +416,7 @@ impl Delegator {
         };
         self.log(run_id, "attention.queued", &request.summary)?;
         self.attention.push(request.clone());
+        self.attention_revision = next_attention_revision();
         Ok(request)
     }
 
@@ -413,12 +425,19 @@ impl Delegator {
         &self.attention
     }
 
+    /// A cheap cache key that changes whenever the attention inbox changes.
+    pub fn attention_revision(&self) -> u64 {
+        self.attention_revision
+    }
+
     /// Take one request out of the inbox, by id. `None` when there is no such
     /// request — answering an already-answered row is not an error, it is
     /// the row the person just closed.
     pub fn take_attention(&mut self, id: &str) -> Option<AttentionRequest> {
         let index = self.attention.iter().position(|r| r.id == id)?;
-        Some(self.attention.remove(index))
+        let request = self.attention.remove(index);
+        self.attention_revision = next_attention_revision();
+        Some(request)
     }
 
     fn node_mut(&mut self, id: &str) -> Result<&mut ChildRun> {

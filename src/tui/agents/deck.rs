@@ -38,6 +38,15 @@ enum Mode {
     Inbox,
 }
 
+#[derive(Debug, Default)]
+struct AttentionFilterCache {
+    query: String,
+    revision: Option<u64>,
+    source_indexes: Vec<usize>,
+    #[cfg(test)]
+    rebuilds: usize,
+}
+
 /// The agent deck: one child per row, with status glyph and task.
 #[derive(Debug)]
 pub struct AgentDeck {
@@ -57,8 +66,10 @@ pub struct AgentDeck {
     searching: bool,
     /// Case-insensitive filter over the source-backed attention request fields.
     inbox_query: String,
+    attention_filter: AttentionFilterCache,
     mode: Mode,
     inbox_selected: usize,
+    inbox_selected_id: Option<String>,
     /// Peaked detail (log tail or receipt) shown in the inspector.
     peeked: Option<String>,
 }
@@ -75,8 +86,10 @@ impl AgentDeck {
             query: String::new(),
             searching: false,
             inbox_query: String::new(),
+            attention_filter: AttentionFilterCache::default(),
             mode: Mode::Roster,
             inbox_selected: 0,
+            inbox_selected_id: None,
             peeked: None,
         }
     }
@@ -255,27 +268,58 @@ impl AgentDeck {
     /// Attention requests in their original inbox order, filtered by fields
     /// supplied by the delegator. Keep indices so Enter addresses the original
     /// request rather than a copied or synthesized row.
-    fn visible_attention_indices(&self, app: &App) -> Vec<usize> {
+    fn refresh_attention_filter(&mut self, app: &App) {
+        let delegator = app.delegator.as_ref();
+        let requests = delegator
+            .map(|delegator| delegator.attention())
+            .unwrap_or_default();
+        let revision = delegator.map(|delegator| delegator.attention_revision());
         let query = self.inbox_query.trim().to_lowercase();
-        app.delegator
-            .as_ref()
-            .map(|delegator| {
-                delegator
-                    .attention()
+        let cache = &mut self.attention_filter;
+        let query_changed = cache.query != query;
+        let revision_changed = cache.revision != revision;
+        if query_changed || revision_changed {
+            let selected_id = (!query_changed && revision_changed)
+                .then(|| self.inbox_selected_id.clone())
+                .flatten();
+            cache.query.clone_from(&query);
+            cache.revision = revision;
+            cache.source_indexes.clear();
+            cache
+                .source_indexes
+                .extend(requests.iter().enumerate().filter_map(|(index, request)| {
+                    (query.is_empty()
+                        || request.agent.to_lowercase().contains(&query)
+                        || request.kind.to_lowercase().contains(&query)
+                        || request.summary.to_lowercase().contains(&query)
+                        || request.run_id.to_lowercase().contains(&query)
+                        || request.id.to_lowercase().contains(&query))
+                    .then_some(index)
+                }));
+            #[cfg(test)]
+            {
+                cache.rebuilds += 1;
+            }
+            if let Some(selected_id) = selected_id {
+                self.inbox_selected = cache
+                    .source_indexes
                     .iter()
-                    .enumerate()
-                    .filter_map(|(index, request)| {
-                        (query.is_empty()
-                            || request.agent.to_lowercase().contains(&query)
-                            || request.kind.to_lowercase().contains(&query)
-                            || request.summary.to_lowercase().contains(&query)
-                            || request.run_id.to_lowercase().contains(&query)
-                            || request.id.to_lowercase().contains(&query))
-                        .then_some(index)
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
+                    .position(|index| requests[*index].id == selected_id)
+                    .unwrap_or_else(|| {
+                        self.inbox_selected
+                            .min(cache.source_indexes.len().saturating_sub(1))
+                    });
+            } else {
+                self.inbox_selected = self
+                    .inbox_selected
+                    .min(cache.source_indexes.len().saturating_sub(1));
+            }
+        }
+        self.inbox_selected_id = cache
+            .source_indexes
+            .get(self.inbox_selected)
+            .and_then(|index| requests.get(*index))
+            .map(|request| request.id.clone());
     }
 
     /// Inspector lines for the selected child: status, task, lineage, model,
@@ -450,7 +494,11 @@ impl Overlay for AgentDeck {
     }
 
     fn on_open(&mut self, app: &mut App) {
+        self.attention_filter = AttentionFilterCache::default();
+        self.inbox_selected_id = None;
+        self.inbox_selected = 0;
         self.refresh(app);
+        self.refresh_attention_filter(app);
         // The deck opens on the newest run: Alt+A is how you inspect the
         // delegation you just made, not the session itself. With rows in spawn
         // order the newest is the last row in flat view, and selecting by
@@ -465,28 +513,8 @@ impl Overlay for AgentDeck {
 
     fn on_tick(&mut self, app: &mut App) {
         // A run that finishes while the deck is open lands without a keypress.
-        let selected_request_id = self
-            .visible_attention_indices(app)
-            .get(self.inbox_selected)
-            .and_then(|index| {
-                app.delegator
-                    .as_ref()?
-                    .attention()
-                    .get(*index)
-                    .map(|request| request.id.clone())
-            });
         self.refresh(app);
-        let visible = self.visible_attention_indices(app);
-        self.inbox_selected = selected_request_id
-            .and_then(|id| {
-                visible.iter().position(|index| {
-                    app.delegator
-                        .as_ref()
-                        .and_then(|delegator| delegator.attention().get(*index))
-                        .is_some_and(|request| request.id == id)
-                })
-            })
-            .unwrap_or_else(|| self.inbox_selected.min(visible.len().saturating_sub(1)));
+        self.refresh_attention_filter(app);
     }
 
     fn hide(&mut self) {
@@ -494,6 +522,7 @@ impl Overlay for AgentDeck {
     }
 
     fn handle_key(&mut self, key: KeyEvent, app: &mut App) -> OverlayAction {
+        self.refresh_attention_filter(app);
         if self.searching {
             match key.code {
                 KeyCode::Esc => {
@@ -551,6 +580,8 @@ impl Overlay for AgentDeck {
                 self.selected = self
                     .selected
                     .min(self.filtered_order.len().saturating_sub(1));
+            } else {
+                self.refresh_attention_filter(app);
             }
             return OverlayAction::None;
         }
@@ -613,7 +644,7 @@ impl Overlay for AgentDeck {
                         }
                     }
                     Mode::Inbox => {
-                        let len = self.visible_attention_indices(app).len();
+                        let len = self.attention_filter.source_indexes.len();
                         if len > 0 {
                             self.inbox_selected = (self.inbox_selected + 1).min(len - 1);
                         }
@@ -638,7 +669,7 @@ impl Overlay for AgentDeck {
                         self.peeked = None;
                     }
                     Mode::Inbox => {
-                        let len = self.visible_attention_indices(app).len();
+                        let len = self.attention_filter.source_indexes.len();
                         if forward {
                             self.inbox_selected = self
                                 .inbox_selected
@@ -664,7 +695,7 @@ impl Overlay for AgentDeck {
                     }
                     Mode::Inbox => {
                         self.inbox_selected = if end {
-                            self.visible_attention_indices(app).len().saturating_sub(1)
+                            self.attention_filter.source_indexes.len().saturating_sub(1)
                         } else {
                             0
                         };
@@ -681,7 +712,8 @@ impl Overlay for AgentDeck {
                     // Keep it pending while the user reviews and drafts a
                     // response. Focus removes it only after the steer succeeds.
                     if let Some(request) = self
-                        .visible_attention_indices(app)
+                        .attention_filter
+                        .source_indexes
                         .get(self.inbox_selected)
                         .and_then(|index| app.delegator.as_ref()?.attention().get(*index))
                         .cloned()
@@ -832,6 +864,7 @@ impl Overlay for AgentDeck {
     }
 
     fn render(&mut self, frame: &mut Frame, area: Rect, app: &App) {
+        self.refresh_attention_filter(app);
         frame.render_widget(Clear, area);
         let inbox_len = app
             .delegator
@@ -935,7 +968,7 @@ impl Overlay for AgentDeck {
             (body, None)
         };
         let roster_total = self.filtered_order.len();
-        let visible_attention = self.visible_attention_indices(app);
+        let visible_attention = &self.attention_filter.source_indexes;
         let inbox_total = app
             .delegator
             .as_ref()
@@ -1758,7 +1791,8 @@ mod tests {
             );
         }
 
-        assert_eq!(deck.visible_attention_indices(&app), vec![1]);
+        deck.refresh_attention_filter(&app);
+        assert_eq!(deck.attention_filter.source_indexes, vec![1]);
         deck.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut app);
         assert!(!deck.searching, "first Enter commits the filter");
         let action = deck.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut app);
@@ -1791,13 +1825,15 @@ mod tests {
                 &mut app,
             );
         }
-        assert!(deck.visible_attention_indices(&app).is_empty());
+        deck.refresh_attention_filter(&app);
+        assert!(deck.attention_filter.source_indexes.is_empty());
 
         deck.handle_key(
             KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
             &mut app,
         );
-        assert_eq!(deck.visible_attention_indices(&app), vec![0]);
+        deck.refresh_attention_filter(&app);
+        assert_eq!(deck.attention_filter.source_indexes, vec![0]);
         deck.on_tick(&mut app);
         assert_eq!(deck.inbox_selected, 0);
         assert_eq!(app.delegator.as_ref().unwrap().attention(), &[request]);
@@ -1805,7 +1841,130 @@ mod tests {
         deck.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut app);
         assert!(!deck.searching);
         assert!(deck.inbox_query.is_empty());
-        assert_eq!(deck.visible_attention_indices(&app), vec![0]);
+        deck.refresh_attention_filter(&app);
+        assert_eq!(deck.attention_filter.source_indexes, vec![0]);
+    }
+
+    #[test]
+    fn inbox_filter_caches_large_source_indexes_and_bounds_the_viewport() {
+        let temp = tempfile::tempdir().expect("temporary agent directory");
+        let mut delegator = memnoth_agent::Delegator::new(temp.path().join("agents"));
+        let run = delegator.root(None, "scout", "inbox fixture").expect("run");
+        for index in 0..1_000 {
+            let summary = if matches!(index, 0 | 500 | 999) {
+                format!("match request {index}")
+            } else {
+                format!("request {index}")
+            };
+            delegator
+                .queue_attention(&run.agent_id, "question", &summary)
+                .expect("queue request");
+        }
+        let mut app = App::new("s", false);
+        app.delegator = Some(delegator);
+        let mut deck = AgentDeck::new();
+        deck.mode = Mode::Inbox;
+
+        deck.refresh_attention_filter(&app);
+        assert_eq!(deck.attention_filter.source_indexes.len(), 1_000);
+        let window = AgentDeck::row_window(1_000, 500, 16);
+        assert_eq!(window, 492..508);
+        assert_eq!(
+            &deck.attention_filter.source_indexes[window.clone()],
+            &(492..508).collect::<Vec<_>>()
+        );
+        let allocation = deck.attention_filter.source_indexes.as_ptr();
+        let rebuilds = deck.attention_filter.rebuilds;
+        deck.refresh_attention_filter(&app);
+        assert_eq!(
+            deck.attention_filter.source_indexes.as_ptr(),
+            allocation,
+            "unchanged inbox and query reuse the cached index allocation"
+        );
+        assert_eq!(deck.attention_filter.rebuilds, rebuilds);
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| deck.render(frame, frame.area(), &app))
+            .expect("first cached render");
+        terminal
+            .draw(|frame| deck.render(frame, frame.area(), &app))
+            .expect("second cached render");
+        assert_eq!(
+            deck.attention_filter.rebuilds, rebuilds,
+            "rendering with a stable revision and query does not rebuild the filter"
+        );
+
+        app.delegator
+            .as_mut()
+            .unwrap()
+            .queue_attention(&run.agent_id, "question", "request after cache")
+            .expect("mutate inbox");
+        deck.refresh_attention_filter(&app);
+        assert_eq!(deck.attention_filter.rebuilds, rebuilds + 1);
+        assert_eq!(deck.attention_filter.source_indexes.len(), 1_001);
+
+        deck.inbox_query = "match".to_string();
+        deck.refresh_attention_filter(&app);
+        assert_eq!(deck.attention_filter.source_indexes, vec![0, 500, 999]);
+        let filtered_window = AgentDeck::row_window(3, 2, 2);
+        assert_eq!(filtered_window, 1..3);
+        assert_eq!(
+            &deck.attention_filter.source_indexes[filtered_window],
+            &[500, 999]
+        );
+    }
+
+    #[test]
+    fn inbox_refresh_keeps_selection_by_request_identity_when_source_indexes_shift() {
+        let temp = tempfile::tempdir().expect("temporary agent directory");
+        let mut delegator = memnoth_agent::Delegator::new(temp.path().join("agents"));
+        let run = delegator
+            .root(None, "scout", "inbox selection")
+            .expect("run");
+        let first = delegator
+            .queue_attention(&run.agent_id, "question", "first")
+            .expect("first request");
+        let second = delegator
+            .queue_attention(&run.agent_id, "question", "second")
+            .expect("second request");
+        let third = delegator
+            .queue_attention(&run.agent_id, "question", "third")
+            .expect("third request");
+        let mut app = App::new("s", false);
+        app.delegator = Some(delegator);
+        let mut deck = AgentDeck::new();
+        deck.mode = Mode::Inbox;
+        deck.refresh_attention_filter(&app);
+        deck.inbox_selected = 2;
+        deck.refresh_attention_filter(&app);
+
+        app.delegator
+            .as_mut()
+            .unwrap()
+            .take_attention(&first.id)
+            .expect("remove the earlier request");
+        app.delegator
+            .as_mut()
+            .unwrap()
+            .queue_attention(&run.agent_id, "question", "fourth")
+            .expect("append a request while preserving inbox length");
+        deck.on_tick(&mut app);
+
+        assert_eq!(deck.attention_filter.source_indexes.len(), 3);
+        assert_eq!(deck.inbox_selected, 1);
+        let selected_source = deck.attention_filter.source_indexes[deck.inbox_selected];
+        assert_eq!(
+            app.delegator.as_ref().unwrap().attention()[selected_source],
+            third,
+            "the selected request remains the same even when source indexes shift"
+        );
+        assert_ne!(
+            app.delegator.as_ref().unwrap().attention()[selected_source],
+            second,
+            "selection must not silently stick to the old numeric index"
+        );
     }
 
     #[test]
