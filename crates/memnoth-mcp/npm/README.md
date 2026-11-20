@@ -62,8 +62,8 @@ retained during the transition, it takes precedence over OIDC until it is remove
 
 ## Client config
 
-This is a standalone stdio server for MCP hosts such as OpenCode, Codex, Claude
-Code, Cursor, and Zed. It must be pointed at one vault file; it never guesses a
+This is the standalone packaged server — a stdio MCP server for hosts such as
+OpenCode, Codex, Claude Code, Cursor, and Zed. It must be pointed at one vault file; it never guesses a
 default. If you do not have a vault yet, run `memnoth vault init` and
 `memnoth vault status`, then copy the absolute vault file path shown by status.
 Creating a new vault requires the Memnoth CLI once; after that, the packaged
@@ -191,6 +191,7 @@ Examples:
 mn mcp add --local --clients claude,cursor,codex --profile code
 mn mcp add --local --clients cursor --allow-writes
 mn mcp add --local --clients claude,cursor,codex,zed --dry-run
+memnoth mcp add --local --clients opencode   # OpenCode chooses the CLI-managed path
 ```
 
 The written entry launches `<path-to-memnoth> mcp serve --db <absolute-vault>`
@@ -203,8 +204,8 @@ Zed settings are JSON-with-comments; `mcp add` will not rewrite such a file and
 prints a snippet for Zed's Command Palette instead.
 
 Use one setup flow — the standalone npm entry above, or the CLI-managed
-registration described here. Do not install both unless you intentionally want
-two servers named `memnoth`.
+registration described here. Use one only: do not add both entries unless you
+intentionally want two servers named `memnoth`.
 
 ## Protocol compatibility
 
