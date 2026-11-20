@@ -1078,6 +1078,27 @@ const OUTBOUND_PATHS: &[OutboundPath] = &[
         gate: "the uninstall confirmation; it fails open so an offline uninstall continues",
         fields: &["nothing but the request itself (the manifest is public)"],
     },
+    // Informational rows. Neither is a Cloud sender: they are listed so this
+    // command enumerates every path `docs/cli/privacy.md` describes. Privacy
+    // mode governs field detail below, never whether a sender exists.
+    OutboundPath {
+        name: "model provider",
+        endpoint: "the provider base URL the user configured",
+        when: "every turn",
+        gate: "user action / the user's own key — not a Cloud sender; this is the user's provider relationship, not ours",
+        fields: &["prompt", "assembled context", "tool results"],
+    },
+    OutboundPath {
+        name: "MCP registration",
+        endpoint: "none (a local client config write, not a network request)",
+        when: "`mn mcp add --local`",
+        gate: "explicit user action / local config write — not a Cloud sender; no URL and no token are written",
+        fields: &[
+            "local client config only",
+            "no URL (`url:\"\"`)",
+            "no token (`token_used:false`)",
+        ],
+    },
 ];
 
 /// Show what data would be sent in a sync
@@ -1264,6 +1285,8 @@ mod tests {
             "project graph sync",
             "hosted MCP request",
             "update check",
+            "model provider",
+            "MCP registration",
         ] {
             assert!(
                 OUTBOUND_PATHS.iter().any(|path| path.name == required),
@@ -1294,5 +1317,33 @@ mod tests {
             .find(|path| path.name == "update check")
             .unwrap();
         assert!(update.gate.contains("NO_UPDATE_NOTIFIER"));
+
+        // The two informational rows must stay visibly non-Cloud: a reader
+        // must not mistake the user's own provider or a local config write for
+        // a sender the control plane operates.
+        let model_provider = OUTBOUND_PATHS
+            .iter()
+            .find(|path| path.name == "model provider")
+            .unwrap();
+        assert!(model_provider.fields.contains(&"prompt"));
+        assert!(model_provider.fields.contains(&"assembled context"));
+        assert!(model_provider.fields.contains(&"tool results"));
+        assert!(model_provider.gate.contains("user's own key"));
+        assert!(model_provider.gate.contains("not a Cloud sender"));
+
+        let mcp_registration = OUTBOUND_PATHS
+            .iter()
+            .find(|path| path.name == "MCP registration")
+            .unwrap();
+        assert!(mcp_registration.endpoint.starts_with("none"));
+        assert!(mcp_registration.gate.contains("local config write"));
+        assert!(mcp_registration.gate.contains("not a Cloud sender"));
+        assert!(mcp_registration.fields.iter().any(|f| f.contains("no URL")));
+        assert!(
+            mcp_registration
+                .fields
+                .iter()
+                .any(|f| f.contains("no token"))
+        );
     }
 }

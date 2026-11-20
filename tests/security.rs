@@ -88,29 +88,89 @@ fn test_ssrf_blocks_private_and_loopback() {
 
 #[test]
 fn test_token_leak_trace_matrix() {
-    // RUST_LOG=trace must never emit a token. This test documents the contract:
-    // every log site that touches a secret must redact it. No actual logging
-    // happens here — the token-leak matrix is checked at CI via RUST_LOG=trace
-    // runs and grep for token-shaped strings.
-    let token = "sk-ant-api03-1234567890abcdef";
-    assert!(token.contains("sk-ant-"));
-    // The matrix: token fields in settings, keyring, env, MCP config, sync
-    // manifests. Each must be redacted at trace. This test asserts the list is
-    // non-empty and each entry names a redaction point.
-    let leak_points = &[
-        "settings.toml provider api_key",
-        "keyring service credential",
-        "env MEMNOTH_*_API_KEY",
-        "mcp client config headers",
-        "sync manifest upload headers",
+    // RUST_LOG=trace must never emit a token. This test no longer checks a
+    // hard-coded checklist: it drives a distinctive sentinel through the same
+    // redaction functions the product calls at each trace site, so a regression
+    // in those functions (not just in the checklist) fails the test.
+    //
+    // A benign `marker` rides on every line to prove the redactor actually
+    // processed and emitted that line. Without it, an empty or over-eager
+    // redactor could satisfy `!contains(secret)` vacuously.
+    use memnoth_auth::redaction::{redact_env_vars, redact_header_value, redact_token};
+    use memnoth_harness_api::security::{redact_token_leaks, scan_token_leaks};
+
+    let secret = "sk-ant-api03-SENTINEL9876543210abcdef";
+    let marker = "TRACE-CAPTURE-OK";
+
+    // One representative log line per leak point in the W12-06 matrix. Each
+    // carries the sentinel and the benign marker.
+    let leak_lines = [
+        format!("settings.toml provider api_key={secret} {marker}"),
+        format!("keyring service credential={secret} {marker}"),
+        format!("env MEMNOTH_API_KEY={secret} {marker}"),
+        format!("mcp client config headers bearer {secret} {marker}"),
+        format!("sync manifest upload headers bearer {secret} {marker}"),
     ];
-    assert!(!leak_points.is_empty());
-    for point in leak_points {
+    assert_eq!(
+        leak_lines.len(),
+        5,
+        "the matrix must cover every leak point"
+    );
+
+    for line in &leak_lines {
+        let redacted = redact_token(line);
         assert!(
-            point.contains("api_key")
-                || point.contains("credential")
-                || point.contains("API_KEY")
-                || point.contains("headers")
+            !redacted.contains(secret),
+            "token leaked through redact_token: {line}"
+        );
+        assert!(
+            redacted.contains(marker),
+            "benign marker lost through redact_token: {line}"
+        );
+        assert!(
+            redacted.contains("***"),
+            "redact_token masked nothing: {line}"
         );
     }
+
+    // Bearer headers drop the whole credential; a non-credential header is
+    // left byte for byte (non-redaction of benign text).
+    let via_header = redact_header_value(&format!("Bearer {secret}"));
+    assert!(
+        !via_header.contains(secret),
+        "token leaked through Bearer redaction"
+    );
+    assert!(via_header.contains("***"));
+    assert_eq!(
+        redact_header_value("X-Trace-Id abc123"),
+        "X-Trace-Id abc123"
+    );
+
+    // Environment variables: credential keys are masked, benign keys survive.
+    let vars = vec![
+        ("MEMNOTH_API_KEY".to_string(), secret.to_string()),
+        ("TRACE_MARKER".to_string(), marker.to_string()),
+    ];
+    let redacted_vars = redact_env_vars(&vars);
+    assert_eq!(redacted_vars[0].1, "***");
+    assert_eq!(redacted_vars[1].1, marker);
+
+    // Harness scanner/redactor: the marker-shaped prefix is detected and
+    // replaced; the sentinel never survives and benign text is preserved.
+    let scanned_line = format!("trace token {secret} {marker}");
+    let findings = scan_token_leaks(&scanned_line);
+    assert!(
+        findings.values().any(|hits| !hits.is_empty()),
+        "the scanner found no token-shaped leak in: {scanned_line}"
+    );
+    let via_harness = redact_token_leaks(&scanned_line);
+    assert!(
+        !via_harness.contains(secret),
+        "token leaked through redact_token_leaks: {scanned_line}"
+    );
+    assert!(
+        via_harness.contains(marker),
+        "benign marker lost through redact_token_leaks"
+    );
+    assert!(via_harness.contains("[REDACTED]"));
 }
