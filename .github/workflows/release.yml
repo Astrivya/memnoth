@@ -624,6 +624,57 @@ jobs:
         if: ${{ steps.npm-publish-auth.outputs.mode == 'oidc' }}
         run: npm publish "${{ steps.npm-package.outputs.package }}" --access public --tag "${{ steps.layout.outputs.npm_tag }}" --provenance
 
+      # npm accepts the upload before its registry has finished processing it.
+      # Do not report a successful release while the advertised `@latest` or
+      # channel-tag command still resolves to an older package or a 404.
+      - name: verify npm install resolves to this release
+        if: ${{ steps.npm-publish-auth.outputs.mode != 'skip' }}
+        env:
+          PACKAGE_NAME: "@astrivya/mcp"
+          PACKAGE_VERSION: ${{ steps.layout.outputs.tag }}
+          EXPECTED_NPM_TAG: ${{ steps.layout.outputs.npm_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${PACKAGE_VERSION#v}"
+          export PACKAGE_VERSION="$version"
+          node --input-type=module <<'NODE'
+          const endpoint = 'https://registry.npmjs.org/@astrivya%2fmcp';
+          const deadline = Date.now() + 20 * 60 * 1000;
+          let last = 'registry has not returned a package document';
+          const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+          while (Date.now() < deadline) {
+            try {
+              const response = await fetch(`${endpoint}?memnoth_check=${Date.now()}`, { cache: 'no-store' });
+              if (response.ok) {
+                const packument = await response.json();
+                const version = process.env.PACKAGE_VERSION;
+                const tag = process.env.EXPECTED_NPM_TAG;
+                if (packument.versions?.[version] && packument['dist-tags']?.[tag] === version) {
+                  console.log(`npm registry resolves @astrivya/mcp@${tag} to ${version}`);
+                  process.exit(0);
+                }
+                last = `version=${Boolean(packument.versions?.[version])}, ${tag}=${packument['dist-tags']?.[tag] ?? 'missing'}`;
+              } else {
+                last = `registry HTTP ${response.status}`;
+              }
+            } catch (error) {
+              last = error.message;
+            }
+            await sleep(15_000);
+          }
+          console.error(`npm has not made @astrivya/mcp@${process.env.PACKAGE_VERSION} installable after 20 minutes (${last})`);
+          process.exit(1);
+          NODE
+
+          installed_version="$(npm exec --yes --package="${PACKAGE_NAME}@${version}" -- memnoth-mcp --version)"
+          expected_version="memnoth-mcp ${version}"
+          test "$installed_version" = "$expected_version" || {
+            echo "npm install smoke returned '$installed_version', expected '$expected_version'" >&2
+            exit 1
+          }
+
   # SLSA provenance for the release, attesting that the published artifacts
   # were produced by this workflow from the tagged commit.
   provenance:
