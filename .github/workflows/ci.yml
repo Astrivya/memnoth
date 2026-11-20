@@ -78,6 +78,8 @@ jobs:
         run: cargo run --quiet -- completion show --shell bash --output completions/memnoth.bash --check
       - name: Standalone MCP package surface
         run: python3 scripts/check_surface.py
+      - name: npm stable-tag monotonicity
+        run: node scripts/npm-dist-tag.mjs --self-test
 
       # Also exercise the command crate's direct entry point without paying for
       # another runner and another cache restore.

@@ -77,6 +77,7 @@ jobs:
           cargo run --quiet -- schema --output contract/commands.json --check
           cargo run --quiet -- completion show --shell bash --output completions/memnoth.bash --check
           python scripts/check_surface.py
+          node scripts/npm-dist-tag.mjs --self-test
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace --locked
 
@@ -405,6 +406,9 @@ jobs:
   dist:
     name: dist bundle
     needs: [build, artifact-test]
+    concurrency:
+      group: memnoth-npm-publish
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.layout.outputs.tag }}
@@ -505,15 +509,6 @@ jobs:
             *) channel=stable ;;
           esac
           echo "channel=$channel" >> "$GITHUB_OUTPUT"
-          # Keep install commands on the newest stable package. A beta or
-          # nightly publish must never move npm's `latest` dist-tag backward
-          # onto a prerelease.
-          case "$channel" in
-            beta) npm_tag=beta ;;
-            nightly) npm_tag=nightly ;;
-            *) npm_tag=latest ;;
-          esac
-          echo "npm_tag=$npm_tag" >> "$GITHUB_OUTPUT"
           echo "publishing $tag on the $channel channel"
           MEMNOTH_CHANNEL="$channel" sh scripts/dist.sh --from artifacts --version "$tag" --out dist
 
@@ -608,6 +603,19 @@ jobs:
             dist/install.ps1
             dist/SHA256SUMS
 
+      - name: choose non-regressing npm channel tag
+        id: npm-publish-tag
+        if: ${{ steps.npm-publish-auth.outputs.mode != 'skip' }}
+        env:
+          RELEASE_CHANNEL: ${{ steps.layout.outputs.channel }}
+          RELEASE_VERSION: ${{ steps.layout.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${RELEASE_VERSION#v}"
+          tag="$(node scripts/npm-dist-tag.mjs "$RELEASE_CHANNEL" "$version")"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
       # Publish only after the matching source tag and complete GitHub draft
       # with its validated assets exist. A registry failure then leaves a
       # recoverable draft instead of an unpaired public package version.
@@ -615,14 +623,14 @@ jobs:
         if: ${{ steps.npm-publish-auth.outputs.mode == 'token' }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish "${{ steps.npm-package.outputs.package }}" --access public --tag "${{ steps.layout.outputs.npm_tag }}" --provenance
+        run: npm publish "${{ steps.npm-package.outputs.package }}" --access public --tag "${{ steps.npm-publish-tag.outputs.tag }}" --provenance
 
       # Enable this repository variable only after registering the matching
       # trusted publisher on npm. This prevents missing first-publish auth from
       # failing the otherwise verified GitHub release.
       - name: publish standalone npm package with trusted publishing
         if: ${{ steps.npm-publish-auth.outputs.mode == 'oidc' }}
-        run: npm publish "${{ steps.npm-package.outputs.package }}" --access public --tag "${{ steps.layout.outputs.npm_tag }}" --provenance
+        run: npm publish "${{ steps.npm-package.outputs.package }}" --access public --tag "${{ steps.npm-publish-tag.outputs.tag }}" --provenance
 
       # npm accepts the upload before its registry has finished processing it.
       # Do not report a successful release while the advertised `@latest` or
@@ -632,7 +640,7 @@ jobs:
         env:
           PACKAGE_NAME: "@astrivya/mcp"
           PACKAGE_VERSION: ${{ steps.layout.outputs.tag }}
-          EXPECTED_NPM_TAG: ${{ steps.layout.outputs.npm_tag }}
+          EXPECTED_NPM_TAG: ${{ steps.npm-publish-tag.outputs.tag }}
         shell: bash
         run: |
           set -euo pipefail
