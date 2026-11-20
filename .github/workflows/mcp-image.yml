@@ -37,9 +37,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --release --locked --target x86_64-unknown-linux-gnu -p memnoth-mcp
           cargo install cross --locked
-          cross build --release --locked --target aarch64-unknown-linux-gnu -p memnoth-mcp
+          cargo build --release --locked --target x86_64-unknown-linux-gnu -p memnoth-mcp &
+          native_pid=$!
+          cross build --release --locked --target aarch64-unknown-linux-gnu -p memnoth-mcp &
+          arm64_pid=$!
+          native_status=0
+          arm64_status=0
+          wait "$native_pid" || native_status=$?
+          wait "$arm64_pid" || arm64_status=$?
+          build_status=$native_status
+          if (( build_status == 0 )); then
+            build_status=$arm64_status
+          fi
+          if (( build_status != 0 )); then
+            exit "$build_status"
+          fi
           work="$(mktemp -d)"
           target/x86_64-unknown-linux-gnu/release/memnoth-mcp \
             --selftest --db "$work/smoke.db"
