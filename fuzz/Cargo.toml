@@ -30,6 +30,11 @@ libfuzzer-sys = "0.4"
 # defined` on Windows). They are still built as binaries, which is all
 # cargo-fuzz needs.
 [[bin]]
+name = "child_event"
+path = "fuzz_targets/child_event.rs"
+test = false
+
+[[bin]]
 name = "config"
 path = "fuzz_targets/config.rs"
 test = false
@@ -42,6 +47,11 @@ test = false
 [[bin]]
 name = "frontmatter"
 path = "fuzz_targets/frontmatter.rs"
+test = false
+
+[[bin]]
+name = "install_manifest"
+path = "fuzz_targets/install_manifest.rs"
 test = false
 
 [[bin]]
