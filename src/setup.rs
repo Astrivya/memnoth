@@ -4,20 +4,26 @@
 //!
 //! 1. Vault — create `~/.memnoth/vault.db` if missing.
 //! 2. Graph — index the workspace (`.memnoth/graph.db`) if missing.
-//! 3. Auth — run `mn auth login` if no token is cached.
+//! 3. Auth — run `mn auth login` only when a person asks for it; `--yes` never signs in.
 //! 4. MCP — offer to start `mn mcp serve` if the server binary is present.
-//! 5. Provider — offer to configure a model via `mn config set provider.*` if none is configured.
-//! 6. Config — write `~/.memnoth/config.toml` with any changes.
-//! 7. Sandbox — check/enforce sandbox policy and helper setup.
+//! 5. Completions — install shell completions through `mn completion install`'s code path.
+//! 6. Provider — offer to configure a model via `mn config set provider.*` if none is configured.
+//! 7. Config — write `~/.memnoth/config.toml` with any changes.
+//! 8. Sandbox — check/enforce sandbox policy and helper setup.
 //!
-//! Each step can be skipped with `--skip vault,graph,auth,mcp,provider,config,sandbox`.
-//! `--yes` accepts all defaults without prompting (for CI).
+//! Each step can be skipped with
+//! `--skip vault,graph,auth,mcp,completions,provider,config,sandbox`.
+//! `--yes` accepts the safe defaults without prompting and never signs in or
+//! writes credentials: auth and provider stay skipped, and the verdict says so.
 
 use anyhow::{Context, Result};
 use serde_json::json;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
+use std::path::Path;
 
 use crate::auth::login;
+use crate::completion;
 use crate::context::{AppContext, Config};
 use crate::kg;
 use crate::output::Outcome;
@@ -30,6 +36,7 @@ enum Step {
     Graph,
     Auth,
     Mcp,
+    Completions,
     Provider,
     Config,
     Sandbox,
@@ -42,6 +49,7 @@ impl Step {
             Step::Graph => "graph",
             Step::Auth => "auth",
             Step::Mcp => "mcp",
+            Step::Completions => "completions",
             Step::Provider => "provider",
             Step::Config => "config",
             Step::Sandbox => "sandbox",
@@ -54,6 +62,7 @@ impl Step {
             Step::Graph,
             Step::Auth,
             Step::Mcp,
+            Step::Completions,
             Step::Provider,
             Step::Config,
             Step::Sandbox,
@@ -64,9 +73,11 @@ impl Step {
 /// State carried through the setup wizard.
 struct SetupState {
     /// Whether each step was skipped by flag.
-    skipped: std::collections::HashSet<Step>,
+    skipped: HashSet<Step>,
     /// Whether each step was completed (or already satisfied).
-    completed: std::collections::HashSet<Step>,
+    completed: HashSet<Step>,
+    /// Why a step is not ready. Only non-completed steps carry a note.
+    notes: HashMap<Step, String>,
     /// Whether config was modified and needs saving.
     config_dirty: bool,
     /// The config being built up.
@@ -79,15 +90,20 @@ struct SetupState {
 
 impl SetupState {
     fn new(args: &crate::cli::SetupArgs) -> Self {
-        let skipped = args
+        let skipped: HashSet<Step> = args
             .skip
             .iter()
             .filter_map(|s| Step::all().iter().find(|step| step.name() == s).copied())
             .collect();
+        let notes = skipped
+            .iter()
+            .map(|step| (*step, "skipped (--skip)".to_string()))
+            .collect();
 
         Self {
             skipped,
-            completed: std::collections::HashSet::new(),
+            completed: HashSet::new(),
+            notes,
             config_dirty: false,
             config: Config::default(),
             yes: args.yes,
@@ -101,6 +117,21 @@ impl SetupState {
 
     fn mark_completed(&mut self, step: Step) {
         self.completed.insert(step);
+        self.notes.remove(&step);
+    }
+
+    /// Record why a step is not ready. A completed step never carries a note.
+    fn note(&mut self, step: Step, reason: impl Into<String>) {
+        if !self.completed.contains(&step) {
+            self.notes.insert(step, reason.into());
+        }
+    }
+
+    fn reason(&self, step: Step) -> &str {
+        self.notes
+            .get(&step)
+            .map(String::as_str)
+            .unwrap_or("not attempted")
     }
 
     fn print_progress(&self, step: Step, message: &str) {
@@ -148,32 +179,42 @@ pub fn run(ctx: &AppContext, args: &crate::cli::SetupArgs) -> Result<Outcome> {
         run_mcp_step(ctx, &mut state)?;
     }
 
-    // Step 5: Provider
+    // Step 5: Completions
+    if !state.is_skipped(Step::Completions) {
+        run_completions_step(ctx, &mut state)?;
+    }
+
+    // Step 6: Provider
     if !state.is_skipped(Step::Provider) {
         run_provider_step(ctx, &mut state)?;
     }
 
-    // Step 6: Config
+    // Step 7: Config
     if !state.is_skipped(Step::Config) {
         run_config_step(ctx, &mut state)?;
     }
 
-    // Step 7: Sandbox
+    // Step 8: Sandbox
     if !state.is_skipped(Step::Sandbox) {
         run_sandbox_step(ctx, &mut state)?;
     }
 
-    let text = build_summary_text(&state, ctx);
+    let verdict = build_verdict_text(&state);
+    let text = build_summary_text(&state, ctx, &verdict);
     let data = json!({
         "steps": Step::all().iter().map(|s| {
             json!({
                 "name": s.name(),
                 "skipped": state.is_skipped(*s),
                 "completed": state.completed.contains(s),
+                "reason": state.reason(*s),
             })
         }).collect::<Vec<_>>(),
         "config_path": ctx.config_path.display().to_string(),
         "config_saved": state.config_dirty,
+        "ready": ready_steps(&state),
+        "not_ready": not_ready_steps(&state),
+        "verdict": verdict.clone(),
     });
 
     Ok(Outcome::new("setup", text, data))
@@ -199,6 +240,7 @@ fn run_vault_step(ctx: &AppContext, state: &mut SetupState) -> Result<()> {
         state.mark_completed(Step::Vault);
     } else {
         state.print_progress(Step::Vault, "skipped (no vault)");
+        state.note(Step::Vault, "no vault created; run `mn vault init`");
     }
 
     Ok(())
@@ -227,6 +269,7 @@ fn run_graph_step(ctx: &AppContext, state: &mut SetupState) -> Result<()> {
         state.mark_completed(Step::Graph);
     } else {
         state.print_progress(Step::Graph, "skipped (no graph)");
+        state.note(Step::Graph, "workspace not indexed; run `mn kg index`");
     }
 
     Ok(())
@@ -249,7 +292,10 @@ fn run_auth_step(ctx: &AppContext, state: &mut SetupState) -> Result<()> {
         return Ok(());
     }
 
-    if state.yes || confirm_simple("Run authentication flow?") {
+    // `--yes` is the CI path: it must never open a browser, prompt, or write a
+    // credential. Authentication is the one step that needs a person, so it is
+    // reported as skipped rather than silently attempted.
+    if !state.yes && confirm_simple("Run authentication flow?") {
         state.print_progress(Step::Auth, "starting login...");
         let login_args = crate::cli::AuthLoginArgs {
             no_browser: false,
@@ -264,7 +310,13 @@ fn run_auth_step(ctx: &AppContext, state: &mut SetupState) -> Result<()> {
         state.print_progress(Step::Auth, "authenticated");
         state.mark_completed(Step::Auth);
     } else {
+        let reason = if state.yes {
+            "not authenticated (--yes never signs in); run `mn auth login`"
+        } else {
+            "not authenticated; run `mn auth login`"
+        };
         state.print_progress(Step::Auth, "skipped (not authenticated)");
+        state.note(Step::Auth, reason);
     }
 
     Ok(())
@@ -277,8 +329,11 @@ fn run_mcp_step(ctx: &AppContext, state: &mut SetupState) -> Result<()> {
 
     if !has_server {
         state.print_progress(Step::Mcp, "server binary not found (skipped)");
-        // Not an error - the server is a separate crate
-        state.mark_completed(Step::Mcp);
+        // Not an error — the server is a separate crate — but not ready either.
+        state.note(
+            Step::Mcp,
+            "no MCP server binary; build crates/memnoth-mcp or use `mn mcp add`",
+        );
         return Ok(());
     }
 
@@ -304,6 +359,97 @@ fn run_mcp_step(ctx: &AppContext, state: &mut SetupState) -> Result<()> {
         state.mark_completed(Step::Mcp);
     } else {
         state.print_progress(Step::Mcp, "skipped (server available)");
+        state.note(
+            Step::Mcp,
+            "server available but not started; run `mn mcp serve` or `mn mcp add`",
+        );
+    }
+
+    Ok(())
+}
+
+/// The completion decision, kept separate from the install so it can be tested
+/// without touching a real shell profile or completion directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompletionDecision {
+    AlreadyInstalled,
+    Install,
+    Decline,
+}
+
+fn completion_decision(path: &Path, yes: bool) -> CompletionDecision {
+    if path.is_file() {
+        return CompletionDecision::AlreadyInstalled;
+    }
+    if yes {
+        return CompletionDecision::Install;
+    }
+    if confirm_simple("Install shell completions?") {
+        CompletionDecision::Install
+    } else {
+        CompletionDecision::Decline
+    }
+}
+
+/// Install shell completions using the same public code path as
+/// `mn doctor --fix`: detect the shell, ask `completion` where its script lives,
+/// and call `completion::install_completions`. No new generator is introduced.
+fn run_completions_step(_ctx: &AppContext, state: &mut SetupState) -> Result<()> {
+    state.print_progress(Step::Completions, "checking shell completions...");
+
+    let shell = match completion::detect_shell() {
+        Some(shell) => shell,
+        None => {
+            state.print_progress(Step::Completions, "skipped (no shell detected)");
+            state.note(
+                Step::Completions,
+                "no shell detected; run `mn completion install --shell <shell>`",
+            );
+            return Ok(());
+        }
+    };
+
+    let path = match completion::completion_path(shell) {
+        Ok(path) => path,
+        Err(error) => {
+            state.print_progress(
+                Step::Completions,
+                &format!("skipped (no completion path: {error:#})"),
+            );
+            state.note(
+                Step::Completions,
+                format!("cannot resolve completion path: {error:#}"),
+            );
+            return Ok(());
+        }
+    };
+
+    match completion_decision(&path, state.yes) {
+        CompletionDecision::AlreadyInstalled => {
+            state.print_progress(
+                Step::Completions,
+                &format!("already installed at {}", path.display()),
+            );
+            state.mark_completed(Step::Completions);
+        }
+        CompletionDecision::Install => {
+            // `install_completions` is idempotent in effect (it backs up an
+            // existing script), and `completion_decision` already avoided the
+            // rewrite when the script is in place.
+            let installed = completion::install_completions(shell)?;
+            state.print_progress(
+                Step::Completions,
+                &format!("installed at {}", installed.display()),
+            );
+            state.mark_completed(Step::Completions);
+        }
+        CompletionDecision::Decline => {
+            state.print_progress(Step::Completions, "skipped (not installed)");
+            state.note(
+                Step::Completions,
+                "not installed; run `mn completion install`",
+            );
+        }
     }
 
     Ok(())
@@ -324,7 +470,21 @@ fn run_provider_step(_ctx: &AppContext, state: &mut SetupState) -> Result<()> {
         return Ok(());
     }
 
-    if state.yes || confirm_simple("Configure a model provider?") {
+    // The CI path never guesses a provider and never touches config on behalf
+    // of a person who is not there. It leaves the step honestly skipped.
+    if state.yes {
+        state.print_progress(
+            Step::Provider,
+            "skipped (--yes does not configure a provider)",
+        );
+        state.note(
+            Step::Provider,
+            "no provider configured; export an API key or run `mn config set provider.kind`",
+        );
+        return Ok(());
+    }
+
+    if confirm_simple("Configure a model provider?") {
         state.print_progress(Step::Provider, "configuring provider...");
 
         if !state.quiet {
@@ -374,6 +534,10 @@ fn run_provider_step(_ctx: &AppContext, state: &mut SetupState) -> Result<()> {
         state.mark_completed(Step::Provider);
     } else {
         state.print_progress(Step::Provider, "skipped (no provider configured)");
+        state.note(
+            Step::Provider,
+            "no provider configured; export an API key or run `mn config set provider.kind`",
+        );
     }
 
     Ok(())
@@ -404,12 +568,15 @@ fn run_sandbox_step(ctx: &AppContext, state: &mut SetupState) -> Result<()> {
         Ok(config) => config,
         Err(error) => {
             state.print_progress(Step::Sandbox, &format!("policy unreadable: {error:#}"));
-            state.mark_completed(Step::Sandbox);
+            state.note(
+                Step::Sandbox,
+                format!("sandbox policy unreadable: {error:#}"),
+            );
             return Ok(());
         }
     };
 
-    match memnoth_sandbox::backend::BackendPlan::build(
+    let plan_ok = match memnoth_sandbox::backend::BackendPlan::build(
         memnoth_sandbox::backend::OsBackend::host(),
         &memnoth_sandbox::profiles::ProfileName::Workspace,
         &ctx.root,
@@ -423,13 +590,18 @@ fn run_sandbox_step(ctx: &AppContext, state: &mut SetupState) -> Result<()> {
             } else {
                 state.print_progress(Step::Sandbox, &format!("policy-checked ({line})"));
             }
+            true
         }
         Err(error) => {
             state.print_progress(Step::Sandbox, &format!("plan refused: {error:#}"));
+            state.note(Step::Sandbox, format!("sandbox plan refused: {error:#}"));
+            false
         }
-    }
+    };
 
-    state.mark_completed(Step::Sandbox);
+    if plan_ok {
+        state.mark_completed(Step::Sandbox);
+    }
     Ok(())
 }
 
@@ -449,7 +621,42 @@ fn confirm_simple(prompt: &str) -> bool {
     input == "y" || input == "yes"
 }
 
-fn build_summary_text(state: &SetupState, ctx: &AppContext) -> String {
+/// Steps that actually succeeded. A skipped or failed step is never in here.
+fn ready_steps(state: &SetupState) -> Vec<&'static str> {
+    Step::all()
+        .iter()
+        .filter(|step| state.completed.contains(step))
+        .map(|step| step.name())
+        .collect()
+}
+
+/// Every step that did not succeed, with the reason recorded when it was skipped
+/// or refused. This is the honest half of the verdict.
+fn not_ready_steps(state: &SetupState) -> Vec<String> {
+    Step::all()
+        .iter()
+        .filter(|step| !state.completed.contains(step))
+        .map(|step| format!("{} — {}", step.name(), state.reason(*step)))
+        .collect()
+}
+
+fn build_verdict_text(state: &SetupState) -> String {
+    let ready = ready_steps(state);
+    let ready_text = if ready.is_empty() {
+        "none".to_string()
+    } else {
+        format!("{} ✓", ready.join(" ✓ "))
+    };
+
+    let mut verdict = format!("ready: {ready_text} — next: mn doctor\n");
+    let not_ready = not_ready_steps(state);
+    if !not_ready.is_empty() {
+        verdict.push_str(&format!("not ready: {}\n", not_ready.join("; ")));
+    }
+    verdict
+}
+
+fn build_summary_text(state: &SetupState, ctx: &AppContext, verdict: &str) -> String {
     let mut text = String::new();
 
     text.push_str("setup complete\n\n");
@@ -476,5 +683,105 @@ fn build_summary_text(state: &SetupState, ctx: &AppContext) -> String {
     text.push_str("  memnoth              # open the session\n");
     text.push_str("  memnoth doctor       # verify everything is wired\n");
 
+    text.push('\n');
+    text.push_str(verdict);
+
     text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(skip: &[&str], yes: bool) -> crate::cli::SetupArgs {
+        crate::cli::SetupArgs {
+            skip: skip.iter().map(|name| name.to_string()).collect(),
+            yes,
+            json: true,
+        }
+    }
+
+    #[test]
+    fn completions_is_a_first_class_skip_name() {
+        let state = SetupState::new(&args(&["completions", "auth", "not-a-step"], true));
+        assert!(state.is_skipped(Step::Completions));
+        assert!(state.is_skipped(Step::Auth));
+        assert_eq!(state.skipped.len(), 2);
+        assert_eq!(state.reason(Step::Completions), "skipped (--skip)");
+    }
+
+    #[test]
+    fn completion_install_is_idempotent_and_declines_without_a_yes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("memnoth.bash");
+
+        assert_eq!(
+            completion_decision(&path, true),
+            CompletionDecision::Install
+        );
+        std::fs::write(&path, "generated script").expect("write script");
+        assert_eq!(
+            completion_decision(&path, true),
+            CompletionDecision::AlreadyInstalled
+        );
+        std::fs::remove_file(&path).expect("remove script");
+        assert_eq!(
+            completion_decision(&path, false),
+            CompletionDecision::Decline
+        );
+    }
+
+    #[test]
+    fn verdict_lists_only_successful_steps_and_names_every_skipped_one() {
+        let mut state = SetupState::new(&args(&["auth", "provider"], true));
+        state.mark_completed(Step::Vault);
+        state.mark_completed(Step::Graph);
+        state.mark_completed(Step::Completions);
+
+        let verdict = build_verdict_text(&state);
+        let ready_line = verdict.lines().next().expect("ready line");
+        assert!(
+            ready_line.contains("vault ✓ graph ✓ completions ✓"),
+            "{ready_line}"
+        );
+        assert!(!ready_line.contains("auth"), "{ready_line}");
+        assert!(!ready_line.contains("provider"), "{ready_line}");
+
+        let not_ready_line = verdict.lines().nth(1).expect("not ready line");
+        assert!(
+            not_ready_line.contains("auth — skipped (--skip)"),
+            "{not_ready_line}"
+        );
+        assert!(
+            not_ready_line.contains("provider — skipped (--skip)"),
+            "{not_ready_line}"
+        );
+        assert!(verdict.contains("next: mn doctor"), "{verdict}");
+        assert!(ready_steps(&state) == vec!["vault", "graph", "completions"]);
+    }
+
+    #[test]
+    fn summary_carries_the_verdict() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ctx = crate::context::AppContext {
+            root: dir.path().to_path_buf(),
+            home: dir.path().join("state"),
+            vault_path: dir.path().join("state").join("vault.db"),
+            namespace: "default".to_string(),
+            graph_path: dir.path().join(".memnoth").join("graph.db"),
+            sessions_dir: dir.path().join("state").join("sessions"),
+            config_path: dir.path().join("state").join("config.toml"),
+            config: crate::context::Config::default(),
+            json: true,
+            quiet: true,
+            exe_path: std::path::PathBuf::from("mn"),
+        };
+        let state = SetupState::new(&args(&["auth", "provider"], true));
+        let verdict = build_verdict_text(&state);
+        let text = build_summary_text(&state, &ctx, &verdict);
+        assert!(text.contains("ready:"), "{text}");
+        assert!(text.contains("not ready:"), "{text}");
+        assert!(text.contains("auth — skipped (--skip)"), "{text}");
+        assert!(text.contains("provider — skipped (--skip)"), "{text}");
+    }
 }
