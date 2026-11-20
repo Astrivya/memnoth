@@ -13,6 +13,14 @@
 //! started is allowed to finish and report, and the *next* boundary refuses.
 //! That is the only place a cancellation is cheap and safe.
 
+pub mod event_replay;
+pub mod event_schema;
+
+use event_schema::{
+    ATTENTION_QUEUED, EVENT_SCHEMA_VERSION, EventState, RUN_CANCELLED, RUN_DONE, RUN_FAILED,
+    RUN_REVIVE, RUN_SPAWN, RUN_START, RUN_STOP, SOURCE_DELEGATOR, STEER, TOOL_USE,
+};
+
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -121,16 +129,58 @@ pub struct ChildRun {
 }
 
 /// One line in a child's JSONL.
+///
+/// The first four fields are the original wire format and stay mandatory so
+/// old files load unchanged. Everything after `detail` is additive (schema
+/// v1) and carries a serde default: an old line parses with `seq == 0`, an
+/// empty `id`, no ids, no source, `EventState::Unknown` and `version == 0`.
+/// A missing `state` or an unknown future state degrades to `Unknown` rather
+/// than failing the line, so a reader never mistakes a new event for a
+/// terminal state just because it does not recognise the kind.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChildEvent {
-    /// `run.start`, `tool.use`, `run.done`, `run.failed`, `run.cancelled`.
+    /// Event kind: `run.spawn`, `run.start`, `tool.use`, `run.done`,
+    /// `run.failed`, `run.cancelled`, `run.stop`, `run.revive`, `steer`, or
+    /// `attention.queued`. Old logs also contain only these original kinds.
     pub event: String,
-    /// The child this line belongs to.
+    /// The child this line belongs to (legacy field, equal to `run_id`).
     pub agent_id: String,
     /// Milliseconds since the epoch.
     pub at_ms: i64,
     /// Event detail: the tool name, the result summary, the reason.
+    ///
+    /// For `tool.use` this is only the tool name observed at a boundary. It
+    /// is never a tool result and never reasoning text; neither is stored in
+    /// this log.
     pub detail: String,
+
+    /// Stable event id, `<run-id>:<seq>`. Empty on legacy lines.
+    #[serde(default)]
+    pub id: String,
+    /// Monotonic, per-run sequence starting at 1. Zero on legacy lines.
+    #[serde(default)]
+    pub seq: u64,
+    /// Run this event belongs to, denormalised with `agent_id` for new lines.
+    #[serde(default)]
+    pub run_id: String,
+    /// Session that owns the run, when one was recorded.
+    #[serde(default)]
+    pub session_id: Option<String>,
+    /// Turn within the run, when a caller supplies one.
+    #[serde(default)]
+    pub turn_id: Option<String>,
+    /// Parent run id, when this child was delegated.
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    /// Producer label (`delegator` for rows written here). Empty on old lines.
+    #[serde(default)]
+    pub source: String,
+    /// Typed lifecycle state, projected from the kind.
+    #[serde(default, deserialize_with = "event_schema::deserialize_state")]
+    pub state: EventState,
+    /// Schema version; 0 for legacy lines, 1 for the current schema.
+    #[serde(default)]
+    pub version: u32,
 }
 
 /// The spawn tree over a run registry.
@@ -152,6 +202,9 @@ pub struct Delegator {
     attention: Vec<AttentionRequest>,
     /// Monotonic counter behind the `attn-N` ids.
     attention_seq: u64,
+    /// Per-run counters behind each event's `seq` and `<run-id>:<seq>` id.
+    /// Keyed by run id so two children both start at 1 in their own logs.
+    event_seq: BTreeMap<String, u64>,
     /// O(1) change token for attention inbox readers. Globally advanced so a
     /// replacement Delegator cannot reuse another instance's cache key.
     attention_revision: u64,
@@ -193,6 +246,7 @@ impl Delegator {
             spawn_seq: 0,
             attention: Vec::new(),
             attention_seq: 0,
+            event_seq: BTreeMap::new(),
             attention_revision: next_attention_revision(),
         }
     }
@@ -298,10 +352,14 @@ impl Delegator {
             created_ms: now_ms(),
         };
         self.nodes.insert(run_id.clone(), node.clone());
-        self.log(&run_id, "run.start", task)?;
-        // Spawning registers the run; it does not start it. A child with no
-        // executor must not claim to be running: `begin` is what an executor
-        // calls when it actually picks the run up.
+        // Spawning is not execution, so it writes no `run.start`. The `node`
+        // above *is* the discoverable spawn record: it carries the parent,
+        // root, session, task, spawn order and timestamp a parent needs to
+        // reconstruct the tree. Only `begin`, which an executor calls when it
+        // actually picks the run up, emits `run.start`. Callers that want an
+        // explicit persisted spawn transition can call `record_spawn`, which
+        // writes the additive `run.spawn` kind (schema v1) without claiming
+        // the child has started.
         Ok(node)
     }
 
@@ -344,7 +402,7 @@ impl Delegator {
         if !self.nodes.contains_key(id) {
             bail!("no such child {id}: cannot steer what does not exist");
         }
-        self.log(id, "steer", note)
+        self.log(id, STEER, note)
     }
 
     /// Stop one child without touching its parent or siblings.
@@ -361,7 +419,7 @@ impl Delegator {
             Ok(()) => {
                 self.log(
                     id,
-                    "run.stop",
+                    RUN_STOP,
                     "stopped from the deck; parent and siblings untouched",
                 )?;
                 Ok(true)
@@ -382,7 +440,7 @@ impl Delegator {
         self.registry.revive(id)?;
         self.log(
             id,
-            "run.revive",
+            RUN_REVIVE,
             "revived from the deck; log and history kept",
         )
     }
@@ -414,7 +472,7 @@ impl Delegator {
             summary: summary.to_string(),
             at_ms: now_ms(),
         };
-        self.log(run_id, "attention.queued", &request.summary)?;
+        self.log(run_id, ATTENTION_QUEUED, &request.summary)?;
         self.attention.push(request.clone());
         self.attention_revision = next_attention_revision();
         Ok(request)
@@ -454,9 +512,48 @@ impl Delegator {
         out
     }
 
+    /// Persist an explicit spawn transition for `id`, using the additive
+    /// `run.spawn` kind (schema v1).
+    ///
+    /// `spawn()` does not call this automatically: a spawn record already
+    /// exists as the [`ChildRun`] node, and the default log must still start
+    /// with `run.start` once an executor calls [`Self::begin`]. A caller that
+    /// maintains a parent-side roster may call this to get a durable,
+    /// discoverable "child was created" row. `run.spawn` is deliberately not
+    /// `run.start`: the first means a node exists, the second means code is
+    /// executing.
+    pub fn record_spawn(&mut self, id: &str) -> Result<()> {
+        let agent = self
+            .nodes
+            .get(id)
+            .with_context(|| format!("no such child {id}: cannot record a spawn"))?
+            .agent
+            .clone();
+        self.log(id, RUN_SPAWN, &format!("spawned {agent}"))
+    }
+
     /// Mark a child as running: the executor has picked it up.
+    ///
+    /// This is the only place `run.start` is emitted. Calling `begin` on a
+    /// run that is already running is a no-op for the log, so an actually
+    /// started child has exactly one `run.start` no matter how many times an
+    /// executor reports the transition.
     pub fn begin(&mut self, id: &str) -> Result<()> {
-        self.registry.start(id)
+        let already_running = self
+            .registry
+            .get(id)
+            .is_some_and(|entry| entry.status == crate::runtime::RunStatus::Running);
+        self.registry.start(id)?;
+        if !already_running {
+            let task = self
+                .nodes
+                .get(id)
+                .with_context(|| format!("no such run {id}"))?
+                .task
+                .clone();
+            self.log(id, RUN_START, &task)?;
+        }
+        Ok(())
     }
 
     /// Direct children of `id`, oldest first.
@@ -551,22 +648,25 @@ impl Delegator {
             bail!("no such run {id}");
         }
         if self.is_cancelled(id) {
-            self.log(id, "run.cancelled", "cancelled before tool boundary")?;
+            self.log(id, RUN_CANCELLED, "cancelled before tool boundary")?;
             bail!("run {id} is cancelled; refusing {tool}");
         }
-        self.log(id, "tool.use", tool)
+        // `tool.use` is a typed fact about tool *use* at a boundary, with a
+        // source label. It carries only the tool name in `detail`: never the
+        // result, never reasoning text. Readers must not render it as either.
+        self.log(id, TOOL_USE, tool)
     }
 
     /// Finish a child with the result it returned to its parent.
     pub fn finish(&mut self, id: &str, result: &AgentResult) -> Result<()> {
         let summary = serde_json::to_string(result).unwrap_or_else(|_| "{}".to_string());
-        self.log(id, "run.done", &summary)?;
+        self.log(id, RUN_DONE, &summary)?;
         self.registry.complete(id)
     }
 
     /// Fail a child.
     pub fn fail(&mut self, id: &str, reason: &str) -> Result<()> {
-        self.log(id, "run.failed", reason)?;
+        self.log(id, RUN_FAILED, reason)?;
         self.registry.fail(id, reason)
     }
 
@@ -588,7 +688,7 @@ impl Delegator {
                 continue;
             }
             // Log first: a cancelled run whose log says nothing is a mystery.
-            let _ = self.log(&target, "run.cancelled", "cancelled by parent");
+            let _ = self.log(&target, RUN_CANCELLED, "cancelled by parent");
             self.registry.cancel(&target)?;
             stopped += 1;
         }
@@ -614,24 +714,67 @@ impl Delegator {
             .collect())
     }
 
-    fn log(&self, id: &str, event: &str, detail: &str) -> Result<()> {
-        let node = self
-            .nodes
-            .get(id)
-            .with_context(|| format!("no such run {id}"))?;
+    fn log(&mut self, id: &str, event: &str, detail: &str) -> Result<()> {
+        let (session_id, parent_id, log_path) = {
+            let node = self
+                .nodes
+                .get(id)
+                .with_context(|| format!("no such run {id}"))?;
+            (
+                node.session_id.clone(),
+                node.parent_id.clone(),
+                node.log.clone(),
+            )
+        };
+
+        // Continue an existing log instead of reusing ids from a previous
+        // Delegator instance. Legacy lines have `seq == 0`, so they never
+        // collide with the v1 ids written here.
+        let resume_from = if self.event_seq.contains_key(id) {
+            0
+        } else {
+            Self::max_seq_in_log(&log_path)
+        };
+        let counter = self.event_seq.entry(id.to_string()).or_insert(resume_from);
+        *counter += 1;
+        let seq = *counter;
+
         let line = serde_json::to_string(&ChildEvent {
             event: event.to_string(),
             agent_id: id.to_string(),
             at_ms: now_ms(),
             detail: detail.to_string(),
+            id: format!("{id}:{seq}"),
+            seq,
+            run_id: id.to_string(),
+            session_id,
+            turn_id: None,
+            parent_id,
+            source: SOURCE_DELEGATOR.to_string(),
+            state: event_schema::state_for_kind(event),
+            version: EVENT_SCHEMA_VERSION,
         })?;
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&node.log)
-            .with_context(|| format!("cannot open child log {}", node.log.display()))?;
+            .open(&log_path)
+            .with_context(|| format!("cannot open child log {}", log_path.display()))?;
         writeln!(file, "{line}")?;
         Ok(())
+    }
+
+    /// Highest `seq` already present in `log_path`, or 0 for a new/unreadable
+    /// file. Malformed trailing lines are ignored, as in [`Self::read_log`].
+    fn max_seq_in_log(log_path: &Path) -> u64 {
+        match std::fs::read_to_string(log_path) {
+            Ok(text) => text
+                .lines()
+                .filter_map(|line| serde_json::from_str::<ChildEvent>(line).ok())
+                .map(|event| event.seq)
+                .max()
+                .unwrap_or(0),
+            Err(_) => 0,
+        }
     }
 
     /// The directory child logs live in.
@@ -709,6 +852,8 @@ mod tests {
         let dir = temp();
         let mut delegator = Delegator::new(dir.path());
         let child = delegator.root(Some("s1"), "scout", "look around").unwrap();
+        // `run.start` is emitted when the child actually starts, not at spawn.
+        delegator.begin(&child.agent_id).unwrap();
         delegator
             .tool_boundary(&child.agent_id, "read_file")
             .unwrap();
@@ -778,6 +923,7 @@ mod tests {
         let (id, path) = {
             let mut delegator = Delegator::new(dir.path());
             let child = delegator.root(None, "scout", "look").unwrap();
+            delegator.begin(&child.agent_id).unwrap();
             delegator.tool_boundary(&child.agent_id, "grep").unwrap();
             (child.agent_id, child.log)
         };
@@ -1036,5 +1182,179 @@ mod session_model_tests {
                 .queue_attention("nope", "permission", "x")
                 .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod event_log_tests {
+    use super::*;
+    use crate::result::{Cost, Exit};
+    use std::collections::BTreeSet;
+
+    fn dir(name: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "memnoth-delegate-events-{}-{name}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        path
+    }
+
+    fn result_ok() -> AgentResult {
+        AgentResult {
+            summary: "done".to_string(),
+            findings: Vec::new(),
+            changed_files: Vec::new(),
+            commands_run: Vec::new(),
+            receipts: Vec::new(),
+            proposed_beliefs: Vec::new(),
+            cost: Cost {
+                tokens: 0,
+                usd: 0.0,
+            },
+            turns: 1,
+            exit: Exit::Completed,
+        }
+    }
+
+    #[test]
+    fn event_ids_are_stable_and_unique() {
+        let mut d = Delegator::new(dir("ids"));
+        let root = d.root(Some("s1"), "scout", "look").unwrap();
+        d.begin(&root.agent_id).unwrap();
+        d.tool_boundary(&root.agent_id, "read_file").unwrap();
+        d.tool_boundary(&root.agent_id, "grep").unwrap();
+        d.finish(&root.agent_id, &result_ok()).unwrap();
+
+        let first = d.read_log(&root.agent_id).unwrap();
+        let ids: Vec<&str> = first.iter().map(|e| e.id.as_str()).collect();
+        let expected: Vec<String> = (1..=4).map(|n| format!("{}:{n}", root.agent_id)).collect();
+        let expected: Vec<&str> = expected.iter().map(String::as_str).collect();
+        assert_eq!(ids, expected, "id is <run-id>:<seq>");
+
+        let mut seen = BTreeSet::new();
+        for id in &ids {
+            assert!(seen.insert(*id), "duplicate event id {id}");
+        }
+        // A second read returns byte-for-byte the same ids: they are stable,
+        // not regenerated on read.
+        let again = d.read_log(&root.agent_id).unwrap();
+        assert_eq!(again.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(), ids);
+    }
+
+    #[test]
+    fn seq_is_monotonic_per_run() {
+        let mut d = Delegator::new(dir("seq"));
+        let a = d.root(None, "scout", "a").unwrap();
+        let b = d.spawn(Some(&a.agent_id), None, "worker", "b").unwrap();
+        d.begin(&a.agent_id).unwrap();
+        d.tool_boundary(&a.agent_id, "read_file").unwrap();
+        d.begin(&b.agent_id).unwrap();
+        d.tool_boundary(&b.agent_id, "grep").unwrap();
+        d.tool_boundary(&b.agent_id, "write_file").unwrap();
+
+        for id in [&a.agent_id, &b.agent_id] {
+            let events = d.read_log(id).unwrap();
+            assert!(!events.is_empty());
+            assert_eq!(events[0].seq, 1, "each run starts its own seq at 1");
+            assert!(
+                events.windows(2).all(|w| w[0].seq + 1 == w[1].seq),
+                "seq must be strictly monotonic with no gaps"
+            );
+            assert!(
+                events.iter().all(|e| e.id == format!("{id}:{}", e.seq)),
+                "id must always match run id and seq"
+            );
+        }
+    }
+
+    #[test]
+    fn a_spawn_only_child_never_emits_run_start() {
+        let mut d = Delegator::new(dir("spawn-only"));
+        let root = d.root(Some("s1"), "scout", "look").unwrap();
+        let events = d.read_log(&root.agent_id).unwrap();
+        assert!(events.is_empty(), "spawn writes no lifecycle event");
+        assert!(!events.iter().any(|e| e.event == RUN_START));
+        assert_eq!(
+            d.registry().get(&root.agent_id).unwrap().status,
+            crate::runtime::RunStatus::Pending,
+            "a spawned child is pending, not running"
+        );
+    }
+
+    #[test]
+    fn an_actually_started_child_emits_exactly_one_run_start() {
+        let mut d = Delegator::new(dir("one-start"));
+        let root = d.root(None, "scout", "look").unwrap();
+        d.begin(&root.agent_id).unwrap();
+        d.begin(&root.agent_id).unwrap(); // a repeated report is a no-op
+        let events = d.read_log(&root.agent_id).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event, RUN_START);
+        assert_eq!(events[0].state, EventState::Started);
+        assert_eq!(events.iter().filter(|e| e.event == RUN_START).count(), 1);
+    }
+
+    #[test]
+    fn a_spawn_record_is_distinct_from_a_start() {
+        let mut d = Delegator::new(dir("spawn-vs-start"));
+        let root = d.root(None, "scout", "look").unwrap();
+        d.record_spawn(&root.agent_id).unwrap();
+        d.begin(&root.agent_id).unwrap();
+        let events = d.read_log(&root.agent_id).unwrap();
+        assert_eq!(events[0].event, RUN_SPAWN);
+        assert_eq!(events[0].state, EventState::Spawned);
+        assert_eq!(events[0].version, EVENT_SCHEMA_VERSION);
+        assert_eq!(events[1].event, RUN_START);
+        assert_eq!(events[1].state, EventState::Started);
+        assert_eq!(events.iter().filter(|e| e.event == RUN_START).count(), 1);
+        assert!(d.record_spawn("nope").is_err());
+    }
+
+    #[test]
+    fn tool_use_is_a_typed_fact_not_a_result_or_reasoning() {
+        let mut d = Delegator::new(dir("tool-fact"));
+        let root = d.root(None, "worker", "edit").unwrap();
+        d.begin(&root.agent_id).unwrap();
+        d.tool_boundary(&root.agent_id, "read_file").unwrap();
+        let events = d.read_log(&root.agent_id).unwrap();
+        let tool = events.iter().find(|e| e.event == TOOL_USE).unwrap();
+        assert_eq!(tool.detail, "read_file", "only the tool name is recorded");
+        assert_eq!(tool.source, SOURCE_DELEGATOR);
+        assert_eq!(tool.state, EventState::ToolUse);
+        assert_eq!(tool.version, EVENT_SCHEMA_VERSION);
+        assert!(tool.turn_id.is_none(), "no turn context was supplied");
+        assert_ne!(tool.state, EventState::Completed, "use is not a result");
+    }
+
+    #[test]
+    fn old_log_lines_still_parse_alongside_new_ones() {
+        let mut d = Delegator::new(dir("legacy"));
+        let root = d.root(Some("s1"), "scout", "look").unwrap();
+        d.begin(&root.agent_id).unwrap();
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&root.log)
+                .unwrap();
+            writeln!(
+                file,
+                r#"{{"event":"tool.use","agent_id":"{}","at_ms":1,"detail":"legacy_tool"}}"#,
+                root.agent_id
+            )
+            .unwrap();
+        }
+        let events = d.read_log(&root.agent_id).unwrap();
+        assert_eq!(events.len(), 2, "the old line is not dropped");
+        assert_eq!(events[0].event, RUN_START, "new lines carry full schema");
+        assert!(events[0].seq > 0);
+        assert_eq!(events[1].event, "tool.use");
+        assert_eq!(events[1].seq, 0, "missing seq defaults to zero");
+        assert_eq!(events[1].id, "");
+        assert_eq!(events[1].run_id, "");
+        assert_eq!(events[1].session_id, None);
+        assert_eq!(events[1].source, "");
+        assert_eq!(events[1].state, EventState::Unknown);
+        assert_eq!(events[1].version, 0, "missing version means legacy");
     }
 }
