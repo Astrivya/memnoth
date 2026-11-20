@@ -88,10 +88,12 @@ jobs:
       - name: Command crate registry schema
         run: cargo run --quiet -p memnoth-command -- schema --check
 
-  # Build each platform's test binaries once, archive them, then fan the same
-  # complete inventory out to execution shards. Windows archives the main CLI
-  # crate and several disjoint workspace package groups in parallel. Doctests
-  # remain explicit Cargo runs because nextest archives do not include them.
+  # Build each platform's test binaries once, then execute the inventory
+  # without recompiling. Non-Windows uses one workspace archive fanned out to
+  # three shards; Windows gives every workspace member its own `-p <pkg>`
+  # archive and splits the root CLI package into small lib/bin/integration-test
+  # groups, each executed by a single dedicated job. Doctests stay explicit
+  # Cargo runs because nextest archives do not include them.
   test-archive:
     name: test archive (${{ matrix.os }}, ${{ matrix.scope }})
     runs-on: ${{ matrix.os }}
@@ -109,65 +111,180 @@ jobs:
             scope: workspace
             archive_args: --workspace
             doctests: true
+
+          # One Windows archive per workspace member. A single `-p` scope keeps
+          # each job small and stops a slow dependency tree from delaying an
+          # unrelated crate. Every package is archived in exactly one scope.
+          # `memnoth-session` is an implicit member (a path dependency of the
+          # root package) and is listed here so its tests keep running.
+          - os: windows-latest
+            scope: memnoth-agent
+            archive_args: "-p memnoth-agent"
+            doctests: false
+          - os: windows-latest
+            scope: memnoth-auth
+            archive_args: "-p memnoth-auth"
+            doctests: false
+          - os: windows-latest
+            scope: memnoth-capability
+            archive_args: "-p memnoth-capability"
+            doctests: false
+          - os: windows-latest
+            scope: memnoth-cloud-client
+            archive_args: "-p memnoth-cloud-client"
+            doctests: false
+          - os: windows-latest
+            scope: memnoth-codegraph
+            archive_args: "-p memnoth-codegraph"
+            doctests: false
+          - os: windows-latest
+            scope: memnoth-command
+            archive_args: "-p memnoth-command"
+            doctests: false
+          - os: windows-latest
+            scope: memnoth-command-macros
+            archive_args: "-p memnoth-command-macros"
+            doctests: false
+          - os: windows-latest
+            scope: memnoth-context
+            archive_args: "-p memnoth-context"
+            doctests: false
+          - os: windows-latest
+            scope: memnoth-coord
+            archive_args: "-p memnoth-coord"
+            doctests: false
+          - os: windows-latest
+            scope: memnoth-embedding
+            archive_args: "-p memnoth-embedding"
+            doctests: false
+          - os: windows-latest
+            scope: memnoth-embedding-wasm
+            archive_args: "-p memnoth-embedding-wasm"
+            doctests: false
+          - os: windows-latest
+            scope: memnoth-engine
+            archive_args: "-p memnoth-engine"
+            doctests: false
+          - os: windows-latest
+            scope: memnoth-ext
+            archive_args: "-p memnoth-ext"
+            doctests: false
+          - os: windows-latest
+            scope: memnoth-fuzz
+            archive_args: "-p memnoth-fuzz"
+            doctests: false
+          - os: windows-latest
+            scope: memnoth-harness-api
+            archive_args: "-p memnoth-harness-api"
+            doctests: false
+          - os: windows-latest
+            scope: memnoth-ingest
+            archive_args: "-p memnoth-ingest"
+            doctests: false
+          - os: windows-latest
+            scope: memnoth-lsp
+            archive_args: "-p memnoth-lsp"
+            doctests: false
+          - os: windows-latest
+            scope: memnoth-mcp
+            archive_args: "-p memnoth-mcp"
+            doctests: false
+          - os: windows-latest
+            scope: memnoth-mcp-auth
+            archive_args: "-p memnoth-mcp-auth"
+            doctests: false
+          - os: windows-latest
+            scope: memnoth-mcp-client
+            archive_args: "-p memnoth-mcp-client"
+            doctests: false
+          - os: windows-latest
+            scope: memnoth-protocol-v2
+            archive_args: "-p memnoth-protocol-v2"
+            doctests: false
+          - os: windows-latest
+            scope: memnoth-provider-config
+            archive_args: "-p memnoth-provider-config"
+            doctests: false
+          - os: windows-latest
+            scope: memnoth-provider-registry
+            archive_args: "-p memnoth-provider-registry"
+            doctests: false
+          - os: windows-latest
+            scope: memnoth-sandbox
+            archive_args: "-p memnoth-sandbox"
+            doctests: false
+          - os: windows-latest
+            scope: memnoth-search
+            archive_args: "-p memnoth-search"
+            doctests: false
+          - os: windows-latest
+            scope: memnoth-session
+            archive_args: "-p memnoth-session"
+            doctests: false
+          - os: windows-latest
+            scope: memnoth-skills
+            archive_args: "-p memnoth-skills"
+            doctests: false
+          - os: windows-latest
+            scope: memnoth-transport
+            archive_args: "-p memnoth-transport"
+            doctests: false
+          - os: windows-latest
+            scope: memnoth-ui
+            archive_args: "-p memnoth-ui"
+            doctests: false
+          - os: windows-latest
+            scope: memnoth-update
+            archive_args: "-p memnoth-update"
+            doctests: false
+          - os: windows-latest
+            scope: memnoth-worktree
+            archive_args: "-p memnoth-worktree"
+            doctests: false
+
+          # The root `memnoth` package: library, binaries, then its integration
+          # tests in four small explicit-target groups. Every tests/*.rs file
+          # is in exactly one group. The installer parser check rides with
+          # cli-tests-2, which owns tests/install_scripts.rs.
           - os: windows-latest
             scope: cli-lib
-            archive_args: -p memnoth --lib
+            archive_args: "-p memnoth --lib"
             doctests: false
           - os: windows-latest
-            scope: cli-extra
+            scope: cli-bins
+            archive_args: "-p memnoth --bins"
+            doctests: false
+          - os: windows-latest
+            scope: cli-tests-1
             archive_args: >-
-              -p memnoth --bins
+              -p memnoth
               --test ask_verb --test cli --test completion_check
               --test config_explain --test demo_verb --test destructive_no_tty
-              --test docs_check --test docs_man --test exit_code_table
-              --test exit_codes --test help_verb --test provider
-              --test registry_parity --test release_manifest
-              --test schema_verb --test security --test slash_hierarchy
-              --test surfaces --test sync_crypto --test tui_pty
-              --test update_local_release --test version_surfaces
-              --test version_verb
+              --test docs_check
             doctests: false
           - os: windows-latest
-            scope: core
+            scope: cli-tests-2
             archive_args: >-
-              -p memnoth-agent -p memnoth-capability -p memnoth-engine
-              -p memnoth-codegraph -p memnoth-context -p memnoth-coord
-              -p memnoth-embedding -p memnoth-ext -p memnoth-command
-              -p memnoth-skills -p memnoth-harness-api -p memnoth-ingest
-              -p memnoth-lsp -p memnoth-mcp
-            doctests: false
-          # tract's ONNX stack (embedding-wasm) and the updater's download stack
-          # (update) are the two slowest independent dependency trees on Windows.
-          # Isolating them keeps rest-a and rest-b under the 180s archive budget
-          # while every package stays in exactly one Windows scope.
-          - os: windows-latest
-            scope: heavy-deps
-            archive_args: >-
-              -p memnoth-embedding-wasm -p memnoth-update
+              -p memnoth
+              --test docs_man --test exit_code_table --test exit_codes
+              --test help_verb --test install_scripts --test provider
+              --test registry_parity
             doctests: false
           - os: windows-latest
-            scope: rest-a
+            scope: cli-tests-3
             archive_args: >-
-              -p memnoth-command-macros
-              -p memnoth-transport -p memnoth-mcp-client -p memnoth-protocol-v2
-              -p memnoth-sandbox -p memnoth-search -p memnoth-ui
+              -p memnoth
+              --test release_manifest --test schema_verb --test security
+              --test serve_auth --test slash_hierarchy --test surfaces
+              --test sync_crypto
             doctests: false
           - os: windows-latest
-            scope: rest-b
+            scope: cli-tests-4
             archive_args: >-
-              --workspace --exclude memnoth --exclude memnoth-agent
-              --exclude memnoth-capability --exclude memnoth-engine
-              --exclude memnoth-codegraph --exclude memnoth-context
-              --exclude memnoth-coord --exclude memnoth-embedding
-              --exclude memnoth-ext --exclude memnoth-command
-              --exclude memnoth-skills --exclude memnoth-harness-api
-              --exclude memnoth-ingest --exclude memnoth-lsp
-              --exclude memnoth-mcp
-              --exclude memnoth-command-macros --exclude memnoth-embedding-wasm
-              --exclude memnoth-update
-              --exclude memnoth-transport --exclude memnoth-mcp-client
-              --exclude memnoth-protocol-v2 --exclude memnoth-sandbox
-              --exclude memnoth-search --exclude memnoth-ui
+              -p memnoth
+              --test tui_pty --test update_local_release
+              --test update_signed_release --test vault_invariants
+              --test version_surfaces --test version_verb
             doctests: false
     steps:
       - uses: actions/checkout@v4
@@ -183,18 +300,26 @@ jobs:
         with:
           tool: nextest@0.9.150
 
-      # Windows package and target scopes are a disjoint union of the
-      # workspace packages. Every archive is executed by every Windows shard,
-      # and each archive is partitioned independently so all scopes are covered
-      # across the complete shard matrix.
+      # Each matrix row is a disjoint, self-contained scope. The Windows name
+      # omits `-latest` so the artifact and archive are exactly
+      # `nextest-windows-<scope>[.tar.zst]`; every scope is executed by its own
+      # single-slice test job rather than by every shard.
       - name: Build and archive ${{ matrix.scope }} tests
-        run: cargo nextest archive ${{ matrix.archive_args }} --locked --archive-file nextest-${{ matrix.scope }}.tar.zst
+        shell: bash
+        run: |
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            archive="nextest-windows-${{ matrix.scope }}.tar.zst"
+          else
+            archive="nextest-workspace.tar.zst"
+          fi
+          cargo nextest archive ${{ matrix.archive_args }} --locked --archive-file "$archive"
 
       # The Windows installer is shipped and run as PowerShell 5.1, but no
-      # Rust test executes it. Parse it on Windows so script syntax remains a
-      # required cross-platform CI check.
+      # Rust test executes it. Parse it on Windows so script syntax stays a
+      # required cross-platform CI check. The old `scope == 'cli'` condition
+      # never matched a real scope; cli-tests-2 owns install_scripts.rs.
       - name: Windows installer parses
-        if: runner.os == 'Windows' && matrix.scope == 'cli'
+        if: runner.os == 'Windows' && matrix.scope == 'cli-tests-2'
         shell: pwsh
         run: |
           $errors = $null
@@ -210,16 +335,27 @@ jobs:
         run: cargo test --workspace --doc --locked
 
       - name: Upload test archive
+        if: matrix.os != 'windows-latest'
         uses: actions/upload-artifact@v4
         with:
           name: nextest-${{ matrix.os }}-${{ matrix.scope }}
-          path: nextest-${{ matrix.scope }}.tar.zst
+          path: nextest-workspace.tar.zst
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+      - name: Upload Windows scope archive
+        if: matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-windows-${{ matrix.scope }}
+          path: nextest-windows-${{ matrix.scope }}.tar.zst
           if-no-files-found: error
           compression-level: 0
           retention-days: 1
 
   test:
-    name: test (${{ matrix.os }}, ${{ matrix.shard }}/${{ matrix.shards }})
+    name: test (${{ matrix.os }}, ${{ matrix.label }})
     runs-on: ${{ matrix.os }}
     needs: test-archive
     strategy:
@@ -229,45 +365,142 @@ jobs:
           - os: ubuntu-latest
             shard: 1
             shards: 3
+            label: 1/3
           - os: ubuntu-latest
             shard: 2
             shards: 3
+            label: 2/3
           - os: ubuntu-latest
             shard: 3
             shards: 3
+            label: 3/3
           - os: macos-latest
             shard: 1
             shards: 3
+            label: 1/3
           - os: macos-latest
             shard: 2
             shards: 3
+            label: 2/3
           - os: macos-latest
             shard: 3
             shards: 3
+            label: 3/3
+
+          # One execution job per Windows archive. Each downloads only its own
+          # artifact and runs the single slice 1/1, so no shard downloads or
+          # extracts the other archives and no tests are skipped by partitioning.
           - os: windows-latest
-            shard: 1
-            shards: 8
+            scope: memnoth-agent
+            label: memnoth-agent
           - os: windows-latest
-            shard: 2
-            shards: 8
+            scope: memnoth-auth
+            label: memnoth-auth
           - os: windows-latest
-            shard: 3
-            shards: 8
+            scope: memnoth-capability
+            label: memnoth-capability
           - os: windows-latest
-            shard: 4
-            shards: 8
+            scope: memnoth-cloud-client
+            label: memnoth-cloud-client
           - os: windows-latest
-            shard: 5
-            shards: 8
+            scope: memnoth-codegraph
+            label: memnoth-codegraph
           - os: windows-latest
-            shard: 6
-            shards: 8
+            scope: memnoth-command
+            label: memnoth-command
           - os: windows-latest
-            shard: 7
-            shards: 8
+            scope: memnoth-command-macros
+            label: memnoth-command-macros
           - os: windows-latest
-            shard: 8
-            shards: 8
+            scope: memnoth-context
+            label: memnoth-context
+          - os: windows-latest
+            scope: memnoth-coord
+            label: memnoth-coord
+          - os: windows-latest
+            scope: memnoth-embedding
+            label: memnoth-embedding
+          - os: windows-latest
+            scope: memnoth-embedding-wasm
+            label: memnoth-embedding-wasm
+          - os: windows-latest
+            scope: memnoth-engine
+            label: memnoth-engine
+          - os: windows-latest
+            scope: memnoth-ext
+            label: memnoth-ext
+          - os: windows-latest
+            scope: memnoth-fuzz
+            label: memnoth-fuzz
+          - os: windows-latest
+            scope: memnoth-harness-api
+            label: memnoth-harness-api
+          - os: windows-latest
+            scope: memnoth-ingest
+            label: memnoth-ingest
+          - os: windows-latest
+            scope: memnoth-lsp
+            label: memnoth-lsp
+          - os: windows-latest
+            scope: memnoth-mcp
+            label: memnoth-mcp
+          - os: windows-latest
+            scope: memnoth-mcp-auth
+            label: memnoth-mcp-auth
+          - os: windows-latest
+            scope: memnoth-mcp-client
+            label: memnoth-mcp-client
+          - os: windows-latest
+            scope: memnoth-protocol-v2
+            label: memnoth-protocol-v2
+          - os: windows-latest
+            scope: memnoth-provider-config
+            label: memnoth-provider-config
+          - os: windows-latest
+            scope: memnoth-provider-registry
+            label: memnoth-provider-registry
+          - os: windows-latest
+            scope: memnoth-sandbox
+            label: memnoth-sandbox
+          - os: windows-latest
+            scope: memnoth-search
+            label: memnoth-search
+          - os: windows-latest
+            scope: memnoth-session
+            label: memnoth-session
+          - os: windows-latest
+            scope: memnoth-skills
+            label: memnoth-skills
+          - os: windows-latest
+            scope: memnoth-transport
+            label: memnoth-transport
+          - os: windows-latest
+            scope: memnoth-ui
+            label: memnoth-ui
+          - os: windows-latest
+            scope: memnoth-update
+            label: memnoth-update
+          - os: windows-latest
+            scope: memnoth-worktree
+            label: memnoth-worktree
+          - os: windows-latest
+            scope: cli-lib
+            label: cli-lib
+          - os: windows-latest
+            scope: cli-bins
+            label: cli-bins
+          - os: windows-latest
+            scope: cli-tests-1
+            label: cli-tests-1
+          - os: windows-latest
+            scope: cli-tests-2
+            label: cli-tests-2
+          - os: windows-latest
+            scope: cli-tests-3
+            label: cli-tests-3
+          - os: windows-latest
+            scope: cli-tests-4
+            label: cli-tests-4
     steps:
       - uses: actions/checkout@v4
 
@@ -282,39 +515,38 @@ jobs:
         with:
           name: nextest-${{ matrix.os }}-workspace
 
-      - name: Download Windows test archives
+      # Exactly one artifact per job: the archive named by this job's scope.
+      # No wildcard, no merge-multiple, and no six-archive fan-out.
+      - name: Download Windows scope archive
         if: matrix.os == 'windows-latest'
         uses: actions/download-artifact@v4
         with:
-          pattern: nextest-${{ matrix.os }}-*
-          path: .
-          merge-multiple: true
+          name: nextest-windows-${{ matrix.scope }}
 
-      # Each shard executes a disjoint slice without invoking Cargo or
-      # recompiling test harnesses. On Windows the package-disjoint archives are
-      # each partitioned; a scope may have an empty slice on a given shard,
-      # while all scopes together still cover the workspace inventory.
-      - name: Run archived nextest shard
+      # Non-Windows shards split the workspace archive; each Windows scope runs
+      # its own archive as slice 1/1 without invoking Cargo or recompiling test
+      # harnesses. Failure detail from either path goes to the step summary.
+      - name: Run archived nextest partition
         shell: bash
         run: |
           set -o pipefail
-          # Integration tests use compile-time CARGO_BIN_EXE_* paths. Extract
-          # into the workspace root so the archive's target/debug binaries land
-          # at the exact paths embedded by Cargo during the archive build. The
-          # Windows archives share dependency paths, so allow identical build
-          # artifacts from a later archive to replace an earlier extraction.
+          # Integration tests bake in CARGO_BIN_EXE_* paths at build time.
+          # Extract into the workspace root so the archive's target/debug
+          # binaries land at the exact paths Cargo recorded during the archive
+          # build. --extract-overwrite keeps a pre-existing target/ from
+          # blocking extraction; only this job's archive is ever extracted.
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            archives=(nextest-cli-lib.tar.zst nextest-cli-extra.tar.zst nextest-core.tar.zst nextest-heavy-deps.tar.zst nextest-rest-a.tar.zst nextest-rest-b.tar.zst)
+            archive="nextest-windows-${{ matrix.scope }}.tar.zst"
             no_tests=pass
+            partition="slice:1/1"
           else
-            archives=(nextest-workspace.tar.zst)
+            archive="nextest-workspace.tar.zst"
             no_tests=fail
+            partition="slice:${{ matrix.shard }}/${{ matrix.shards }}"
           fi
-          for archive in "${archives[@]}"; do
-            log="test-output-${archive}.log"
-            cargo-nextest nextest run --archive-file "$archive" --extract-to . --extract-overwrite --no-tests="$no_tests" --partition slice:${{ matrix.shard }}/${{ matrix.shards }} 2>&1 | tee "$log"
-            { grep -E "FAILED|panicked at" "$log" | head -40; } >> "$GITHUB_STEP_SUMMARY" || true
-          done
+          log="test-output-${archive}.log"
+          cargo-nextest nextest run --archive-file "$archive" --extract-to . --extract-overwrite --no-tests="$no_tests" --partition "$partition" 2>&1 | tee "$log"
+          { grep -E "FAILED|panicked at" "$log" | head -40; } >> "$GITHUB_STEP_SUMMARY" || true
 
   pinned-model-ci:
     name: pinned model CI (N=3 paired, 95% bootstrap CI)
