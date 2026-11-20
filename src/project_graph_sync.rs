@@ -1006,9 +1006,14 @@ mod tests {
         let server_ciphertext = Arc::clone(&remote_ciphertext);
         let download_count = Arc::new(AtomicUsize::new(0));
         let server_download_count = Arc::clone(&download_count);
+        let upload_count = Arc::new(AtomicUsize::new(0));
+        let server_upload_count = Arc::clone(&upload_count);
         let expected_project = project_id.to_string();
         let server = std::thread::spawn(move || {
-            for _ in 0..8 {
+            // Initial upload (status + PUT), two rejected downloads (status +
+            // snapshot each), a successful restore (status + snapshot), and
+            // one replay check (status only; it must not upload again).
+            for _ in 0..9 {
                 let (mut stream, _) = listener.accept().unwrap();
                 let (path, body) = read_http_request(&mut stream);
                 assert!(
@@ -1025,6 +1030,7 @@ mod tests {
                         &status_json(&expected_project, version, ciphertext.as_deref()),
                     );
                 } else if path.ends_with("/graph-sync") && path.starts_with("PUT ") {
+                    server_upload_count.fetch_add(1, Ordering::SeqCst);
                     let mut ciphertext = server_ciphertext.lock().unwrap();
                     let hash = content_hash(&body);
                     assert!(
@@ -1103,7 +1109,7 @@ mod tests {
             "tampered bytes should fail the hash check: {tampered:#}"
         );
         assert!(!graph_b.exists(), "tampered bytes must not install a graph");
-        let restored = sync_project(
+        let restored = restore_project(
             &ctx_b,
             &client,
             "test recovery phrase",
@@ -1119,6 +1125,25 @@ mod tests {
         let a = local_snapshot(&ctx_a).unwrap().0;
         let b = local_snapshot(&ctx_b).unwrap().0;
         assert_eq!(content_hash(&a), content_hash(&b));
+        let status_a = local_status(&ctx_a, project_id).unwrap();
+        let status_b = local_status(&ctx_b, project_id).unwrap();
+        assert_eq!(status_a.graph_symbols, status_b.graph_symbols);
+        assert_eq!(status_a.stale_files, Some(0));
+        assert_eq!(status_b.stale_files, Some(0));
+
+        // Replaying sync from the restored checkout is idempotent: the local
+        // cursor and graph hash match, so the mock transport sees no second PUT.
+        let replay = sync_project(
+            &ctx_b,
+            &client,
+            "test recovery phrase",
+            "org-test",
+            project_id,
+        )
+        .unwrap();
+        assert!(!replay.changed);
+        assert_eq!(replay.version, 1);
+        assert_eq!(upload_count.load(Ordering::SeqCst), 1);
         server.join().unwrap();
         assert!(remote_ciphertext.lock().unwrap().is_some());
     }

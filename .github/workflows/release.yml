@@ -417,6 +417,22 @@ jobs:
         with:
           fetch-depth: 0
 
+      # npm trusted publishing requires Node >=22.14 and npm >=11.5.1. The
+      # artifact-test job has its own runtime, so pin the publishing runtime in
+      # this job too. Disable package-manager caching to keep OIDC auth ephemeral.
+      - uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
+        with:
+          node-version: 22.14.0
+          package-manager-cache: false
+
+      - name: install and verify trusted-publishing npm
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global npm@11.5.1
+          node --version | grep -Fx 'v22.14.0'
+          npm --version | grep -Fx '11.5.1'
+
       # Every target's artifact lands in its own directory, which is the shape
       # `dist.sh` searches: `download-artifact` is not asked to merge them
       # because the per-target name is what tells two artifacts apart.
