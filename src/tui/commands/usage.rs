@@ -861,6 +861,39 @@ fn grouped(value: u64) -> String {
 mod tests {
     use super::*;
 
+    // Exact IDs are taken from Kind::default_model. These rows exercise receipt
+    // identity and rendering only; they make no claim about model capabilities.
+    struct IdentityFixture {
+        provider: &'static str,
+        model: &'static str,
+        input: u64,
+        output: u64,
+        reasoning: Option<u64>,
+        cache_read: Option<u64>,
+        cache_write: Option<u64>,
+    }
+
+    const IDENTITY_FIXTURES: &[IdentityFixture] = &[
+        IdentityFixture {
+            provider: "anthropic",
+            model: "claude-sonnet-4-5",
+            input: 11,
+            output: 4,
+            reasoning: None,
+            cache_read: Some(3),
+            cache_write: Some(2),
+        },
+        IdentityFixture {
+            provider: "openai",
+            model: "gpt-4.1",
+            input: 7,
+            output: 2,
+            reasoning: Some(1),
+            cache_read: Some(5),
+            cache_write: None,
+        },
+    ];
+
     fn receipt() -> TurnReceipt {
         TurnReceipt {
             at_ms: 1,
@@ -910,6 +943,174 @@ mod tests {
             Some("medium"),
             false,
         )
+    }
+
+    fn receipt_for(provider: &str, model: &str) -> TurnReceipt {
+        let mut row = receipt();
+        row.provider_id = Some(provider.into());
+        row.context_window_provider = Some(provider.into());
+        row.context_window_model = Some(model.into());
+        row.reasoning_effort = None;
+        row
+    }
+
+    fn assert_text_json_parity(
+        session: &Session,
+        context: Option<u64>,
+        configured_identity: Option<(&str, &str)>,
+    ) -> serde_json::Value {
+        let latest = session.receipts.last();
+        let args = (
+            context,
+            configured_identity
+                .map(|(model, _)| model)
+                .or_else(|| latest.and_then(|row| row.context_window_model.as_deref()))
+                .unwrap_or(""),
+            configured_identity
+                .map(|(_, provider)| provider)
+                .or_else(|| latest.and_then(|row| row.context_window_provider.as_deref()))
+                .unwrap_or(""),
+            Some("explicit test configuration"),
+            None,
+        );
+        let mut expected =
+            serde_json::to_value(snapshot(session, args.0, args.1, args.2, args.3, args.4))
+                .unwrap();
+        let mut actual: serde_json::Value = serde_json::from_str(&render(
+            session, args.0, args.1, args.2, args.3, args.4, true,
+        ))
+        .unwrap();
+        actual.as_object_mut().unwrap().remove("session_age_ms");
+        expected.as_object_mut().unwrap().remove("session_age_ms");
+        let text = render(session, args.0, args.1, args.2, args.3, args.4, false);
+        for row in &session.receipts {
+            if let (Some(provider), Some(model)) = (
+                row.provider_id.as_deref(),
+                row.context_window_model.as_deref(),
+            ) {
+                assert!(text.contains(&format!("{provider} · {model}")), "{text}");
+            }
+        }
+        assert_eq!(actual, expected);
+        actual
+    }
+
+    #[test]
+    fn exact_id_fixtures_render_receipt_usage_and_context_identity_consistently() {
+        for fixture in IDENTITY_FIXTURES {
+            let mut row = receipt_for(fixture.provider, fixture.model);
+            row.input_tokens = fixture.input;
+            row.output_tokens = fixture.output;
+            row.context_window_used = Some(fixture.input);
+            row.provider_reasoning_tokens = fixture.reasoning;
+            row.provider_cache_read_tokens = fixture.cache_read;
+            row.provider_cache_write_tokens = fixture.cache_write;
+            let session = session_with(vec![row]);
+            let value = assert_text_json_parity(&session, None, None);
+            assert_eq!(value["latest_turn"]["provider"], fixture.provider);
+            assert_eq!(value["latest_turn"]["model"], fixture.model);
+            assert!(value["latest_turn"]["effort"].is_null());
+            assert_eq!(value["context_window"]["model"], fixture.model);
+            assert_eq!(value["context_window"]["provider"], fixture.provider);
+            assert_eq!(value["input_tokens"]["value"], fixture.input);
+            assert_eq!(value["output_tokens"]["value"], fixture.output);
+            assert_eq!(
+                value["reasoning_output_tokens"]["value"],
+                serde_json::json!(fixture.reasoning)
+            );
+            assert_eq!(
+                value["cache_read_tokens"]["value"],
+                serde_json::json!(fixture.cache_read)
+            );
+            assert_eq!(
+                value["cache_write_tokens"]["value"],
+                serde_json::json!(fixture.cache_write)
+            );
+            assert_eq!(value["context_window"]["occupancy_tokens"], fixture.input);
+            assert!(value["context_window"]["limit_tokens"].is_null());
+        }
+    }
+
+    #[test]
+    fn reset_boundary_uses_only_latest_exact_model_context_and_effort() {
+        let mut first = receipt_for("openai", "gpt-4.1");
+        first.context_window_used = Some(8_000);
+        first.reasoning_effort = Some("high".into());
+        let mut second = receipt_for("anthropic", "claude-sonnet-4-5");
+        second.turn_id = Some(2);
+        second.context_window_used = None;
+        second.reasoning_effort = None;
+
+        let session = session_with(vec![first, second]);
+        let value = assert_text_json_parity(&session, Some(200_000), Some(("gpt-4.1", "openai")));
+        assert_eq!(value["latest_turn"]["model"], "claude-sonnet-4-5");
+        assert!(value["latest_turn"]["effort"].is_null());
+        assert_eq!(value["next_turn_effort"], "provider default");
+        assert_eq!(value["context_window"]["model"], "claude-sonnet-4-5");
+        assert!(value["context_window"]["occupancy_tokens"].is_null());
+        assert!(value["context_window"]["limit_tokens"].is_null());
+    }
+
+    #[test]
+    fn legacy_receipt_keeps_missing_identity_effort_and_categories_unknown() {
+        let legacy = serde_json::json!({
+            "at_ms": 1,
+            "total_tokens": 12,
+            "prefix_hash": "legacy",
+            "layer_tokens": [3, 3, 3, 3],
+            "pieces": 4,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0
+        });
+        let row: TurnReceipt = serde_json::from_value(legacy).unwrap();
+        let value = assert_text_json_parity(&session_with(vec![row]), None, None);
+        assert!(value["latest_turn"]["provider"].is_null());
+        assert!(value["latest_turn"]["model"].is_null());
+        assert!(value["latest_turn"]["effort"].is_null());
+        for category in [
+            "input_tokens",
+            "output_tokens",
+            "reasoning_output_tokens",
+            "cache_read_tokens",
+            "cache_write_tokens",
+        ] {
+            assert_eq!(value["latest_turn"][category]["status"], "not reported");
+            assert!(value["latest_turn"][category]["value"].is_null());
+        }
+    }
+
+    #[test]
+    fn partial_categories_and_reported_zero_have_text_json_parity() {
+        let mut zero = receipt_for("openai", "gpt-4.1");
+        zero.input_tokens = 0;
+        zero.provider_input_reported = Some(true);
+        zero.provider_output_reported = Some(false);
+        zero.provider_reasoning_tokens = None;
+        zero.provider_cache_read_tokens = Some(0);
+        zero.provider_cache_write_tokens = None;
+
+        let mut partial = receipt_for("openai", "gpt-4.1");
+        partial.turn_id = Some(2);
+        partial.provider_input_reported = Some(false);
+        partial.provider_output_reported = Some(true);
+        partial.provider_reasoning_tokens = Some(0);
+        partial.provider_cache_read_tokens = None;
+        partial.provider_cache_write_tokens = Some(7);
+
+        let value = assert_text_json_parity(&session_with(vec![zero, partial]), None, None);
+        for (field, expected, coverage) in [
+            ("input_tokens", 0, 1),
+            ("output_tokens", 678, 1),
+            ("reasoning_output_tokens", 0, 1),
+            ("cache_read_tokens", 0, 1),
+            ("cache_write_tokens", 7, 1),
+        ] {
+            assert_eq!(value[field]["status"], "partially reported", "{field}");
+            assert_eq!(value[field]["value"], expected, "{field}");
+            assert_eq!(value[field]["reported_turns"], coverage, "{field}");
+        }
     }
 
     #[test]
