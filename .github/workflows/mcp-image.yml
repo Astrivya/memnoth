@@ -11,11 +11,10 @@ concurrency:
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
-  publish:
-    name: Build, smoke, and publish linux/amd64 + linux/arm64
+  test:
+    name: Test MCP server
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -24,7 +23,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: stable
-          targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu
+          targets: x86_64-unknown-linux-gnu
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
@@ -33,34 +32,93 @@ jobs:
       - name: Test the MCP server
         run: cargo test --locked -p memnoth-mcp
 
-      - name: Build native and arm64 servers
+  publish:
+    name: Build linux/amd64 MCP server
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-linux-gnu
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: mcp-image
+
+      - name: Build and smoke-test native server
         shell: bash
         run: |
-          set -euo pipefail
-          cargo install cross --locked
-          cargo build --release --locked --target x86_64-unknown-linux-gnu -p memnoth-mcp &
-          native_pid=$!
-          cross build --release --locked --target aarch64-unknown-linux-gnu -p memnoth-mcp &
-          arm64_pid=$!
-          native_status=0
-          arm64_status=0
-          wait "$native_pid" || native_status=$?
-          wait "$arm64_pid" || arm64_status=$?
-          build_status=$native_status
-          if (( build_status == 0 )); then
-            build_status=$arm64_status
-          fi
-          if (( build_status != 0 )); then
-            exit "$build_status"
-          fi
           work="$(mktemp -d)"
+          cargo build --release --locked --target x86_64-unknown-linux-gnu -p memnoth-mcp
           target/x86_64-unknown-linux-gnu/release/memnoth-mcp \
             --selftest --db "$work/smoke.db"
-          mkdir -p image-context
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: memnoth-mcp-amd64
+          path: target/x86_64-unknown-linux-gnu/release/memnoth-mcp
+          if-no-files-found: error
+
+  build-arm64:
+    name: Build linux/arm64 MCP server
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: aarch64-unknown-linux-gnu
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: mcp-image
+
+      - name: Build and smoke-test native server
+        shell: bash
+        run: |
+          work="$(mktemp -d)"
+          cargo build --release --locked --target aarch64-unknown-linux-gnu -p memnoth-mcp
+          target/aarch64-unknown-linux-gnu/release/memnoth-mcp \
+            --selftest --db "$work/smoke.db"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: memnoth-mcp-arm64
+          path: target/aarch64-unknown-linux-gnu/release/memnoth-mcp
+          if-no-files-found: error
+
+  publish-image:
+    name: Publish linux/amd64 + linux/arm64 image
+    needs: [test, publish, build-arm64]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: memnoth-mcp-amd64
+          path: image-context/amd64
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: memnoth-mcp-arm64
+          path: image-context/arm64
+
+      - name: Assemble image context
+        run: |
           cp crates/memnoth-mcp/docker/Dockerfile image-context/Dockerfile
           cp crates/memnoth-mcp/docker/init.sh image-context/init.sh
-          cp target/x86_64-unknown-linux-gnu/release/memnoth-mcp image-context/memnoth-mcp-amd64
-          cp target/aarch64-unknown-linux-gnu/release/memnoth-mcp image-context/memnoth-mcp-arm64
+          cp image-context/amd64/memnoth-mcp image-context/memnoth-mcp-amd64
+          cp image-context/arm64/memnoth-mcp image-context/memnoth-mcp-arm64
 
       - name: Enable arm64 image build support
         run: docker run --privileged --rm tonistiigi/binfmt --install arm64
@@ -86,6 +144,12 @@ jobs:
             --cache-to type=gha,scope=memnoth-mcp-image,mode=max \
             --push image-context
 
+  deploy-smoke:
+    name: Wait for deployment and smoke public MCP discovery
+    needs: publish-image
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
       - name: Wait for production deployment and smoke public MCP discovery
         shell: bash
         env:
