@@ -168,13 +168,62 @@ function Invoke-Download {
         Invoke-WebRequest @params
     } catch {
         $status = 0
-        if ($_.Exception.Response) {
-            $status = $_.Exception.Response.StatusCode.value__
+        # On filesystem errors (for example, a full TEMP volume) there is no
+        # HTTP Response. Read it through PSObject.Properties so strict mode
+        # preserves the useful underlying exception instead of masking it.
+        $responseProperty = $_.Exception.PSObject.Properties['Response']
+        if ($responseProperty -and $responseProperty.Value) {
+            $statusProperty = $responseProperty.Value.StatusCode.PSObject.Properties['value__']
+            if ($statusProperty) {
+                $status = [int]$statusProperty.Value
+            } else {
+                $status = [int]$responseProperty.Value.StatusCode
+            }
         }
         if ($status -eq 404) { return 2 }
         Fail "Download failed for $Url : $_"
     }
     return 0
+}
+
+function Get-InstallerWorkDirectory {
+    $candidates = @()
+    if ($env:MEMNOTH_TEMP_DIR) { $candidates += $env:MEMNOTH_TEMP_DIR }
+    if ($env:TEMP) { $candidates += $env:TEMP }
+    if ($env:LOCALAPPDATA) { $candidates += (Join-Path $env:LOCALAPPDATA 'Temp') }
+    $systemTemp = [System.IO.Path]::GetTempPath()
+    if ($systemTemp) { $candidates += $systemTemp }
+    if ($env:USERPROFILE) { $candidates += (Join-Path $env:USERPROFILE 'AppData\Local\Temp') }
+
+    $seen = @{}
+    foreach ($candidate in $candidates) {
+        if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+        try {
+            $fullCandidate = [System.IO.Path]::GetFullPath($candidate)
+            $key = $fullCandidate.TrimEnd('\').ToLowerInvariant()
+            if ($seen.ContainsKey($key)) { continue }
+            $seen[$key] = $true
+            if (-not (Test-Path -LiteralPath $fullCandidate -PathType Container)) {
+                New-Item -ItemType Directory -Path $fullCandidate -Force -ErrorAction Stop | Out-Null
+            }
+
+            $root = [System.IO.Path]::GetPathRoot($fullCandidate)
+            if ($root) {
+                $drive = [System.IO.DriveInfo]::new($root)
+                if ($drive.IsReady -and $drive.AvailableFreeSpace -lt 134217728) {
+                    Write-Log "Skipping temporary volume with less than 128 MiB free: $fullCandidate" 'Debug'
+                    continue
+                }
+            }
+
+            $workPath = Join-Path $fullCandidate ("memnoth-install-" + [Guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Path $workPath -ErrorAction Stop | Out-Null
+            return $workPath
+        } catch {
+            Write-Log "Temporary directory unavailable ($candidate): $($_.Exception.Message)" 'Debug'
+        }
+    }
+    throw 'No writable temporary directory with at least 128 MiB free. Set MEMNOTH_TEMP_DIR to a directory on a volume with enough space.'
 }
 
 function Resolve-Version {
@@ -282,10 +331,15 @@ try {
 $archiveUrl = "$BaseUrl/$resolvedVersion/$artifact"
 $checksumUrl = "$archiveUrl.sha256"
 
-# Working directory
-$workDir = Join-Path $env:TEMP "memnoth-install-$(Get-Random)"
-if (Test-Path $workDir) { Remove-Item -Recurse -Force $workDir }
-New-Item -ItemType Directory -Path $workDir | Out-Null
+# Working directory. Prefer MEMNOTH_TEMP_DIR, then fall back across the normal
+# Windows temp locations. A unique directory avoids deleting or reusing a
+# pre-existing path, even if two installer processes start at the same time.
+try {
+    $workDir = Get-InstallerWorkDirectory
+    Write-Log "Using temporary workspace $workDir" 'Debug'
+} catch {
+    Fail $_.Exception.Message
+}
 
 # Cleanup on exit
 try {

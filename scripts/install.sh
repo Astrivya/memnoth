@@ -12,6 +12,7 @@
 #   MEMNOTH_INSTALL_BASE  where the release tree is served  (default: GitHub releases)
 #   MEMNOTH_VERSION       which release to install          (default: latest)
 #   MEMNOTH_INSTALL_DIR   where the binary lands            (default: ~/.local/bin)
+#   MEMNOTH_TEMP_DIR      where downloads are staged        (default: writable system temp)
 #
 # Nothing here falls back to a package manager, a `cargo install`, or a
 # "latest from the default branch" build. Those install something that is not
@@ -131,9 +132,31 @@ esac
 ARCHIVE_URL="$ARTIFACT_BASE/$ARTIFACT"
 CHECKSUM_URL="$ARCHIVE_URL.sha256"
 MANIFEST_URL="$ARTIFACT_BASE/manifest.json"
-WORK="${TMPDIR:-/tmp}/memnoth-install.$$"
-rm -rf "$WORK"
-mkdir -p "$WORK"
+
+# Select a writable volume before downloading. Require 128 MiB where df
+# reports capacity so a small probe cannot succeed on an almost-full volume.
+try_work_dir() {
+    candidate=$1
+    [ -n "$candidate" ] || return 1
+    mkdir -p "$candidate" 2>/dev/null || return 1
+    available_kb=$(df -Pk "$candidate" 2>/dev/null | awk 'NR == 2 { print $4 }')
+    case "$available_kb" in
+        ''|*[!0-9]*) ;;
+        *) [ "$available_kb" -ge 131072 ] || return 1 ;;
+    esac
+    mktemp -d "$candidate/memnoth-install.XXXXXX" 2>/dev/null
+}
+
+WORK=""
+if [ -n "${MEMNOTH_TEMP_DIR:-}" ]; then WORK=$(try_work_dir "$MEMNOTH_TEMP_DIR") || WORK=""; fi
+if [ -z "$WORK" ] && [ -n "${TMPDIR:-}" ]; then WORK=$(try_work_dir "$TMPDIR") || WORK=""; fi
+if [ -z "$WORK" ] && [ -n "${LOCALAPPDATA:-}" ] && command -v cygpath >/dev/null 2>&1; then
+    LOCAL_TEMP=$(cygpath -u "$LOCALAPPDATA" 2>/dev/null || true)
+    [ -z "$LOCAL_TEMP" ] || WORK=$(try_work_dir "$LOCAL_TEMP/Temp") || WORK=""
+fi
+if [ -z "$WORK" ]; then WORK=$(try_work_dir /tmp) || WORK=""; fi
+if [ -z "$WORK" ] && [ -n "${HOME:-}" ]; then WORK=$(try_work_dir "$HOME/.cache/memnoth/tmp") || WORK=""; fi
+[ -n "$WORK" ] || fail "no writable temporary directory with at least 128 MiB free; set MEMNOTH_TEMP_DIR to a directory on a volume with enough space"
 trap 'rm -rf "$WORK"' 0 1 2 3 15
 
 # 0 = downloaded, 2 = the server says the path does not exist, 1 = anything else.
