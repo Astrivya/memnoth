@@ -669,7 +669,7 @@ jobs:
           NODE
 
           installed_version="$(npm exec --yes --package="${PACKAGE_NAME}@${version}" -- memnoth-mcp --version)"
-          expected_version="memnoth-mcp ${version}"
+          expected_version="$version"
           test "$installed_version" = "$expected_version" || {
             echo "npm install smoke returned '$installed_version', expected '$expected_version'" >&2
             exit 1
