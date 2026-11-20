@@ -89,11 +89,12 @@ jobs:
         run: cargo run --quiet -p memnoth-command -- schema --check
 
   # Build each platform's test binaries once, archive them, then fan the same
-  # complete inventory out to execution shards. This avoids recompiling all
-  # test harnesses independently on every shard. Doctests remain explicit Cargo
-  # runs because nextest archives do not include them.
+  # complete inventory out to execution shards. Windows archives the main CLI
+  # crate and the rest of the workspace in parallel to keep its compile-heavy
+  # archive job below three minutes. Doctests remain explicit Cargo runs because
+  # nextest archives do not include them.
   test-archive:
-    name: test archive (${{ matrix.os }})
+    name: test archive (${{ matrix.os }}, ${{ matrix.scope }})
     runs-on: ${{ matrix.os }}
     env:
       CARGO_PROFILE_TEST_DEBUG: "0"
@@ -102,10 +103,20 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
+            scope: workspace
+            archive_args: --workspace
             doctests: true
           - os: macos-latest
+            scope: workspace
+            archive_args: --workspace
             doctests: true
           - os: windows-latest
+            scope: cli
+            archive_args: -p memnoth
+            doctests: false
+          - os: windows-latest
+            scope: rest
+            archive_args: --workspace --exclude memnoth
             doctests: false
     steps:
       - uses: actions/checkout@v4
@@ -121,18 +132,18 @@ jobs:
         with:
           tool: nextest@0.9.150
 
-      # Keep this inventory at workspace scope on every OS. In particular,
-      # Windows used to split unit and integration targets into separate cargo
-      # builds; archiving the workspace once preserves their union and shares
-      # that exact build across every execution shard.
-      - name: Build and archive workspace tests
-        run: cargo nextest archive --workspace --locked --archive-file nextest-archive.tar.zst
+      # The Windows `cli` and `rest` scopes are a disjoint union of the
+      # workspace packages. Both archives are executed by every Windows shard,
+      # and each archive is partitioned independently so their test sets are
+      # both covered across the complete shard matrix.
+      - name: Build and archive ${{ matrix.scope }} tests
+        run: cargo nextest archive ${{ matrix.archive_args }} --locked --archive-file nextest-${{ matrix.scope }}.tar.zst
 
       # The Windows installer is shipped and run as PowerShell 5.1, but no
       # Rust test executes it. Parse it on Windows so script syntax remains a
       # required cross-platform CI check.
       - name: Windows installer parses
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && matrix.scope == 'cli'
         shell: pwsh
         run: |
           $errors = $null
@@ -150,8 +161,8 @@ jobs:
       - name: Upload test archive
         uses: actions/upload-artifact@v4
         with:
-          name: nextest-${{ matrix.os }}
-          path: nextest-archive.tar.zst
+          name: nextest-${{ matrix.os }}-${{ matrix.scope }}
+          path: nextest-${{ matrix.scope }}.tar.zst
           if-no-files-found: error
           compression-level: 0
           retention-days: 1
@@ -214,23 +225,49 @@ jobs:
         with:
           tool: nextest@0.9.150
 
-      - name: Download test archive
+      - name: Download workspace test archive
+        if: matrix.os != 'windows-latest'
         uses: actions/download-artifact@v4
         with:
-          name: nextest-${{ matrix.os }}
+          name: nextest-${{ matrix.os }}-workspace
 
-      # The archive was built from the complete workspace inventory on the
-      # same OS. Each shard executes a disjoint slice without invoking Cargo or
-      # recompiling test harnesses. --no-tests=fail catches stale shard counts.
+      - name: Download Windows CLI test archive
+        if: matrix.os == 'windows-latest'
+        uses: actions/download-artifact@v4
+        with:
+          name: nextest-${{ matrix.os }}-cli
+
+      - name: Download remaining Windows test archive
+        if: matrix.os == 'windows-latest'
+        uses: actions/download-artifact@v4
+        with:
+          name: nextest-${{ matrix.os }}-rest
+
+      # Each shard executes a disjoint slice without invoking Cargo or
+      # recompiling test harnesses. On Windows the two package-disjoint archives
+      # are each partitioned; a scope may have an empty slice on a given shard,
+      # while all scopes together still cover the workspace inventory.
       - name: Run archived nextest shard
         shell: bash
         run: |
           set -o pipefail
           # Integration tests use compile-time CARGO_BIN_EXE_* paths. Extract
           # into the workspace root so the archive's target/debug binaries land
-          # at the exact paths embedded by Cargo during the archive build.
-          cargo-nextest nextest run --archive-file nextest-archive.tar.zst --extract-to . --no-tests=fail --partition slice:${{ matrix.shard }}/${{ matrix.shards }} 2>&1 | tee test-output.log
-          { grep -E "FAILED|panicked at" test-output.log | head -40; } >> "$GITHUB_STEP_SUMMARY" || true
+          # at the exact paths embedded by Cargo during the archive build. The
+          # Windows archives share dependency paths, so allow identical build
+          # artifacts from the second archive to replace the first extraction.
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            archives=(nextest-cli.tar.zst nextest-rest.tar.zst)
+            no_tests=pass
+          else
+            archives=(nextest-workspace.tar.zst)
+            no_tests=fail
+          fi
+          for archive in "${archives[@]}"; do
+            log="test-output-${archive}.log"
+            cargo-nextest nextest run --archive-file "$archive" --extract-to . --extract-overwrite --no-tests="$no_tests" --partition slice:${{ matrix.shard }}/${{ matrix.shards }} 2>&1 | tee "$log"
+            { grep -E "FAILED|panicked at" "$log" | head -40; } >> "$GITHUB_STEP_SUMMARY" || true
+          done
 
   pinned-model-ci:
     name: pinned model CI (N=3 paired, 95% bootstrap CI)
