@@ -175,6 +175,8 @@ impl ColorScheme {
             // A tool row's glyph is its state, so it is not themed away.
             crate::tui::app::EntryRole::Tool => (self.tool, "▌"),
             crate::tui::app::EntryRole::ToolDone => (self.success, "✓"),
+            crate::tui::app::EntryRole::ToolFailed => (self.error, "✗"),
+            crate::tui::app::EntryRole::ToolInterrupted => (self.dim, "·"),
             crate::tui::app::EntryRole::Thinking => (self.dim, "▸"),
         };
 
@@ -211,6 +213,8 @@ impl ScreenReaderOutput {
             crate::tui::app::EntryRole::Error => "[ERROR]",
             crate::tui::app::EntryRole::Tool => "[TOOL]",
             crate::tui::app::EntryRole::ToolDone => "[TOOL]",
+            crate::tui::app::EntryRole::ToolFailed => "[TOOL FAILED]",
+            crate::tui::app::EntryRole::ToolInterrupted => "[TOOL INTERRUPTED]",
             crate::tui::app::EntryRole::Thinking => "[THINKING]",
         };
         format!("{} {}", role_str, entry.text)

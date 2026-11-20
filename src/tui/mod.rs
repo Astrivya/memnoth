@@ -90,8 +90,6 @@ type TurnOutcome = anyhow::Result<(
 
 /// What a running turn reports back to the screen.
 enum TurnEvent {
-    /// One tool call the model is about to make (or made).
-    Note(String),
     /// A write wants permission. The worker blocks until `reply` answers.
     Ask {
         /// What the change would do, and to what.
@@ -110,6 +108,9 @@ enum TurnEvent {
 /// A model turn that is currently in flight.
 struct Busy {
     rx: Receiver<TurnEvent>,
+    /// Monotonic within the persisted session; provider IDs may be reused by
+    /// later turns, so UI correlation always includes this epoch.
+    turn_id: usize,
     /// The line that asked, recorded when the answer lands.
     prompt: String,
     /// The model that answered; the session file records it.
@@ -338,12 +339,22 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
                             memnoth_harness_api::ApiEvent::ReasoningDelta { delta, .. } => {
                                 app.append_reasoning_delta(&delta);
                             }
+                            memnoth_harness_api::ApiEvent::ToolStart { call_id, name, .. } => {
+                                tools_from.get_or_insert(app.entries.len());
+                                let scoped_id = format!("{}:{call_id}", current.turn_id);
+                                app.start_tool_call(&scoped_id, &name);
+                            }
+                            memnoth_harness_api::ApiEvent::ToolDone {
+                                call_id,
+                                output,
+                                error,
+                                ..
+                            } => {
+                                let scoped_id = format!("{}:{call_id}", current.turn_id);
+                                app.finish_tool_call(&scoped_id, &output, error.as_deref());
+                            }
                             _ => {}
                         }
-                    }
-                    Ok(TurnEvent::Note(note)) => {
-                        tools_from.get_or_insert(app.entries.len());
-                        app.push_tool(note);
                     }
                     Ok(TurnEvent::Ask { request, reply }) => {
                         app.approval = Some(format!(
@@ -786,6 +797,7 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
             app.cancel_turn = false;
             finished = false;
             if let Some(current) = busy.take() {
+                app.interrupt_tool_calls();
                 drop(current);
                 app.busy = false;
                 app.approval = None;
@@ -2814,14 +2826,13 @@ fn start_turn(
         let mut tools = provider::Toolbox::new(&worker_ctx)
             .with_approver(approver)
             .with_turn_id(turn_id);
-        let notes = tx.clone();
         let events = tx.clone();
         let mut emit = move |event: memnoth_harness_api::ApiEvent| {
             let _ = events.send(TurnEvent::Api(event));
         };
-        let mut on_note = |line: &str| {
-            let _ = notes.send(TurnEvent::Note(line.to_string()));
-        };
+        // The transcript is driven by correlated ApiEvents. The old note
+        // channel has no call identity and could reorder against results.
+        let mut on_note = |_line: &str| {};
         let result = provider::run_turn_attached(
             &settings,
             &root,
@@ -2844,6 +2855,7 @@ fn start_turn(
 
     Some(Busy {
         rx,
+        turn_id,
         prompt: asked,
         model,
         context_provider,

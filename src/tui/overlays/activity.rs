@@ -124,7 +124,15 @@ impl ActivityOverlay {
                     app.entries
                         .iter()
                         .rev()
-                        .filter(|entry| matches!(entry.role, EntryRole::Tool | EntryRole::ToolDone))
+                        .filter(|entry| {
+                            matches!(
+                                entry.role,
+                                EntryRole::Tool
+                                    | EntryRole::ToolDone
+                                    | EntryRole::ToolFailed
+                                    | EntryRole::ToolInterrupted
+                            )
+                        })
                         .take(30)
                         .map(|entry| ActivityRow {
                             title: ellipsize(&entry.text.replace('\n', " "), 62),

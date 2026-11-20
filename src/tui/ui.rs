@@ -888,10 +888,9 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
     let start = app.scroll.min(visual.len());
     let end = (start + inner.height as usize).min(visual.len());
 
-    // The pointer's row, translated into the visible window. Exactly one
-    // drawn line may carry the `ctrl-r` hint: a thinking header the pointer
-    // rests on. Every other line, and every thinking header without the
-    // pointer, stays one word long.
+    // The pointer's row, translated into the visible window. The shortcut
+    // operates on the newest reasoning/tool detail, so only that row advertises
+    // it; hovering an older row must not imply it will be the one expanded.
     let hovered = app.mouse_row.and_then(|row| {
         if row >= inner.y {
             let offset = (row - inner.y) as usize;
@@ -901,6 +900,22 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
         }
         None
     });
+    let latest_detail = visual
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, (role, _, header))| {
+            (*header
+                && matches!(
+                    role,
+                    EntryRole::Thinking
+                        | EntryRole::Tool
+                        | EntryRole::ToolDone
+                        | EntryRole::ToolFailed
+                        | EntryRole::ToolInterrupted
+                ))
+            .then_some(index)
+        });
     let scheme = crate::tui::theme::ColorScheme::for_theme(app.theme);
     let lines: Vec<Line> = visual[start..end]
         .iter()
@@ -964,7 +979,7 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
             }
             let mut drawn = Line::from(spans);
             if hovered == Some(start + offset)
-                && *role == EntryRole::Thinking
+                && latest_detail == Some(start + offset)
                 && *header
                 && let Some(text) = drawn.spans.get_mut(1)
             {
@@ -1244,6 +1259,8 @@ fn style_for(role: EntryRole) -> (Style, &'static str) {
         EntryRole::Info => (Style::default().fg(Color::Gray), "· "),
         EntryRole::Tool => (Style::default().fg(Color::Cyan), "◌ "),
         EntryRole::ToolDone => (Style::default().fg(Color::DarkGray), "✓ "),
+        EntryRole::ToolFailed => (Style::default().fg(Color::Red), "✗ "),
+        EntryRole::ToolInterrupted => (Style::default().fg(Color::DarkGray), "· "),
         // Thinking is the one role that is italic: grey italic is how every
         // coding agent separates reasoning from the answer it produced, and
         // a reader's eye learns the distinction without a legend.
@@ -1866,7 +1883,7 @@ mod tests {
     }
 
     #[test]
-    fn a_tool_row_resolves_on_the_line_it_started_on() {
+    fn an_unobserved_tool_note_is_never_rendered_as_success() {
         let mut app = App::new("s", false);
         app.push(EntryRole::Answer, "an answer");
         let from = app.entries.len();
@@ -1877,7 +1894,7 @@ mod tests {
 
         app.resolve_tools(from);
         let done = screen(&mut app, 100, 24);
-        assert!(done.contains("1 step · code graph"), "{done}");
+        assert!(done.contains("interrupted (result not observed)"), "{done}");
         assert!(!done.contains('▌'), "no row is left running: {done}");
     }
 

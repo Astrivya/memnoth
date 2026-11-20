@@ -307,8 +307,12 @@ pub enum EntryRole {
     Tool,
     /// A tool call whose result landed. The same row, resolved in place.
     ToolDone,
+    /// A tool returned an observed error.
+    ToolFailed,
+    /// The turn ended before a result was observed; success is not implied.
+    ToolInterrupted,
     /// The model's reasoning for one turn, collapsed to a header row until
-    /// expanded with `ctrl-r`. Never persisted: it is not part of the answer.
+    /// expandable reasoning/tool detail. Never persisted: it is not the answer.
     Thinking,
 }
 
@@ -395,12 +399,16 @@ pub struct Entry {
     pub at_ms: i64,
     /// Still streaming: the last visual line carries the caret glyph.
     pub live: bool,
-    /// A thinking block's expanded state. Meaningless for other roles.
+    /// Expanded state for reasoning and correlated tool details.
     pub expanded: bool,
     /// The turn's pace, stamped when the answer settles: `17s · 5.5 tps ·
     /// ↑24k ↓8`. Rendered as one dim line under the answer; never persisted,
     /// because the receipt already carries the same numbers in the file.
     pub stats: Option<String>,
+    /// Provider call identity, present for event-correlated live tool rows.
+    pub tool_call_id: Option<String>,
+    /// Sanitized, bounded result detail; hidden until the call row is expanded.
+    pub tool_detail: Option<String>,
 }
 
 /// Compact turn summary: elapsed time, tools used, and output throughput.
@@ -509,8 +517,8 @@ pub struct App {
     /// Whether the view follows new output.
     pub follow: bool,
     /// Screen row the pointer last sat on, absolute. Feeds the one hover
-    /// the transcript has: the `ctrl-r` hint on a thinking header exists
-    /// only while the pointer rests on it, and is noise everywhere else.
+    /// transcript has: the `ctrl-r` hint on the latest expandable header
+    /// appears only while the pointer rests on it.
     pub mouse_row: Option<u16>,
     /// Short-lived footer status, such as a clipboard confirmation.
     pub notification: Option<(String, std::time::Instant)>,
@@ -790,6 +798,18 @@ fn plural(count: usize, singular: &str) -> String {
     }
 }
 
+fn bounded_tool_detail(text: &str) -> String {
+    const LIMIT: usize = 4_000;
+    let redacted = memnoth_auth::redaction::redact_token(text);
+    let mut chars = redacted.chars();
+    let prefix: String = chars.by_ref().take(LIMIT).collect();
+    if chars.next().is_some() {
+        format!("{prefix}\n… detail truncated …")
+    } else {
+        prefix
+    }
+}
+
 impl App {
     pub fn notify(&mut self, message: impl Into<String>, duration: std::time::Duration) {
         self.notification = Some((message.into(), std::time::Instant::now() + duration));
@@ -929,6 +949,8 @@ impl App {
                 live: false,
                 expanded: false,
                 stats: None,
+                tool_call_id: None,
+                tool_detail: None,
             });
         }
         self.follow = true;
@@ -956,6 +978,8 @@ impl App {
             live: false,
             expanded: false,
             stats: None,
+            tool_call_id: None,
+            tool_detail: None,
         });
         self.home_visible = false;
         self.home_cursor = 0;
@@ -977,6 +1001,8 @@ impl App {
                     live: true,
                     expanded: false,
                     stats: None,
+                    tool_call_id: None,
+                    tool_detail: None,
                 });
                 let index = self.entries.len() - 1;
                 self.stream_answer = Some(index);
@@ -1000,7 +1026,7 @@ impl App {
     /// collapsed — the header plus a three-line tail — because a reasoning
     /// block that is fully expanded while it streams pushes the answer off
     /// the screen, and every agent's users have asked for the smaller one.
-    /// `ctrl-r` opens the whole of it.
+    /// `ctrl-r` opens the full reasoning block.
     pub fn append_reasoning_delta(&mut self, piece: &str) {
         let index = match self.stream_think {
             Some(index) if index < self.entries.len() => index,
@@ -1012,6 +1038,8 @@ impl App {
                     live: true,
                     expanded: false,
                     stats: None,
+                    tool_call_id: None,
+                    tool_detail: None,
                 };
                 // If reasoning arrives after its answer delta, put it before
                 // that phase's answer. Before the first tool this is the first
@@ -1046,14 +1074,20 @@ impl App {
         }
     }
 
-    /// Expand or collapse the newest thinking block.
+    /// Expand or collapse the newest reasoning block or tool detail.
     pub fn toggle_thinking(&mut self) {
-        if let Some(entry) = self
-            .entries
-            .iter_mut()
-            .rev()
-            .find(|entry| entry.role == EntryRole::Thinking)
-        {
+        let entry = self.entries.iter_mut().rev().find(|entry| {
+            entry.role == EntryRole::Thinking
+                || (entry.tool_call_id.is_some()
+                    && matches!(
+                        entry.role,
+                        EntryRole::Tool
+                            | EntryRole::ToolDone
+                            | EntryRole::ToolFailed
+                            | EntryRole::ToolInterrupted
+                    ))
+        });
+        if let Some(entry) = entry {
             entry.expanded = !entry.expanded;
         }
     }
@@ -1127,7 +1161,63 @@ impl App {
     pub fn resolve_tools(&mut self, from: usize) {
         for entry in self.entries.iter_mut().skip(from) {
             if entry.role == EntryRole::Tool {
-                entry.role = EntryRole::ToolDone;
+                entry.role = EntryRole::ToolInterrupted;
+                entry.text.push_str(" · interrupted (result not observed)");
+                entry.live = false;
+            }
+        }
+    }
+
+    /// Start one provider-identified call. Duplicate starts do not create a
+    /// second row; an empty ID belongs to an older event producer and is not
+    /// safe to correlate.
+    pub fn start_tool_call(&mut self, call_id: &str, name: &str) {
+        if call_id.is_empty()
+            || self
+                .entries
+                .iter()
+                .any(|entry| entry.tool_call_id.as_deref() == Some(call_id))
+        {
+            return;
+        }
+        self.push_tool(name.to_string());
+        if let Some(entry) = self.entries.last_mut() {
+            entry.tool_call_id = Some(call_id.to_string());
+        }
+    }
+
+    /// Settle only the row identified by the provider's call ID. An orphan,
+    /// duplicate, or late result cannot manufacture a successful row.
+    pub fn finish_tool_call(&mut self, call_id: &str, output: &str, error: Option<&str>) {
+        let Some(entry) = self.entries.iter_mut().find(|entry| {
+            entry.tool_call_id.as_deref() == Some(call_id) && entry.role == EntryRole::Tool
+        }) else {
+            return;
+        };
+        let name = entry.text.clone();
+        if let Some(error) = error {
+            entry.role = EntryRole::ToolFailed;
+            entry.text = format!("{name} · failed · {} chars", error.chars().count());
+            entry.tool_detail = Some(bounded_tool_detail(error));
+        } else {
+            entry.role = EntryRole::ToolDone;
+            entry.text = if output.is_empty() {
+                format!("{name} · completed · empty result")
+            } else {
+                format!("{name} · completed · {} chars", output.chars().count())
+            };
+            entry.tool_detail = Some(bounded_tool_detail(output));
+        }
+        entry.live = false;
+    }
+
+    /// Mark calls with no observed terminal event as interrupted. Used for
+    /// cancellation and turn/receiver termination; a late result is ignored.
+    pub fn interrupt_tool_calls(&mut self) {
+        for entry in &mut self.entries {
+            if entry.role == EntryRole::Tool && entry.tool_call_id.is_some() {
+                entry.role = EntryRole::ToolInterrupted;
+                entry.text.push_str(" · interrupted (result not observed)");
                 entry.live = false;
             }
         }
@@ -1642,6 +1732,23 @@ impl App {
             // row reads as a second prompt.
             if entry.role == EntryRole::User && index > 0 {
                 out.push((EntryRole::User, ratatui::text::Line::from(""), false));
+            }
+            // Correlated calls retain their own status and evidence row. The
+            // legacy note-only rows below may still use the compact burst view.
+            if entry.tool_call_id.is_some() {
+                out.push((
+                    entry.role,
+                    ratatui::text::Line::from(entry.text.clone()),
+                    true,
+                ));
+                if entry.expanded
+                    && let Some(detail) = &entry.tool_detail
+                {
+                    for line in crate::tui::markdown::lines(detail, width.saturating_sub(2)) {
+                        out.push((entry.role, line, false));
+                    }
+                }
+                continue;
             }
             if matches!(entry.role, EntryRole::Tool | EntryRole::ToolDone) {
                 let end = self.entries[index..]
@@ -5242,7 +5349,7 @@ mod tests {
     }
 
     #[test]
-    fn a_tool_burst_is_one_quiet_transcript_row() {
+    fn legacy_tool_burst_is_never_marked_success_without_results() {
         let mut app = App::new("s", false);
         app.push_tool("kg status");
         app.push_tool("read file {\"path\":\"Cargo.toml\"}");
@@ -5261,11 +5368,80 @@ mod tests {
 
         app.resolve_tools(0);
         let done = app.visual_lines(96);
-        assert_eq!(done.len(), 1, "finished calls collapse into one summary");
-        let summary = done[0].1.to_string();
-        assert!(summary.contains("3 steps"), "{summary}");
-        assert!(summary.contains("2 files"), "{summary}");
-        assert!(summary.contains("code graph"), "{summary}");
+        assert_eq!(done.len(), 3, "each unresolved call remains visible");
+        assert!(
+            app.entries
+                .iter()
+                .all(|entry| entry.role == EntryRole::ToolInterrupted)
+        );
+        assert!(
+            done.iter()
+                .all(|(_, line, _)| line.to_string().contains("result not observed"))
+        );
+    }
+
+    #[test]
+    fn parallel_tool_results_settle_only_their_correlated_rows() {
+        let mut app = App::new("s", false);
+        app.start_tool_call("turn-1:a", "read_file");
+        app.start_tool_call("turn-1:b", "kg_search");
+        app.finish_tool_call("turn-1:b", "secret result", None);
+        app.finish_tool_call("turn-1:a", "file contents", None);
+
+        assert_eq!(app.entries[0].role, EntryRole::ToolDone);
+        assert_eq!(app.entries[1].role, EntryRole::ToolDone);
+        assert!(app.entries[0].text.contains("completed"));
+        assert!(app.entries[1].text.contains("completed"));
+        assert!(!app.entries[0].text.contains("file contents"));
+        assert!(!app.entries[1].text.contains("secret result"));
+        let rendered = app.visual_lines(120);
+        assert_eq!(
+            rendered.len(),
+            2,
+            "each correlated call remains inspectable"
+        );
+    }
+
+    #[test]
+    fn duplicate_starts_orphan_results_and_duplicate_results_are_ignored() {
+        let mut app = App::new("s", false);
+        app.finish_tool_call("orphan", "must not appear", None);
+        app.start_tool_call("turn-1:x", "kg_status");
+        app.start_tool_call("turn-1:x", "duplicate");
+        app.finish_tool_call("turn-1:x", "observed", None);
+        app.finish_tool_call("turn-1:x", "late duplicate", Some("late failure"));
+
+        assert_eq!(app.entries.len(), 1);
+        assert_eq!(app.entries[0].role, EntryRole::ToolDone);
+        assert!(app.entries[0].text.contains("completed"));
+        assert!(!app.entries[0].text.contains("observed"));
+        assert!(!app.entries[0].text.contains("late"));
+    }
+
+    #[test]
+    fn cancellation_marks_unobserved_calls_and_late_results_cannot_upgrade_them() {
+        let mut app = App::new("s", false);
+        app.start_tool_call("turn-1:x", "shell");
+        app.interrupt_tool_calls();
+        app.finish_tool_call("turn-1:x", "late output", None);
+
+        assert_eq!(app.entries[0].role, EntryRole::ToolInterrupted);
+        assert!(app.entries[0].text.contains("result not observed"));
+        assert!(!app.entries[0].text.contains("late output"));
+    }
+
+    #[test]
+    fn provider_ids_reused_in_later_turns_remain_distinct() {
+        let mut app = App::new("s", false);
+        app.start_tool_call("turn-1:call-1", "first");
+        app.finish_tool_call("turn-1:call-1", "done", None);
+        app.start_tool_call("turn-2:call-1", "second");
+        // A late result scoped to turn one cannot settle turn two.
+        app.finish_tool_call("turn-1:call-1", "late", None);
+        assert_eq!(app.entries[0].role, EntryRole::ToolDone);
+        assert_eq!(app.entries[1].role, EntryRole::Tool);
+        app.finish_tool_call("turn-2:call-1", "done", None);
+        assert_eq!(app.entries[1].role, EntryRole::ToolDone);
     }
 
     #[test]

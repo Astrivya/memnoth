@@ -244,6 +244,8 @@ fn style_for(role: EntryRole) -> (Style, &'static str) {
         // The glyph is the state: running, then done in place.
         EntryRole::Tool => (Style::default().fg(Color::Cyan), "▌"),
         EntryRole::ToolDone => (Style::default().fg(Color::Green), "✓"),
+        EntryRole::ToolFailed => (Style::default().fg(Color::Red), "✗"),
+        EntryRole::ToolInterrupted => (Style::default().fg(Color::DarkGray), "·"),
         EntryRole::Thinking => (
             Style::default()
                 .fg(Color::DarkGray)

@@ -1046,6 +1046,16 @@ fn add_reported(total: &mut Option<u64>, value: Option<u64>) {
     }
 }
 
+/// Give event consumers a stable identity even when a compatible provider
+/// omitted its own call ID. The model response still uses the provider ID.
+fn lifecycle_call_id(call_id: &str, round: usize, call_index: usize) -> String {
+    if call_id.is_empty() {
+        format!("missing-{round}-{call_index}")
+    } else {
+        call_id.to_string()
+    }
+}
+
 /// The tools a turn may call. Implemented once, over the CLI's own dispatcher.
 pub trait Tools {
     /// Run one tool and return the text the model should see.
@@ -2338,13 +2348,20 @@ pub fn run_turn_attached(
         }
 
         let mut results = Vec::new();
-        for call in &step.calls {
+        for (call_index, call) in step.calls.iter().enumerate() {
+            // Some compatible providers omit tool-call IDs. Give the UI
+            // lifecycle a deterministic ID for this round so parallel calls
+            // still settle independently. Keep the provider's original ID in
+            // the model response below: only the event stream needs this one.
+            let event_call_id = lifecycle_call_id(&call.id, round, call_index);
             emit(ApiEvent::ToolStart {
                 session_id: session_id.to_string(),
+                call_id: event_call_id.clone(),
                 name: call.name.clone(),
             });
             emit(ApiEvent::ToolExec {
                 session_id: session_id.to_string(),
+                call_id: event_call_id.clone(),
                 name: call.name.clone(),
             });
             let label = describe_call(&call.name, &call.input);
@@ -2359,7 +2376,7 @@ pub fn run_turn_attached(
             let clipped = clip(&output, TOOL_RESULT_CHARS);
             emit(ApiEvent::ToolDone {
                 session_id: session_id.to_string(),
-                call_id: call.id.clone(),
+                call_id: event_call_id,
                 name: call.name.clone(),
                 output: clipped.clone(),
                 error,
@@ -3401,6 +3418,14 @@ fn env_string(key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_provider_call_ids_get_unique_lifecycle_ids() {
+        assert_eq!(lifecycle_call_id("provider-1", 0, 0), "provider-1");
+        assert_eq!(lifecycle_call_id("", 0, 0), "missing-0-0");
+        assert_eq!(lifecycle_call_id("", 0, 1), "missing-0-1");
+        assert_ne!(lifecycle_call_id("", 0, 0), lifecycle_call_id("", 1, 0));
+    }
 
     fn settings(kind: Kind) -> Settings {
         Settings {

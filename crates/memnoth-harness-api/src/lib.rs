@@ -127,7 +127,14 @@ pub enum ApiEvent {
     /// Reasoning done.
     ReasoningDone { session_id: String },
     /// Tool start.
-    ToolStart { session_id: String, name: String },
+    ToolStart {
+        session_id: String,
+        /// Invocation identity (provider-issued when available). Missing on
+        /// older serialized events; consumers must treat an empty value as legacy.
+        #[serde(default)]
+        call_id: String,
+        name: String,
+    },
     /// Tool input delta.
     ToolInputDelta {
         session_id: String,
@@ -135,7 +142,14 @@ pub enum ApiEvent {
         delta: String,
     },
     /// Tool exec.
-    ToolExec { session_id: String, name: String },
+    ToolExec {
+        session_id: String,
+        /// Invocation identity (provider-issued when available). Missing on
+        /// older serialized events; consumers must treat an empty value as legacy.
+        #[serde(default)]
+        call_id: String,
+        name: String,
+    },
     /// Token usage.
     TokenUsage { session_id: String, tokens: u64 },
     /// Message accepted.
@@ -199,17 +213,27 @@ pub enum ApiEvent {
 
 impl ApiEvent {
     /// A tool call started. The name is the model's tool, not a verb spelling.
-    pub fn tool_started(session_id: impl Into<String>, name: impl Into<String>) -> Self {
+    pub fn tool_started(
+        session_id: impl Into<String>,
+        call_id: impl Into<String>,
+        name: impl Into<String>,
+    ) -> Self {
         ApiEvent::ToolStart {
             session_id: session_id.into(),
+            call_id: call_id.into(),
             name: name.into(),
         }
     }
 
     /// The tool is about to execute, after the person has been asked.
-    pub fn tool_executing(session_id: impl Into<String>, name: impl Into<String>) -> Self {
+    pub fn tool_executing(
+        session_id: impl Into<String>,
+        call_id: impl Into<String>,
+        name: impl Into<String>,
+    ) -> Self {
         ApiEvent::ToolExec {
             session_id: session_id.into(),
+            call_id: call_id.into(),
             name: name.into(),
         }
     }
@@ -527,12 +551,24 @@ mod tests {
             ApiEvent::TokenUsage { tokens: 42, .. }
         ));
         assert!(matches!(
-            ApiEvent::tool_started("s-1", "kg_impact"),
+            ApiEvent::tool_started("s-1", "c-1", "kg_impact"),
             ApiEvent::ToolStart { .. }
         ));
         assert!(matches!(
-            ApiEvent::tool_executing("s-1", "kg_impact"),
+            ApiEvent::tool_executing("s-1", "c-1", "kg_impact"),
             ApiEvent::ToolExec { .. }
         ));
+    }
+
+    #[test]
+    fn legacy_tool_lifecycle_frames_deserialize_without_call_identity() {
+        let legacy_start: ApiEvent =
+            serde_json::from_str(r#"{"tool_start":{"session_id":"s-1","name":"kg_search"}}"#)
+                .unwrap();
+        assert!(matches!(legacy_start, ApiEvent::ToolStart { call_id, .. } if call_id.is_empty()));
+        let legacy_exec: ApiEvent =
+            serde_json::from_str(r#"{"tool_exec":{"session_id":"s-1","name":"kg_search"}}"#)
+                .unwrap();
+        assert!(matches!(legacy_exec, ApiEvent::ToolExec { call_id, .. } if call_id.is_empty()));
     }
 }
