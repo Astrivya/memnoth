@@ -92,6 +92,9 @@ pub struct AddReport {
     pub vault: Option<String>,
     /// Whether anything was actually written.
     pub dry_run: bool,
+    /// Whether the local registration is read-only. False for a cloud
+    /// registration, where the flag has no meaning.
+    pub read_only: bool,
     /// Whether a token was available.
     pub token_used: bool,
     /// One row per client acted on.
@@ -437,9 +440,12 @@ pub fn add(ctx: &AppContext, options: AddOptions<'_>) -> Result<AddReport> {
             Some(t) => {
                 let team_dir = ctx.home.join("teams").join(t);
                 let vault_path = team_dir.join("vault.db");
-                std::fs::create_dir_all(&team_dir).with_context(|| {
-                    format!("cannot create team vault dir {}", team_dir.display())
-                })?;
+                // A dry run resolves the path but leaves the filesystem alone.
+                if !dry_run {
+                    std::fs::create_dir_all(&team_dir).with_context(|| {
+                        format!("cannot create team vault dir {}", team_dir.display())
+                    })?;
+                }
                 absolute_vault(vault_path)?
             }
             None => absolute_vault(db.unwrap_or_else(|| ctx.vault_path.clone()))?,
@@ -608,6 +614,7 @@ pub fn add(ctx: &AppContext, options: AddOptions<'_>) -> Result<AddReport> {
         command,
         vault,
         dry_run,
+        read_only: local && !allow_writes,
         token_used: token.is_some(),
         results,
         snippets,
@@ -1780,8 +1787,8 @@ mod tests {
             "--team must resolve to the shared team vault, not the personal one"
         );
         assert!(
-            home.join("teams").join("acme").is_dir(),
-            "the team vault dir must exist for the hosts to share"
+            !home.join("teams").join("acme").exists(),
+            "a dry run must not create the team vault dir"
         );
         assert!(
             report.results.iter().any(|row| row.ok),

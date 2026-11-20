@@ -173,30 +173,44 @@ fn existing_opencode_config(directory: &Path) -> Option<PathBuf> {
 }
 
 fn zed_settings_path(home: &Path) -> PathBuf {
-    // A home that actually holds a Zed settings file wins, wherever the platform
-    // would put it. Without this the Windows branch below read
-    // `%APPDATA%\Zed\settings.json` for every caller — including one that passed
-    // its own directory — so the answer came from the real user's file no matter
-    // which home was asked about, and a test could only pass on a machine that
-    // happened to have memnoth registered there.
+    // Every candidate stays under `home`. Consulting `%APPDATA%` here was a home
+    // escape: a caller that passed a sandbox home (a test, an isolated install)
+    // was pointed at the real user's Zed settings, and `mcp add` then refused to
+    // rewrite a JSONC file it had no business reading.
     let xdg = home.join(".config").join("zed").join("settings.json");
     let roaming = home
         .join("AppData")
         .join("Roaming")
         .join("Zed")
         .join("settings.json");
-    if xdg.exists() {
-        return xdg;
-    }
+    let default = if cfg!(windows) {
+        roaming.clone()
+    } else {
+        xdg.clone()
+    };
+
+    // Zed has moved its settings file between releases. An existing file wins;
+    // the platform default is used when this is a fresh registration.
+    let mut candidates: Vec<PathBuf> = Vec::new();
     if cfg!(windows) {
-        if roaming.exists() {
-            return roaming;
+        candidates.push(roaming);
+        candidates.push(xdg.clone());
+    } else {
+        if cfg!(target_os = "macos") {
+            candidates.push(
+                home.join("Library")
+                    .join("Application Support")
+                    .join("Zed")
+                    .join("settings.json"),
+            );
+            candidates.push(home.join(".zed").join("settings.json"));
         }
-        if let Some(appdata) = std::env::var_os("APPDATA").map(PathBuf::from) {
-            return appdata.join("Zed").join("settings.json");
-        }
+        candidates.push(xdg.clone());
     }
-    xdg
+    candidates
+        .into_iter()
+        .find(|path| path.exists())
+        .unwrap_or(default)
 }
 
 /// The registration to write: either an HTTP endpoint or a local stdio
@@ -1616,6 +1630,38 @@ mod tests {
         let parsed: Value = serde_json::from_str(&strip_jsonc(text)).expect("parses");
         assert_eq!(parsed["a"], 1);
         assert_eq!(parsed["b"][1], 2);
+    }
+
+    /// The Zed path must be a pure function of the home it is given. Reading
+    /// `%APPDATA%` used to send a sandbox caller to the real user's settings.
+    #[test]
+    fn zed_settings_path_stays_under_the_supplied_home() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = zed_settings_path(dir.path());
+        assert!(
+            path.starts_with(dir.path()),
+            "{path:?} escaped the supplied home {:?}",
+            dir.path()
+        );
+        let expected = if cfg!(windows) {
+            dir.path()
+                .join("AppData")
+                .join("Roaming")
+                .join("Zed")
+                .join("settings.json")
+        } else {
+            dir.path().join(".config").join("zed").join("settings.json")
+        };
+        assert_eq!(path, expected);
+    }
+
+    #[test]
+    fn zed_settings_path_prefers_an_existing_settings_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let existing = dir.path().join(".config").join("zed").join("settings.json");
+        std::fs::create_dir_all(existing.parent().unwrap()).unwrap();
+        std::fs::write(&existing, "{}\n").unwrap();
+        assert_eq!(zed_settings_path(dir.path()), existing);
     }
 
     /// Reading is tolerant; writing is not. A JSONC file the reader understands

@@ -120,7 +120,11 @@ pub fn render_add(report: &AddReport) -> String {
         if let Some(command) = &report.command {
             text.push_str(&format!("  command    {command} mcp serve\n"));
         }
-        text.push_str("  writes     read-only (pass --allow-writes to opt in)\n");
+        if report.read_only {
+            text.push_str("  writes     read-only (pass --allow-writes to opt in)\n");
+        } else {
+            text.push_str("  writes     allowed (--allow-writes)\n");
+        }
     } else if !report.token_used {
         text.push_str("           (set MEMNOTH_MCP_TOKEN or pass --token)\n");
     }

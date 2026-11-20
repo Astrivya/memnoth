@@ -161,11 +161,50 @@ For Zed, add the equivalent entry to its settings JSON:
 }
 ```
 
-This npm setup launches the standalone packaged server from the host's config.
-Separately, `memnoth mcp add --local --clients opencode` is the CLI-managed
-registration flow: it writes a local Memnoth CLI server entry (including its
-resolved vault path) into OpenCode's config. Use one setup flow; do not add both
-entries unless you intentionally want two servers.
+## CLI-managed one-click registration
+
+If the Memnoth CLI is installed, `mcp add --local` writes the same stdio entry
+into each client's own config for you. It resolves the vault path, sets
+`MEMNOTH_MCP_PROFILE`, and defaults to read-only; no account, token or network
+access is needed. The client names advertised on the site are `claude`,
+`cursor`, `codex` and `zed` (`opencode` is also accepted):
+
+```sh
+mn mcp add --local --clients claude,cursor,codex,zed
+```
+
+Flags that matter for the written entry:
+
+- `--profile <name>` — tool profile. `--local` defaults to `memory`; a cloud
+  registration (`mcp add` without `--local`) defaults to `full`. Valid names:
+  `micro`, `memory`, `coord`, `code`, `full`, `agent` (the last is HTTP-only).
+- `--allow-writes` — launch with `MEMNOTH_MCP_READ_ONLY=0`. Without it the entry
+  sets `MEMNOTH_MCP_READ_ONLY=1` and the report says `writes read-only`.
+- `--dry-run` — show the paths and entry that would be written; writes nothing.
+- `--team <name>` — register a shared team vault instead of the personal one
+  (requires `--local`).
+- `--db <path>` — name the vault file explicitly instead of the resolved default.
+
+Examples:
+
+```sh
+mn mcp add --local --clients claude,cursor,codex --profile code
+mn mcp add --local --clients cursor --allow-writes
+mn mcp add --local --clients claude,cursor,codex,zed --dry-run
+```
+
+The written entry launches `<path-to-memnoth> mcp serve --db <absolute-vault>`
+with `MEMNOTH_MCP_PROFILE` and `MEMNOTH_MCP_READ_ONLY` in its environment. Local
+mode writes no token into the client config and reports `token_used: false` with
+an empty `url`. The config files are `~/.claude.json` (Claude Code),
+`~/.cursor/mcp.json` (Cursor), `~/.codex/config.toml` (Codex) and Zed's
+`settings.json` (`~/.config/zed` on Linux/macOS, `%APPDATA%\Zed` on Windows).
+Zed settings are JSON-with-comments; `mcp add` will not rewrite such a file and
+prints a snippet for Zed's Command Palette instead.
+
+Use one setup flow — the standalone npm entry above, or the CLI-managed
+registration described here. Do not install both unless you intentionally want
+two servers named `memnoth`.
 
 ## Protocol compatibility
 
