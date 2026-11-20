@@ -2161,6 +2161,10 @@ fn submit(
             open_overlay(app, crate::tui::overlays::OverlayKind::Teams);
             None
         }
+        Parsed::OrganizationOverlay => {
+            open_overlay(app, crate::tui::overlays::OverlayKind::Organization);
+            None
+        }
         Parsed::KeyCreate {
             name,
             scope,

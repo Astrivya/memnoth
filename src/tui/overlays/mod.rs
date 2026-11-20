@@ -56,6 +56,8 @@ pub enum OverlayKind {
     Connect,
     /// `/teams members` with no id: pick the team from the org's list.
     Teams,
+    /// `/org`: read-only overview of the authenticated organization.
+    Organization,
     /// `/keys create`: the form, because the secret must not reach the transcript.
     KeyCreate,
     /// `/org invite`: the same, for the link and the code.
@@ -277,6 +279,7 @@ pub fn create_overlay(kind: OverlayKind) -> Box<dyn Overlay> {
         OverlayKind::Connect => Box::new(ConnectOverlay::new()),
         OverlayKind::Permissions => Box::new(PermissionsOverlay::new()),
         OverlayKind::Teams => Box::new(TeamsOverlay::new()),
+        OverlayKind::Organization => Box::new(organization::OrganizationOverlay::new()),
         OverlayKind::KeyCreate => Box::new(KeyCreateOverlay::new()),
         OverlayKind::Invite => Box::new(InviteOverlay::new()),
         // Opened with a spec, never bare: `present` is the door for this one.
@@ -334,6 +337,7 @@ mod help;
 mod mcps;
 mod models;
 pub(crate) mod onboarding;
+mod organization;
 // Crate-visible because the inline slash dropdown reads the same command list
 // the modal palette does.
 mod checkpoints;
@@ -390,6 +394,7 @@ mod reachability {
         OverlayKind::Commands,
         OverlayKind::Connect,
         OverlayKind::Teams,
+        OverlayKind::Organization,
         OverlayKind::KeyCreate,
         OverlayKind::Invite,
         OverlayKind::Deck,

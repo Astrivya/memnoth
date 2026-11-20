@@ -264,6 +264,8 @@ pub enum Parsed {
     /// `/teams members` with no id: the id only exists in another command's
     /// output, so ask for it with the list instead of a uuid to copy.
     TeamsOverlay,
+    /// `/org`: read-only overview of the authenticated organization.
+    OrganizationOverlay,
     /// `/keys create`: a form, because the secret is shown once and a session
     /// writes every answer to its transcript on disk.
     KeyCreate {
@@ -4298,9 +4300,7 @@ const ORG_USAGE: &str = "usage: /org <show | rename <name> | members | add-membe
 /// and code exactly once, and this session persists every answer to disk.
 fn parse_org(args: &[String]) -> Parsed {
     let Some(action) = args.first() else {
-        return Parsed::Run(Verb::Org(OrgArgs {
-            action: OrgCommand::Show(OrgShowArgs { json: false }),
-        }));
+        return Parsed::OrganizationOverlay;
     };
     let rest = &args[1..];
     match action.as_str() {
@@ -4896,8 +4896,9 @@ mod tests {
             } if name == "laptop"
         ));
 
+        assert!(matches!(parse_line("/org"), Parsed::OrganizationOverlay));
         assert!(matches!(
-            parse_line("/org"),
+            parse_line("/org show"),
             Parsed::Run(Verb::Org(OrgArgs {
                 action: OrgCommand::Show(_)
             }))
