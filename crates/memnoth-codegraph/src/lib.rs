@@ -395,6 +395,26 @@ impl Store {
     pub fn open(path: &Path) -> Result<Self> {
         let conn = Connection::open(path)
             .with_context(|| format!("opening code graph store at {}", path.display()))?;
+        // The CLI's `mn kg index` currently owns a separate, legacy schema in
+        // the same graph.db path. Detect it before CREATE INDEX can partially
+        // mutate that database, and leave the user's existing graph untouched.
+        let symbols_exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'symbols')",
+            [],
+            |row| row.get(0),
+        )?;
+        if symbols_exists {
+            let mut columns = conn.prepare("PRAGMA table_info(symbols)")?;
+            let names = columns
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<rusqlite::Result<std::collections::HashSet<_>>>()?;
+            if names.contains("name") && !names.contains("qname") {
+                anyhow::bail!(
+                    "graph database at {} uses the CLI index schema; it was left unchanged. Run `mn kg index --full` only after preserving a backup to rebuild it for this graph engine",
+                    path.display()
+                );
+            }
+        }
         // Initialize schema
         conn.execute_batch(
             r#"

@@ -76,6 +76,12 @@ struct SyncRequest<'a> {
     org: &'a str,
 }
 
+#[derive(Clone, Copy)]
+enum GraphLayout {
+    CliLegacy,
+    Codegraph,
+}
+
 /// Report the last locally acknowledged graph version without contacting Cloud.
 /// The version is explicitly a local cursor; callers must not present it as the
 /// current remote version until `sync now` checks the project endpoint.
@@ -88,16 +94,22 @@ pub fn local_status(ctx: &AppContext, project_id: &str) -> Result<LocalGraphStat
     let cursor = load_cursor(&paths, &project_id)?;
     let local_graph_present = ctx.graph_path.exists();
     let (graph_symbols, stale_files, local_graph_bytes) = if local_graph_present {
-        let store = memnoth_codegraph::Store::open(&ctx.graph_path)
-            .context("opening local graph for sync status")?;
-        let freshness = memnoth_codegraph::staleness_report(&store, &ctx.root, 0)?;
+        let connection = Connection::open_with_flags(
+            &ctx.graph_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .context("opening local graph for sync status")?;
+        let layout = graph_layout(&connection)?;
+        let graph_symbols: i64 =
+            connection.query_row("SELECT COUNT(*) FROM symbols", [], |row| row.get(0))?;
+        let stale_files = graph_stale_file_count(&connection, layout, &ctx.root)?;
         let unindexed = unindexed_source_count(&ctx.root, &ctx.graph_path)?;
         let local_graph_bytes = fs::metadata(&ctx.graph_path)
             .context("reading local graph size")?
             .len();
         (
-            Some(store.generation()?),
-            Some(freshness.stale_files + unindexed as u64),
+            Some(graph_symbols.max(0) as u64),
+            Some(stale_files + unindexed as u64),
             Some(local_graph_bytes),
         )
     } else {
@@ -490,14 +502,13 @@ fn verify_database(path: &Path) -> Result<()> {
 }
 
 fn ensure_graph_fresh(root: &Path, database: &Path) -> Result<()> {
-    let store = memnoth_codegraph::Store::open(database)
-        .with_context(|| format!("opening graph database {}", database.display()))?;
-    let report = memnoth_codegraph::staleness_report(&store, root, 0)?;
-    if report.stale_files > 0 {
-        bail!(
-            "graph has {} stale source file(s); run `mn kg index` before syncing",
-            report.stale_files
-        );
+    let connection =
+        Connection::open_with_flags(database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .with_context(|| format!("opening graph database {}", database.display()))?;
+    let layout = graph_layout(&connection)?;
+    let stale_files = graph_stale_file_count(&connection, layout, root)?;
+    if stale_files > 0 {
+        bail!("graph has {stale_files} stale source file(s); run `mn kg index` before syncing",);
     }
     // staleness_report verifies only rows already in the index. Also compare
     // against the indexer's discovery set so a newly added source file cannot
@@ -507,6 +518,102 @@ fn ensure_graph_fresh(root: &Path, database: &Path) -> Result<()> {
         bail!("graph has {added} unindexed source file(s); run `mn kg index` before syncing");
     }
     Ok(())
+}
+
+fn graph_layout(connection: &Connection) -> Result<GraphLayout> {
+    fn columns(connection: &Connection, table: &str) -> Result<std::collections::HashSet<String>> {
+        let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+        Ok(statement
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    let symbol_columns = columns(connection, "symbols")?;
+    let file_columns = columns(connection, "files")?;
+    if symbol_columns.contains("qname") && file_columns.contains("hash") {
+        return Ok(GraphLayout::Codegraph);
+    }
+    if symbol_columns.contains("name")
+        && symbol_columns.contains("path")
+        && symbol_columns.contains("line")
+        && file_columns.contains("bytes")
+        && file_columns.contains("mtime_ms")
+    {
+        return Ok(GraphLayout::CliLegacy);
+    }
+    bail!(
+        "graph database schema is unsupported; it was left unchanged. Preserve a backup, then run `mn kg index --full` to rebuild the local graph"
+    )
+}
+
+fn graph_stale_file_count(
+    connection: &Connection,
+    layout: GraphLayout,
+    root: &Path,
+) -> Result<u64> {
+    let canonical_root = root.canonicalize().context("resolving workspace root")?;
+    let mut stale = 0u64;
+    match layout {
+        GraphLayout::CliLegacy => {
+            let mut statement = connection.prepare("SELECT path, bytes, mtime_ms FROM files")?;
+            let mut rows = statement.query([])?;
+            while let Some(row) = rows.next()? {
+                let path: String = row.get(0)?;
+                let bytes: i64 = row.get(1)?;
+                let modified_ms: i64 = row.get(2)?;
+                let Some(metadata) = safe_source_metadata(&canonical_root, &path) else {
+                    stale += 1;
+                    continue;
+                };
+                if metadata.len() as i64 != bytes || metadata_modified_ms(&metadata) != modified_ms
+                {
+                    stale += 1;
+                }
+            }
+        }
+        GraphLayout::Codegraph => {
+            let mut statement = connection.prepare("SELECT path, hash FROM files")?;
+            let mut rows = statement.query([])?;
+            while let Some(row) = rows.next()? {
+                let path: String = row.get(0)?;
+                let expected: Option<String> = row.get(1)?;
+                let current = safe_source_metadata(&canonical_root, &path).and_then(|_| {
+                    fs::read(canonical_root.join(&path))
+                        .ok()
+                        .map(|bytes| blake3::hash(&bytes).to_hex().to_string())
+                });
+                if current != expected {
+                    stale += 1;
+                }
+            }
+        }
+    }
+    Ok(stale)
+}
+
+fn safe_source_metadata(root: &Path, relative: &str) -> Option<fs::Metadata> {
+    let path = Path::new(relative);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|part| !matches!(part, std::path::Component::Normal(_)))
+    {
+        return None;
+    }
+    let canonical = root.join(path).canonicalize().ok()?;
+    canonical
+        .starts_with(root)
+        .then(|| fs::metadata(canonical).ok())
+        .flatten()
+}
+
+fn metadata_modified_ms(metadata: &fs::Metadata) -> i64 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 fn unindexed_source_count(root: &Path, database: &Path) -> Result<usize> {
@@ -781,6 +888,59 @@ mod tests {
         memnoth_codegraph::index_full(&mut store, root).unwrap();
     }
 
+    fn index_legacy_checkout(root: &Path, graph_path: &Path) {
+        fs::create_dir_all(root).unwrap();
+        let source = root.join("lib.rs");
+        fs::write(&source, "pub fn legacy_symbol() -> u8 { 7 }\n").unwrap();
+        if let Some(parent) = graph_path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        let metadata = fs::metadata(&source).unwrap();
+        let modified_ms = metadata_modified_ms(&metadata);
+        let connection = Connection::open(graph_path).unwrap();
+        // This is the exact schema created by src/kg/store.rs::Graph::init_schema,
+        // including its legacy symbols(path, name, kind, line, end_line, ...)
+        // layout and schema marker.
+        connection
+            .execute_batch(
+                "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 CREATE TABLE files (
+                     path TEXT PRIMARY KEY, language TEXT NOT NULL, bytes INTEGER NOT NULL,
+                     mtime_ms INTEGER NOT NULL, symbols INTEGER NOT NULL DEFAULT 0
+                 );
+                 CREATE TABLE symbols (
+                     id INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT NOT NULL,
+                     name TEXT NOT NULL, kind TEXT NOT NULL, line INTEGER NOT NULL,
+                     end_line INTEGER NOT NULL, container TEXT,
+                     exported INTEGER NOT NULL DEFAULT 0
+                 );
+                 CREATE INDEX symbols_name ON symbols(name);
+                 CREATE INDEX symbols_path ON symbols(path);
+                 CREATE TABLE refs (
+                     id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
+                     path TEXT NOT NULL, line INTEGER NOT NULL, container TEXT
+                 );
+                 CREATE INDEX refs_name ON refs(name);
+                 CREATE INDEX refs_path ON refs(path);
+                 INSERT INTO meta(key, value) VALUES ('schema', '3');",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO files(path, language, bytes, mtime_ms, symbols)
+                 VALUES ('lib.rs', 'rust', ?1, ?2, 1)",
+                rusqlite::params![metadata.len() as i64, modified_ms],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO symbols(path, name, kind, line, end_line, exported)
+                 VALUES ('lib.rs', 'legacy_symbol', 'function', 1, 1, 1)",
+                [],
+            )
+            .unwrap();
+    }
+
     fn read_http_request(stream: &mut TcpStream) -> (String, Vec<u8>) {
         let mut bytes = Vec::new();
         let mut one = [0u8; 1];
@@ -961,6 +1121,52 @@ mod tests {
         assert_eq!(content_hash(&a), content_hash(&b));
         server.join().unwrap();
         assert!(remote_ciphertext.lock().unwrap().is_some());
+    }
+
+    #[test]
+    fn legacy_cli_index_graph_status_and_snapshot_are_read_only_and_compatible() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("workspace");
+        let graph = root.join(".memnoth/graph.db");
+        let project_id = "7284b093-4bb8-4d92-b661-8502dfbb46c6";
+        index_legacy_checkout(&root, &graph);
+        let original_bytes = fs::read(&graph).unwrap();
+        let ctx = test_context(&root, &temp.path().join("home"), graph.clone());
+
+        let status = local_status(&ctx, project_id).unwrap();
+        assert!(status.local_graph_present);
+        assert_eq!(status.graph_symbols, Some(1));
+        assert_eq!(status.stale_files, Some(0));
+        assert_eq!(status.local_graph_bytes, Some(original_bytes.len() as u64));
+
+        let (snapshot, fingerprint) = local_snapshot(&ctx).unwrap();
+        assert!(!snapshot.is_empty());
+        assert!(!fingerprint.is_empty());
+        assert_eq!(fs::read(&graph).unwrap(), original_bytes);
+
+        let store_error = match memnoth_codegraph::Store::open(&graph) {
+            Ok(_) => panic!("the graph store must reject the incompatible schema"),
+            Err(error) => error,
+        };
+        assert!(
+            format!("{store_error:#}").contains("mn kg index --full"),
+            "{store_error:#}"
+        );
+        assert_eq!(fs::read(&graph).unwrap(), original_bytes);
+
+        fs::write(
+            root.join("lib.rs"),
+            "pub fn legacy_symbol() -> u16 { 700 }\n",
+        )
+        .unwrap();
+        let stale = local_status(&ctx, project_id).unwrap();
+        assert_eq!(stale.stale_files, Some(1));
+        let error = local_snapshot(&ctx).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("stale source file"),
+            "{error:#}"
+        );
+        assert_eq!(fs::read(&graph).unwrap(), original_bytes);
     }
 
     #[test]
