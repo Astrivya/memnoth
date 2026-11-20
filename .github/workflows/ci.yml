@@ -90,8 +90,8 @@ jobs:
 
   # Build each platform's test binaries once, archive them, then fan the same
   # complete inventory out to execution shards. Windows archives the main CLI
-  # crate and two disjoint workspace package groups in parallel. Doctests remain
-  # explicit Cargo runs because nextest archives do not include them.
+  # crate and several disjoint workspace package groups in parallel. Doctests
+  # remain explicit Cargo runs because nextest archives do not include them.
   test-archive:
     name: test archive (${{ matrix.os }}, ${{ matrix.scope }})
     runs-on: ${{ matrix.os }}
@@ -134,12 +134,21 @@ jobs:
               -p memnoth-codegraph -p memnoth-context -p memnoth-coord
               -p memnoth-embedding -p memnoth-ext -p memnoth-command
               -p memnoth-skills -p memnoth-harness-api -p memnoth-ingest
-              -p memnoth-lsp -p memnoth-mcp -p memnoth-mcp-auth
+              -p memnoth-lsp -p memnoth-mcp
+            doctests: false
+          # tract's ONNX stack (embedding-wasm) and the updater's download stack
+          # (update) are the two slowest independent dependency trees on Windows.
+          # Isolating them keeps rest-a and rest-b under the 180s archive budget
+          # while every package stays in exactly one Windows scope.
+          - os: windows-latest
+            scope: heavy-deps
+            archive_args: >-
+              -p memnoth-embedding-wasm -p memnoth-update
             doctests: false
           - os: windows-latest
             scope: rest-a
             archive_args: >-
-              -p memnoth-command-macros -p memnoth-embedding-wasm
+              -p memnoth-command-macros
               -p memnoth-transport -p memnoth-mcp-client -p memnoth-protocol-v2
               -p memnoth-sandbox -p memnoth-search -p memnoth-ui
             doctests: false
@@ -153,8 +162,9 @@ jobs:
               --exclude memnoth-ext --exclude memnoth-command
               --exclude memnoth-skills --exclude memnoth-harness-api
               --exclude memnoth-ingest --exclude memnoth-lsp
-              --exclude memnoth-mcp --exclude memnoth-mcp-auth
+              --exclude memnoth-mcp
               --exclude memnoth-command-macros --exclude memnoth-embedding-wasm
+              --exclude memnoth-update
               --exclude memnoth-transport --exclude memnoth-mcp-client
               --exclude memnoth-protocol-v2 --exclude memnoth-sandbox
               --exclude memnoth-search --exclude memnoth-ui
@@ -174,9 +184,9 @@ jobs:
           tool: nextest@0.9.150
 
       # Windows package and target scopes are a disjoint union of the
-      # workspace packages. Both archives are executed by every Windows shard,
-      # and each archive is partitioned independently so their test sets are
-      # both covered across the complete shard matrix.
+      # workspace packages. Every archive is executed by every Windows shard,
+      # and each archive is partitioned independently so all scopes are covered
+      # across the complete shard matrix.
       - name: Build and archive ${{ matrix.scope }} tests
         run: cargo nextest archive ${{ matrix.archive_args }} --locked --archive-file nextest-${{ matrix.scope }}.tar.zst
 
@@ -281,8 +291,8 @@ jobs:
           merge-multiple: true
 
       # Each shard executes a disjoint slice without invoking Cargo or
-      # recompiling test harnesses. On Windows the two package-disjoint archives
-      # are each partitioned; a scope may have an empty slice on a given shard,
+      # recompiling test harnesses. On Windows the package-disjoint archives are
+      # each partitioned; a scope may have an empty slice on a given shard,
       # while all scopes together still cover the workspace inventory.
       - name: Run archived nextest shard
         shell: bash
@@ -292,9 +302,9 @@ jobs:
           # into the workspace root so the archive's target/debug binaries land
           # at the exact paths embedded by Cargo during the archive build. The
           # Windows archives share dependency paths, so allow identical build
-          # artifacts from the second archive to replace the first extraction.
+          # artifacts from a later archive to replace an earlier extraction.
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            archives=(nextest-cli-lib.tar.zst nextest-cli-extra.tar.zst nextest-core.tar.zst nextest-rest-a.tar.zst nextest-rest-b.tar.zst)
+            archives=(nextest-cli-lib.tar.zst nextest-cli-extra.tar.zst nextest-core.tar.zst nextest-heavy-deps.tar.zst nextest-rest-a.tar.zst nextest-rest-b.tar.zst)
             no_tests=pass
           else
             archives=(nextest-workspace.tar.zst)
