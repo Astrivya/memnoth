@@ -7,9 +7,12 @@
 
 pub mod cards;
 pub mod deck;
+pub mod detail_view;
 pub mod focus;
 pub mod goal;
 pub mod plan;
+pub mod steer_composer;
+pub mod timeline_model;
 pub mod trace;
 
 /// Status of a child agent session.
