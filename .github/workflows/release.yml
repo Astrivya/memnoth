@@ -64,8 +64,11 @@ env:
 jobs:
   # A tag push does not run the branch CI, so the release gates on the same
   # checks itself. A release that has not passed them is not a release.
-  verify:
-    name: verify
+  # The four checks are separate jobs so they run in parallel instead of one
+  # long serial chain. Each job saves to its own rust-cache key suffix: sharing
+  # one key would make parallel jobs race to save the same cache entry.
+  verify-fmt:
+    name: verify fmt
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -76,8 +79,26 @@ jobs:
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: verify-fmt
 
       - run: cargo fmt --all -- --check
+
+  verify-generated:
+    name: verify generated
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: verify-generated
+
       - name: verify generated command surfaces
         run: |
           cargo run --quiet -- docs --output contract/command-surface.md --check
@@ -86,12 +107,44 @@ jobs:
           cargo run --quiet -- completion show --shell bash --output completions/memnoth.bash --check
           python scripts/check_surface.py
           node scripts/npm-dist-tag.mjs --self-test
+
+  verify-clippy:
+    name: verify clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: verify-clippy
+
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  verify-test:
+    name: verify test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: verify-test
+
       - run: cargo test --workspace --locked
 
   build:
     name: build (${{ matrix.target }})
-    needs: verify
+    needs: [verify-fmt, verify-generated, verify-clippy, verify-test]
     runs-on: ${{ matrix.os }}
     env:
       # Compiled into every shipped binary by option_env! in memnoth-update, so
@@ -146,12 +199,20 @@ jobs:
         shell: bash
         run: cargo build --release --locked --target "${{ matrix.target }}" -p memnoth -p memnoth-mcp
 
+      - name: install cross
+        if: ${{ matrix.cross }}
+        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
+        with:
+          # Same SHA pin as ci.yml. `tool: cross` resolves to the cross version
+          # attached to that action release, so the install is reproducible and
+          # the aarch64 leg no longer rebuilds cross from source on every run.
+          tool: cross
+
       - name: cross build
         if: ${{ matrix.cross }}
         shell: bash
         run: |
           set -euo pipefail
-          cargo install cross --locked
           cross build --release --locked --target "${{ matrix.target }}" -p memnoth -p memnoth-mcp
 
       # A binary that builds and does not run is the failure this step exists
@@ -422,12 +483,11 @@ jobs:
   dist:
     name: dist bundle
     needs: [build, artifact-test]
-    concurrency:
-      group: memnoth-npm-publish
-      cancel-in-progress: false
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.layout.outputs.tag }}
+      # npm-publish needs the channel to choose a non-regressing npm dist-tag.
+      channel: ${{ steps.layout.outputs.channel }}
     permissions:
       # Creating the release and attaching the bundle's assets to it.
       contents: write
@@ -569,22 +629,6 @@ jobs:
           cp "$package" "dist/${{ steps.layout.outputs.tag }}/"
           echo "package=$package" >> "$GITHUB_OUTPUT"
 
-      - name: check npm publishing credentials
-        id: npm-publish-auth
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NPM_TRUSTED_PUBLISHING: ${{ vars.NPM_TRUSTED_PUBLISHING }}
-        shell: bash
-        run: |
-          if [ -n "$NPM_TOKEN" ]; then
-            echo 'mode=token' >> "$GITHUB_OUTPUT"
-          elif [ "$NPM_TRUSTED_PUBLISHING" = 'true' ]; then
-            echo 'mode=oidc' >> "$GITHUB_OUTPUT"
-          else
-            echo 'mode=skip' >> "$GITHUB_OUTPUT"
-            echo 'npm publishing is not configured; the verified tarball will ship as a GitHub release asset.'
-          fi
-
       # SBOM for every published artifact, generated after signing so it
       # describes the exact bytes shipped. CycloneDX and SPDX are produced side
       # by side and land in dist/<tag>/ alongside the archives, so the release
@@ -689,12 +733,86 @@ jobs:
           done
           echo "release installers byte-for-byte match the freshly built dist bundle"
 
+      # npm publication (and the slow registry poll) lives in the `npm-publish`
+      # job below. This job still assembles the .tgz and ships it inside the
+      # dist artifact and the draft release; publishing it must not hold up
+      # provenance or the install-surface check.
+
+  # npm registry publishing is split out of `dist` so the post-publish registry
+  # poll (up to 20 minutes) cannot block provenance or the install-surface
+  # check. `dist` assembles the .tgz and uploads it inside the
+  # `memnoth-dist-<tag>` artifact; this job downloads that artifact and
+  # publishes the exact bytes attached to the draft release. The
+  # `memnoth-npm-publish` concurrency group moves here with the publish steps.
+  npm-publish:
+    name: npm publish
+    needs: dist
+    concurrency:
+      group: memnoth-npm-publish
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      # npm trusted publishing exchanges this OIDC token for publish rights.
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # npm trusted publishing requires Node >=22.14 and npm >=11.5.1.
+      # Disable setup-node's package-manager cache in this publishing job so
+      # auth material cannot be restored from a cache created by other code.
+      - uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
+        with:
+          node-version: 22.14.0
+          package-manager-cache: false
+
+      - name: install and verify trusted-publishing npm
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global npm@11.5.1
+          node --version | grep -Fx 'v22.14.0'
+          npm --version | grep -Fx '11.5.1'
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: memnoth-dist-${{ needs.dist.outputs.tag }}
+          path: dist
+
+      # The tarball `dist` assembled is at dist/<tag>/*.tgz in the downloaded
+      # artifact. Find it rather than guessing the npm-generated file name.
+      - name: locate npm tarball
+        id: npm-package
+        shell: bash
+        run: |
+          set -euo pipefail
+          package=$(find dist -maxdepth 2 -name '*.tgz' -print -quit)
+          test -n "$package" || { echo "npm tarball was not produced" >&2; exit 1; }
+          echo "package=$package" >> "$GITHUB_OUTPUT"
+
+      - name: check npm publishing credentials
+        id: npm-publish-auth
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TRUSTED_PUBLISHING: ${{ vars.NPM_TRUSTED_PUBLISHING }}
+        shell: bash
+        run: |
+          if [ -n "$NPM_TOKEN" ]; then
+            echo 'mode=token' >> "$GITHUB_OUTPUT"
+          elif [ "$NPM_TRUSTED_PUBLISHING" = 'true' ]; then
+            echo 'mode=oidc' >> "$GITHUB_OUTPUT"
+          else
+            echo 'mode=skip' >> "$GITHUB_OUTPUT"
+            echo 'npm publishing is not configured; the verified tarball will ship as a GitHub release asset.'
+          fi
+
       - name: choose non-regressing npm channel tag
         id: npm-publish-tag
         if: ${{ steps.npm-publish-auth.outputs.mode != 'skip' }}
         env:
-          RELEASE_CHANNEL: ${{ steps.layout.outputs.channel }}
-          RELEASE_VERSION: ${{ steps.layout.outputs.tag }}
+          RELEASE_CHANNEL: ${{ needs.dist.outputs.channel }}
+          RELEASE_VERSION: ${{ needs.dist.outputs.tag }}
         shell: bash
         run: |
           set -euo pipefail
@@ -725,7 +843,7 @@ jobs:
         if: ${{ steps.npm-publish-auth.outputs.mode != 'skip' }}
         env:
           PACKAGE_NAME: "@astrivya/mcp"
-          PACKAGE_VERSION: ${{ steps.layout.outputs.tag }}
+          PACKAGE_VERSION: ${{ needs.dist.outputs.tag }}
           EXPECTED_NPM_TAG: ${{ steps.npm-publish-tag.outputs.tag }}
         shell: bash
         run: |
@@ -770,10 +888,12 @@ jobs:
           }
 
   # SLSA provenance for the release, attesting that the published artifacts
-  # were produced by this workflow from the tagged commit.
+  # were produced by this workflow from the tagged commit. This waits for
+  # npm-publish as well: the subject-path `dist/**` includes the npm tarball,
+  # so the attestation must describe a release whose npm package is published.
   provenance:
     name: provenance
-    needs: dist
+    needs: [dist, npm-publish]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -790,12 +910,12 @@ jobs:
         with:
           subject-path: "dist/**"
 
-  # Post-publish contract check. `dist` has already published the npm package
-  # and attached the assets; this job re-reads the bundle this run actually
-  # built and checks that every install surface still agrees: the manifest,
-  # the version in Cargo.toml, the five archives and their sidecars, the two
-  # installers, and npm's `latest` dist-tag. It runs the same check a human can
-  # run locally — it does not keep a second target list in this workflow.
+  # Post-publish contract check. `dist` has built and attached the assets and
+  # `npm-publish` has published the npm package; this job re-reads the bundle
+  # this run actually built and checks that every install surface still agrees:
+  # the manifest, the version in Cargo.toml, the five archives and their
+  # sidecars, the two installers, and npm's `latest` dist-tag. It runs the same
+  # check a human can run locally — it does not keep a second target list here.
   #
   # The check is stdlib-only Python, so there is nothing to install here. It
   # exits non-zero only on a FAIL. The signing key is now provisioned for this
@@ -804,7 +924,7 @@ jobs:
   # still records the signature state for the release.
   install-surface:
     name: install surface check
-    needs: dist
+    needs: [dist, npm-publish]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
