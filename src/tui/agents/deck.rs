@@ -11,9 +11,12 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 
-use crate::tui::agents::{AgentStatus, ChildInfo};
-use crate::tui::app::App;
+use crate::tui::agents::{AgentStatus, ChildInfo, detail_view, steer_composer};
+use crate::tui::app::{App, EntryRole};
 use crate::tui::overlays::{Overlay, OverlayAction, OverlayKind};
+
+use detail_view::DetailPage;
+use steer_composer::SteerComposer;
 
 fn truncate_row(text: &str, width: usize) -> String {
     let mut chars = text.chars();
@@ -72,6 +75,16 @@ pub struct AgentDeck {
     inbox_selected_id: Option<String>,
     /// Peaked detail (log tail or receipt) shown in the inspector.
     peeked: Option<String>,
+    /// A full-screen, read-only run detail page over the roster.
+    detail_open: bool,
+    detail_run_id: Option<String>,
+    detail_page: DetailPage,
+    detail_scroll: usize,
+    /// The steer composer, opened with `s` for the selected run.
+    steer: SteerComposer,
+    steer_open: bool,
+    /// Honest feedback after an allow-once or deny decision.
+    review_notice: Option<String>,
 }
 
 impl AgentDeck {
@@ -91,6 +104,13 @@ impl AgentDeck {
             inbox_selected: 0,
             inbox_selected_id: None,
             peeked: None,
+            detail_open: false,
+            detail_run_id: None,
+            detail_page: DetailPage::Overview,
+            detail_scroll: 0,
+            steer: SteerComposer::default(),
+            steer_open: false,
+            review_notice: None,
         }
     }
 
@@ -472,6 +492,327 @@ impl AgentDeck {
             Err(error) => format!("cannot read log: {error}"),
         }
     }
+
+    /// The attention row under the cursor, resolved by source index so search
+    /// and refresh can never answer a different request than the one shown.
+    fn selected_attention(&self, app: &App) -> Option<memnoth_agent::delegate::AttentionRequest> {
+        let index = *self
+            .attention_filter
+            .source_indexes
+            .get(self.inbox_selected)?;
+        app.delegator.as_ref()?.attention().get(index).cloned()
+    }
+
+    /// Record an allow-once or deny decision in the child's own log, then take
+    /// the request out of the inbox. A decision is never a silent drop: if the
+    /// write fails the request stays pending and an error is surfaced.
+    fn record_attention_decision(&mut self, app: &mut App, decision: &'static str) {
+        let Some(request) = self.selected_attention(app) else {
+            return;
+        };
+        let note = format!(
+            "attention decision: {decision} request {} ({}) — {}",
+            request.id, request.kind, request.summary
+        );
+        let recorded = match app.delegator.as_mut() {
+            Some(delegator) => match delegator.steer(&request.run_id, &note) {
+                Ok(()) => true,
+                Err(error) => {
+                    self.review_notice = Some(format!("could not record {decision}: {error}"));
+                    false
+                }
+            },
+            None => {
+                self.review_notice = Some("no delegator — decision not recorded".to_string());
+                false
+            }
+        };
+        if recorded {
+            let removed = app
+                .delegator
+                .as_mut()
+                .is_some_and(|delegator| delegator.take_attention(&request.id).is_some());
+            let notice = format!(
+                "{decision} request {} — recorded in the child log{}",
+                request.id,
+                if removed { "" } else { " (already closed)" }
+            );
+            app.push(EntryRole::Info, notice.clone());
+            self.review_notice = Some(notice);
+        } else {
+            let error = self
+                .review_notice
+                .clone()
+                .unwrap_or_else(|| "decision not recorded".to_string());
+            app.push(EntryRole::Error, error);
+        }
+        self.refresh_attention_filter(app);
+    }
+
+    fn review_allow_once(&mut self, app: &mut App) {
+        self.record_attention_decision(app, "allow once");
+    }
+
+    fn review_deny(&mut self, app: &mut App) {
+        self.record_attention_decision(app, "deny");
+    }
+
+    /// Structured review of the selected request: the fields the delegator
+    /// actually supplies, then three explicit actions. No reason or target is
+    /// invented from a vague log line.
+    fn attention_review_lines(&self, app: &App) -> Vec<String> {
+        let Some(request) = self.selected_attention(app) else {
+            return vec!["No open requests.".to_string()];
+        };
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+            .unwrap_or_default();
+        let seconds = now_ms.saturating_sub(request.at_ms).max(0) / 1_000;
+        let age = if seconds < 60 {
+            format!("{seconds}s ago")
+        } else if seconds < 3_600 {
+            format!("{}m ago", seconds / 60)
+        } else {
+            format!("{}h ago", seconds / 3_600)
+        };
+        let mut lines = vec![
+            format!("{} needs your decision", request.agent),
+            String::new(),
+            format!("Request   {}", request.kind),
+            format!("Summary   {}", request.summary),
+            format!("Run       {}", request.run_id),
+            format!("Id        {}", request.id),
+            "Scope     one request on this run".to_string(),
+            format!("Requested {age}"),
+            String::new(),
+            "[a] Allow once   [d] Deny   [Enter] Open run".to_string(),
+            String::new(),
+            "Decisions are recorded in the child log; nothing is approved silently.".to_string(),
+        ];
+        if let Some(notice) = &self.review_notice {
+            lines.push(String::new());
+            lines.push(notice.clone());
+        }
+        lines
+    }
+
+    /// Enter on a roster row opens the read-only detail page. It does not touch
+    /// the parent draft or the attention inbox.
+    fn open_detail(&mut self) {
+        let Some(child) = self.selected_child().cloned() else {
+            return;
+        };
+        self.detail_run_id = Some(child.agent_id);
+        self.detail_page = DetailPage::Overview;
+        self.detail_scroll = 0;
+        self.detail_open = true;
+    }
+
+    /// Resolve the detailed run by id, so a refresh that reorders the roster
+    /// cannot switch the page to a different child.
+    fn detail_child(&self) -> Option<ChildInfo> {
+        let id = self.detail_run_id.as_ref()?;
+        self.children
+            .iter()
+            .find(|child| &child.agent_id == id)
+            .cloned()
+    }
+
+    fn detail_events(&self, app: &App) -> Vec<memnoth_agent::ChildEvent> {
+        let Some(id) = self.detail_run_id.as_deref() else {
+            return Vec::new();
+        };
+        app.delegator
+            .as_ref()
+            .and_then(|delegator| delegator.read_log(id).ok())
+            .unwrap_or_default()
+    }
+
+    fn detail_lines(&self, app: &App) -> Vec<String> {
+        let Some(child) = self.detail_child() else {
+            return vec!["run is no longer in the roster".to_string()];
+        };
+        let events = self.detail_events(app);
+        detail_view::page_lines(self.detail_page, &child, &events)
+    }
+
+    fn open_steer(&mut self, app: &App, child: &ChildInfo) {
+        self.steer.open_for(app, child);
+        self.steer_open = true;
+    }
+
+    fn handle_detail_key(&mut self, key: KeyEvent, _app: &mut App) -> OverlayAction {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.detail_open = false,
+            KeyCode::Tab | KeyCode::Right => {
+                self.detail_page = self.detail_page.next();
+                self.detail_scroll = 0;
+            }
+            KeyCode::BackTab | KeyCode::Left => {
+                self.detail_page = self.detail_page.previous();
+                self.detail_scroll = 0;
+            }
+            KeyCode::Char(ch @ '1'..='4') => {
+                if let Some(page) = DetailPage::from_index(ch as usize - '1' as usize) {
+                    self.detail_page = page;
+                    self.detail_scroll = 0;
+                }
+            }
+            KeyCode::Up | KeyCode::PageUp => {
+                self.detail_scroll = self.detail_scroll.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::PageDown => self.detail_scroll += 1,
+            KeyCode::Home => self.detail_scroll = 0,
+            KeyCode::End => self.detail_scroll = usize::MAX,
+            _ => {}
+        }
+        OverlayAction::None
+    }
+
+    fn handle_steer_key(&mut self, key: KeyEvent, app: &mut App) -> OverlayAction {
+        if !self.steer.is_wired() {
+            if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
+                self.steer_open = false;
+            }
+            return OverlayAction::None;
+        }
+        match key.code {
+            KeyCode::Esc => self.steer_open = false,
+            KeyCode::Enter => {
+                if self.steer.submit(app) {
+                    self.steer_open = false;
+                }
+            }
+            KeyCode::Backspace => self.steer.backspace(),
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.steer.clear();
+            }
+            KeyCode::Char(ch)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                self.steer.push_char(ch);
+            }
+            _ => {}
+        }
+        OverlayAction::None
+    }
+
+    fn render_detail_panel(&mut self, frame: &mut Frame, area: Rect, app: &App) {
+        frame.render_widget(Clear, area);
+        let child = self.detail_child();
+        let title = match &child {
+            Some(child) => format!("Agent Deck / {} / {}", child.role, child.agent_id),
+            None => "Agent Deck / run".to_string(),
+        };
+        let state = match &child {
+            Some(child) => format!("state: {} {}", child.status.glyph(), child.status.label()),
+            None => "state: unavailable".to_string(),
+        };
+        let tabs = detail_view::DetailPage::ALL
+            .iter()
+            .map(|page| {
+                if *page == self.detail_page {
+                    format!("[{}]", page.label())
+                } else {
+                    format!(" {}", page.label())
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("   ");
+        let vertical = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Min(1),
+                Constraint::Length(1),
+            ])
+            .split(area);
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled(
+                    title,
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(state, Style::default().fg(Color::DarkGray))),
+                Line::from(Span::styled(tabs, Style::default().fg(Color::Cyan))),
+            ]),
+            vertical[0],
+        );
+        let body = self.detail_lines(app);
+        let height = vertical[1].height as usize;
+        let max_scroll = body.len().saturating_sub(height);
+        self.detail_scroll = self.detail_scroll.min(max_scroll);
+        let window: String = body
+            .iter()
+            .skip(self.detail_scroll)
+            .take(height)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        frame.render_widget(
+            Paragraph::new(window)
+                .style(Style::default().fg(Color::Gray))
+                .wrap(ratatui::widgets::Wrap { trim: true }),
+            vertical[1],
+        );
+        frame.render_widget(
+            Paragraph::new("1-4 / Tab sections  ·  ↑↓ scroll  ·  s steer  ·  Esc deck")
+                .style(Style::default().fg(Color::DarkGray)),
+            vertical[2],
+        );
+    }
+
+    fn render_steer_panel(&mut self, frame: &mut Frame, area: Rect) {
+        frame.render_widget(Clear, area);
+        let wired = self.steer.is_wired();
+        let vertical = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(2),
+                Constraint::Min(1),
+                Constraint::Length(1),
+            ])
+            .split(area);
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled(
+                    "Agent Deck / Steer",
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(
+                    if wired {
+                        "the note goes to the child's own log"
+                    } else {
+                        "the runtime cannot accept a steer"
+                    },
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ]),
+            vertical[0],
+        );
+        let body = self.steer.lines().join("\n");
+        frame.render_widget(
+            Paragraph::new(body)
+                .style(Style::default().fg(Color::Gray))
+                .wrap(ratatui::widgets::Wrap { trim: true }),
+            vertical[1],
+        );
+        frame.render_widget(
+            Paragraph::new(if wired {
+                "type  ·  Backspace  ·  Ctrl+U clear  ·  Enter send  ·  Esc back"
+            } else {
+                "Esc back"
+            })
+            .style(Style::default().fg(Color::DarkGray)),
+            vertical[2],
+        );
+    }
 }
 
 impl Default for AgentDeck {
@@ -523,6 +864,12 @@ impl Overlay for AgentDeck {
 
     fn handle_key(&mut self, key: KeyEvent, app: &mut App) -> OverlayAction {
         self.refresh_attention_filter(app);
+        if self.steer_open {
+            return self.handle_steer_key(key, app);
+        }
+        if self.detail_open {
+            return self.handle_detail_key(key, app);
+        }
         if self.searching {
             match key.code {
                 KeyCode::Esc => {
@@ -731,13 +1078,11 @@ impl Overlay for AgentDeck {
                     }
                     return OverlayAction::None;
                 }
-                // Focus is handed the run the cursor is on, so the transcript it
-                // reads is the child the person was looking at.
-                if let Some(child) = self.selected_child() {
-                    app.focus_agent = Some(child.agent_id.clone());
-                }
-                app.focus_attention = None;
-                OverlayAction::Push(OverlayKind::Focus)
+                // Enter inspects: open the read-only run detail page. Steering
+                // is a separate, explicit action on `s`, so looking at a run
+                // can never send it a direction by accident.
+                self.open_detail();
+                OverlayAction::None
             }
             KeyCode::Char(' ') => {
                 if let Some(child) = self.selected_child().cloned() {
@@ -785,15 +1130,21 @@ impl Overlay for AgentDeck {
                 OverlayAction::None
             }
             KeyCode::Char('s') => {
-                // Open the child composer; the user writes the actual direction
-                // there instead of recording a fixed placeholder message.
+                // Open the real steer composer when the runtime can deliver a
+                // note; otherwise show the not-wired answer, never a dead box.
                 if self.mode == Mode::Roster
-                    && let Some(child) = self.selected_child()
+                    && let Some(child) = self.selected_child().cloned()
                 {
-                    app.focus_agent = Some(child.agent_id.clone());
-                    app.focus_attention = None;
-                    return OverlayAction::Push(OverlayKind::Focus);
+                    self.open_steer(app, &child);
                 }
+                OverlayAction::None
+            }
+            KeyCode::Char('a') if self.mode == Mode::Inbox => {
+                self.review_allow_once(app);
+                OverlayAction::None
+            }
+            KeyCode::Char('d') if self.mode == Mode::Inbox => {
+                self.review_deny(app);
                 OverlayAction::None
             }
             KeyCode::Char('x') => {
@@ -865,6 +1216,14 @@ impl Overlay for AgentDeck {
 
     fn render(&mut self, frame: &mut Frame, area: Rect, app: &App) {
         self.refresh_attention_filter(app);
+        if self.steer_open {
+            self.render_steer_panel(frame, area);
+            return;
+        }
+        if self.detail_open {
+            self.render_detail_panel(frame, area, app);
+            return;
+        }
         frame.render_widget(Clear, area);
         let inbox_len = app
             .delegator
@@ -1194,19 +1553,7 @@ impl Overlay for AgentDeck {
                 detail_title,
             );
             let detail = if self.mode == Mode::Inbox {
-                visible_attention
-                    .get(self.inbox_selected)
-                    .and_then(|index| app.delegator.as_ref()?.attention().get(*index))
-                    .map(|request| {
-                        vec![
-                            format!("{} needs your input", request.agent),
-                            String::new(),
-                            format!("{} · {}", request.kind, request.summary),
-                            String::new(),
-                            "Enter opens the child run so you can respond.".to_string(),
-                        ]
-                    })
-                    .unwrap_or_else(|| vec!["No open requests.".to_string()])
+                self.attention_review_lines(app)
             } else {
                 self.inspector_lines(app)
             };
@@ -1229,19 +1576,19 @@ impl Overlay for AgentDeck {
                 if self.searching {
                     "type to filter  ·  Enter finish  ·  Esc clear  ·  Ctrl+U clear"
                 } else if !self.inbox_query.is_empty() {
-                    "↑↓ move  ·  Enter review  ·  / search  ·  Esc clear"
+                    "↑↓ move  ·  a allow once  ·  d deny  ·  Enter open run  ·  Esc clear"
                 } else {
-                    "↑↓ move  ·  Enter review  ·  / search  ·  Tab runs"
+                    "↑↓ move  ·  a allow once  ·  d deny  ·  Enter open run  ·  Tab runs"
                 }
             } else {
                 if self.searching {
                     "type to filter  ·  Enter finish  ·  Esc clear  ·  Ctrl+U clear"
                 } else if !self.query.is_empty() {
-                    "↑↓ move  ·  Enter open  ·  / search  ·  Esc clear"
+                    "↑↓ move  ·  Enter detail  ·  / search  ·  Esc clear"
                 } else if area.width < 72 {
-                    "↑↓ move  ·  Enter open  ·  Tab view  ·  Esc close"
+                    "↑↓ move  ·  Enter detail  ·  s steer  ·  Esc close"
                 } else {
-                    "↑↓ move  ·  Enter open  ·  F5 refresh  ·  r revive  ·  x stop  ·  Tab inbox  ·  Esc close"
+                    "↑↓ move  ·  Enter detail  ·  s steer  ·  F5 refresh  ·  r revive  ·  x stop  ·  Tab inbox  ·  Esc close"
                 }
             })
             .style(Style::default().fg(Color::DarkGray)),
@@ -1255,14 +1602,19 @@ impl Overlay for AgentDeck {
             ("Home/End", "first / last run"),
             ("PgUp/PgDn", "move by page"),
             ("F5", "refresh roster"),
-            ("/", "search runs"),
-            ("Enter", "open child / respond to request"),
-            ("Tab", "runs ⇄ needs you"),
+            ("/", "search runs or requests"),
+            ("Enter", "open run detail / open the reviewed run"),
+            ("Tab", "runs ⇄ needs you; page detail tabs"),
             ("Space", "peek recent events"),
             ("m", "show worktree merge instructions"),
             ("p", "show run receipt"),
             ("t", "flat/tree"),
-            ("s", "open child composer to send direction"),
+            (
+                "s",
+                "open the real steer composer, or an honest not-wired state",
+            ),
+            ("a / d", "allow once / deny the focused attention request"),
+            ("1-4", "Overview / Activity / Result / Details"),
             ("x", "stop one child"),
             ("r", "revive"),
             ("Ctrl+i", "interrupt subtree"),
@@ -1440,10 +1792,10 @@ mod tests {
     }
 
     #[test]
-    fn enter_opens_the_selected_run_without_changing_the_parent_draft() {
+    fn enter_opens_the_selected_run_detail_without_changing_the_parent_draft() {
         let temp = tempfile::tempdir().expect("temporary agent directory");
         let mut delegator = memnoth_agent::Delegator::new(temp.path().join("agents"));
-        let first = delegator.root(None, "first", "first task").unwrap();
+        let _first = delegator.root(None, "first", "first task").unwrap();
         let second = delegator.root(None, "second", "second task").unwrap();
         let mut app = App::new("s", false);
         app.input = "preserve this parent draft".to_string();
@@ -1458,10 +1810,26 @@ mod tests {
 
         let action = deck.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut app);
 
-        assert!(matches!(action, OverlayAction::Push(OverlayKind::Focus)));
-        assert_eq!(app.focus_agent.as_deref(), Some(second.agent_id.as_str()));
-        assert_ne!(app.focus_agent.as_deref(), Some(first.agent_id.as_str()));
+        assert_eq!(action, OverlayAction::None);
+        assert!(deck.detail_open);
+        assert_eq!(
+            deck.detail_run_id.as_deref(),
+            Some(second.agent_id.as_str())
+        );
+        assert_eq!(deck.detail_page, DetailPage::Overview);
         assert_eq!(app.input, "preserve this parent draft");
+        assert!(app.focus_agent.is_none(), "inspecting never steals focus");
+
+        // Esc returns to the roster, and `s` opens the real composer for the
+        // same run — looking and steering are separate, explicit actions.
+        deck.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut app);
+        assert!(!deck.detail_open);
+        deck.handle_key(
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+            &mut app,
+        );
+        assert!(deck.steer_open);
+        assert_eq!(deck.steer.target.as_deref(), Some(second.agent_id.as_str()));
     }
 
     #[test]
@@ -2020,5 +2388,226 @@ mod tests {
         }
         assert!(text.contains("No requests match this search"), "{text}");
         assert!(text.contains("0 of 1"), "{text}");
+    }
+
+    #[test]
+    fn detail_renders_from_events_and_a_missing_result_is_not_recorded() {
+        let temp = tempfile::tempdir().expect("temporary agent directory");
+        let mut delegator = memnoth_agent::Delegator::new(temp.path().join("agents"));
+        let run = delegator.root(None, "scout", "map the endpoints").unwrap();
+        delegator.begin(&run.agent_id).unwrap();
+        delegator
+            .tool_boundary(&run.agent_id, "read_file src/auth.rs")
+            .unwrap();
+
+        let mut app = App::new("s", false);
+        app.delegator = Some(delegator);
+        let mut deck = AgentDeck::new();
+        deck.refresh(&app);
+        deck.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut app);
+
+        let overview = deck.detail_lines(&app).join("\n");
+        assert!(overview.contains("map the endpoints"), "{overview}");
+        assert!(overview.contains("[tool_use]"), "{overview}");
+        assert!(!overview.to_lowercase().contains("reasoning"), "{overview}");
+        assert!(!overview.to_lowercase().contains("thinking"), "{overview}");
+
+        // The Activity page is the ordered event list, with typed states and
+        // the tool name — never a fabricated thought.
+        deck.handle_key(
+            KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE),
+            &mut app,
+        );
+        let activity = deck.detail_lines(&app).join("\n");
+        assert!(activity.contains("[started"), "{activity}");
+        assert!(activity.contains("[tool_use"), "{activity}");
+        assert!(
+            activity.contains("tool: read_file src/auth.rs"),
+            "{activity}"
+        );
+        assert!(!activity.to_lowercase().contains("reasoning"), "{activity}");
+        assert!(!activity.to_lowercase().contains("thinking"), "{activity}");
+
+        // No `run.done` was written, so the Result page says so honestly.
+        deck.handle_key(
+            KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE),
+            &mut app,
+        );
+        assert_eq!(deck.detail_page, DetailPage::Result);
+        assert_eq!(deck.detail_lines(&app), vec!["not recorded".to_string()]);
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| deck.render(frame, frame.area(), &app))
+            .expect("draw run detail");
+        let buffer = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+        assert!(text.contains("Overview"), "{text}");
+        assert!(text.contains("Result"), "{text}");
+        assert!(text.contains("not recorded"), "{text}");
+        assert!(!text.to_lowercase().contains("reasoning"), "{text}");
+    }
+
+    #[test]
+    fn deny_is_recorded_in_the_child_log_instead_of_being_dropped() {
+        let temp = tempfile::tempdir().expect("temporary agent directory");
+        let mut delegator = memnoth_agent::Delegator::new(temp.path().join("agents"));
+        let run = delegator.root(None, "review", "check the change").unwrap();
+        let request = delegator
+            .queue_attention(&run.agent_id, "permission", "Read private fixtures?")
+            .unwrap();
+
+        let mut app = App::new("s", false);
+        app.delegator = Some(delegator);
+        let mut deck = AgentDeck::new();
+        deck.mode = Mode::Inbox;
+        deck.refresh_attention_filter(&app);
+        assert_eq!(deck.selected_attention(&app).unwrap().id, request.id);
+
+        let action = deck.handle_key(
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+            &mut app,
+        );
+
+        assert_eq!(action, OverlayAction::None);
+        assert!(
+            app.delegator.as_ref().unwrap().attention().is_empty(),
+            "the request is removed only after the decision is recorded"
+        );
+        let events = app
+            .delegator
+            .as_ref()
+            .unwrap()
+            .read_log(&run.agent_id)
+            .unwrap();
+        let decision = events
+            .iter()
+            .find(|event| event.event == "steer")
+            .expect("a deny writes a steer decision to the child log");
+        assert!(decision.detail.contains("deny"), "{}", decision.detail);
+        assert!(decision.detail.contains(&request.id), "{}", decision.detail);
+        assert_eq!(
+            decision.state,
+            memnoth_agent::delegate::event_schema::EventState::Steered
+        );
+        assert!(
+            deck.review_notice
+                .as_deref()
+                .is_some_and(|n| n.contains("deny"))
+        );
+        assert!(
+            app.focus_agent.is_none(),
+            "a decision never silently opens focus"
+        );
+        assert!(
+            app.entries
+                .iter()
+                .any(|entry| entry.role == EntryRole::Info && entry.text.contains("deny request"))
+        );
+    }
+
+    #[test]
+    fn allow_once_records_only_the_selected_request() {
+        let temp = tempfile::tempdir().expect("temporary agent directory");
+        let mut delegator = memnoth_agent::Delegator::new(temp.path().join("agents"));
+        let run = delegator.root(None, "review", "check the change").unwrap();
+        let first = delegator
+            .queue_attention(&run.agent_id, "permission", "Read fixtures?")
+            .unwrap();
+        let second = delegator
+            .queue_attention(&run.agent_id, "question", "Which endpoint?")
+            .unwrap();
+
+        let mut app = App::new("s", false);
+        app.delegator = Some(delegator);
+        let mut deck = AgentDeck::new();
+        deck.mode = Mode::Inbox;
+        deck.refresh_attention_filter(&app);
+
+        deck.handle_key(
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+            &mut app,
+        );
+
+        let remaining = app.delegator.as_ref().unwrap().attention();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, second.id);
+        assert_ne!(remaining[0].id, first.id);
+        let events = app
+            .delegator
+            .as_ref()
+            .unwrap()
+            .read_log(&run.agent_id)
+            .unwrap();
+        let decision = events.iter().find(|event| event.event == "steer").unwrap();
+        assert!(
+            decision.detail.contains("allow once"),
+            "{}",
+            decision.detail
+        );
+        assert!(decision.detail.contains(&first.id), "{}", decision.detail);
+    }
+
+    #[test]
+    fn steer_without_a_runtime_shows_not_wired_instead_of_a_dead_text_box() {
+        let mut app = App::new("s", false);
+        let mut deck = AgentDeck::new();
+        deck.children = vec![ChildInfo {
+            agent_id: "run-1".to_string(),
+            parent_id: None,
+            root_id: Some("run-1".to_string()),
+            session_id: None,
+            role: "scout".to_string(),
+            task: "inspect the API".to_string(),
+            status: AgentStatus::Running,
+            spawn_seq: 1,
+            depth: 0,
+            model: None,
+            worktree: None,
+            unread: true,
+        }];
+        deck.rebuild_order();
+        deck.rebuild_filter();
+
+        deck.handle_key(
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+            &mut app,
+        );
+
+        assert!(deck.steer_open);
+        assert!(!deck.steer.is_wired());
+        assert!(deck.steer.not_wired.is_some());
+        deck.handle_key(
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+            &mut app,
+        );
+        assert!(
+            deck.steer.draft.is_empty(),
+            "no text is accepted when not wired"
+        );
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| deck.render(frame, frame.area(), &app))
+            .expect("draw not wired steer");
+        let buffer = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+        assert!(text.contains("status: not wired"), "{text}");
+        assert!(text.contains("needs:"), "{text}");
+        assert!(text.contains("meanwhile:"), "{text}");
     }
 }
