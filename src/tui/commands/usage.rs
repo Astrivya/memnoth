@@ -1015,6 +1015,182 @@ mod tests {
     }
 
     #[test]
+    fn partial_category_reports_keep_unknown_zero_and_positive_values_distinct() {
+        let mut input_only = receipt();
+        input_only.input_tokens = 0;
+        input_only.provider_input_reported = Some(true);
+        input_only.provider_output_reported = Some(false);
+        input_only.provider_reasoning_tokens = None;
+        input_only.provider_cache_read_tokens = Some(0);
+        input_only.provider_cache_write_tokens = None;
+
+        let mut output_only = receipt();
+        output_only.provider_input_reported = Some(false);
+        output_only.provider_output_reported = Some(true);
+        output_only.provider_reasoning_tokens = Some(0);
+        output_only.provider_cache_read_tokens = None;
+        output_only.provider_cache_write_tokens = Some(7);
+
+        let session = session_with(vec![input_only, output_only]);
+        let value: serde_json::Value = serde_json::from_str(&render(
+            &session,
+            Some(100_000),
+            "vendor/model:free",
+            "gateway",
+            Some("provider model catalog"),
+            None,
+            true,
+        ))
+        .unwrap();
+
+        for (field, expected_status, expected_value, expected_coverage) in [
+            ("input_tokens", "partially reported", 0, 1),
+            ("output_tokens", "partially reported", 678, 1),
+            ("reasoning_output_tokens", "partially reported", 0, 1),
+            ("cache_read_tokens", "partially reported", 0, 1),
+            ("cache_write_tokens", "partially reported", 7, 1),
+        ] {
+            assert_eq!(value[field]["status"], expected_status, "{field}");
+            assert_eq!(value[field]["value"], expected_value, "{field}");
+            assert_eq!(value[field]["reported_turns"], expected_coverage, "{field}");
+        }
+
+        let mut none = receipt();
+        none.provider_input_reported = Some(false);
+        none.provider_output_reported = Some(false);
+        none.provider_reasoning_tokens = None;
+        none.provider_cache_read_tokens = None;
+        none.provider_cache_write_tokens = None;
+        let unknown: serde_json::Value = serde_json::from_str(&render(
+            &session_with(vec![none]),
+            None,
+            "vendor/model:free",
+            "gateway",
+            None,
+            None,
+            true,
+        ))
+        .unwrap();
+        for field in [
+            "input_tokens",
+            "output_tokens",
+            "reasoning_output_tokens",
+            "cache_read_tokens",
+            "cache_write_tokens",
+        ] {
+            assert_eq!(unknown[field]["status"], "not reported", "{field}");
+            assert!(unknown[field]["value"].is_null(), "{field}");
+        }
+    }
+
+    #[test]
+    fn provider_only_switch_does_not_reuse_the_previous_providers_context_limit() {
+        let mut direct = receipt();
+        direct.provider_id = Some("openai".into());
+        direct.context_window_provider = Some("openai".into());
+        direct.context_window_model = Some("shared-model-id".into());
+        direct.context_window_used = Some(8_000);
+
+        let mut gateway = direct.clone();
+        gateway.provider_id = Some("kilo".into());
+        gateway.context_window_provider = Some("kilo".into());
+        gateway.context_window_used = Some(9_000);
+
+        let value: serde_json::Value = serde_json::from_str(&render(
+            &session_with(vec![direct, gateway]),
+            Some(128_000),
+            "shared-model-id",
+            "openai",
+            Some("OpenAI catalog"),
+            None,
+            true,
+        ))
+        .unwrap();
+        assert_eq!(value["context_window"]["provider"], "kilo");
+        assert_eq!(value["context_window"]["model"], "shared-model-id");
+        assert_eq!(value["context_window"]["occupancy_tokens"], 9_000);
+        assert!(value["context_window"]["limit_tokens"].is_null());
+        assert!(value["context_window"]["limit_source"].is_null());
+        assert!(value["context_window"]["remaining_tokens"].is_null());
+    }
+
+    #[test]
+    fn latest_effort_reset_does_not_inherit_the_previous_turn_effort() {
+        let mut explicit = receipt();
+        explicit.reasoning_effort = Some("high".into());
+        let mut default = receipt();
+        default.turn_id = Some(2);
+        default.reasoning_effort = None;
+
+        let session = session_with(vec![explicit, default]);
+        let json: serde_json::Value = serde_json::from_str(&render(
+            &session,
+            Some(100_000),
+            "vendor/model:free",
+            "gateway",
+            Some("provider model catalog"),
+            None,
+            true,
+        ))
+        .unwrap();
+        assert!(json["latest_turn"]["effort"].is_null());
+        assert_eq!(json["next_turn_effort"], "provider default");
+        assert_eq!(json["models"][0]["efforts"], serde_json::json!(["high"]));
+
+        let text = render(
+            &session,
+            Some(100_000),
+            "vendor/model:free",
+            "gateway",
+            Some("provider model catalog"),
+            None,
+            false,
+        );
+        assert!(text.contains("turn 2 · kilo · vendor/model:free · effort not recorded"));
+        assert!(text.contains("next turn effort  provider default"));
+    }
+
+    #[test]
+    fn text_and_json_are_rendered_from_the_same_semantic_snapshot() {
+        let session = session_with(vec![receipt()]);
+        let expected = serde_json::to_value(snapshot(
+            &session,
+            Some(100_000),
+            "vendor/model:free",
+            "gateway",
+            Some("provider model catalog"),
+            Some("medium"),
+        ))
+        .unwrap();
+        let actual: serde_json::Value = serde_json::from_str(&render(
+            &session,
+            Some(100_000),
+            "vendor/model:free",
+            "gateway",
+            Some("provider model catalog"),
+            Some("medium"),
+            true,
+        ))
+        .unwrap();
+        assert_eq!(actual, expected);
+
+        let text = render_text(&session);
+        for semantic in [
+            expected["active_provider"].as_str().unwrap(),
+            expected["active_model"].as_str().unwrap(),
+            expected["next_turn_effort"].as_str().unwrap(),
+            expected["context_window"]["limit_source"].as_str().unwrap(),
+            expected["cost"]["status"].as_str().unwrap(),
+        ] {
+            assert!(text.contains(semantic), "missing {semantic:?}: {text}");
+        }
+        assert!(text.contains("12,345 tokens"), "{text}");
+        assert!(text.contains("90,000 remaining"), "{text}");
+        assert!(text.contains("~$0.001234 estimate"), "{text}");
+        assert!(text.contains("not provider-billed cost"), "{text}");
+    }
+
+    #[test]
     fn context_limit_is_not_reused_for_a_different_model_or_provider() {
         let text = render(
             &session_with(vec![receipt()]),

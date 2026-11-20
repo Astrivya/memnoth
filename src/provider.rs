@@ -3432,6 +3432,55 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_model_context_limits_accept_known_field_shapes_and_integer_strings() {
+        for model in [
+            json!({"context_length": 32_000}),
+            json!({"context_window": 32_000}),
+            json!({"context_window_tokens": 32_000}),
+            json!({"contextWindow": 32_000}),
+            json!({"input_token_limit": 32_000}),
+            json!({"inputTokenLimit": 32_000}),
+            json!({"max_context_length": 32_000}),
+            json!({"top_provider": {"context_length": 32_000}}),
+            json!({"architecture": {"context_length": 32_000}}),
+            json!({"limits": {"context_window": 32_000}}),
+            json!({"limits": {"context_length": 32_000}}),
+            json!({"context_window": "32000"}),
+        ] {
+            assert_eq!(
+                provider_model_context_window(&model),
+                Some(32_000),
+                "{model}"
+            );
+        }
+
+        // Ignore unusable earlier aliases and continue to a valid later one.
+        assert_eq!(
+            provider_model_context_window(&json!({
+                "context_length": 0,
+                "limits": {"context_window": 65_536}
+            })),
+            Some(65_536)
+        );
+    }
+
+    #[test]
+    fn dynamic_model_context_limits_reject_zero_fraction_negative_and_overflow() {
+        for model in [
+            json!({"context_length": 0}),
+            json!({"context_length": -1}),
+            json!({"context_length": 0.5}),
+            json!({"context_length": 1.25}),
+            json!({"context_length": "not-a-number"}),
+            json!({"context_length": "0"}),
+            json!({"context_length": 4_294_967_296_u64}),
+            json!({"context_length": 4_294_967_296.0}),
+        ] {
+            assert_eq!(provider_model_context_window(&model), None, "{model}");
+        }
+    }
+
+    #[test]
     fn a_gateway_model_is_never_sent_a_reasoning_effort() {
         // Kilo routes Claude through an OpenAI-shaped endpoint, so the model id
         // decides, not the wire shape: the field is a 400 on these ids.
