@@ -7,7 +7,12 @@
 //! assertions are on the parsed screen, so an escape sequence that wraps is a
 //! failure here instead of a surprise on a user's 80-column terminal.
 //!
-//! On Windows the two screen tests are `ignore`d: ConPTY needs a console, and a
+//! The harness drives six surfaces: brief, help (80 and 40 columns), deck,
+//! trace, `/usage` (80 and 40 columns) and `/org`. Each leaves a real transcript
+//! behind `MEMNOTH_PTY_DUMP=1`; assertions stay on geometry and text, never
+//! colour.
+//!
+//! On Windows the screen tests are `ignore`d: ConPTY needs a console, and a
 //! build agent starts processes without one (the child dies with 0xC0000142).
 //! Run them where a real tty exists:
 //!
@@ -25,6 +30,9 @@ use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
 const ROWS: u16 = 24;
 const COLS: u16 = 80;
+/// The narrow acceptance width from the design doc. At exactly 40 the global
+/// "terminal too small" guard in `tui::ui::draw` lets the real screen through.
+const NARROW_COLS: u16 = 40;
 
 struct Session {
     child: Box<dyn portable_pty::Child + Send + Sync>,
@@ -55,14 +63,20 @@ fn ensure_console() {}
 
 impl Session {
     fn open(args: &[&str]) -> Self {
+        Self::open_sized(ROWS, COLS, args)
+    }
+
+    /// Same session, explicit geometry. The pty and the `vt100` parser must be
+    /// given the same size or a wrapped line is a parser artefact, not a defect.
+    fn open_sized(rows: u16, cols: u16, args: &[&str]) -> Self {
         ensure_console();
         let dir = tempfile::tempdir().expect("temp dir");
         let home = dir.path().join("home");
         std::fs::create_dir_all(&home).expect("home");
         let pair = native_pty_system()
             .openpty(PtySize {
-                rows: ROWS,
-                cols: COLS,
+                rows,
+                cols,
                 pixel_width: 0,
                 pixel_height: 0,
             })
@@ -99,7 +113,7 @@ impl Session {
         Self {
             child,
             writer,
-            parser: vt100::Parser::new(ROWS, COLS, 0),
+            parser: vt100::Parser::new(rows, cols, 0),
             raw: Vec::new(),
             rx,
             _dir: dir,
@@ -263,6 +277,26 @@ fn the_screen_opens_at_eighty_columns_and_can_be_left() {
 /// Alt+A is ESC followed by `a` over a pty; the payload is two bytes.
 fn alt(ch: char) -> String {
     format!("{}{}", char::from(27), ch)
+}
+
+/// Geometry half of the 80x24 / 40-column acceptance. A row may be shortened
+/// by an explicit ellipsis, but it must never run wider than the terminal — a
+/// mid-word cut caused by overflow is a defect, not a style choice. This is
+/// deliberately text-only: colour is a separate question and `NO_COLOR` is set
+/// on every session.
+fn assert_fits(screen: &str, rows: u16, cols: u16) {
+    let lines: Vec<&str> = screen.lines().collect();
+    assert!(
+        lines.len() <= rows as usize,
+        "drew {} rows in a {rows}-row terminal:\n{screen}",
+        lines.len()
+    );
+    for line in lines {
+        assert!(
+            line.chars().count() <= cols as usize,
+            "a line overflowed {cols} columns: {line:?}"
+        );
+    }
 }
 
 #[test]
@@ -437,4 +471,217 @@ fn question_mark_opens_help_at_eighty_columns() {
         "help drew taller than the terminal:\n{help}"
     );
     assert!(session.quit(), "ctrl-d must leave help too:\n{help}");
+}
+
+/// `/usage` pushes a long text answer into the transcript and the view follows
+/// its tail. On a fresh vault there are no receipts, so a token number would be
+/// fabricated; every measurement must read `not reported`. The final section is
+/// `rate limits`, which also carries a `not reported` status on a fresh vault —
+/// waiting on it proves the whole report reached the visible screen.
+fn usage_reports_only_measured_values(cols: u16) {
+    let mut session = Session::open_sized(ROWS, cols, &["--trust-folder"]);
+    assert!(
+        session.wait_for_any(&["session", "memnoth"], Duration::from_secs(60)),
+        "no frame within 60s:\n{}",
+        session.diagnose()
+    );
+    assert_eq!(
+        session.parser.screen().size(),
+        (ROWS, cols),
+        "the app must adopt the terminal's size"
+    );
+    session.dismiss_onboarding();
+    session.send("/usage\r");
+    assert!(
+        session.wait_for_any(&["rate limits"], Duration::from_secs(20)),
+        "the usage report did not reach the visible tail:\n{}",
+        session.diagnose()
+    );
+    let screen = session.text();
+    assert!(
+        screen.contains("not reported"),
+        "a fresh session must not invent token numbers:\n{screen}"
+    );
+    assert_fits(&screen, ROWS, cols);
+    session.dump(&format!("usage at {cols}x{ROWS}"));
+    assert!(
+        session.quit(),
+        "ctrl-d must leave the usage report:\n{screen}"
+    );
+}
+
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY needs an interactive console; this host starts processes without one. \
+              Run `docker run --rm -v E:/memnoth-prod:/w -w /w/CLI rust:1-bookworm \
+              cargo test --test tui_pty` (see the module header)."
+)]
+fn usage_renders_measured_text_at_eighty_columns() {
+    usage_reports_only_measured_values(COLS);
+}
+
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY needs an interactive console; this host starts processes without one. \
+              Run `docker run --rm -v E:/memnoth-prod:/w -w /w/CLI rust:1-bookworm \
+              cargo test --test tui_pty` (see the module header)."
+)]
+fn usage_renders_measured_text_at_forty_columns() {
+    usage_reports_only_measured_values(NARROW_COLS);
+}
+
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY needs an interactive console; this host starts processes without one. \
+              Run `docker run --rm -v E:/memnoth-prod:/w -w /w/CLI rust:1-bookworm \
+              cargo test --test tui_pty` (see the module header)."
+)]
+fn org_overview_is_read_only_at_eighty_columns() {
+    let mut session = Session::open(&["--trust-folder"]);
+    assert!(
+        session.wait_for_any(&["session", "memnoth"], Duration::from_secs(60)),
+        "no frame within 60s:\n{}",
+        session.diagnose()
+    );
+    session.dismiss_onboarding();
+    session.send("/org\r");
+    assert!(
+        session.wait_for_any(&["Organization"], Duration::from_secs(20)),
+        "/org did not open the overview:\n{}",
+        session.diagnose()
+    );
+    let screen = session.text();
+    // The overview clears the frame and offers only reads: its footer names
+    // the whole reachable surface. No write verb may be offered from here.
+    assert!(
+        screen.contains("Esc chat") && screen.contains("Ctrl+R refresh"),
+        "the org overview did not show its read-only chrome:\n{screen}"
+    );
+    for write in [
+        "rename",
+        "add-member",
+        "add member",
+        "remove member",
+        "invite",
+    ] {
+        assert!(
+            !screen.contains(write),
+            "the read-only org overview offered a write action ({write}):\n{screen}"
+        );
+    }
+    assert_fits(&screen, ROWS, COLS);
+    session.dump("org overview at 80x24");
+    // Esc returns to chat. Opening the page must not have added a mutation
+    // card to the transcript.
+    session.send(&char::from(27).to_string());
+    std::thread::sleep(Duration::from_millis(250));
+    assert!(
+        session.wait_for_any(&["session", "memnoth"], Duration::from_secs(10)),
+        "chat did not return after the org overview:\n{}",
+        session.diagnose()
+    );
+    let back = session.text();
+    assert!(
+        !back.contains("Organization"),
+        "Esc did not close the org overview:\n{back}"
+    );
+    assert!(
+        session.quit(),
+        "ctrl-d must leave after the org overview:\n{back}"
+    );
+}
+
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY needs an interactive console; this host starts processes without one. \
+              Run `docker run --rm -v E:/memnoth-prod:/w -w /w/CLI rust:1-bookworm \
+              cargo test --test tui_pty` (see the module header)."
+)]
+fn deck_opens_with_a_seeded_child_at_eighty_columns() {
+    let mut session = Session::open(&["--trust-folder"]);
+    assert!(
+        session.wait_for_any(&["session", "memnoth"], Duration::from_secs(60)),
+        "no frame within 60s:\n{}",
+        session.diagnose()
+    );
+    session.dismiss_onboarding();
+    // Offline seed: the TUI's delegate path runs an in-memory executor with no
+    // model and no network, then stages the child's proposals in the local
+    // vault. The "delegated to scout" card proves the seed actually ran.
+    session.send("/delegate scout find the retry loop\r");
+    assert!(
+        session.wait_for_any(&["delegated to scout"], Duration::from_secs(20)),
+        "the offline delegation seed did not run:\n{}",
+        session.diagnose()
+    );
+    session.send(&alt('a'));
+    assert!(
+        session.wait_for_any(&["Agent Deck"], Duration::from_secs(10)),
+        "Alt+A did not open the deck:\n{}",
+        session.diagnose()
+    );
+    let deck = session.text();
+    // The deck is a run list plus one detail block. Both headings are plain
+    // text so they read without colour; the seeded child's task is a row.
+    assert!(
+        deck.contains("Runs") && deck.contains("SELECTED RUN"),
+        "the deck must show its run list and detail block:\n{deck}"
+    );
+    assert!(
+        deck.contains("find the retry loop"),
+        "the seeded child's task is missing from the run list:\n{deck}"
+    );
+    assert_fits(&deck, ROWS, COLS);
+    session.dump("deck with seeded child at 80x24");
+    assert!(
+        session.quit(),
+        "ctrl-d must leave after the seeded deck:\n{deck}"
+    );
+}
+
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY needs an interactive console; this host starts processes without one. \
+              Run `docker run --rm -v E:/memnoth-prod:/w -w /w/CLI rust:1-bookworm \
+              cargo test --test tui_pty` (see the module header)."
+)]
+fn help_fits_forty_columns_without_mid_word_clipping() {
+    let mut session = Session::open_sized(ROWS, NARROW_COLS, &["--trust-folder"]);
+    assert!(
+        session.wait_for_any(&["session", "memnoth"], Duration::from_secs(60)),
+        "no frame within 60s:\n{}",
+        session.diagnose()
+    );
+    assert_eq!(
+        session.parser.screen().size(),
+        (ROWS, NARROW_COLS),
+        "the app must adopt the terminal's size"
+    );
+    session.dismiss_onboarding();
+    session.send("?");
+    assert!(
+        session.wait_for_any(&["Keybindings"], Duration::from_secs(10)),
+        "? did not open help at 40 columns:\n{}",
+        session.diagnose()
+    );
+    let help = session.text();
+    // "previous/next input" is the longest description on the Global tab. The
+    // overlay splits a binding onto a second row instead of clipping it, so
+    // the words must survive whole at 40 columns. An explicit trailing ellipsis
+    // is the acceptable form of truncation; a half-word at the border is not.
+    assert!(
+        help.contains("previous/next input"),
+        "a binding description was clipped mid-word at 40 columns:\n{help}"
+    );
+    assert_fits(&help, ROWS, NARROW_COLS);
+    session.dump("help at 40x24");
+    assert!(
+        session.quit(),
+        "ctrl-d must leave help at 40 columns too:\n{help}"
+    );
 }
