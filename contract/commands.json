@@ -3510,7 +3510,7 @@
           {
             "default": "",
             "deprecated": null,
-            "description": "Skip steps (comma-separated: vault,graph,auth,mcp,provider,config)",
+            "description": "Skip steps (comma-separated: vault,graph,auth,mcp,completions,provider,config,sandbox)",
             "env": null,
             "hidden": false,
             "long": null,

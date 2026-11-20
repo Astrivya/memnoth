@@ -1926,7 +1926,7 @@ pub fn build_p0_registry() -> RegistryBuilder {
                 params: vec![
                     ParamSpec::string_opt(
                         "skip",
-                        "Skip steps (comma-separated: vault,graph,auth,mcp,provider,config)",
+                        "Skip steps (comma-separated: vault,graph,auth,mcp,completions,provider,config,sandbox)",
                         "",
                     ),
                     ParamSpec::bool("yes", "Accept defaults, don't prompt"),

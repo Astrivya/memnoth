@@ -1341,7 +1341,7 @@ pub struct ConfigArgs {
 /// `mn setup` — interactive setup wizard.
 #[derive(Debug, Args)]
 pub struct SetupArgs {
-    /// Skip specific steps (comma-separated: vault,graph,auth,mcp,provider,config).
+    /// Skip specific steps (comma-separated: vault,graph,auth,mcp,completions,provider,config,sandbox).
     #[arg(long, value_delimiter = ',', value_name = "STEPS")]
     pub skip: Vec<String>,
     /// Non-interactive mode: accept defaults, don't prompt.

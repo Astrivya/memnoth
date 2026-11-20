@@ -1743,7 +1743,7 @@ memnoth setup --yes
 
 **Optional arguments:**
 
-- `--skip` (string) — Skip steps (comma-separated: vault,graph,auth,mcp,provider,config) (default: "")
+- `--skip` (string) — Skip steps (comma-separated: vault,graph,auth,mcp,completions,provider,config,sandbox) (default: "")
 - `--yes` (bool) — Accept defaults, don't prompt (default: false)
 
 **Overlay:** `Wizard` | **Danger:** `LocalWrite` | **Auth:** `None`
