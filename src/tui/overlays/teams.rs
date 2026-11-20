@@ -270,6 +270,12 @@ impl TeamsOverlay {
                         "You are a member: {} · You can manage: {}",
                         detail.team.is_member, detail.can_manage
                     ),
+                    // Locality: these are cloud control-plane team-directory
+                    // facts, not local coordination/presence data. D28 hides
+                    // team screens until M8; never imply shared local data.
+                    "Source: cloud control-plane team directory (/api/v1/teams).".to_string(),
+                    "Local coordination (tasks, inbox, presence) is separate and is not shared here.".to_string(),
+                    "No freshness timestamp is reported by the API.".to_string(),
                     String::new(),
                     "Members".to_string(),
                 ];
@@ -290,12 +296,18 @@ impl TeamsOverlay {
                     }
                 }
                 lines.push(String::new());
-                lines.push("Projects".to_string());
+                lines.push("Projects (team grants, read only)".to_string());
                 if detail.projects.is_empty() {
                     lines.push("No project details returned.".into());
                 } else {
+                    // `TeamProject.level` is a real reported grant level. The
+                    // typed API carries no direct-vs-inherited provenance, so
+                    // each row says that plainly instead of guessing.
                     for project in &detail.projects {
-                        lines.push(format!("{} · {}", project.name, project.level));
+                        lines.push(format!(
+                            "{} · {} · grant source: not reported by the API",
+                            project.name, project.level
+                        ));
                     }
                 }
                 lines.join("\n")
@@ -377,6 +389,13 @@ impl Overlay for TeamsOverlay {
         if !self.visible {
             return OverlayAction::None;
         }
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        // Connected navigation: the org overview stays on the surface stack,
+        // so the chat draft and transcript are untouched. A modifier keeps the
+        // bare `o` available for filtering the team list.
+        if ctrl && key.code == KeyCode::Char('o') {
+            return OverlayAction::Push(OverlayKind::Organization);
+        }
         // Detail is a distinct browsing state. Never let navigation or typed
         // characters mutate the hidden team list or leak into the chat prompt.
         if self.detail.is_some() {
@@ -395,7 +414,6 @@ impl Overlay for TeamsOverlay {
             }
             return OverlayAction::None;
         }
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Esc => OverlayAction::Close,
             KeyCode::Char('r') if ctrl => {
@@ -582,7 +600,7 @@ impl Overlay for TeamsOverlay {
 
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                "↑/↓ scroll  ·  PgUp/PgDn page  ·  Esc back",
+                "↑/↓ scroll  ·  PgUp/PgDn page  ·  Ctrl+O org  ·  Esc back",
                 Style::default().fg(Color::DarkGray),
             ))),
             hint_area,
@@ -595,6 +613,7 @@ impl Overlay for TeamsOverlay {
             ("up/down", "move"),
             ("enter", "inspect the selected team's details"),
             ("ctrl+r", "read the list again"),
+            ("ctrl+o", "open the organization overview (read only)"),
             ("esc", "close"),
         ]
     }
@@ -815,6 +834,67 @@ mod tests {
         assert!(text.contains("not signed in"), "{text}");
         assert!(text.contains("/login"), "the fix is named: {text}");
         assert!(text.contains("ctrl+r"), "{text}");
+    }
+
+    #[test]
+    fn ctrl_o_pushes_the_org_overview_without_touching_chat_state() {
+        let mut app = App::new("s", false);
+        app.input = "unfinished question".into();
+        app.cursor = 4;
+        let entries = app.entries.clone();
+        let mut overlay = ready(vec![team("platform", "id-platform", 1, 1)]);
+
+        assert_eq!(
+            overlay.handle_key(
+                KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
+                &mut app
+            ),
+            OverlayAction::Push(OverlayKind::Organization)
+        );
+        assert_eq!(app.input, "unfinished question");
+        assert_eq!(app.cursor, 4);
+        assert!(!app.pending_submit);
+        assert_eq!(
+            app.entries
+                .iter()
+                .map(|entry| (entry.role, entry.text.as_str()))
+                .collect::<Vec<_>>(),
+            entries
+                .iter()
+                .map(|entry| (entry.role, entry.text.as_str()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn detail_is_honest_about_locality_and_grant_provenance() {
+        let mut overlay = ready(vec![team("platform", "id-platform", 1, 1)]);
+        overlay.detail = Some(DetailLoaded::Ready(TeamDetail {
+            team: team("platform", "id-platform", 1, 1),
+            members: vec![],
+            projects: vec![memnoth_cloud_client::TeamProject {
+                id: "p-1".into(),
+                name: "Memnoth".into(),
+                level: "maintain".into(),
+            }],
+            can_manage: false,
+        }));
+        let text = TeamsOverlay::detail_text(overlay.detail.as_ref().unwrap());
+
+        assert!(
+            text.contains("cloud control-plane team directory"),
+            "{text}"
+        );
+        assert!(text.contains("not shared here"), "{text}");
+        assert!(text.contains("No freshness timestamp"), "{text}");
+        assert!(
+            text.contains("Memnoth · maintain · grant source: not reported by the API"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("direct grant") && !text.contains("inherited grant"),
+            "the typed API has no provenance to report: {text}"
+        );
     }
 
     #[test]

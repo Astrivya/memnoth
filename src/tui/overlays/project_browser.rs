@@ -18,6 +18,10 @@ struct Project {
     name: String,
     visibility: Option<String>,
     access: Option<String>,
+    /// Direct/inherited provenance, when the control plane ever sends it. The
+    /// current typed `ProjectInfo` has no such field, so these are `None` today.
+    grant_source: Option<String>,
+    grant_via: Option<String>,
     repos: Option<i64>,
     members: Option<i64>,
 }
@@ -37,9 +41,38 @@ impl Project {
                 .get("access_level")
                 .and_then(Value::as_str)
                 .map(str::to_owned),
+            grant_source: value
+                .get("grant_source")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            grant_via: value
+                .get("grant_via")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
             repos: value.get("repos").and_then(Value::as_i64),
             members: value.get("member_count").and_then(Value::as_i64),
         })
+    }
+}
+
+/// How a grant's source is reported. The typed project API carries the
+/// caller's *effective* level but no direct-vs-inherited provenance, so today
+/// this always falls back to an honest "not reported by the API" line. The
+/// shape is here so a future field is rendered instead of invented.
+fn grant_source_text(source: Option<&str>, via: Option<&str>) -> String {
+    match source {
+        None => "not reported by the API".to_string(),
+        Some("direct") => match via {
+            Some(via) => format!("direct grant via {via}"),
+            None => "direct grant".to_string(),
+        },
+        Some("inherited") => match via {
+            Some(via) => format!("inherited grant via {via}"),
+            None => "inherited grant".to_string(),
+        },
+        // An unrecognised source is a fact we cannot explain, not a chance to
+        // guess that it was inherited.
+        Some(_) => "grant could not be explained".to_string(),
     }
 }
 
@@ -53,6 +86,10 @@ pub(crate) struct ProjectBrowserOverlay {
     selected: usize,
     scroll: usize,
     detail: bool,
+    /// What Esc returns to. "chat" when opened from `/projects`, "org" when
+    /// opened in place from the organization overview. No global state: the
+    /// label travels with the browser instance.
+    esc_label: &'static str,
 }
 
 impl ProjectBrowserOverlay {
@@ -70,7 +107,15 @@ impl ProjectBrowserOverlay {
             selected: 0,
             scroll: 0,
             detail: false,
+            esc_label: "chat",
         })
+    }
+
+    /// Label the Esc hint for the screen that opened this browser. Used by the
+    /// organization overview, which reuses this widget in place.
+    pub(crate) fn returning_to(mut self, label: &'static str) -> Self {
+        self.esc_label = label;
+        self
     }
 
     fn matches(&self) -> Vec<usize> {
@@ -128,7 +173,6 @@ impl ProjectBrowserOverlay {
         ]));
         for (label, value) in [
             ("visibility", project.visibility.clone()),
-            ("your access", project.access.clone()),
             ("repositories", project.repos.map(|n| n.to_string())),
             ("members", project.members.map(|n| n.to_string())),
         ] {
@@ -139,6 +183,30 @@ impl ProjectBrowserOverlay {
                 ]));
             }
         }
+        // Read-only effective access. `access_level` is returned by the API and
+        // is the caller's effective level; direct-vs-inherited provenance is
+        // not, so it gets an honest fallback rather than a guess.
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("your access   ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                project
+                    .access
+                    .clone()
+                    .unwrap_or_else(|| "not reported by the API".to_string()),
+                Style::default().fg(Color::Gray),
+            ),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("grant source  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                grant_source_text(
+                    project.grant_source.as_deref(),
+                    project.grant_via.as_deref(),
+                ),
+                Style::default().fg(Color::Gray),
+            ),
+        ]));
         lines
     }
 }
@@ -162,20 +230,29 @@ impl Overlay for ProjectBrowserOverlay {
 
     fn handle_key(&mut self, key: KeyEvent, app: &mut App) -> OverlayAction {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        // Connected navigation works from both the list and the detail view.
+        // These use the existing surface stack; neither touches the chat draft
+        // or transcript. No bare letter is taken, so filtering still works.
+        if ctrl {
+            match key.code {
+                KeyCode::Char('t') => return OverlayAction::Push(OverlayKind::Teams),
+                KeyCode::Char('o') => return OverlayAction::Push(OverlayKind::Organization),
+                KeyCode::Enter => return self.use_selected(app),
+                _ => {}
+            }
+        }
         if self.detail {
             return match key.code {
                 KeyCode::Esc | KeyCode::Backspace => {
                     self.detail = false;
                     OverlayAction::None
                 }
-                KeyCode::Enter if ctrl => self.use_selected(app),
                 _ => OverlayAction::None,
             };
         }
 
         match key.code {
             KeyCode::Esc => OverlayAction::Close,
-            KeyCode::Enter if ctrl => self.use_selected(app),
             KeyCode::Enter => {
                 if self.selected_project().is_some() {
                     self.detail = true;
@@ -249,9 +326,12 @@ impl Overlay for ProjectBrowserOverlay {
 
         let footer_y = area.bottom().saturating_sub(1);
         let footer = if self.detail {
-            "Ctrl+Enter use for this chat · Esc projects"
+            "Ctrl+Enter use for this chat · Esc projects".to_string()
         } else {
-            "type search · ↑↓ move · Enter inspect · Ctrl+Enter use · Esc chat"
+            format!(
+                "search · ↑↓ move · Enter inspect · Ctrl+Enter use · Ctrl+T teams · Esc {}",
+                self.esc_label
+            )
         };
         frame.render_widget(
             Paragraph::new(Span::styled(footer, Style::default().fg(Color::DarkGray))),
@@ -375,6 +455,8 @@ impl Overlay for ProjectBrowserOverlay {
                 "inspect the selected project; does not change assignment",
             ),
             ("ctrl+enter", "use the selected project for this chat"),
+            ("ctrl+t", "browse the organization's teams (read only)"),
+            ("ctrl+o", "open the organization overview (read only)"),
             ("esc", "return to chat"),
         ]
     }
@@ -441,6 +523,100 @@ mod tests {
         );
         assert_eq!(app.input, "/projects use p-2");
         assert!(app.pending_submit);
+    }
+
+    #[test]
+    fn detail_reports_effective_access_with_an_honest_source_fallback() {
+        let overlay = overlay();
+        let detail = ProjectBrowserOverlay::detail_lines(overlay.selected_project().unwrap())
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(detail.contains("your access"), "{detail}");
+        assert!(detail.contains("read"), "{detail}");
+        assert!(
+            detail.contains("grant source"),
+            "a read-only access line is required: {detail}"
+        );
+        assert!(
+            detail.contains("not reported by the API"),
+            "the typed API has no direct/inherited field: {detail}"
+        );
+        assert!(
+            !detail.contains("direct grant") && !detail.contains("inherited grant"),
+            "never invent provenance: {detail}"
+        );
+    }
+
+    #[test]
+    fn detail_reports_direct_inherited_and_unexplainable_sources_when_present() {
+        for (source, via, expected) in [
+            (Some("direct"), None, "direct grant"),
+            (
+                Some("inherited"),
+                Some("Engineering"),
+                "inherited grant via Engineering",
+            ),
+            (Some("via a badge"), None, "grant could not be explained"),
+            (None, None, "not reported by the API"),
+        ] {
+            let mut browser = overlay();
+            let mut project = browser.projects.remove(0);
+            project.grant_source = source.map(str::to_owned);
+            project.grant_via = via.map(str::to_owned);
+            let detail = ProjectBrowserOverlay::detail_lines(&project)
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                detail.contains(expected),
+                "expected {expected:?} in {detail}"
+            );
+        }
+    }
+
+    #[test]
+    fn ctrl_navigation_pushes_surfaces_without_touching_chat_state() {
+        let mut app = App::new("s", false);
+        app.input = "unfinished question".into();
+        app.cursor = 4;
+        let entries = app.entries.clone();
+        let mut overlay = overlay();
+
+        for (key, expected) in [
+            (
+                KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
+                OverlayAction::Push(OverlayKind::Teams),
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
+                OverlayAction::Push(OverlayKind::Organization),
+            ),
+        ] {
+            assert_eq!(overlay.handle_key(key, &mut app), expected);
+            assert_eq!(app.input, "unfinished question");
+            assert_eq!(app.cursor, 4);
+            assert_eq!(
+                app.entries
+                    .iter()
+                    .map(|entry| (entry.role, entry.text.as_str()))
+                    .collect::<Vec<_>>(),
+                entries
+                    .iter()
+                    .map(|entry| (entry.role, entry.text.as_str()))
+                    .collect::<Vec<_>>()
+            );
+            assert!(!app.pending_submit);
+        }
+    }
+
+    #[test]
+    fn returning_to_changes_only_the_escaped_to_hint() {
+        let embedded = overlay().returning_to("org");
+        assert_eq!(embedded.esc_label, "org");
+        assert_eq!(overlay().esc_label, "chat");
     }
 
     #[test]

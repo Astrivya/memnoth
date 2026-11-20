@@ -3,7 +3,7 @@
 //! Opening this page only reads the existing typed `GET /api/v1/org` response.
 //! It does not alter the chat scope, transcript, or server-side organization.
 
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, Sender};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use memnoth_cloud_client::{CloudError, OrgInfo};
@@ -12,12 +12,15 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph, Wrap};
+use serde_json::Value;
 
 use crate::context::AppContext;
 use crate::tui::app::App;
+use crate::tui::overlays::project_browser::ProjectBrowserOverlay;
 use crate::tui::overlays::{Overlay, OverlayAction, OverlayKind};
 
 type OrgReply = Result<OrgInfo, OrgFailure>;
+type ProjectsReply = Result<Value, OrgFailure>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct OrgFailure {
@@ -71,6 +74,13 @@ pub(crate) struct OrganizationOverlay {
     ctx: Option<AppContext>,
     state: OrgState,
     rx: Option<Receiver<OrgReply>>,
+    /// Projects opened in place from this overview. The overlay factory has no
+    /// Projects kind, so the overview reuses the project browser directly
+    /// instead of pushing a second stack entry; Esc returns here. No global
+    /// state is involved — the browser lives on this overlay instance.
+    projects: Option<ProjectBrowserOverlay>,
+    projects_rx: Option<Receiver<ProjectsReply>>,
+    projects_error: Option<String>,
 }
 
 impl OrganizationOverlay {
@@ -80,7 +90,37 @@ impl OrganizationOverlay {
             ctx: None,
             state: OrgState::Loading,
             rx: None,
+            projects: None,
+            projects_rx: None,
+            projects_error: None,
         }
+    }
+
+    /// Fetch the credential-authorized project list for the in-place browser.
+    /// The read is on a worker thread so opening a page never blocks a frame.
+    fn load_projects(&mut self) {
+        let Some(ctx) = self.ctx.clone() else {
+            self.projects_error = Some("No session cloud context is available.".to_string());
+            return;
+        };
+        let (tx, rx): (Sender<ProjectsReply>, _) = mpsc::channel();
+        self.projects_rx = Some(rx);
+        self.projects_error = None;
+        std::thread::spawn(move || {
+            let result = match crate::cloud::signed_in_client(&ctx) {
+                Ok(client) => {
+                    client
+                        .projects()
+                        .map_err(OrgFailure::from_cloud)
+                        .and_then(|response| {
+                            serde_json::to_value(response)
+                                .map_err(|error| OrgFailure::from_setup(format!("{error:#}")))
+                        })
+                }
+                Err(error) => Err(OrgFailure::from_setup(format!("{error:#}"))),
+            };
+            let _ = tx.send(result);
+        });
     }
 
     fn reload(&mut self) {
@@ -122,6 +162,9 @@ impl OrganizationOverlay {
             Line::from(""),
             Self::fact("organization", org.slug.clone()),
             Self::fact("your role", org.role.clone()),
+            // The typed org response carries the effective role but no
+            // direct-vs-inherited provenance. Say so rather than guessing.
+            Self::fact("role grant source", "not reported by the API"),
             Self::fact("plan", org.plan.clone()),
             Self::fact(
                 "seats",
@@ -170,49 +213,100 @@ impl Overlay for OrganizationOverlay {
 
     fn on_open(&mut self, app: &mut App) {
         self.ctx = app.ctx.clone();
+        self.projects = None;
+        self.projects_rx = None;
+        self.projects_error = None;
         self.reload();
     }
 
     fn on_tick(&mut self, _app: &mut App) {
-        let Some(rx) = self.rx.take() else {
-            return;
-        };
-        match rx.try_recv() {
-            Ok(Ok(org)) => self.state = OrgState::Ready(org),
-            Ok(Err(error)) => self.state = OrgState::Failed(error),
-            Err(mpsc::TryRecvError::Disconnected) => {
-                self.state = OrgState::Failed(OrgFailure::from_setup(
-                    "The organization request ended without a response.".to_string(),
-                ));
+        if let Some(rx) = self.rx.take() {
+            match rx.try_recv() {
+                Ok(Ok(org)) => self.state = OrgState::Ready(org),
+                Ok(Err(error)) => self.state = OrgState::Failed(error),
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.state = OrgState::Failed(OrgFailure::from_setup(
+                        "The organization request ended without a response.".to_string(),
+                    ));
+                }
+                Err(mpsc::TryRecvError::Empty) => self.rx = Some(rx),
             }
-            Err(mpsc::TryRecvError::Empty) => self.rx = Some(rx),
+        }
+
+        if let Some(rx) = self.projects_rx.take() {
+            match rx.try_recv() {
+                Ok(Ok(value)) => {
+                    self.projects = ProjectBrowserOverlay::from_answer(&value)
+                        .map(|browser| browser.returning_to("org"));
+                    if self.projects.is_none() {
+                        self.projects_error =
+                            Some("The cloud API returned no project rows.".to_string());
+                    }
+                }
+                Ok(Err(error)) => {
+                    self.projects_error = Some(format!("{}: {}", error.title, error.detail));
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.projects_error =
+                        Some("The project request ended without a response.".to_string());
+                }
+                Err(mpsc::TryRecvError::Empty) => self.projects_rx = Some(rx),
+            }
         }
     }
 
     fn hide(&mut self) {
         self.visible = false;
         self.rx = None;
+        self.projects = None;
+        self.projects_rx = None;
     }
 
-    fn handle_key(&mut self, key: KeyEvent, _app: &mut App) -> OverlayAction {
+    fn handle_key(&mut self, key: KeyEvent, app: &mut App) -> OverlayAction {
         if !self.visible {
             return OverlayAction::None;
         }
+        // The in-place projects view owns the keys while it is open. Embed it
+        // here rather than writing a second key loop: its own list/detail and
+        // explicit Ctrl+Enter behaviour stays the single source of truth.
+        if let Some(projects) = self.projects.as_mut() {
+            return match projects.handle_key(key, app) {
+                OverlayAction::Close => {
+                    self.projects = None;
+                    OverlayAction::None
+                }
+                other => other,
+            };
+        }
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Esc | KeyCode::Backspace => OverlayAction::Close,
-            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char('r') if ctrl => {
                 self.reload();
+                OverlayAction::None
+            }
+            // Connected navigation. Teams uses the surface stack; the chat
+            // draft and transcript are untouched by either route.
+            KeyCode::Char('t') if !ctrl => OverlayAction::Push(OverlayKind::Teams),
+            KeyCode::Char('p') if !ctrl => {
+                self.load_projects();
                 OverlayAction::None
             }
             _ => OverlayAction::None,
         }
     }
 
-    fn render(&mut self, frame: &mut Frame, area: Rect, _app: &App) {
+    fn render(&mut self, frame: &mut Frame, area: Rect, app: &App) {
         if !self.visible || area.width < 24 || area.height < 7 {
             return;
         }
         frame.render_widget(Clear, area);
+
+        // Reuse the project browser's own renderer while its view is open.
+        if let Some(projects) = self.projects.as_mut() {
+            projects.render(frame, area, app);
+            return;
+        }
 
         let title = match &self.state {
             OrgState::Loading => {
@@ -233,24 +327,44 @@ impl Overlay for OrganizationOverlay {
             Rect::new(area.x, area.y, area.width, 1),
         );
 
-        let body = match &self.state {
-            OrgState::Loading => vec![Line::from(Span::styled(
-                "Loading organization details…",
+        let body = if self.projects_rx.is_some() {
+            vec![Line::from(Span::styled(
+                "Loading projects…",
                 Style::default().fg(Color::Gray),
-            ))],
-            OrgState::Ready(org) => Self::overview_lines(org),
-            OrgState::Failed(failure) => vec![
+            ))]
+        } else if let Some(error) = &self.projects_error {
+            vec![
                 Line::from(Span::styled(
-                    failure.title,
+                    "Projects unavailable",
                     Style::default()
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD),
                 )),
                 Line::from(""),
-                Line::from(failure.detail.clone()),
+                Line::from(error.clone()),
                 Line::from(""),
-                Line::from("Ctrl+R retries this read."),
-            ],
+                Line::from("Press p to retry."),
+            ]
+        } else {
+            match &self.state {
+                OrgState::Loading => vec![Line::from(Span::styled(
+                    "Loading organization details…",
+                    Style::default().fg(Color::Gray),
+                ))],
+                OrgState::Ready(org) => Self::overview_lines(org),
+                OrgState::Failed(failure) => vec![
+                    Line::from(Span::styled(
+                        failure.title,
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    )),
+                    Line::from(""),
+                    Line::from(failure.detail.clone()),
+                    Line::from(""),
+                    Line::from("Ctrl+R retries this read."),
+                ],
+            }
         };
         let body_area = Rect::new(
             area.x.saturating_add(2),
@@ -260,7 +374,7 @@ impl Overlay for OrganizationOverlay {
         );
         frame.render_widget(Paragraph::new(body).wrap(Wrap { trim: true }), body_area);
 
-        let footer = " /org members   /teams   /projects    ·    Ctrl+R refresh    ·    Esc chat";
+        let footer = " p projects   t teams   ·   Ctrl+R refresh   ·   Esc chat";
         frame.render_widget(
             Paragraph::new(Span::styled(footer, Style::default().fg(Color::DarkGray))),
             Rect::new(
@@ -273,7 +387,17 @@ impl Overlay for OrganizationOverlay {
     }
 
     fn help_text(&self) -> Vec<(&'static str, &'static str)> {
+        if self.projects.is_some() {
+            return vec![
+                ("enter", "inspect the project (read only)"),
+                ("ctrl+t", "browse the organization's teams (read only)"),
+                ("ctrl+o", "open the organization overview (read only)"),
+                ("esc", "back to the organization overview"),
+            ];
+        }
         vec![
+            ("p", "browse the organization's projects (read only)"),
+            ("t", "browse the organization's teams (read only)"),
             ("ctrl+r", "refresh organization facts"),
             ("esc", "return to chat"),
         ]
@@ -399,5 +523,139 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert_eq!(app.name, "session-1");
+    }
+
+    fn chat_app() -> App {
+        let mut app = App::new("session-1", false);
+        app.input = "unfinished question".into();
+        app.cursor = app.input.chars().count();
+        app.name = "session-1".into();
+        app
+    }
+
+    fn assert_chat_intact(app: &App, before: &[crate::tui::app::Entry]) {
+        assert_eq!(app.input, "unfinished question");
+        assert_eq!(app.name, "session-1");
+        assert_eq!(
+            app.entries
+                .iter()
+                .map(|entry| (entry.role, entry.text.as_str()))
+                .collect::<Vec<_>>(),
+            before
+                .iter()
+                .map(|entry| (entry.role, entry.text.as_str()))
+                .collect::<Vec<_>>()
+        );
+        assert!(!app.pending_submit);
+    }
+
+    #[test]
+    fn t_key_pushes_teams_without_touching_chat_state() {
+        let mut overlay = OrganizationOverlay::new();
+        overlay.show();
+        overlay.state = OrgState::Ready(org());
+        let mut app = chat_app();
+        let entries = app.entries.clone();
+
+        assert_eq!(
+            overlay.handle_key(KeyEvent::from(KeyCode::Char('t')), &mut app),
+            OverlayAction::Push(OverlayKind::Teams)
+        );
+        assert_chat_intact(&app, &entries);
+    }
+
+    #[test]
+    fn p_key_opens_the_in_place_project_browser_and_es_returns_here() {
+        let mut overlay = OrganizationOverlay::new();
+        overlay.show();
+        overlay.state = OrgState::Ready(org());
+        let mut app = chat_app();
+        let entries = app.entries.clone();
+
+        // Simulate the worker reply landing: the real `on_tick` builds this
+        // from the projects.list value; the construction is what this checks.
+        overlay.projects = Some(
+            ProjectBrowserOverlay::from_answer(&serde_json::json!({"projects": [
+                {"id":"p-1", "name":"Alpha", "access_level":"read"}
+            ]}))
+            .expect("project list")
+            .returning_to("org"),
+        );
+        assert!(overlay.projects.is_some());
+
+        let mut terminal = Terminal::new(TestBackend::new(90, 20)).unwrap();
+        terminal
+            .draw(|frame| overlay.render(frame, frame.area(), &app))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let text = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Alpha"), "{text}");
+        assert!(
+            text.contains("Esc org"),
+            "the Esc hint names the return: {text}"
+        );
+
+        // Enter inspects, Esc leaves the detail, Esc again leaves the embedded
+        // browser and returns to the still-open organization overview.
+        assert_eq!(
+            overlay.handle_key(KeyEvent::from(KeyCode::Enter), &mut app),
+            OverlayAction::None
+        );
+        assert_eq!(
+            overlay.handle_key(KeyEvent::from(KeyCode::Esc), &mut app),
+            OverlayAction::None
+        );
+        assert_eq!(
+            overlay.handle_key(KeyEvent::from(KeyCode::Esc), &mut app),
+            OverlayAction::None
+        );
+        assert!(overlay.projects.is_none(), "the overview is back");
+        assert!(overlay.is_visible(), "the overview itself stayed open");
+        assert_chat_intact(&app, &entries);
+    }
+
+    #[test]
+    fn overview_admits_role_grant_source_is_not_reported() {
+        let text = draw(OrgState::Ready(org()));
+        assert!(text.contains("role grant source"), "{text}");
+        assert!(
+            text.contains("not reported by the API"),
+            "no direct/inherited field exists on the typed org: {text}"
+        );
+        assert!(
+            !text.contains("inherited grant") && !text.contains("direct grant"),
+            "no provenance is invented: {text}"
+        );
+    }
+
+    #[test]
+    fn a_failed_projects_read_says_so_without_claiming_any_rows() {
+        let mut overlay = OrganizationOverlay::new();
+        overlay.show();
+        overlay.state = OrgState::Ready(org());
+        overlay.projects_error = Some("Offline: connection refused".into());
+        let mut terminal = Terminal::new(TestBackend::new(90, 20)).unwrap();
+        terminal
+            .draw(|frame| overlay.render(frame, frame.area(), &App::new("s", false)))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let text = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Projects unavailable"), "{text}");
+        assert!(text.contains("Offline: connection refused"), "{text}");
+        assert!(text.contains("Press p to retry"), "{text}");
     }
 }
