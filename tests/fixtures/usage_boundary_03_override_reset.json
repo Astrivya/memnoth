@@ -1,0 +1,80 @@
+{
+  "case": "03-override-reset",
+  "scenarios": [
+    {
+      "name": "override_on_A_not_carried_to_B",
+      "render": {
+        "context_window_size": 200000,
+        "context_model": "kilo-model-a",
+        "context_provider": "kilo",
+        "context_window_source": "manual override",
+        "next_turn_effort": null
+      },
+      "receipts": [
+        {
+          "at_ms": 1000,
+          "turn_id": 0,
+          "total_tokens": 5100,
+          "prefix_hash": "ka",
+          "layer_tokens": [1200, 1200, 1200, 1500],
+          "pieces": 4,
+          "input_tokens": 5000,
+          "output_tokens": 100,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "context_window_used": 5000,
+          "context_window_model": "kilo-model-a",
+          "context_window_provider": "kilo",
+          "provider_id": "kilo",
+          "provider_usage_reported": true,
+          "provider_input_reported": true,
+          "provider_output_reported": true,
+          "cost_micros": 50
+        },
+        {
+          "at_ms": 2000,
+          "turn_id": 1,
+          "total_tokens": 6300,
+          "prefix_hash": "mb",
+          "layer_tokens": [1500, 1500, 1500, 1800],
+          "pieces": 4,
+          "input_tokens": 6000,
+          "output_tokens": 300,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "context_window_model": "memnoth-model-b",
+          "context_window_provider": "memnoth",
+          "provider_id": "memnoth",
+          "provider_usage_reported": true,
+          "provider_input_reported": true,
+          "provider_output_reported": true,
+          "cost_micros": 60
+        }
+      ],
+      "expect": {
+        "models_len": 2,
+        "json": {
+          "models.0.provider": "kilo",
+          "models.0.model": "kilo-model-a",
+          "models.1.provider": "memnoth",
+          "models.1.model": "memnoth-model-b",
+          "latest_turn.provider": "memnoth",
+          "context_window.model": "memnoth-model-b",
+          "context_window.provider": "memnoth",
+          "context_window.occupancy_tokens": null,
+          "context_window.limit_tokens": null,
+          "context_window.limit_source": null,
+          "context_window.status": "provider did not report request occupancy"
+        },
+        "text_contains": [
+          "kilo · kilo-model-a",
+          "memnoth · memnoth-model-b",
+          "last request  occupancy not reported"
+        ],
+        "text_not_contains": [
+          "200,000 tokens"
+        ]
+      }
+    }
+  ]
+}

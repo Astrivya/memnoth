@@ -1,0 +1,248 @@
+{
+  "case": "07-context-occupancy",
+  "scenarios": [
+    {
+      "name": "occupancy_absent",
+      "render": {
+        "context_window_size": 100000,
+        "context_model": "gpt-5.4",
+        "context_provider": "openai",
+        "context_window_source": "catalog",
+        "next_turn_effort": null
+      },
+      "receipts": [
+        {
+          "at_ms": 1000,
+          "turn_id": 0,
+          "total_tokens": 100,
+          "prefix_hash": "c0",
+          "layer_tokens": [25, 25, 25, 25],
+          "pieces": 4,
+          "input_tokens": 100,
+          "output_tokens": 50,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "context_window_model": "gpt-5.4",
+          "context_window_provider": "openai",
+          "provider_id": "openai"
+        }
+      ],
+      "expect": {
+        "json": {
+          "context_window.occupancy_tokens": null,
+          "context_window.limit_tokens": 100000,
+          "context_window.remaining_tokens": null,
+          "context_window.status": "provider did not report request occupancy"
+        },
+        "text_contains": ["last request  occupancy not reported"],
+        "text_not_contains": []
+      }
+    },
+    {
+      "name": "occupancy_zero",
+      "render": {
+        "context_window_size": 100000,
+        "context_model": "gpt-5.4",
+        "context_provider": "openai",
+        "context_window_source": "catalog",
+        "next_turn_effort": null
+      },
+      "receipts": [
+        {
+          "at_ms": 1000,
+          "turn_id": 0,
+          "total_tokens": 100,
+          "prefix_hash": "c1",
+          "layer_tokens": [25, 25, 25, 25],
+          "pieces": 4,
+          "input_tokens": 100,
+          "output_tokens": 50,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "context_window_used": 0,
+          "context_window_model": "gpt-5.4",
+          "context_window_provider": "openai",
+          "provider_id": "openai"
+        }
+      ],
+      "expect": {
+        "json": {
+          "context_window.occupancy_tokens": 0,
+          "context_window.limit_tokens": 100000,
+          "context_window.remaining_tokens": 100000,
+          "context_window.over_limit_tokens": null,
+          "context_window.status": "measured occupancy and matched model limit"
+        },
+        "text_contains": ["0 / 100,000 tokens", "100,000 remaining"],
+        "text_not_contains": []
+      }
+    },
+    {
+      "name": "occupancy_below_limit",
+      "render": {
+        "context_window_size": 100000,
+        "context_model": "gpt-5.4",
+        "context_provider": "openai",
+        "context_window_source": "catalog",
+        "next_turn_effort": null
+      },
+      "receipts": [
+        {
+          "at_ms": 1000,
+          "turn_id": 0,
+          "total_tokens": 40000,
+          "prefix_hash": "c2",
+          "layer_tokens": [10000, 10000, 10000, 10000],
+          "pieces": 4,
+          "input_tokens": 40000,
+          "output_tokens": 50,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "context_window_used": 40000,
+          "context_window_model": "gpt-5.4",
+          "context_window_provider": "openai",
+          "provider_id": "openai"
+        }
+      ],
+      "expect": {
+        "json": {
+          "context_window.occupancy_tokens": 40000,
+          "context_window.limit_tokens": 100000,
+          "context_window.remaining_tokens": 60000,
+          "context_window.over_limit_tokens": null
+        },
+        "text_contains": ["40,000 / 100,000 tokens", "60,000 remaining"],
+        "text_not_contains": []
+      }
+    },
+    {
+      "name": "occupancy_exactly_at_limit",
+      "render": {
+        "context_window_size": 100000,
+        "context_model": "gpt-5.4",
+        "context_provider": "openai",
+        "context_window_source": "catalog",
+        "next_turn_effort": null
+      },
+      "receipts": [
+        {
+          "at_ms": 1000,
+          "turn_id": 0,
+          "total_tokens": 100000,
+          "prefix_hash": "c3",
+          "layer_tokens": [25000, 25000, 25000, 25000],
+          "pieces": 4,
+          "input_tokens": 100000,
+          "output_tokens": 50,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "context_window_used": 100000,
+          "context_window_model": "gpt-5.4",
+          "context_window_provider": "openai",
+          "provider_id": "openai"
+        }
+      ],
+      "expect": {
+        "json": {
+          "context_window.occupancy_tokens": 100000,
+          "context_window.limit_tokens": 100000,
+          "context_window.remaining_tokens": 0,
+          "context_window.over_limit_tokens": null
+        },
+        "text_contains": ["100,000 / 100,000 tokens", "0 remaining"],
+        "text_not_contains": []
+      }
+    },
+    {
+      "name": "occupancy_above_limit",
+      "render": {
+        "context_window_size": 100000,
+        "context_model": "gpt-5.4",
+        "context_provider": "openai",
+        "context_window_source": "catalog",
+        "next_turn_effort": null
+      },
+      "receipts": [
+        {
+          "at_ms": 1000,
+          "turn_id": 0,
+          "total_tokens": 100050,
+          "prefix_hash": "c4",
+          "layer_tokens": [25000, 25000, 25000, 25050],
+          "pieces": 4,
+          "input_tokens": 100050,
+          "output_tokens": 50,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "context_window_used": 100050,
+          "context_window_model": "gpt-5.4",
+          "context_window_provider": "openai",
+          "provider_id": "openai"
+        }
+      ],
+      "expect": {
+        "json": {
+          "context_window.occupancy_tokens": 100050,
+          "context_window.limit_tokens": 100000,
+          "context_window.remaining_tokens": 0,
+          "context_window.over_limit_tokens": 50
+        },
+        "text_contains": ["0 remaining · 50 over"],
+        "text_not_contains": []
+      }
+    },
+    {
+      "name": "latest_omits_occupancy_after_earlier_supplied",
+      "render": {
+        "context_window_size": 100000,
+        "context_model": "gpt-5.4",
+        "context_provider": "openai",
+        "context_window_source": "catalog",
+        "next_turn_effort": null
+      },
+      "receipts": [
+        {
+          "at_ms": 1000,
+          "turn_id": 0,
+          "total_tokens": 30000,
+          "prefix_hash": "c5a",
+          "layer_tokens": [7500, 7500, 7500, 7500],
+          "pieces": 4,
+          "input_tokens": 30000,
+          "output_tokens": 50,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "context_window_used": 30000,
+          "context_window_model": "gpt-5.4",
+          "context_window_provider": "openai",
+          "provider_id": "openai"
+        },
+        {
+          "at_ms": 2000,
+          "turn_id": 1,
+          "total_tokens": 31000,
+          "prefix_hash": "c5b",
+          "layer_tokens": [7700, 7700, 7700, 7900],
+          "pieces": 4,
+          "input_tokens": 31000,
+          "output_tokens": 50,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "context_window_model": "gpt-5.4",
+          "context_window_provider": "openai",
+          "provider_id": "openai"
+        }
+      ],
+      "expect": {
+        "json": {
+          "context_window.occupancy_tokens": null,
+          "context_window.limit_tokens": 100000,
+          "context_window.remaining_tokens": null,
+          "context_window.status": "provider did not report request occupancy"
+        },
+        "text_contains": ["last request  occupancy not reported"],
+        "text_not_contains": []
+      }
+    }
+  ]
+}

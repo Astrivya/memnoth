@@ -1,0 +1,271 @@
+{
+  "case": "05-partial-categories",
+  "scenarios": [
+    {
+      "name": "all_categories_absent",
+      "render": {
+        "context_window_size": 100000,
+        "context_model": "gpt-5.4",
+        "context_provider": "openai",
+        "context_window_source": "catalog",
+        "next_turn_effort": null
+      },
+      "receipts": [
+        {
+          "at_ms": 1000,
+          "turn_id": 0,
+          "total_tokens": 0,
+          "prefix_hash": "z0",
+          "layer_tokens": [0, 0, 0, 0],
+          "pieces": 0,
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "context_window_model": "gpt-5.4",
+          "context_window_provider": "openai",
+          "provider_id": "openai"
+        }
+      ],
+      "expect": {
+        "json": {
+          "input_tokens.status": "not reported",
+          "input_tokens.value": null,
+          "output_tokens.status": "not reported",
+          "output_tokens.value": null,
+          "reasoning_output_tokens.status": "not reported",
+          "reasoning_output_tokens.value": null,
+          "cache_read_tokens.status": "not reported",
+          "cache_read_tokens.value": null,
+          "cache_write_tokens.status": "not reported",
+          "cache_write_tokens.value": null
+        },
+        "text_contains": [
+          "input               not reported",
+          "cache read          not reported"
+        ],
+        "text_not_contains": []
+      }
+    },
+    {
+      "name": "all_categories_reported_zero",
+      "render": {
+        "context_window_size": 100000,
+        "context_model": "gpt-5.4",
+        "context_provider": "openai",
+        "context_window_source": "catalog",
+        "next_turn_effort": null
+      },
+      "receipts": [
+        {
+          "at_ms": 1000,
+          "turn_id": 0,
+          "total_tokens": 0,
+          "prefix_hash": "z1",
+          "layer_tokens": [0, 0, 0, 0],
+          "pieces": 0,
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "context_window_model": "gpt-5.4",
+          "context_window_provider": "openai",
+          "provider_id": "openai",
+          "provider_reasoning_tokens": 0,
+          "provider_cache_read_tokens": 0,
+          "provider_cache_write_tokens": 0,
+          "provider_usage_reported": true,
+          "provider_input_reported": true,
+          "provider_output_reported": true
+        }
+      ],
+      "expect": {
+        "json": {
+          "input_tokens.status": "reported",
+          "input_tokens.value": 0,
+          "output_tokens.status": "reported",
+          "output_tokens.value": 0,
+          "reasoning_output_tokens.status": "reported",
+          "reasoning_output_tokens.value": 0,
+          "cache_read_tokens.status": "reported",
+          "cache_read_tokens.value": 0,
+          "cache_write_tokens.status": "reported",
+          "cache_write_tokens.value": 0
+        },
+        "text_contains": [
+          "input               0 tokens",
+          "cache read          0 tokens"
+        ],
+        "text_not_contains": []
+      }
+    },
+    {
+      "name": "all_categories_positive",
+      "render": {
+        "context_window_size": 100000,
+        "context_model": "gpt-5.4",
+        "context_provider": "openai",
+        "context_window_source": "catalog",
+        "next_turn_effort": null
+      },
+      "receipts": [
+        {
+          "at_ms": 1000,
+          "turn_id": 0,
+          "total_tokens": 400,
+          "prefix_hash": "p1",
+          "layer_tokens": [100, 100, 100, 100],
+          "pieces": 4,
+          "input_tokens": 100,
+          "output_tokens": 50,
+          "cache_read_tokens": 20,
+          "cache_write_tokens": 10,
+          "context_window_model": "gpt-5.4",
+          "context_window_provider": "openai",
+          "provider_id": "openai",
+          "provider_reasoning_tokens": 7,
+          "provider_cache_read_tokens": 20,
+          "provider_cache_write_tokens": 10,
+          "provider_usage_reported": true,
+          "provider_input_reported": true,
+          "provider_output_reported": true
+        }
+      ],
+      "expect": {
+        "json": {
+          "input_tokens.status": "reported",
+          "input_tokens.value": 100,
+          "output_tokens.value": 50,
+          "reasoning_output_tokens.value": 7,
+          "cache_read_tokens.value": 20,
+          "cache_write_tokens.value": 10
+        },
+        "text_contains": [
+          "100 tokens",
+          "50 tokens",
+          "7 tokens",
+          "20 tokens",
+          "10 tokens"
+        ],
+        "text_not_contains": []
+      }
+    },
+    {
+      "name": "input_only_output_only_cache_only_reasoning_only",
+      "render": {
+        "context_window_size": 100000,
+        "context_model": "gpt-5.4",
+        "context_provider": "openai",
+        "context_window_source": "catalog",
+        "next_turn_effort": null
+      },
+      "receipts": [
+        {
+          "at_ms": 1000,
+          "turn_id": 0,
+          "total_tokens": 100,
+          "prefix_hash": "i1",
+          "layer_tokens": [25, 25, 25, 25],
+          "pieces": 4,
+          "input_tokens": 100,
+          "output_tokens": 0,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "context_window_model": "gpt-5.4",
+          "context_window_provider": "openai",
+          "provider_id": "openai",
+          "provider_usage_reported": false,
+          "provider_input_reported": true,
+          "provider_output_reported": false
+        },
+        {
+          "at_ms": 2000,
+          "turn_id": 1,
+          "total_tokens": 200,
+          "prefix_hash": "o1",
+          "layer_tokens": [50, 50, 50, 50],
+          "pieces": 4,
+          "input_tokens": 0,
+          "output_tokens": 200,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "context_window_model": "gpt-5.4",
+          "context_window_provider": "openai",
+          "provider_id": "openai",
+          "provider_usage_reported": false,
+          "provider_input_reported": false,
+          "provider_output_reported": true
+        },
+        {
+          "at_ms": 3000,
+          "turn_id": 2,
+          "total_tokens": 5,
+          "prefix_hash": "c1",
+          "layer_tokens": [1, 1, 1, 2],
+          "pieces": 2,
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 5,
+          "context_window_model": "gpt-5.4",
+          "context_window_provider": "openai",
+          "provider_id": "openai",
+          "provider_cache_read_tokens": 0,
+          "provider_cache_write_tokens": 5,
+          "provider_usage_reported": false,
+          "provider_input_reported": false,
+          "provider_output_reported": false
+        },
+        {
+          "at_ms": 4000,
+          "turn_id": 3,
+          "total_tokens": 7,
+          "prefix_hash": "r1",
+          "layer_tokens": [1, 2, 2, 2],
+          "pieces": 2,
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "context_window_model": "gpt-5.4",
+          "context_window_provider": "openai",
+          "provider_id": "openai",
+          "provider_reasoning_tokens": 7,
+          "provider_usage_reported": false,
+          "provider_input_reported": false,
+          "provider_output_reported": false
+        }
+      ],
+      "expect": {
+        "models_len": 1,
+        "json": {
+          "input_tokens.status": "partially reported",
+          "input_tokens.value": 100,
+          "input_tokens.reported_turns": 1,
+          "input_tokens.total_turns": 4,
+          "output_tokens.status": "partially reported",
+          "output_tokens.value": 200,
+          "output_tokens.reported_turns": 1,
+          "reasoning_output_tokens.status": "partially reported",
+          "reasoning_output_tokens.value": 7,
+          "reasoning_output_tokens.reported_turns": 1,
+          "cache_read_tokens.status": "partially reported",
+          "cache_read_tokens.value": 0,
+          "cache_read_tokens.reported_turns": 1,
+          "cache_write_tokens.status": "partially reported",
+          "cache_write_tokens.value": 5,
+          "cache_write_tokens.reported_turns": 1
+        },
+        "text_contains": [
+          "1/4 turns · partially reported",
+          "100 tokens",
+          "200 tokens",
+          "7 tokens",
+          "5 tokens",
+          "cache read          0 tokens"
+        ],
+        "text_not_contains": []
+      }
+    }
+  ]
+}

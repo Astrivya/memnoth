@@ -5,6 +5,46 @@ use std::collections::BTreeMap;
 use memnoth_session::{Role, Session, TurnReceipt};
 use serde::Serialize;
 
+/// Adapter kinds the client actually speaks. These mirror the request/usage
+/// adapters: a receipt carrying any other `provider_id` was served by something
+/// we cannot identify, so its identity is reported as unknown rather than
+/// presented as a supported provider.
+const RECOGNIZED_PROVIDERS: &[&str] = &["anthropic", "openai", "memnoth", "kilo"];
+
+fn provider_recognition(provider: Option<&str>) -> &'static str {
+    match provider {
+        None => "not recorded",
+        Some(raw) if is_recognized(raw) => "recognized",
+        Some(_) => "unrecognized",
+    }
+}
+
+fn is_recognized(raw: &str) -> bool {
+    let normalized = raw.trim().to_ascii_lowercase();
+    RECOGNIZED_PROVIDERS.contains(&normalized.as_str())
+}
+
+/// The identity shown in text and JSON. Unrecognized adapters are collapsed to
+/// `unknown/other`: an arbitrary gateway identifier is not evidence that we
+/// support its request, response, context or effort shape.
+fn provider_label(provider: Option<&str>) -> Option<String> {
+    match provider {
+        None => None,
+        Some(raw) if is_recognized(raw) => Some(raw.to_string()),
+        Some(_) => Some("unknown/other".to_string()),
+    }
+}
+
+/// Text form keeps the recognition status visible so a reader cannot mistake an
+/// unrecognized adapter for a supported one.
+fn provider_text(provider: Option<&str>, status: &str) -> String {
+    match provider {
+        None => "not recorded".to_string(),
+        Some(label) if status == "unrecognized" => format!("{label} (unrecognized adapter)"),
+        Some(label) => label.to_string(),
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct Measurement<T> {
     status: &'static str,
@@ -16,6 +56,7 @@ struct Measurement<T> {
 #[derive(Debug, Serialize)]
 struct ModelUsage {
     provider: Option<String>,
+    provider_status: &'static str,
     model: Option<String>,
     turns: usize,
     input_tokens: Measurement<u64>,
@@ -71,6 +112,7 @@ struct TurnUsage {
     turn_id: Option<usize>,
     completed_at_ms: i64,
     provider: Option<String>,
+    provider_status: &'static str,
     model: Option<String>,
     effort: Option<String>,
     input_tokens: Measurement<u64>,
@@ -108,6 +150,7 @@ struct Latency {
 struct ContextWindow {
     model: Option<String>,
     provider: Option<String>,
+    provider_status: &'static str,
     occupancy_tokens: Option<u64>,
     limit_tokens: Option<u64>,
     remaining_tokens: Option<u64>,
@@ -213,8 +256,13 @@ fn snapshot(
         .collect();
 
     let latest = receipts.last();
+    let latest_provider = latest.and_then(|receipt| receipt.provider_id.as_deref());
+    // A receipt from an adapter we cannot identify never borrows a configured
+    // context limit. The limit is only legitimate when the recorded provider is
+    // one we actually speak and the model/provider pair matches the config.
     let context_matches = latest.is_some_and(|receipt| {
-        receipt.context_window_model.as_deref() == Some(context_model)
+        provider_recognition(latest_provider) != "unrecognized"
+            && receipt.context_window_model.as_deref() == Some(context_model)
             && receipt
                 .context_window_provider
                 .as_deref()
@@ -225,7 +273,8 @@ fn snapshot(
     let occupancy_tokens = latest.and_then(|receipt| receipt.context_window_used);
     let context_window = ContextWindow {
         model: latest.and_then(|receipt| receipt.context_window_model.clone()),
-        provider: latest.and_then(|receipt| receipt.provider_id.clone()),
+        provider: provider_label(latest_provider),
+        provider_status: provider_recognition(latest_provider),
         occupancy_tokens,
         limit_tokens,
         remaining_tokens: occupancy_tokens
@@ -410,8 +459,11 @@ fn model_usage(
         .filter(|receipt| output_was_reported(receipt))
         .copied()
         .collect::<Vec<_>>();
+    let provider_status = provider_recognition(provider.as_deref());
+    let provider = provider_label(provider.as_deref());
     ModelUsage {
         provider,
+        provider_status,
         model,
         turns: rows.len(),
         input_tokens: measurement(
@@ -520,10 +572,12 @@ fn output_was_reported(receipt: &TurnReceipt) -> bool {
 fn turn_usage(receipt: &TurnReceipt) -> TurnUsage {
     let measured =
         |known: bool, value: u64| measurement(usize::from(known), 1, known.then_some(value));
+    let latest_provider = receipt.provider_id.as_deref();
     TurnUsage {
         turn_id: receipt.turn_id,
         completed_at_ms: receipt.at_ms,
-        provider: receipt.provider_id.clone(),
+        provider: provider_label(latest_provider),
+        provider_status: provider_recognition(latest_provider),
         model: receipt.context_window_model.clone(),
         effort: receipt.reasoning_effort.clone(),
         input_tokens: measured(input_was_reported(receipt), receipt.input_tokens),
@@ -625,7 +679,7 @@ fn render_text(snapshot: &UsageSnapshot) -> String {
             turn.turn_id
                 .map(|id| id.to_string())
                 .unwrap_or_else(|| "index not recorded".to_string()),
-            turn.provider.as_deref().unwrap_or("provider not recorded"),
+            provider_text(turn.provider.as_deref(), turn.provider_status),
             turn.model.as_deref().unwrap_or("model not recorded"),
             turn.effort.as_deref().unwrap_or("not recorded"),
         ));
@@ -671,7 +725,7 @@ fn render_text(snapshot: &UsageSnapshot) -> String {
     for model in &snapshot.models {
         out.push_str(&format!(
             "{} · {} · {} turn(s) · effort {}\n",
-            model.provider.as_deref().unwrap_or("provider not recorded"),
+            provider_text(model.provider.as_deref(), model.provider_status),
             model.model.as_deref().unwrap_or("model not recorded"),
             model.turns,
             if model.efforts.is_empty() {
@@ -720,11 +774,10 @@ fn render_text(snapshot: &UsageSnapshot) -> String {
     out.push_str("\ncontext window\n");
     out.push_str(&format!(
         "{} · {}\n",
-        snapshot
-            .context_window
-            .provider
-            .as_deref()
-            .unwrap_or("provider not recorded"),
+        provider_text(
+            snapshot.context_window.provider.as_deref(),
+            snapshot.context_window.provider_status
+        ),
         snapshot
             .context_window
             .model
@@ -1470,5 +1523,207 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(value["models"].as_array().unwrap().len(), 2);
+    }
+
+    // ---- Fixture-driven acceptance matrix (P22-103) -----------------------
+    //
+    // Every scenario below carries one semantic expectation. The text and JSON
+    // renderings are both checked against it: JSON is compared to the snapshot
+    // that text also renders from, and the fixture states the substrings that
+    // must (or must not) appear in the text form.
+
+    use serde::Deserialize;
+
+    #[derive(Debug, Deserialize)]
+    struct Fixture {
+        case: String,
+        scenarios: Vec<Scenario>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct Scenario {
+        name: String,
+        render: FixtureRender,
+        receipts: Vec<TurnReceipt>,
+        expect: FixtureExpect,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct FixtureRender {
+        context_window_size: Option<u64>,
+        context_model: String,
+        context_provider: String,
+        context_window_source: Option<String>,
+        next_turn_effort: Option<String>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct FixtureExpect {
+        json: serde_json::Value,
+        #[serde(default)]
+        text_contains: Vec<String>,
+        #[serde(default)]
+        text_not_contains: Vec<String>,
+        #[serde(default)]
+        models_len: Option<usize>,
+    }
+
+    fn json_path<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
+        let mut current = value;
+        for part in path.split('.') {
+            current = match part.parse::<usize>() {
+                Ok(index) => current.get(index)?,
+                Err(_) => current.get(part)?,
+            };
+        }
+        Some(current)
+    }
+
+    fn check_scenario(case: &str, scenario: &Scenario) {
+        let mut session = Session::new(scenario.render.context_model.as_str());
+        session.id = "usage-fixture".into();
+        session.created_ms = 1;
+        session.receipts = scenario.receipts.clone();
+
+        let render_args = &scenario.render;
+        let args = (
+            render_args.context_window_size,
+            render_args.context_model.as_str(),
+            render_args.context_provider.as_str(),
+            render_args.context_window_source.as_deref(),
+            render_args.next_turn_effort.as_deref(),
+        );
+        let text = render(&session, args.0, args.1, args.2, args.3, args.4, false);
+        let json_text = render(&session, args.0, args.1, args.2, args.3, args.4, true);
+
+        let mut actual: serde_json::Value =
+            serde_json::from_str(&json_text).unwrap_or_else(|error| {
+                panic!(
+                    "{case}/{}: invalid JSON ({error}): {json_text}",
+                    scenario.name
+                )
+            });
+        let mut expected_snapshot =
+            serde_json::to_value(snapshot(&session, args.0, args.1, args.2, args.3, args.4))
+                .unwrap();
+
+        // Session age is sampled per rendering; it is the only field allowed to
+        // differ between the two calls. Everything else must be identical.
+        actual.as_object_mut().unwrap().remove("session_age_ms");
+        expected_snapshot
+            .as_object_mut()
+            .unwrap()
+            .remove("session_age_ms");
+        assert_eq!(
+            actual, expected_snapshot,
+            "{case}/{}: text and JSON must come from one snapshot",
+            scenario.name
+        );
+
+        for (path, expected) in scenario.expect.json.as_object().unwrap() {
+            let observed = json_path(&actual, path)
+                .unwrap_or_else(|| panic!("{case}/{}: missing JSON path {path}", scenario.name));
+            assert_eq!(observed, expected, "{case}/{}: {path}", scenario.name);
+        }
+        if let Some(expected_len) = scenario.expect.models_len {
+            assert_eq!(
+                actual["models"].as_array().unwrap().len(),
+                expected_len,
+                "{case}/{}: exact provider/model groups",
+                scenario.name
+            );
+        }
+        for needle in &scenario.expect.text_contains {
+            assert!(
+                text.contains(needle),
+                "{case}/{}: missing {needle:?} in text: {text}",
+                scenario.name
+            );
+        }
+        for needle in &scenario.expect.text_not_contains {
+            assert!(
+                !text.contains(needle),
+                "{case}/{}: unexpected {needle:?} in text: {text}",
+                scenario.name
+            );
+        }
+    }
+
+    fn check_fixture(raw: &str) {
+        let fixture: Fixture = serde_json::from_str(raw).expect("fixture must parse");
+        assert!(!fixture.scenarios.is_empty(), "fixture has no scenarios");
+        for scenario in &fixture.scenarios {
+            check_scenario(&fixture.case, scenario);
+        }
+    }
+
+    #[test]
+    fn boundary_01_provider_model_switch() {
+        check_fixture(include_str!(
+            "../../../tests/fixtures/usage_boundary_01_provider_model_switch.json"
+        ));
+    }
+
+    #[test]
+    fn boundary_02_provider_only_mismatch() {
+        check_fixture(include_str!(
+            "../../../tests/fixtures/usage_boundary_02_provider_only_mismatch.json"
+        ));
+    }
+
+    #[test]
+    fn boundary_03_override_reset() {
+        check_fixture(include_str!(
+            "../../../tests/fixtures/usage_boundary_03_override_reset.json"
+        ));
+    }
+
+    #[test]
+    fn boundary_04_effort_reset() {
+        check_fixture(include_str!(
+            "../../../tests/fixtures/usage_boundary_04_effort_reset.json"
+        ));
+    }
+
+    #[test]
+    fn boundary_05_partial_categories() {
+        check_fixture(include_str!(
+            "../../../tests/fixtures/usage_boundary_05_partial_categories.json"
+        ));
+    }
+
+    #[test]
+    fn boundary_06_missing_usage_and_legacy_receipt() {
+        check_fixture(include_str!(
+            "../../../tests/fixtures/usage_boundary_06_missing_usage_legacy.json"
+        ));
+    }
+
+    #[test]
+    fn boundary_07_context_occupancy() {
+        check_fixture(include_str!(
+            "../../../tests/fixtures/usage_boundary_07_context_occupancy.json"
+        ));
+    }
+
+    #[test]
+    fn boundary_08_interrupted_turn() {
+        check_fixture(include_str!(
+            "../../../tests/fixtures/usage_boundary_08_interrupted_turn.json"
+        ));
+    }
+
+    #[test]
+    fn boundary_09_multiple_requests_per_turn() {
+        check_fixture(include_str!(
+            "../../../tests/fixtures/usage_boundary_09_multiple_requests_per_turn.json"
+        ));
+    }
+
+    #[test]
+    fn boundary_10_cost_coverage() {
+        check_fixture(include_str!(
+            "../../../tests/fixtures/usage_boundary_10_cost_coverage.json"
+        ));
     }
 }

@@ -1,0 +1,108 @@
+{
+  "case": "01-provider-model-switch",
+  "scenarios": [
+    {
+      "name": "A_then_B_keeps_exact_groups_and_latest_identity",
+      "render": {
+        "context_window_size": 128000,
+        "context_model": "gpt-5.4",
+        "context_provider": "openai",
+        "context_window_source": "exact catalog entry",
+        "next_turn_effort": null
+      },
+      "receipts": [
+        {
+          "at_ms": 1000,
+          "turn_id": 0,
+          "total_tokens": 1200,
+          "prefix_hash": "a1",
+          "layer_tokens": [300, 300, 300, 300],
+          "pieces": 4,
+          "input_tokens": 1000,
+          "output_tokens": 200,
+          "cache_read_tokens": 100,
+          "cache_write_tokens": 50,
+          "context_window_used": 1200,
+          "context_window_model": "claude-sonnet-4-6",
+          "context_window_provider": "anthropic",
+          "provider_id": "anthropic",
+          "reasoning_effort": "high",
+          "duration_ms": 1000,
+          "provider_requests": 1,
+          "tool_calls": 0,
+          "provider_cache_read_tokens": 100,
+          "provider_cache_write_tokens": 50,
+          "provider_usage_reported": true,
+          "provider_input_reported": true,
+          "provider_output_reported": true,
+          "cost_micros": 100
+        },
+        {
+          "at_ms": 2000,
+          "turn_id": 1,
+          "total_tokens": 2400,
+          "prefix_hash": "b1",
+          "layer_tokens": [600, 600, 600, 600],
+          "pieces": 4,
+          "input_tokens": 2000,
+          "output_tokens": 400,
+          "cache_read_tokens": 300,
+          "cache_write_tokens": 0,
+          "context_window_used": 2400,
+          "context_window_model": "gpt-5.4",
+          "context_window_provider": "openai",
+          "provider_id": "openai",
+          "reasoning_effort": "low",
+          "duration_ms": 1500,
+          "provider_requests": 1,
+          "tool_calls": 0,
+          "provider_reasoning_tokens": 50,
+          "provider_cache_read_tokens": 300,
+          "provider_usage_reported": true,
+          "provider_input_reported": true,
+          "provider_output_reported": true,
+          "cost_micros": 200
+        }
+      ],
+      "expect": {
+        "models_len": 2,
+        "json": {
+          "models.0.provider": "anthropic",
+          "models.0.provider_status": "recognized",
+          "models.0.model": "claude-sonnet-4-6",
+          "models.0.turns": 1,
+          "models.1.provider": "openai",
+          "models.1.model": "gpt-5.4",
+          "models.1.turns": 1,
+          "latest_turn.provider": "openai",
+          "latest_turn.model": "gpt-5.4",
+          "latest_turn.effort": "low",
+          "input_tokens.value": 3000,
+          "input_tokens.reported_turns": 2,
+          "input_tokens.status": "reported",
+          "output_tokens.value": 600,
+          "output_tokens.reported_turns": 2,
+          "context_window.provider": "openai",
+          "context_window.model": "gpt-5.4",
+          "context_window.limit_tokens": 128000,
+          "context_window.occupancy_tokens": 2400,
+          "context_window.remaining_tokens": 125600,
+          "next_turn_effort": "provider default",
+          "cost.status": "estimate",
+          "cost.priced_turns": 2,
+          "cost.total_turns": 2
+        },
+        "text_contains": [
+          "anthropic · claude-sonnet-4-6",
+          "openai · gpt-5.4",
+          "turn 1 · openai · gpt-5.4 · effort low",
+          "128,000 tokens",
+          "125,600 remaining",
+          "~$0.000300 estimate",
+          "not provider-billed cost"
+        ],
+        "text_not_contains": []
+      }
+    }
+  ]
+}

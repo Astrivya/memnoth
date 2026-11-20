@@ -1,0 +1,144 @@
+{
+  "case": "09-multiple-requests-per-turn",
+  "scenarios": [
+    {
+      "name": "two_provider_rounds_reconcile_totals_and_latest_occupancy",
+      "render": {
+        "context_window_size": 200000,
+        "context_model": "kilo-model-x",
+        "context_provider": "kilo",
+        "context_window_source": "exact model metadata",
+        "next_turn_effort": null
+      },
+      "receipts": [
+        {
+          "at_ms": 1000,
+          "turn_id": 0,
+          "total_tokens": 5300,
+          "prefix_hash": "x1",
+          "layer_tokens": [1300, 1300, 1300, 1400],
+          "pieces": 4,
+          "input_tokens": 5000,
+          "output_tokens": 300,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "context_window_used": 5000,
+          "context_window_model": "kilo-model-x",
+          "context_window_provider": "kilo",
+          "provider_id": "kilo",
+          "provider_requests": 2,
+          "tool_calls": 1,
+          "duration_ms": 800,
+          "provider_usage_reported": true,
+          "provider_input_reported": true,
+          "provider_output_reported": true,
+          "cost_micros": 100
+        },
+        {
+          "at_ms": 2000,
+          "turn_id": 0,
+          "total_tokens": 9400,
+          "prefix_hash": "x2",
+          "layer_tokens": [2300, 2300, 2300, 2500],
+          "pieces": 4,
+          "input_tokens": 9000,
+          "output_tokens": 400,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "context_window_used": 9000,
+          "context_window_model": "kilo-model-x",
+          "context_window_provider": "kilo",
+          "provider_id": "kilo",
+          "provider_requests": 1,
+          "tool_calls": 0,
+          "duration_ms": 700,
+          "provider_usage_reported": true,
+          "provider_input_reported": true,
+          "provider_output_reported": true,
+          "cost_micros": 200
+        }
+      ],
+      "expect": {
+        "models_len": 1,
+        "json": {
+          "models.0.provider": "kilo",
+          "models.0.model": "kilo-model-x",
+          "models.0.turns": 2,
+          "input_tokens.value": 14000,
+          "input_tokens.reported_turns": 2,
+          "output_tokens.value": 700,
+          "provider_requests.value": 3,
+          "provider_requests.reported_turns": 2,
+          "tool_calls.value": 1,
+          "tool_calls.reported_turns": 2,
+          "context_window.occupancy_tokens": 9000,
+          "context_window.limit_tokens": 200000,
+          "context_window.remaining_tokens": 191000,
+          "cost.status": "estimate",
+          "cost.priced_turns": 2,
+          "cost.total_turns": 2
+        },
+        "text_contains": [
+          "14,000 tokens",
+          "provider requests",
+          "9,000 / 200,000 tokens",
+          "191,000 remaining"
+        ],
+        "text_not_contains": []
+      }
+    },
+    {
+      "name": "kilo_routed_anthropic_has_no_openai_effort_or_reasoning",
+      "render": {
+        "context_window_size": 200000,
+        "context_model": "anthropic/claude-sonnet-4.5",
+        "context_provider": "kilo",
+        "context_window_source": "exact model metadata",
+        "next_turn_effort": null
+      },
+      "receipts": [
+        {
+          "at_ms": 1000,
+          "turn_id": 0,
+          "total_tokens": 7350,
+          "prefix_hash": "ra",
+          "layer_tokens": [1800, 1800, 1800, 1950],
+          "pieces": 4,
+          "input_tokens": 7000,
+          "output_tokens": 250,
+          "cache_read_tokens": 100,
+          "cache_write_tokens": 50,
+          "context_window_used": 7000,
+          "context_window_model": "anthropic/claude-sonnet-4.5",
+          "context_window_provider": "kilo",
+          "provider_id": "kilo",
+          "provider_cache_read_tokens": 100,
+          "provider_cache_write_tokens": 50,
+          "provider_usage_reported": true,
+          "provider_input_reported": true,
+          "provider_output_reported": true
+        }
+      ],
+      "expect": {
+        "json": {
+          "latest_turn.provider": "kilo",
+          "latest_turn.model": "anthropic/claude-sonnet-4.5",
+          "latest_turn.effort": null,
+          "next_turn_effort": "provider default",
+          "reasoning_output_tokens.value": null,
+          "reasoning_output_tokens.status": "not reported",
+          "cache_read_tokens.value": 100,
+          "cache_write_tokens.value": 50,
+          "context_window.limit_tokens": 200000,
+          "context_window.occupancy_tokens": 7000
+        },
+        "text_contains": [
+          "kilo · anthropic/claude-sonnet-4.5",
+          "effort not recorded",
+          "200,000 tokens"
+        ],
+        "text_not_contains": []
+      }
+    }
+  ]
+}

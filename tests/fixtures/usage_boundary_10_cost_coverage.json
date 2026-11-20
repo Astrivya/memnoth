@@ -1,0 +1,154 @@
+{
+  "case": "10-cost-coverage",
+  "scenarios": [
+    {
+      "name": "valid_attached_rate_is_an_estimate_not_provider_billed",
+      "render": {
+        "context_window_size": 100000,
+        "context_model": "memnoth-default",
+        "context_provider": "memnoth",
+        "context_window_source": "catalog",
+        "next_turn_effort": null
+      },
+      "receipts": [
+        {
+          "at_ms": 1000,
+          "turn_id": 0,
+          "total_tokens": 100,
+          "prefix_hash": "m1",
+          "layer_tokens": [25, 25, 25, 25],
+          "pieces": 4,
+          "input_tokens": 80,
+          "output_tokens": 20,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "context_window_model": "memnoth-default",
+          "context_window_provider": "memnoth",
+          "provider_id": "memnoth",
+          "provider_usage_reported": true,
+          "provider_input_reported": true,
+          "provider_output_reported": true,
+          "cost_micros": 1234
+        }
+      ],
+      "expect": {
+        "json": {
+          "cost.status": "estimate",
+          "cost.priced_turns": 1,
+          "cost.total_turns": 1,
+          "cost.source": "local model/config price table; not provider-billed cost",
+          "latest_turn.cost_estimate_usd": 0.001234
+        },
+        "text_contains": [
+          "~$0.001234 estimate",
+          "1/1 priced turns",
+          "estimate",
+          "not provider-billed cost"
+        ],
+        "text_not_contains": []
+      }
+    },
+    {
+      "name": "missing_rate_stays_unknown",
+      "render": {
+        "context_window_size": 100000,
+        "context_model": "memnoth-default",
+        "context_provider": "memnoth",
+        "context_window_source": "catalog",
+        "next_turn_effort": null
+      },
+      "receipts": [
+        {
+          "at_ms": 1000,
+          "turn_id": 0,
+          "total_tokens": 100,
+          "prefix_hash": "m2",
+          "layer_tokens": [25, 25, 25, 25],
+          "pieces": 4,
+          "input_tokens": 80,
+          "output_tokens": 20,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "context_window_model": "memnoth-default",
+          "context_window_provider": "memnoth",
+          "provider_id": "memnoth"
+        }
+      ],
+      "expect": {
+        "json": {
+          "cost.status": "not priced",
+          "cost.priced_turns": 0,
+          "cost.total_turns": 1,
+          "cost.estimate_usd": null,
+          "latest_turn.cost_estimate_usd": null
+        },
+        "text_contains": [
+          "not available",
+          "not provider-billed cost"
+        ],
+        "text_not_contains": [
+          "$0.000000"
+        ]
+      }
+    },
+    {
+      "name": "partial_rate_coverage_is_labeled_partial_estimate",
+      "render": {
+        "context_window_size": 100000,
+        "context_model": "memnoth-default",
+        "context_provider": "memnoth",
+        "context_window_source": "catalog",
+        "next_turn_effort": null
+      },
+      "receipts": [
+        {
+          "at_ms": 1000,
+          "turn_id": 0,
+          "total_tokens": 100,
+          "prefix_hash": "m3a",
+          "layer_tokens": [25, 25, 25, 25],
+          "pieces": 4,
+          "input_tokens": 80,
+          "output_tokens": 20,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "context_window_model": "memnoth-default",
+          "context_window_provider": "memnoth",
+          "provider_id": "memnoth",
+          "cost_micros": 500
+        },
+        {
+          "at_ms": 2000,
+          "turn_id": 1,
+          "total_tokens": 100,
+          "prefix_hash": "m3b",
+          "layer_tokens": [25, 25, 25, 25],
+          "pieces": 4,
+          "input_tokens": 80,
+          "output_tokens": 20,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "context_window_model": "memnoth-default",
+          "context_window_provider": "memnoth",
+          "provider_id": "memnoth"
+        }
+      ],
+      "expect": {
+        "json": {
+          "cost.status": "partial estimate",
+          "cost.priced_turns": 1,
+          "cost.total_turns": 2,
+          "cost.estimate_usd": 0.0005,
+          "latest_turn.cost_estimate_usd": null
+        },
+        "text_contains": [
+          "~$0.000500 partial estimate",
+          "1/2 priced turns",
+          "partial estimate",
+          "not provider-billed cost"
+        ],
+        "text_not_contains": []
+      }
+    }
+  ]
+}

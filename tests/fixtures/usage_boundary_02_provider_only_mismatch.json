@@ -1,0 +1,88 @@
+{
+  "case": "02-provider-only-mismatch",
+  "scenarios": [
+    {
+      "name": "same_model_direct_openai_then_unrecognized_gateway",
+      "render": {
+        "context_window_size": 128000,
+        "context_model": "shared-model-1",
+        "context_provider": "openai",
+        "context_window_source": "OpenAI catalog",
+        "next_turn_effort": null
+      },
+      "receipts": [
+        {
+          "at_ms": 1000,
+          "turn_id": 0,
+          "total_tokens": 8100,
+          "prefix_hash": "d1",
+          "layer_tokens": [2000, 2000, 2000, 2100],
+          "pieces": 4,
+          "input_tokens": 8000,
+          "output_tokens": 100,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "context_window_used": 8000,
+          "context_window_model": "shared-model-1",
+          "context_window_provider": "openai",
+          "provider_id": "openai",
+          "provider_usage_reported": true,
+          "provider_input_reported": true,
+          "provider_output_reported": true,
+          "cost_micros": 100
+        },
+        {
+          "at_ms": 2000,
+          "turn_id": 1,
+          "total_tokens": 9100,
+          "prefix_hash": "g1",
+          "layer_tokens": [2200, 2200, 2200, 2500],
+          "pieces": 4,
+          "input_tokens": 9000,
+          "output_tokens": 200,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "context_window_used": 9000,
+          "context_window_model": "shared-model-1",
+          "context_window_provider": "custom-router-xyz",
+          "provider_id": "custom-router-xyz",
+          "provider_usage_reported": true,
+          "provider_input_reported": true,
+          "provider_output_reported": true,
+          "cost_micros": 200
+        }
+      ],
+      "expect": {
+        "models_len": 2,
+        "json": {
+          "models.0.provider": "unknown/other",
+          "models.0.provider_status": "unrecognized",
+          "models.0.model": "shared-model-1",
+          "models.1.provider": "openai",
+          "models.1.provider_status": "recognized",
+          "models.1.model": "shared-model-1",
+          "latest_turn.provider": "unknown/other",
+          "latest_turn.provider_status": "unrecognized",
+          "context_window.provider": "unknown/other",
+          "context_window.provider_status": "unrecognized",
+          "context_window.model": "shared-model-1",
+          "context_window.occupancy_tokens": 9000,
+          "context_window.limit_tokens": null,
+          "context_window.remaining_tokens": null,
+          "context_window.limit_source": null,
+          "context_window.status": "occupancy reported; matching model limit unavailable",
+          "input_tokens.value": 17000,
+          "input_tokens.reported_turns": 2
+        },
+        "text_contains": [
+          "openai · shared-model-1",
+          "unknown/other (unrecognized adapter)",
+          "9,000 tokens · model limit unavailable"
+        ],
+        "text_not_contains": [
+          "/ 128,000 tokens"
+        ]
+      }
+    }
+  ]
+}

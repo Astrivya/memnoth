@@ -1,0 +1,108 @@
+{
+  "case": "06-missing-usage-and-legacy-receipt",
+  "scenarios": [
+    {
+      "name": "legacy_receipt_decodes_with_unknown_fields",
+      "render": {
+        "context_window_size": 128000,
+        "context_model": "gpt-5.4",
+        "context_provider": "openai",
+        "context_window_source": "catalog",
+        "next_turn_effort": null
+      },
+      "receipts": [
+        {
+          "at_ms": 1000,
+          "total_tokens": 0,
+          "prefix_hash": "legacy",
+          "layer_tokens": [0, 0, 0, 0],
+          "pieces": 0,
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0
+        }
+      ],
+      "expect": {
+        "json": {
+          "latest_turn.provider": null,
+          "latest_turn.provider_status": "not recorded",
+          "latest_turn.model": null,
+          "latest_turn.effort": null,
+          "latest_turn.input_tokens.status": "not reported",
+          "latest_turn.input_tokens.value": null,
+          "latest_turn.output_tokens.status": "not reported",
+          "latest_turn.output_tokens.value": null,
+          "latest_turn.reasoning_output_tokens.value": null,
+          "latest_turn.cache_read_tokens.value": null,
+          "latest_turn.cache_write_tokens.value": null,
+          "context_window.limit_tokens": null,
+          "context_window.occupancy_tokens": null,
+          "input_tokens.status": "not reported",
+          "input_tokens.value": null,
+          "cost.estimate_usd": null,
+          "cost.status": "not priced"
+        },
+        "text_contains": [
+          "not recorded · model not recorded",
+          "not reported",
+          "not available"
+        ],
+        "text_not_contains": [
+          "$0.000000"
+        ]
+      }
+    },
+    {
+      "name": "usage_object_omitted_stays_unknown",
+      "render": {
+        "context_window_size": 128000,
+        "context_model": "gpt-5.4",
+        "context_provider": "openai",
+        "context_window_source": "catalog",
+        "next_turn_effort": null
+      },
+      "receipts": [
+        {
+          "at_ms": 2000,
+          "turn_id": 1,
+          "total_tokens": 0,
+          "prefix_hash": "no-usage",
+          "layer_tokens": [0, 0, 0, 0],
+          "pieces": 0,
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "context_window_model": "gpt-5.4",
+          "context_window_provider": "openai",
+          "provider_id": "openai",
+          "provider_usage_reported": false,
+          "provider_input_reported": false,
+          "provider_output_reported": false
+        }
+      ],
+      "expect": {
+        "json": {
+          "latest_turn.provider": "openai",
+          "latest_turn.input_tokens.status": "not reported",
+          "latest_turn.input_tokens.value": null,
+          "latest_turn.output_tokens.status": "not reported",
+          "latest_turn.output_tokens.value": null,
+          "provider_usage.status": "not reported",
+          "provider_usage.reported_turns": 0,
+          "input_tokens.status": "not reported",
+          "input_tokens.value": null,
+          "cost.estimate_usd": null
+        },
+        "text_contains": [
+          "not reported",
+          "not available"
+        ],
+        "text_not_contains": [
+          "$0.000000"
+        ]
+      }
+    }
+  ]
+}
