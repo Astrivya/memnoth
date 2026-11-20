@@ -1038,6 +1038,7 @@ mod tests;
 
 mod graph;
 mod history;
+pub mod invariants;
 pub mod proposals;
 mod scoring;
 mod search;
