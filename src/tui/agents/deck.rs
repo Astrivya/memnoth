@@ -43,6 +43,11 @@ enum Mode {
 pub struct AgentDeck {
     visible: bool,
     children: Vec<ChildInfo>,
+    /// Owned indexes into `children` in the current flat/tree order.
+    order: Vec<usize>,
+    /// Filtered positions into `order`; navigation and render do not rebuild
+    /// or allocate a complete roster on every frame.
+    filtered_order: Vec<usize>,
     selected: usize,
     /// Tree order (parents first, indented) versus spawn order.
     tree_view: bool,
@@ -63,6 +68,8 @@ impl AgentDeck {
         Self {
             visible: false,
             children: Vec::new(),
+            order: Vec::new(),
+            filtered_order: Vec::new(),
             selected: 0,
             tree_view: false,
             query: String::new(),
@@ -77,102 +84,158 @@ impl AgentDeck {
     fn refresh(&mut self, app: &App) {
         let selected_id = self.selected_child().map(|child| child.agent_id.clone());
         self.children = crate::tui::agents::roster(app);
-        let selected_index = selected_id.as_ref().and_then(|selected_id| {
-            self.visible()
-                .iter()
-                .position(|child| child.agent_id == *selected_id)
-        });
+        self.rebuild_order();
+        self.rebuild_filter();
+        let selected_index = selected_id
+            .as_ref()
+            .and_then(|selected_id| self.visible_position(|child| child.agent_id == *selected_id));
         if let Some(index) = selected_index {
             self.selected = index;
         } else {
-            self.selected = self.selected.min(self.visible().len().saturating_sub(1));
+            self.selected = self
+                .selected
+                .min(self.filtered_order.len().saturating_sub(1));
         }
     }
 
     /// Roster rows in view order: tree view walks actual parent links; flat
     /// view keeps spawn order.
+    #[cfg(test)]
     fn ordered(&self) -> Vec<&ChildInfo> {
+        self.order
+            .iter()
+            .filter_map(|index| self.children.get(*index))
+            .collect()
+    }
+
+    fn rebuild_order(&mut self) {
         if !self.tree_view {
-            return self.children.iter().collect();
+            self.order = (0..self.children.len()).collect();
+            return;
         }
 
-        fn visit<'a>(
-            root: &'a ChildInfo,
-            children: &std::collections::HashMap<Option<&'a str>, Vec<&'a ChildInfo>>,
-            seen: &mut std::collections::HashSet<&'a str>,
-            ordered: &mut Vec<&'a ChildInfo>,
+        fn visit(
+            root: usize,
+            children: &std::collections::HashMap<Option<usize>, Vec<usize>>,
+            seen: &mut std::collections::HashSet<usize>,
+            ordered: &mut Vec<usize>,
         ) {
             let mut pending = vec![root];
             while let Some(node) = pending.pop() {
-                if !seen.insert(node.agent_id.as_str()) {
+                if !seen.insert(node) {
                     continue;
                 }
                 ordered.push(node);
-                if let Some(descendants) = children.get(&Some(node.agent_id.as_str())) {
+                if let Some(descendants) = children.get(&Some(node)) {
                     pending.extend(descendants.iter().rev().copied());
                 }
             }
         }
 
-        let ids: std::collections::HashSet<&str> = self
+        let ids: std::collections::HashMap<&str, usize> = self
             .children
             .iter()
-            .map(|child| child.agent_id.as_str())
+            .enumerate()
+            .map(|(index, child)| (child.agent_id.as_str(), index))
             .collect();
-        let mut children: std::collections::HashMap<Option<&str>, Vec<&ChildInfo>> =
+        let mut children: std::collections::HashMap<Option<usize>, Vec<usize>> =
             std::collections::HashMap::new();
-        for child in &self.children {
+        for (index, child) in self.children.iter().enumerate() {
             let parent = child
                 .parent_id
                 .as_deref()
-                .filter(|parent_id| ids.contains(parent_id));
-            children.entry(parent).or_default().push(child);
+                .and_then(|parent_id| ids.get(parent_id).copied());
+            children.entry(parent).or_default().push(index);
         }
         for siblings in children.values_mut() {
-            siblings.sort_by_key(|child| child.spawn_seq);
+            siblings.sort_by_key(|index| self.children[*index].spawn_seq);
         }
 
         let mut ordered = Vec::with_capacity(self.children.len());
         let mut seen = std::collections::HashSet::with_capacity(self.children.len());
         if let Some(roots) = children.get(&None) {
             for root in roots {
-                visit(root, &children, &mut seen, &mut ordered);
+                visit(*root, &children, &mut seen, &mut ordered);
             }
         }
         // Corrupt/cyclic lineage should not hide runs. Display any unreachable
         // nodes as deterministic roots after the valid trees.
-        let mut orphans: Vec<&ChildInfo> = self
+        let mut orphans: Vec<usize> = self
             .children
             .iter()
-            .filter(|child| !seen.contains(child.agent_id.as_str()))
+            .enumerate()
+            .filter_map(|(index, _)| (!seen.contains(&index)).then_some(index))
             .collect();
-        orphans.sort_by_key(|child| child.spawn_seq);
+        orphans.sort_by_key(|index| self.children[*index].spawn_seq);
         for orphan in orphans {
             visit(orphan, &children, &mut seen, &mut ordered);
         }
-        ordered
+        self.order = ordered;
     }
 
-    /// The current roster slice after the optional search filter.
-    fn visible(&self) -> Vec<&ChildInfo> {
+    fn rebuild_filter(&mut self) {
         let query = self.query.trim().to_lowercase();
-        self.ordered()
-            .into_iter()
-            .filter(|child| {
-                query.is_empty()
+        self.filtered_order = self
+            .order
+            .iter()
+            .enumerate()
+            .filter_map(|(position, index)| {
+                let child = self.children.get(*index)?;
+                (query.is_empty()
                     || child.role.to_lowercase().contains(&query)
                     || child.task.to_lowercase().contains(&query)
                     || child.agent_id.to_lowercase().contains(&query)
                     || child
                         .model
                         .as_deref()
-                        .is_some_and(|model| model.to_lowercase().contains(&query))
+                        .is_some_and(|model| model.to_lowercase().contains(&query)))
+                .then_some(position)
             })
+            .collect();
+    }
+
+    fn child_at_visible(&self, visible_index: usize) -> Option<&ChildInfo> {
+        let order_position = *self.filtered_order.get(visible_index)?;
+        let child_index = *self.order.get(order_position)?;
+        self.children.get(child_index)
+    }
+
+    fn visible_position(&self, predicate: impl Fn(&ChildInfo) -> bool) -> Option<usize> {
+        self.filtered_order
+            .iter()
+            .enumerate()
+            .find_map(|(visible_index, _)| {
+                self.child_at_visible(visible_index)
+                    .filter(|child| predicate(child))
+                    .map(|_| visible_index)
+            })
+    }
+
+    fn visible_window(
+        &self,
+        window: std::ops::Range<usize>,
+    ) -> impl Iterator<Item = (usize, &ChildInfo)> {
+        let start = window.start.min(self.filtered_order.len());
+        let end = window.end.min(self.filtered_order.len()).max(start);
+        self.filtered_order[start..end]
+            .iter()
+            .enumerate()
+            .filter_map(move |(offset, _)| {
+                let visible_index = start + offset;
+                self.child_at_visible(visible_index)
+                    .map(|child| (visible_index, child))
+            })
+    }
+
+    #[cfg(test)]
+    fn visible(&self) -> Vec<&ChildInfo> {
+        self.visible_window(0..self.filtered_order.len())
+            .map(|(_, child)| child)
             .collect()
     }
 
     fn selected_child(&self) -> Option<&ChildInfo> {
-        self.visible().into_iter().nth(self.selected)
+        self.child_at_visible(self.selected)
     }
 
     /// Bound rendered roster rows to the available terminal height. The full
@@ -394,10 +457,7 @@ impl Overlay for AgentDeck {
         // spawn_seq covers the tree view too, where depth decides position.
         let newest = self.children.iter().map(|child| child.spawn_seq).max();
         if let Some(newest) = newest
-            && let Some(index) = self
-                .visible()
-                .iter()
-                .position(|child| child.spawn_seq == newest)
+            && let Some(index) = self.visible_position(|child| child.spawn_seq == newest)
         {
             self.selected = index;
         }
@@ -486,6 +546,12 @@ impl Overlay for AgentDeck {
                 }
                 _ => {}
             }
+            if self.mode == Mode::Roster {
+                self.rebuild_filter();
+                self.selected = self
+                    .selected
+                    .min(self.filtered_order.len().saturating_sub(1));
+            }
             return OverlayAction::None;
         }
         match key.code {
@@ -498,6 +564,7 @@ impl Overlay for AgentDeck {
                 match self.mode {
                     Mode::Roster => {
                         self.query.clear();
+                        self.rebuild_filter();
                         self.selected = 0;
                     }
                     Mode::Inbox => {
@@ -524,7 +591,7 @@ impl Overlay for AgentDeck {
             KeyCode::Up => {
                 match self.mode {
                     Mode::Roster => {
-                        let len = self.visible().len();
+                        let len = self.filtered_order.len();
                         if len > 0 {
                             self.selected = self.selected.saturating_sub(1);
                             self.peeked = None;
@@ -539,7 +606,7 @@ impl Overlay for AgentDeck {
             KeyCode::Down => {
                 match self.mode {
                     Mode::Roster => {
-                        let len = self.visible().len();
+                        let len = self.filtered_order.len();
                         if len > 0 {
                             self.selected = (self.selected + 1).min(len - 1);
                             self.peeked = None;
@@ -559,7 +626,7 @@ impl Overlay for AgentDeck {
                 let forward = key.code == KeyCode::PageDown;
                 match self.mode {
                     Mode::Roster => {
-                        let len = self.visible().len();
+                        let len = self.filtered_order.len();
                         if forward {
                             self.selected = self
                                 .selected
@@ -589,7 +656,7 @@ impl Overlay for AgentDeck {
                 match self.mode {
                     Mode::Roster => {
                         self.selected = if end {
-                            self.visible().len().saturating_sub(1)
+                            self.filtered_order.len().saturating_sub(1)
                         } else {
                             0
                         };
@@ -675,10 +742,10 @@ impl Overlay for AgentDeck {
             KeyCode::Char('t') => {
                 let selected_id = self.selected_child().map(|child| child.agent_id.clone());
                 self.tree_view = !self.tree_view;
+                self.rebuild_order();
+                self.rebuild_filter();
                 let selected_index = selected_id.and_then(|selected_id| {
-                    self.visible()
-                        .iter()
-                        .position(|child| child.agent_id == selected_id)
+                    self.visible_position(|child| child.agent_id == selected_id)
                 });
                 if let Some(index) = selected_index {
                     self.selected = index;
@@ -867,7 +934,7 @@ impl Overlay for AgentDeck {
         } else {
             (body, None)
         };
-        let visible = self.visible();
+        let roster_total = self.filtered_order.len();
         let visible_attention = self.visible_attention_indices(app);
         let inbox_total = app
             .delegator
@@ -880,7 +947,7 @@ impl Overlay for AgentDeck {
             1
         };
         let viewport = list_area.height.saturating_sub(1) as usize / row_height;
-        let roster_window = Self::row_window(visible.len(), self.selected, viewport);
+        let roster_window = Self::row_window(roster_total, self.selected, viewport);
         let inbox_window = Self::row_window(visible_attention.len(), self.inbox_selected, viewport);
         let mut rows: Vec<ListItem<'static>> = if self.mode == Mode::Inbox {
             app.delegator
@@ -915,11 +982,7 @@ impl Overlay for AgentDeck {
                 })
                 .unwrap_or_default()
         } else {
-            visible
-                .iter()
-                .enumerate()
-                .skip(roster_window.start)
-                .take(roster_window.len())
+            self.visible_window(roster_window.clone())
                 .map(|(index, child)| {
                     let selected = index == self.selected;
                     let status_color = match child.status {
@@ -1022,7 +1085,7 @@ impl Overlay for AgentDeck {
         } else if self.mode == Mode::Inbox {
             format!("Needs you  ({inbox_total})")
         } else if !self.query.is_empty() {
-            let counts = format!("Runs  ·  {} of {}", visible.len(), self.children.len());
+            let counts = format!("Runs  ·  {roster_total} of {}", self.children.len());
             if self.searching {
                 counts
             } else {
@@ -1050,7 +1113,7 @@ impl Overlay for AgentDeck {
         };
         let mut list_state = ListState::default();
         let selected_in_window = match self.mode {
-            Mode::Roster if !visible.is_empty() => {
+            Mode::Roster if roster_total > 0 => {
                 Some(self.selected.saturating_sub(roster_window.start))
             }
             Mode::Inbox if !visible_attention.is_empty() => {
@@ -1473,6 +1536,55 @@ mod tests {
         assert_eq!(end, 9_988..10_000);
 
         assert_eq!(AgentDeck::row_window(10, 0, 0), 0..0);
+
+        let window = AgentDeck::row_window(100, 48, 12);
+        assert_eq!(window.len(), 12);
+        assert!(window.contains(&48));
+        assert_eq!(window, 42..54);
+    }
+
+    #[test]
+    fn high_fanout_window_resolves_only_the_requested_filtered_rows() {
+        let mut deck = AgentDeck::new();
+        deck.children = (0..1_000)
+            .map(|index| ChildInfo {
+                agent_id: format!("run-{index}"),
+                parent_id: None,
+                root_id: None,
+                session_id: None,
+                role: "scout".to_string(),
+                task: if index == 999 {
+                    "needle at the end".to_string()
+                } else {
+                    format!("task {index}")
+                },
+                status: AgentStatus::Running,
+                spawn_seq: index,
+                depth: 0,
+                model: None,
+                worktree: None,
+                unread: false,
+            })
+            .collect();
+        deck.rebuild_order();
+        deck.rebuild_filter();
+
+        let rows: Vec<(usize, String)> = deck
+            .visible_window(490..502)
+            .map(|(index, child)| (index, child.agent_id.clone()))
+            .collect();
+        assert_eq!(rows.len(), 12);
+        assert_eq!(rows.first().unwrap(), &(490, "run-490".to_string()));
+        assert_eq!(rows.last().unwrap(), &(501, "run-501".to_string()));
+        assert!(deck.visible_window(usize::MAX..usize::MAX).next().is_none());
+
+        deck.query = "needle".to_string();
+        deck.rebuild_filter();
+        let filtered: Vec<(usize, String)> = deck
+            .visible_window(0..12)
+            .map(|(index, child)| (index, child.agent_id.clone()))
+            .collect();
+        assert_eq!(filtered, vec![(0, "run-999".to_string())]);
     }
 
     #[test]
