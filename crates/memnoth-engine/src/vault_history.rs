@@ -615,7 +615,11 @@ pub fn vault_contradictions_all(engine: &MemoryEngine) -> Result<Value> {
 ///
 /// Returns `{ beliefs: [...], contradictions: [...], warnings: [...], count }`
 /// where each warning is a ready-to-use line for an agent or a transcript.
-pub fn recall_with_contradictions(engine: &MemoryEngine, names: &[&str]) -> Result<Value> {
+pub fn recall_with_contradictions(
+    engine: &MemoryEngine,
+    names: &[&str],
+    now: i64,
+) -> Result<Value> {
     let conn = engine.connection();
     let mut beliefs = Vec::new();
     let mut contradictions = Vec::new();
@@ -632,10 +636,10 @@ pub fn recall_with_contradictions(engine: &MemoryEngine, names: &[&str]) -> Resu
             let mut stmt = conn.prepare(
                 "SELECT id, kind, name, confidence, valid_from FROM entities \
                  WHERE id = ?1 AND valid_to IS NULL
-                   AND (invalid_at IS NULL OR invalid_at > strftime('%s','now')*1000)",
+                   AND (invalid_at IS NULL OR invalid_at > ?2)",
             )?;
             let row = stmt
-                .query_row(params![id], |r| {
+                .query_row(params![id, now], |r| {
                     Ok(json!({
                         "entity_id": r.get::<_, i64>(0)?,
                         "kind": r.get::<_, String>(1)?,
@@ -685,6 +689,7 @@ pub fn recall_with_contradictions(engine: &MemoryEngine, names: &[&str]) -> Resu
 mod tests {
     use super::*;
     use crate::model::EntityKind;
+    use crate::now_ms;
 
     const T0: i64 = 1_700_000_000_000;
     const DAY: i64 = 86_400_000;
@@ -897,7 +902,7 @@ mod tests {
         // Recall by the original name returns the CURRENT (third-generation)
         // belief — a pre-rename name must not strand the caller on a closed
         // generation or miss the belief entirely.
-        let bundle = recall_with_contradictions(&eng, &["acq"]).unwrap();
+        let bundle = recall_with_contradictions(&eng, &["acq"], now_ms()).unwrap();
         let beliefs = bundle["beliefs"].as_array().unwrap();
         assert_eq!(beliefs.len(), 1);
         assert_eq!(beliefs[0]["entity_id"], e3);
@@ -992,7 +997,7 @@ mod tests {
         eng.supersede_entity(a, None, Some("acme-corp"), None, None, "rebrand", T0 + DAY)
             .unwrap();
 
-        let bundle = recall_with_contradictions(&eng, &["acme-corp", "acme"]).unwrap();
+        let bundle = recall_with_contradictions(&eng, &["acme-corp", "acme"], now_ms()).unwrap();
         let warnings: Vec<&str> = bundle["warnings"]
             .as_array()
             .unwrap()
@@ -1019,7 +1024,7 @@ mod tests {
         let eng = MemoryEngine::open_in_memory().unwrap();
         eng.add_entity(EntityKind::Concept, "calm", 1.0, T0)
             .unwrap();
-        let bundle = recall_with_contradictions(&eng, &["calm"]).unwrap();
+        let bundle = recall_with_contradictions(&eng, &["calm"], now_ms()).unwrap();
         assert_eq!(bundle["count"], 1);
         assert_eq!(bundle["warnings"].as_array().unwrap().len(), 0);
     }
@@ -1224,5 +1229,33 @@ mod tests {
         assert_eq!(rows[1]["target"].as_str().unwrap(), "globex");
         assert_eq!(rows[1]["valid_from"].as_i64().unwrap(), T0);
         assert_eq!(rows[1]["valid_to"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn recall_expiry_uses_the_callers_clock_not_the_sqlite_clock() {
+        let eng = MemoryEngine::open_in_memory().unwrap();
+        eng.add_entity(EntityKind::Concept, "staged", 0.9, T0)
+            .unwrap();
+        let expires = T0 + 10 * DAY;
+        eng.connection()
+            .execute(
+                "UPDATE entities SET invalid_at = ?1 WHERE name = 'staged'",
+                params![expires],
+            )
+            .unwrap();
+
+        let before = recall_with_contradictions(&eng, &["staged"], expires - 1).unwrap();
+        assert_eq!(
+            before["beliefs"].as_array().unwrap().len(),
+            1,
+            "a staged expiry is still current before its instant: {before}"
+        );
+
+        let after = recall_with_contradictions(&eng, &["staged"], expires).unwrap();
+        assert_eq!(
+            after["beliefs"].as_array().unwrap().len(),
+            0,
+            "the half-open boundary excludes an expired belief: {after}"
+        );
     }
 }
