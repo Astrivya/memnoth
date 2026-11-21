@@ -15,7 +15,6 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
-use crate::auth::create_credential_store;
 use crate::cli::DoctorArgs;
 use crate::completion;
 use crate::context::AppContext;
@@ -428,34 +427,25 @@ fn mcp_config_check(ctx: &AppContext) -> Result<Check> {
 /// permissions. The keyring is never written to by --fix; only file-store
 /// permissions are corrected.
 fn keyring_check(_ctx: &AppContext) -> Check {
-    let store = match create_credential_store() {
-        Ok(store) => store,
-        Err(error) => {
-            return warn(
-                "keyring",
-                format!("credential store cannot be opened: {error:#}"),
-                false,
-            );
-        }
-    };
-
-    // The file store is the one whose permissions we can correct. Try a
-    // no-op read to confirm it is readable; if it is not, a permission fix
-    // may help.
-    // A no-op read, not `list_keys`: the store's listing is async and this
-    // diagnostic is not, and a read is the same permission the keyring needs.
-    let file_store = match store.get_sync("whoami") {
-        Ok(_) => None,
-        Err(error) => Some(format!("{error:#}")),
-    };
-
-    match file_store {
-        None => observed("keyring", "credential store readable".to_string()),
-        Some(error) => warn(
+    // Read-only: constructing the credential store calls ensure_config_dir(),
+    // which creates ~/.memnoth via create_dir_all. A diagnostic must not create
+    // state — otherwise `doctor --fix --dry-run` flips its own "state" check
+    // between before and after. Inspect the credential file with metadata only.
+    let (exists, permissions_ok) = crate::auth::credential_file_state();
+    if !exists {
+        return observed(
             "keyring",
-            format!("credential store unreadable: {error}"),
+            "credential store readable (no file store yet)".to_string(),
+        );
+    }
+    if permissions_ok {
+        observed("keyring", "credential store readable".to_string())
+    } else {
+        warn(
+            "keyring",
+            "credential file permissions are too open".to_string(),
             true,
-        ),
+        )
     }
 }
 

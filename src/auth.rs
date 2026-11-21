@@ -876,6 +876,28 @@ pub fn create_credential_store() -> Result<MultiCredentialStore> {
     ]))
 }
 
+/// Read-only probe for `mn doctor`: report the credential file's state without
+/// creating anything. `create_credential_store()` calls `ensure_config_dir()`,
+/// which creates `~/.memnoth` via `create_dir_all` — a diagnostic must not have
+/// that side effect, or `--dry-run`'s "before" and "after" checks disagree on
+/// the very directory it just created. Returns `(exists, permissions_ok)`.
+#[cfg(unix)]
+pub fn credential_file_state() -> (bool, bool) {
+    use std::os::unix::fs::PermissionsExt;
+    let path = memnoth_auth::default_credentials_path();
+    let Ok(metadata) = std::fs::metadata(&path) else {
+        return (false, true); // no file yet: nothing to be too open
+    };
+    let mode = metadata.permissions().mode() & 0o777;
+    (true, mode & 0o077 == 0)
+}
+
+#[cfg(not(unix))]
+pub fn credential_file_state() -> (bool, bool) {
+    let path = memnoth_auth::default_credentials_path();
+    (path.exists(), true)
+}
+
 /// Open a URL in the default browser.
 ///
 /// Shared with the session screen's sign-in worker, which needs the same
