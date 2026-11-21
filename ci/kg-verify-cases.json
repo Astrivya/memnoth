@@ -1,0 +1,250 @@
+{
+  "schema": "mn-kg/1",
+  "cases": [
+    {
+      "id": "kg-verify-001",
+      "kind": "definition",
+      "symbol": "app::helper",
+      "symbols": [
+        {"id": 1, "qname": "app::helper", "kind": "function", "file": "src/app.rs", "line": 10}
+      ],
+      "edges": [],
+      "expect": {
+        "resolved": true,
+        "qname": "app::helper",
+        "kind": "function",
+        "file": "src/app.rs",
+        "line": 10
+      }
+    },
+    {
+      "id": "kg-verify-002",
+      "kind": "definition",
+      "symbol": "app::missing",
+      "symbols": [
+        {"id": 1, "qname": "app::helper", "kind": "function", "file": "src/app.rs", "line": 10}
+      ],
+      "edges": [],
+      "expect": {
+        "resolved": false,
+        "qname": "app::missing",
+        "kind": "unknown",
+        "file": "",
+        "line": 0
+      }
+    },
+    {
+      "id": "kg-verify-003",
+      "kind": "refs",
+      "symbol": "app::helper",
+      "symbols": [
+        {"id": 1, "qname": "app::helper", "kind": "function", "file": "src/app.rs", "line": 10},
+        {"id": 2, "qname": "app::middle", "kind": "function", "file": "src/app.rs", "line": 20},
+        {"id": 3, "qname": "tests::helper_test", "kind": "function", "file": "tests/app_test.rs", "line": 3}
+      ],
+      "edges": [
+        {"source": 2, "target": 1, "kind": "references"},
+        {"source": 3, "target": 1, "kind": "references"}
+      ],
+      "expect": {
+        "resolved": true,
+        "hits": ["app::middle@src/app.rs:20", "tests::helper_test@tests/app_test.rs:3"]
+      }
+    },
+    {
+      "id": "kg-verify-004",
+      "kind": "callers",
+      "symbol": "app::helper",
+      "symbols": [
+        {"id": 1, "qname": "app::helper", "kind": "function", "file": "src/app.rs", "line": 10},
+        {"id": 2, "qname": "app::middle", "kind": "function", "file": "src/app.rs", "line": 20},
+        {"id": 3, "qname": "tests::helper_test", "kind": "function", "file": "tests/app_test.rs", "line": 3}
+      ],
+      "edges": [
+        {"source": 2, "target": 1, "kind": "calls"},
+        {"source": 3, "target": 1, "kind": "calls"}
+      ],
+      "expect": {
+        "resolved": true,
+        "hits": ["app::middle@src/app.rs:20", "tests::helper_test@tests/app_test.rs:3"]
+      }
+    },
+    {
+      "id": "kg-verify-005",
+      "kind": "callees",
+      "symbol": "app::middle",
+      "symbols": [
+        {"id": 1, "qname": "app::helper", "kind": "function", "file": "src/app.rs", "line": 10},
+        {"id": 2, "qname": "app::middle", "kind": "function", "file": "src/app.rs", "line": 20},
+        {"id": 5, "qname": "app::loose", "kind": "function", "file": "src/other.rs", "line": 7}
+      ],
+      "edges": [
+        {"source": 2, "target": 1, "kind": "calls"},
+        {"source": 2, "target": 5, "kind": "calls"}
+      ],
+      "expect": {
+        "resolved": true,
+        "hits": ["app::helper@src/app.rs:10", "app::loose@src/other.rs:7"]
+      }
+    },
+    {
+      "id": "kg-verify-006",
+      "kind": "impact",
+      "symbol": "app::helper",
+      "depth": 3,
+      "symbols": [
+        {"id": 1, "qname": "app::helper", "kind": "function", "file": "src/app.rs", "line": 10},
+        {"id": 2, "qname": "app::middle", "kind": "function", "file": "src/app.rs", "line": 20},
+        {"id": 3, "qname": "app::entry", "kind": "function", "file": "src/lib.rs", "line": 5},
+        {"id": 4, "qname": "tests::helper_test", "kind": "function", "file": "tests/app_test.rs", "line": 3}
+      ],
+      "edges": [
+        {"source": 2, "target": 1, "kind": "calls"},
+        {"source": 3, "target": 2, "kind": "calls"},
+        {"source": 4, "target": 1, "kind": "calls"}
+      ],
+      "expect": {
+        "resolved": true,
+        "precision": "tree-sitter",
+        "counts": {"exact": 3, "likely": 0, "direct": 2, "transitive": 3},
+        "exact": ["app::entry", "app::middle", "tests::helper_test"],
+        "likely": [],
+        "evidence": [
+          {"qname": "app::entry", "confidence": 0.7225, "class": "exact"},
+          {"qname": "app::middle", "confidence": 0.85, "class": "exact"},
+          {"qname": "tests::helper_test", "confidence": 0.85, "class": "exact"}
+        ],
+        "tests": ["tests/app_test.rs"],
+        "truncated": false,
+        "risk": null
+      }
+    },
+    {
+      "id": "kg-verify-007",
+      "kind": "impact",
+      "symbol": "app::entry",
+      "depth": 3,
+      "symbols": [
+        {"id": 3, "qname": "app::entry", "kind": "function", "file": "src/lib.rs", "line": 5},
+        {"id": 5, "qname": "app::loose", "kind": "function", "file": "src/other.rs", "line": 7}
+      ],
+      "edges": [
+        {"source": 5, "target": 3, "kind": "mentions"}
+      ],
+      "expect": {
+        "resolved": true,
+        "precision": "tree-sitter",
+        "counts": {"exact": 0, "likely": 1, "direct": 1, "transitive": 1},
+        "exact": [],
+        "likely": ["app::loose"],
+        "evidence": [
+          {"qname": "app::loose", "confidence": 0.425, "class": "likely"}
+        ],
+        "tests": [],
+        "truncated": false,
+        "risk": null
+      }
+    },
+    {
+      "id": "kg-verify-008",
+      "kind": "impact",
+      "symbol": "app::helper",
+      "depth": 3,
+      "symbols": [
+        {"id": 1, "qname": "app::helper", "kind": "function", "file": "src/app.rs", "line": 10},
+        {"id": 2, "qname": "app::middle", "kind": "function", "file": "src/app.rs", "line": 20},
+        {"id": 3, "qname": "app::entry", "kind": "function", "file": "src/lib.rs", "line": 5},
+        {"id": 5, "qname": "app::indirect", "kind": "function", "file": "src/other.rs", "line": 7}
+      ],
+      "edges": [
+        {"source": 2, "target": 1, "kind": "calls"},
+        {"source": 3, "target": 2, "kind": "calls"},
+        {"source": 5, "target": 3, "kind": "mentions"}
+      ],
+      "expect": {
+        "resolved": true,
+        "precision": "tree-sitter",
+        "counts": {"exact": 2, "likely": 1, "direct": 1, "transitive": 3},
+        "exact": ["app::entry", "app::middle"],
+        "likely": ["app::indirect"],
+        "evidence": [
+          {"qname": "app::entry", "confidence": 0.7225, "class": "exact"},
+          {"qname": "app::indirect", "confidence": 0.3071, "class": "likely"},
+          {"qname": "app::middle", "confidence": 0.85, "class": "exact"}
+        ],
+        "tests": [],
+        "truncated": false,
+        "risk": null
+      }
+    },
+    {
+      "id": "kg-verify-009",
+      "kind": "impact",
+      "symbol": "app::helper",
+      "depth": 1,
+      "churn": 4,
+      "coverage": 0.5,
+      "symbols": [
+        {"id": 1, "qname": "app::helper", "kind": "function", "file": "src/app.rs", "line": 10},
+        {"id": 2, "qname": "app::middle", "kind": "function", "file": "src/app.rs", "line": 20},
+        {"id": 4, "qname": "tests::helper_test", "kind": "function", "file": "tests/app_test.rs", "line": 3}
+      ],
+      "edges": [
+        {"source": 2, "target": 1, "kind": "calls"},
+        {"source": 4, "target": 1, "kind": "calls"}
+      ],
+      "expect": {
+        "resolved": true,
+        "precision": "tree-sitter",
+        "counts": {"exact": 2, "likely": 0, "direct": 2, "transitive": 2},
+        "exact": ["app::middle", "tests::helper_test"],
+        "likely": [],
+        "evidence": [
+          {"qname": "app::middle", "confidence": 0.85, "class": "exact"},
+          {"qname": "tests::helper_test", "confidence": 0.85, "class": "exact"}
+        ],
+        "tests": ["tests/app_test.rs"],
+        "truncated": false,
+        "risk": {"score": 4.0, "fan_in": 2, "churn_90d": 4, "test_coverage": 0.5}
+      }
+    },
+    {
+      "id": "kg-verify-010",
+      "kind": "search",
+      "query": "helper",
+      "limit": 10,
+      "symbols": [
+        {"id": 1, "qname": "app::helper", "kind": "function", "file": "src/app.rs", "line": 10},
+        {"id": 2, "qname": "tests::helper_test", "kind": "function", "file": "tests/app_test.rs", "line": 3},
+        {"id": 3, "qname": "app::middle", "kind": "function", "file": "src/app.rs", "line": 20}
+      ],
+      "edges": [],
+      "expect": {
+        "hits": ["app::helper", "tests::helper_test"]
+      }
+    },
+    {
+      "id": "kg-verify-011",
+      "kind": "precision",
+      "symbol": "app::helper",
+      "depth": 2,
+      "symbols": [
+        {"id": 1, "qname": "app::helper", "kind": "function", "file": "src/app.rs", "line": 10},
+        {"id": 2, "qname": "app::middle", "kind": "function", "file": "src/app.rs", "line": 20}
+      ],
+      "edges": [
+        {"source": 2, "target": 1, "kind": "calls"}
+      ],
+      "expect": {
+        "lexical": true,
+        "tree_sitter": true,
+        "lsp": false,
+        "lsp_available": false,
+        "tree_sitter_available": true,
+        "best": "tree-sitter",
+        "answer_precision": "tree-sitter",
+        "answer_within_capability": true
+      }
+    }
+  ]
+}

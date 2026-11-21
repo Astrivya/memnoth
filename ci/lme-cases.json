@@ -1,0 +1,201 @@
+{
+  "schema": "mn-lme-derived/1",
+  "comment": "DERIVED DIAGNOSTIC inspired by the LongMemEval-S question taxonomy — not an official score and not comparable to vendor headlines. The reader is the vault's two-clock temporal recall (current_facts_known); no model, network or API key is involved. Ground truth is written by hand from the seeded sessions, never from the question under test. T0 = 1700000000000, DAY = 86400000. Each case spans at least two attributed sessions; a fact's recorded_at is when the vault captured it as learned, and null means it was never captured (the reader must exclude it rather than guess). valid_to is exclusive.",
+  "cases": [
+    {
+      "id": "lme-current-region",
+      "kind": "current",
+      "question": "Which region is the service deployed in now?",
+      "entity": "deploy-region",
+      "sessions": [
+        {
+          "id": "s1",
+          "date": 1700000000000,
+          "user": "asha",
+          "facts": [
+            { "content": "region is us-east", "valid_from": 1700000000000, "valid_to": 1700172800000, "recorded_at": 1700000000000 }
+          ]
+        },
+        {
+          "id": "s2",
+          "date": 1700172800000,
+          "user": "bob",
+          "facts": [
+            { "content": "region is eu-west", "valid_from": 1700172800000, "valid_to": null, "recorded_at": 1700172800000 }
+          ]
+        }
+      ],
+      "at": 1700259200000,
+      "expect": ["region is eu-west"]
+    },
+    {
+      "id": "lme-asof-region",
+      "kind": "as-of",
+      "question": "Which region was the service deployed in at the earlier review?",
+      "entity": "deploy-region-asof",
+      "sessions": [
+        {
+          "id": "s1",
+          "date": 1700000000000,
+          "user": "asha",
+          "facts": [
+            { "content": "region is us-east", "valid_from": 1700000000000, "valid_to": 1700172800000, "recorded_at": 1700000000000 }
+          ]
+        },
+        {
+          "id": "s2",
+          "date": 1700172800000,
+          "user": "bob",
+          "facts": [
+            { "content": "region is eu-west", "valid_from": 1700172800000, "valid_to": null, "recorded_at": 1700172800000 }
+          ]
+        }
+      ],
+      "at": 1700086400000,
+      "expect": ["region is us-east"]
+    },
+    {
+      "id": "lme-knowledge-ignores-later-learning",
+      "kind": "knowledge",
+      "question": "What did the vault know about the timeout at the review, ignoring what it only learned later?",
+      "entity": "gateway-timeout",
+      "sessions": [
+        {
+          "id": "s1",
+          "date": 1700000000000,
+          "user": "asha",
+          "facts": [
+            { "content": "timeout was 10s", "valid_from": 1700000000000, "valid_to": null, "recorded_at": 1700000000000 }
+          ]
+        },
+        {
+          "id": "s2",
+          "date": 1700345600000,
+          "user": "bob",
+          "facts": [
+            { "content": "timeout measured at 30s", "valid_from": 1700000000000, "valid_to": null, "recorded_at": 1700345600000 }
+          ]
+        }
+      ],
+      "at": 1700432000000,
+      "known": 1700086400000,
+      "expect": ["timeout was 10s"]
+    },
+    {
+      "id": "lme-why-attributes-the-human",
+      "kind": "why",
+      "question": "Who attributed the current auth window value, and what is it?",
+      "entity": "auth-window",
+      "sessions": [
+        {
+          "id": "s1",
+          "date": 1700000000000,
+          "user": "asha",
+          "facts": [
+            { "content": "window was 60 minutes", "valid_from": 1700000000000, "valid_to": 1700086400000, "recorded_at": 1700000000000 }
+          ]
+        },
+        {
+          "id": "s2",
+          "date": 1700086400000,
+          "user": "bob",
+          "facts": [
+            { "content": "window is 15 minutes after security review", "valid_from": 1700086400000, "valid_to": null, "recorded_at": 1700086400000 }
+          ]
+        }
+      ],
+      "at": 1700172800000,
+      "expect": ["window is 15 minutes after security review"],
+      "expect_authors": ["bob"]
+    },
+    {
+      "id": "lme-change-between-reviews",
+      "kind": "change",
+      "question": "What changed about the rollback flag between the first review and now?",
+      "entity": "rollback-flag",
+      "sessions": [
+        {
+          "id": "s1",
+          "date": 1700000000000,
+          "user": "asha",
+          "facts": [
+            { "content": "flag off", "valid_from": 1700000000000, "valid_to": 1700172800000, "recorded_at": 1700000000000 }
+          ]
+        },
+        {
+          "id": "s2",
+          "date": 1700172800000,
+          "user": "bob",
+          "facts": [
+            { "content": "flag on", "valid_from": 1700172800000, "valid_to": null, "recorded_at": 1700172800000 }
+          ]
+        }
+      ],
+      "from": 1700086400000,
+      "at": 1700259200000,
+      "expect": ["flag on"],
+      "expect_added": ["flag on"],
+      "expect_removed": ["flag off"]
+    },
+    {
+      "id": "lme-unrecorded-learning-is-excluded",
+      "kind": "knowledge",
+      "question": "What is actually attributed about the mystery source?",
+      "entity": "mystery-source",
+      "sessions": [
+        {
+          "id": "s1",
+          "date": 1700000000000,
+          "user": "unknown",
+          "facts": [
+            { "content": "no one recorded when", "valid_from": 1700000000000, "valid_to": null, "recorded_at": null }
+          ]
+        },
+        {
+          "id": "s2",
+          "date": 1700000000000,
+          "user": "asha",
+          "facts": [
+            { "content": "recorded normally", "valid_from": 1700000000000, "valid_to": null, "recorded_at": 1700000000000 }
+          ]
+        }
+      ],
+      "at": 1700086400000,
+      "expect": ["recorded normally"]
+    },
+    {
+      "id": "lme-current-after-three-sessions",
+      "kind": "current",
+      "question": "What is the current retry cap?",
+      "entity": "retry-cap",
+      "sessions": [
+        {
+          "id": "s1",
+          "date": 1700000000000,
+          "user": "asha",
+          "facts": [
+            { "content": "cap is 3", "valid_from": 1700000000000, "valid_to": 1700086400000, "recorded_at": 1700000000000 }
+          ]
+        },
+        {
+          "id": "s2",
+          "date": 1700086400000,
+          "user": "bob",
+          "facts": [
+            { "content": "cap is 5", "valid_from": 1700086400000, "valid_to": 1700172800000, "recorded_at": 1700086400000 }
+          ]
+        },
+        {
+          "id": "s3",
+          "date": 1700172800000,
+          "user": "asha",
+          "facts": [
+            { "content": "cap is 8", "valid_from": 1700172800000, "valid_to": null, "recorded_at": 1700172800000 }
+          ]
+        }
+      ],
+      "at": 1700259200000,
+      "expect": ["cap is 8"]
+    }
+  ]
+}

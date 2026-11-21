@@ -104,6 +104,26 @@ pub enum BenchCommand {
     Ablation(AblationArgs),
     /// Verify deterministic temporal-recall cases with no model or network.
     TrsVerify(TrsVerifyArgs),
+    /// Verify deterministic code-graph cases with no model or network.
+    KgVerify(crate::bench_kg::KgVerifyArgs),
+    /// Verify deterministic handoff/freshness/isolation cases with no model or network.
+    HandoffVerify(crate::bench_handoff::HandoffVerifyArgs),
+    /// Verify model-free RepoQA-derived code-retrieval cases.
+    RepoQaVerify(crate::bench_repoqa::RepoQaVerifyArgs),
+    /// Verify model-free LongMemEval-S-derived temporal cases.
+    LmeVerify(crate::bench_lme::LmeVerifyArgs),
+    /// Validate committed benchmark results and the scoreboard before publication.
+    Proof(ProofArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub struct ProofArgs {
+    /// Committed result JSON to validate (repeatable).
+    #[arg(long)]
+    pub result: Vec<std::path::PathBuf>,
+    /// Scoreboard document to reproduce from the committed result files.
+    #[arg(long)]
+    pub scoreboard: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -195,7 +215,51 @@ pub fn run(_ctx: &AppContext, args: &BenchArgs) -> Result<Outcome> {
         BenchCommand::Scoreboard(scoreboard) => render_scoreboard(scoreboard),
         BenchCommand::Ablation(ablation) => show_ablation(ablation),
         BenchCommand::TrsVerify(verify) => crate::bench_trs::run(verify),
+        BenchCommand::KgVerify(verify) => crate::bench_kg::run(verify),
+        BenchCommand::HandoffVerify(verify) => crate::bench_handoff::run(verify),
+        BenchCommand::RepoQaVerify(verify) => crate::bench_repoqa::run(verify),
+        BenchCommand::LmeVerify(verify) => crate::bench_lme::run(verify),
+        BenchCommand::Proof(proof) => validate_proof(proof),
     }
+}
+
+/// Validate committed benchmark results and the generated scoreboard before
+/// any number may be published. Fails closed on a missing or stale manifest.
+fn validate_proof(args: &ProofArgs) -> Result<Outcome> {
+    use serde_json::json;
+
+    if let Some(doc) = &args.scoreboard {
+        let check = crate::bench_proof::validate_scoreboard_files(doc, &args.result)
+            .map_err(|v| anyhow::anyhow!("{}", crate::bench_proof::format_violations(&v)))?;
+        return Ok(Outcome::new(
+            "bench.proof",
+            format!(
+                "scoreboard reproduced from {} committed result(s)",
+                check.rows
+            ),
+            json!({ "rows": check.rows, "sources": check.sources }),
+        ));
+    }
+    if args.result.is_empty() {
+        anyhow::bail!("bench proof: pass --result <file> or --scoreboard <file>");
+    }
+    let mut validated = Vec::new();
+    for path in &args.result {
+        let proof = crate::bench_proof::validate_result_file(path)
+            .map_err(|v| anyhow::anyhow!("{}", crate::bench_proof::format_violations(&v)))?;
+        validated.push(json!({
+            "source": path.display().to_string(),
+            "commit": proof.commit,
+            "status": proof.status.as_str(),
+            "raw_score": proof.raw_score,
+            "observed_at": proof.observed_at,
+        }));
+    }
+    Ok(Outcome::new(
+        "bench.proof",
+        format!("{} committed result(s) validated", validated.len()),
+        json!({ "validated": validated }),
+    ))
 }
 
 fn run_bench(args: &RunArgs) -> Result<Outcome> {

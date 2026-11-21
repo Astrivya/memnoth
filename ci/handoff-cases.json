@@ -1,0 +1,254 @@
+{
+  "schema": "mn-handoff/1",
+  "comment": "Deterministic handoff/freshness/isolation suite. No model and no network: sessions and namespace vaults are seeded on disk from this file, then the real session attach/handoff, receipt, invariant and namespace APIs are graded against hand-written expectations. t0 = 1700000000000. Bundles carry transcript/receipts/writes/checkpoints, never vault rows; what a surface does not carry is reported as not_modelled, never as a pass. Version bump is deliberate: a fix that starts carrying a previously absent field must update the matching gap case.",
+  "t0": 1700000000000,
+  "namespaces": [
+    {
+      "name": "alpha",
+      "entity": "retry-cap",
+      "fact": "cap is 5",
+      "author": "asha",
+      "valid_from": 1700000000000,
+      "recorded_at": 1700000000000,
+      "corrupt": false
+    },
+    {
+      "name": "beta",
+      "entity": "gateway-timeout",
+      "fact": "timeout is 30s",
+      "author": "bob",
+      "valid_from": 1700000000000,
+      "recorded_at": 1700000000000,
+      "corrupt": false
+    },
+    {
+      "name": "corrupt",
+      "entity": "inverted-window",
+      "fact": "an inverted interval",
+      "author": "asha",
+      "valid_from": 1700000000000,
+      "recorded_at": 1700000000000,
+      "corrupt": true
+    }
+  ],
+  "sessions": [
+    {
+      "name": "origin",
+      "namespace": "alpha",
+      "model": "memnoth-local",
+      "created_ms": 1700000000000,
+      "messages": [
+        { "role": "user", "content": "Decision: keep cap at 5", "at_ms": 1700000000000 },
+        { "role": "assistant", "content": "Recorded: cap is 5", "at_ms": 1700000001000 },
+        { "role": "user", "content": "Decision: do not widen the auth window", "at_ms": 1700000002000 }
+      ],
+      "receipts": [
+        {
+          "at_ms": 1700000000000,
+          "total_tokens": 120,
+          "prefix_hash": "aaaa1111",
+          "layer_tokens": [10, 20, 30, 60],
+          "pieces": 3,
+          "input_tokens": 100,
+          "output_tokens": 20,
+          "cache_read_tokens": 80,
+          "cache_write_tokens": 5,
+          "cost_micros": 42,
+          "turn_id": 0,
+          "prompt": "Decision: keep cap at 5"
+        }
+      ],
+      "writes": [
+        {
+          "at_ms": 1700000000000,
+          "path": "src/cap.rs",
+          "before": "let cap = 3;\n",
+          "after": "let cap = 5;\n",
+          "turn_id": 0
+        }
+      ],
+      "checkpoints": [
+        { "at_ms": 1700000000000, "turn_id": 0, "label": "turn 0" }
+      ],
+      "approvals": [
+        {
+          "record": "approval",
+          "at_ms": 1700000000000,
+          "tool": "edit_file",
+          "subject": "src/cap.rs",
+          "approved": true,
+          "approved_by": "asha",
+          "rule": "user",
+          "turn_id": 0
+        }
+      ]
+    }
+  ],
+  "cases": [
+    {
+      "id": "hf-bundle-shape",
+      "kind": "bundle-contents",
+      "session": "origin",
+      "expect": {
+        "version": 1,
+        "top_keys": ["metadata", "session", "version"],
+        "session_keys": ["checkpoints", "created_ms", "id", "input_tokens", "messages", "model", "output_tokens", "receipts", "writes"],
+        "metadata_keys": ["created_ms", "include_kg", "include_vault"],
+        "counts": { "messages": 3, "receipts": 1, "writes": 1, "checkpoints": 1 },
+        "absent": []
+      }
+    },
+    {
+      "id": "hf-bundle-no-vault-rows-or-secrets",
+      "kind": "bundle-contents",
+      "session": "origin",
+      "absent_keys": ["entities", "facts", "kg", "observations", "vault", "vault_rows"],
+      "forbidden_tokens": ["sk-", "Bearer ", "api_key", "password"],
+      "expect": {
+        "session_keys": ["checkpoints", "created_ms", "id", "input_tokens", "messages", "model", "output_tokens", "receipts", "writes"],
+        "absent": [],
+        "forbidden": []
+      }
+    },
+    {
+      "id": "hf-roundtrip-carries-every-array",
+      "kind": "roundtrip",
+      "session": "origin",
+      "to": "landed",
+      "expect": {
+        "counts": { "messages": 3, "receipts": 1, "writes": 1, "checkpoints": 1 },
+        "messages": [
+          { "role": "user", "content": "Decision: keep cap at 5", "at_ms": 1700000000000 },
+          { "role": "assistant", "content": "Recorded: cap is 5", "at_ms": 1700000001000 },
+          { "role": "user", "content": "Decision: do not widen the auth window", "at_ms": 1700000002000 }
+        ],
+        "receipt_prefixes": ["aaaa1111"],
+        "receipt_prompts": ["Decision: keep cap at 5"],
+        "write_paths": ["src/cap.rs"],
+        "write_befores": ["let cap = 3;\n"],
+        "write_afters": ["let cap = 5;\n"],
+        "checkpoint_labels": ["turn 0"]
+      }
+    },
+    {
+      "id": "hf-roundtrip-keeps-recorded-times",
+      "kind": "roundtrip",
+      "session": "origin",
+      "to": "landed",
+      "expect": {
+        "created_ms": 1700000000000,
+        "message_at_ms": [1700000000000, 1700000001000, 1700000002000],
+        "receipt_at_ms": [1700000000000],
+        "write_at_ms": [1700000000000],
+        "checkpoint_at_ms": [1700000000000]
+      }
+    },
+    {
+      "id": "hf-receipts-keep-spend-and-prompt",
+      "kind": "roundtrip",
+      "session": "origin",
+      "to": "landed",
+      "expect": {
+        "spend_micros": 42,
+        "priced_turns": 1,
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "receipt_prompts": ["Decision: keep cap at 5"]
+      }
+    },
+    {
+      "id": "hf-decisions-survive-verbatim",
+      "kind": "roundtrip",
+      "session": "origin",
+      "to": "landed",
+      "expect": {
+        "user_messages": ["Decision: keep cap at 5", "Decision: do not widen the auth window"]
+      }
+    },
+    {
+      "id": "hf-approvals-not-carried-is-reported",
+      "kind": "roundtrip",
+      "session": "origin",
+      "to": "landed",
+      "expect": {
+        "status": "not_modelled",
+        "approvals_in_bundle": 0,
+        "approvals_after_handoff": 0
+      }
+    },
+    {
+      "id": "hf-handoff-refuses-traversal",
+      "kind": "auth",
+      "session": "origin",
+      "expect": {
+        "traversal_rejected": ["../escape", "a/b", "..", ""],
+        "sessions_created": 0
+      }
+    },
+    {
+      "id": "hf-handoff-refuses-malformed-bundle",
+      "kind": "auth",
+      "session": "origin",
+      "expect": {
+        "malformed_rejected": ["missing-file", "not-json"],
+        "sessions_created": 0
+      }
+    },
+    {
+      "id": "hf-invariants-clean-namespace",
+      "kind": "verification",
+      "namespace": "alpha",
+      "expect": {
+        "invariants": {
+          "MI-1": "pass",
+          "MI-3": "pass",
+          "MI-6": "not_modelled",
+          "MI-9": "pass",
+          "MI-10": "not_modelled"
+        },
+        "not_modelled_never_pass": true
+      }
+    },
+    {
+      "id": "hf-invariants-violation-is-named",
+      "kind": "verification",
+      "namespace": "corrupt",
+      "expect": {
+        "invariants": {
+          "MI-1": "violation",
+          "MI-6": "not_modelled",
+          "MI-10": "not_modelled"
+        },
+        "mi1_count_positive": true
+      }
+    },
+    {
+      "id": "hf-receipt-verify-surfaces-failure",
+      "kind": "receipt-verify",
+      "expect": {
+        "ok": false,
+        "checks": ["schema", "commit", "commit-exists", "patch", "files", "approvals-attributed", "beliefs"],
+        "failing": ["schema", "commit-exists", "patch", "files"],
+        "not_checked": ["patch", "files"]
+      }
+    },
+    {
+      "id": "hf-namespace-isolation",
+      "kind": "isolation",
+      "expect": {
+        "namespaces_seen": ["alpha", "beta", "corrupt"],
+        "entities": { "alpha": 1, "beta": 1 },
+        "cross_reads_empty": true,
+        "distinct_files": true
+      }
+    },
+    {
+      "id": "hf-namespace-traversal-refused",
+      "kind": "isolation",
+      "expect": {
+        "rejected": ["../secrets", "a/b", "..", "con"],
+        "default_drop_refused": true
+      }
+    }
+  ]
+}
