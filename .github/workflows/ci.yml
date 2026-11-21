@@ -81,6 +81,9 @@ jobs:
       - name: npm stable-tag monotonicity
         run: node scripts/npm-dist-tag.mjs --self-test
 
+      - name: Release notes consistency
+        run: python3 scripts/check-release-notes.py --root ..
+
       # Also exercise the command crate's direct entry point without paying for
       # another runner and another cache restore.
       - name: Command crate docs reference
