@@ -545,6 +545,10 @@ jobs:
       - name: assemble dist
         id: layout
         shell: bash
+        env:
+          # dist.sh reads the first note from this file for manifest.json's
+          # `notes` field (MEMNOTH_RELEASE_NOTES still overrides it).
+          MEMNOTH_CHANGELOG: CHANGELOG.md
         run: |
           # dist.sh reads MEMNOTH_MINISIGN_SECRET_KEY as the 0600 key-file path
           # exported above: it signs SHA256SUMS and embeds the signature in

@@ -228,6 +228,64 @@ json_string() {
     printf '"%s"' "$escaped"
 }
 
+# The manifest's `notes` is the one-line release note installers/updater surfaces
+# show. Resolution order:
+#   1. MEMNOTH_RELEASE_NOTES, when set and non-empty — an explicit override.
+#   2. Otherwise the first non-empty Markdown bullet under this release's
+#      `## [<version>]` section in the changelog (MEMNOTH_CHANGELOG, defaulting
+#      to CHANGELOG.md at the repo root). The site's changelog page is generated
+#      from a copy of that same file (web/contract/changelog.md), so the note and
+#      the published changelog always describe the same release.
+#   3. Otherwise nothing: json_string turns the empty result into JSON null, so
+#      a note is never fabricated when neither source is present.
+release_notes() {
+    if [ -n "${MEMNOTH_RELEASE_NOTES:-}" ]; then
+        printf '%s' "$MEMNOTH_RELEASE_NOTES"
+        return 0
+    fi
+
+    changelog=${MEMNOTH_CHANGELOG:-$SCRIPT_DIR/../CHANGELOG.md}
+    [ -f "$changelog" ] || changelog="$SCRIPT_DIR/../$changelog"
+    [ -f "$changelog" ] || return 0
+
+    awk -v want="$VERSION_NUM" '
+        function trim(s) {
+            sub(/^[[:space:]]+/, "", s)
+            sub(/[[:space:]]+$/, "", s)
+            return s
+        }
+        /^## \[/ {
+            # Any level-2 header closes the section we were reading.
+            if (inside) exit
+            if (match($0, /^## \[[^]]*\]/)) {
+                # `## [x.y.z]` is 5 characters including the opening bracket;
+                # RLENGTH - 5 is exactly the bracketed version label.
+                label = substr($0, 5, RLENGTH - 5)
+                if (label == want) inside = 1
+            }
+            next
+        }
+        /^## / {
+            if (inside) exit
+            next
+        }
+        inside {
+            # A bullet is optional indent, one of - * +, then whitespace. The
+            # match drops the marker; gsub drops Markdown code backticks.
+            if (match($0, /^[[:space:]]*[-*+][[:space:]]+/)) {
+                item = substr($0, RSTART + RLENGTH)
+                gsub(/`/, "", item)
+                item = trim(item)
+                if (item != "") {
+                    print substr(item, 1, 200)  # cap at 200 chars
+                    exit
+                }
+            }
+        }
+    ' "$changelog"
+}
+NOTES_JSON=$(json_string "$(release_notes)")
+
 # Fail closed, like the client: a release whose signature nobody can check is a
 # release `mn update` refuses, so publishing one silently would be publishing
 # something no installed binary can use. A release job that has no signing key
@@ -302,7 +360,7 @@ done
     printf '  "checksums": {"sha256": "%s"},\n' "$CHECKSUM_ALIAS"
     printf '  "signatures": {"minisign": %s, "cosign": null},\n' "$SIGNATURE_JSON"
     printf '  "published_at": "%s",\n' "$PUBLISHED_AT"
-    printf '  "notes": %s\n' "$(json_string "${MEMNOTH_RELEASE_NOTES:-}")"
+    printf '  "notes": %s\n' "$NOTES_JSON"
     printf '}\n'
 } > "$MANIFEST"
 cp "$MANIFEST" "$OUT/$VERSION/manifest.json"
