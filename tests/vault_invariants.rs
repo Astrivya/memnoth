@@ -15,10 +15,12 @@ use memnoth_engine::store::invariants::{
 };
 use memnoth_engine::{EntityKind, MemoryEngine, now_ms};
 
-/// The three S-MEM-2 columns that are still a plan, not a migration:
-/// predicate/object (MI-3), forgotten_at (MI-6) and trust (MI-10). A report
-/// that marks any of these `Pass` is claiming a schema the vault does not have.
-const PLAN_ONLY_IDS: [&str; 3] = ["MI-3", "MI-6", "MI-10"];
+/// Rules whose *write path* still does not record what the rule requires.
+/// Schema v5 added predicate/object, so MI-3 is now a counted check; the
+/// retraction and trust paths still do not set forgotten_at or record a trust
+/// decision, so marking MI-6 or MI-10 `Pass` would claim behaviour that does
+/// not exist.
+const NOT_MODELLED_IDS: [&str; 2] = ["MI-6", "MI-10"];
 
 const ALL_IDS: [&str; 10] = [
     "MI-1", "MI-2", "MI-3", "MI-4", "MI-5", "MI-6", "MI-7", "MI-8", "MI-9", "MI-10",
@@ -79,7 +81,7 @@ fn fresh_vault_has_no_violations_but_never_all_pass() {
 
     // The plan-only rules must be honest about the missing schema, and a clean
     // report must never be a wall of fabricated passes.
-    for id in PLAN_ONLY_IDS {
+    for id in NOT_MODELLED_IDS {
         let row = row(&report, id);
         assert_eq!(
             row.status,

@@ -97,6 +97,11 @@ pub use namespace::{
 pub use reflect::{
     REFLECTION_KIND, ReflectPolicy, Reflection, reflect_all, reflect_entity, reflections_for,
 };
+pub use store::belief_events::{
+    BeliefChainVerification, BeliefEvent, BeliefEventColumn, BeliefEventInput, ChainHead,
+    NOT_MODELLED, all_belief_events, append_belief_event, belief_events_by_author,
+    belief_events_where, chain_head, verify_belief_chain,
+};
 pub use store::proposals::{PROPOSAL_TTL_MS, Proposal};
 pub use store::{
     DEFAULT_BUSY_TIMEOUT_MS, MemoryEngine, VaultOptions, content_hash_entity,

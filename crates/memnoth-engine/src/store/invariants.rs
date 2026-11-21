@@ -7,7 +7,10 @@
 //! schema has no column with which to express the rule. Rules whose supporting
 //! columns do not exist (`forgotten_at`, `trust`, `predicate`/`object`) are
 //! reported as `NotModelled` — never as a pass — so the report cannot fake
-//! compliance with a schema the vault does not have.
+//! compliance with a schema the vault does not have. As of schema v5
+//! `predicate`/`object` exist and MI-3 is a counted check; `forgotten_at`
+//! and `trust` exist but their *write paths* still do not record the facts
+//! those rules require, so MI-6 and MI-10 remain `NotModelled`.
 
 use rusqlite::Connection;
 use serde_json::Value;
@@ -289,17 +292,22 @@ WHERE provenance IS NULL OR TRIM(provenance) IN ('', '{}', 'null')";
             &mi2_sql,
             conn,
         ),
-        not_modelled_row(
+        counted_row(
             "MI-3",
             "At most one open row per (entity, predicate)",
-            "observations has no predicate/object columns (they are a schema-v3 addition in the plan), so 'two open rows per (entity, predicate)' cannot be expressed. The existing unique partial index idx_entities_open_belief is keyed by entities.name, not (entity, predicate), and does not prove this rule.",
+            "SELECT COUNT(*) FROM ( \
+               SELECT entity_id, predicate FROM observations \
+                WHERE valid_to IS NULL AND forgotten_at IS NULL AND predicate IS NOT NULL \
+                GROUP BY entity_id, predicate HAVING COUNT(*) > 1 \
+             )",
+            conn,
         ),
         check_mi4(conn),
         check_mi5(conn),
         not_modelled_row(
             "MI-6",
             "Retraction sets forgotten_at, never DELETE",
-            "No forgotten_at column exists on entities, observations or relations. Retraction is recorded as valid_to / revoked_at / invalid_at (revoke-not-delete), but the plan's forgotten_at retraction timestamp is unobservable, and a past DELETE cannot be detected from a single snapshot.",
+            "Schema v5 adds forgotten_at, but the product's retraction path (decay::forget -> revoke_entity) still records only valid_to and a metadata reason, so no row can be shown to have set it. A past DELETE also cannot be distinguished from a never-written row in a single snapshot. The column existing is not proof the rule is followed.",
         ),
         counted_row(
             "MI-7",
@@ -322,7 +330,7 @@ WHERE provenance IS NULL OR TRIM(provenance) IN ('', '{}', 'null')";
         not_modelled_row(
             "MI-10",
             "Trust never increases without a human decision",
-            "No trust column exists on observations or entities (only confidence); trust is a schema-v3 addition. Neither a trust increase nor the human decision that would justify it can be observed, so this rule is not modelled.",
+            "Schema v5 adds observations.trust with default 2, but there is no trust-change event ledger naming the human who authorised an increase. An initial value and an unapproved increase are indistinguishable from one snapshot, so counting either would fake compliance.",
         ),
     ];
     InvariantReport { rows }
@@ -418,7 +426,16 @@ mod tests {
                 "MI-1", "MI-2", "MI-3", "MI-4", "MI-5", "MI-6", "MI-7", "MI-8", "MI-9", "MI-10",
             ]
         );
-        for id in ["MI-3", "MI-6", "MI-10"] {
+        // Schema v5 added predicate/object, so MI-3 is a counted check; an
+        // empty vault must prove it with a real count rather than claiming a
+        // pass from a column that does not exist.
+        let mi3 = report.rows.iter().find(|row| row.id == "MI-3").unwrap();
+        assert_eq!(mi3.status, InvariantStatus::Pass);
+        assert_eq!(mi3.affected_count, Some(0));
+
+        // The retraction and trust write paths still do not record what these
+        // rules require, so they must not be reported as passes.
+        for id in ["MI-6", "MI-10"] {
             let row = report.rows.iter().find(|row| row.id == id).unwrap();
             assert_eq!(
                 row.status,

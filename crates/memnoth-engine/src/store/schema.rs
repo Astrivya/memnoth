@@ -58,7 +58,10 @@ CREATE TABLE IF NOT EXISTS relations (
     valid_to   INTEGER,
     revoked_at INTEGER,
     metadata   TEXT    NOT NULL DEFAULT '{}',
-    invalid_at INTEGER
+    invalid_at INTEGER,
+    recorded_at  INTEGER,
+    forgotten_at INTEGER,
+    provenance   TEXT    NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS idx_relations_source ON relations(source_id);
 CREATE INDEX IF NOT EXISTS idx_relations_target ON relations(target_id);
@@ -93,7 +96,13 @@ CREATE TABLE IF NOT EXISTS observations (
     content_hash TEXT,
     invalid_at INTEGER,
     recorded_at  INTEGER,
-    provenance   TEXT    NOT NULL DEFAULT '{}'
+    provenance   TEXT    NOT NULL DEFAULT '{}',
+    predicate    TEXT,
+    object       TEXT,
+    forgotten_at INTEGER,
+    trust        INTEGER NOT NULL DEFAULT 2,
+    episode_id   INTEGER,
+    idem_key     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_observations_entity ON observations(entity_id);
 

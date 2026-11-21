@@ -244,9 +244,45 @@ fn apply_w1_migrations(conn: &Connection) -> Result<()> {
         "ALTER TABLE entities ADD COLUMN consolidated_at INTEGER",
         "ALTER TABLE entities ADD COLUMN generation INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE entities ADD COLUMN base_checksum TEXT",
+        // v5: predicate-level beliefs and retraction trust. Additive with
+        // defaults so an older vault opens unchanged. `recorded_at` and
+        // `provenance` are NOT re-added here — observations already gained
+        // them in T3, and relations gain their own copies below.
+        "ALTER TABLE relations ADD COLUMN recorded_at INTEGER",
+        "ALTER TABLE relations ADD COLUMN forgotten_at INTEGER",
+        "ALTER TABLE relations ADD COLUMN provenance TEXT NOT NULL DEFAULT '{}'",
+        "ALTER TABLE observations ADD COLUMN predicate TEXT",
+        "ALTER TABLE observations ADD COLUMN object TEXT",
+        "ALTER TABLE observations ADD COLUMN forgotten_at INTEGER",
+        "ALTER TABLE observations ADD COLUMN trust INTEGER NOT NULL DEFAULT 2",
+        "ALTER TABLE observations ADD COLUMN episode_id INTEGER",
+        "ALTER TABLE observations ADD COLUMN idem_key TEXT",
     ] {
         add_column_if_missing(conn, ddl)?;
     }
+
+    // Before the unique open-belief index exists, close any duplicate open
+    // (entity, predicate) pair. Nothing writes a non-NULL predicate yet, so on
+    // real vaults this is a no-op; it exists so a future fixture with duplicate
+    // predicates cannot make `open` fail with a constraint error. The losing
+    // rows are closed at the successor's valid_from (half-open windows), never
+    // deleted, so the history stays answerable.
+    conn.execute(
+        "UPDATE observations AS o \
+            SET valid_to = ( \
+              SELECT MIN(n.valid_from) FROM observations n \
+               WHERE n.entity_id = o.entity_id AND n.predicate = o.predicate \
+                 AND n.id > o.id AND n.valid_to IS NULL \
+            ) \
+          WHERE o.valid_to IS NULL AND o.predicate IS NOT NULL \
+            AND EXISTS ( \
+              SELECT 1 FROM observations n \
+               WHERE n.entity_id = o.entity_id AND n.predicate = o.predicate \
+                 AND n.id > o.id AND n.valid_to IS NULL \
+            )",
+        [],
+    )?;
+
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS memory_links (
             id          INTEGER PRIMARY KEY,
@@ -270,7 +306,18 @@ fn apply_w1_migrations(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_relations_invalid_at ON relations(invalid_at);
         CREATE INDEX IF NOT EXISTS idx_observations_content_hash ON observations(content_hash);
         CREATE INDEX IF NOT EXISTS idx_observations_invalid_at ON observations(invalid_at);
-        CREATE INDEX IF NOT EXISTS idx_observations_recorded_at ON observations(recorded_at);",
+        CREATE INDEX IF NOT EXISTS idx_observations_recorded_at ON observations(recorded_at);
+        CREATE INDEX IF NOT EXISTS idx_observations_predicate ON observations(predicate);
+        CREATE INDEX IF NOT EXISTS idx_relations_recorded_at ON relations(recorded_at);
+        -- MI-3: at most one open observation per (entity, predicate). Predicate
+        -- is NULL on legacy rows, and the partial index excludes them, so a
+        -- legacy vault can never be forced into a false violation by a guess.
+        CREATE UNIQUE INDEX IF NOT EXISTS obs_one_open_per_predicate
+          ON observations(entity_id, predicate)
+          WHERE valid_to IS NULL AND forgotten_at IS NULL AND predicate IS NOT NULL;
+        -- Deterministic re-derivation after a migration or a re-ingest.
+        CREATE UNIQUE INDEX IF NOT EXISTS obs_idem
+          ON observations(idem_key) WHERE idem_key IS NOT NULL;",
     )?;
     // Backfill content hashes for rows written pre-W1.
     //
@@ -290,7 +337,18 @@ fn apply_w1_migrations(conn: &Connection) -> Result<()> {
     // `IF NOT EXISTS`, so an existing vault gains it on the next open. The
     // version is bumped so support can tell a pre-proposals file from a
     // post-proposals one without guessing from the schema.
-    conn.execute_batch("PRAGMA user_version = 4;")?;
+    // 5 adds predicate/object/trust/episode_id/idem_key and the unique open
+    // belief index. The version is written only after every column, index and
+    // duplicate-resolution pass above has succeeded, so a failed migration
+    // cannot leave a file that claims v5 but lacks the v5 shape.
+    //
+    // Belief-events ledger (VLT-05). Additive (`CREATE TABLE/INDEX IF NOT
+    // EXISTS`), so every vault — fresh or pre-existing — gains it on open
+    // without a version bump past 5. This batch is the single source of truth
+    // for the ledger DDL (`belief_events::BELIEF_EVENTS_SCHEMA_SQL`); it is
+    // deliberately not duplicated in `schema.rs`'s `SCHEMA_SQL`.
+    conn.execute_batch(crate::store::belief_events::BELIEF_EVENTS_SCHEMA_SQL)?;
+    conn.execute_batch("PRAGMA user_version = 5;")?;
     Ok(())
 }
 
@@ -1036,6 +1094,7 @@ impl MemoryEngine {
 #[cfg(test)]
 mod tests;
 
+pub mod belief_events;
 mod graph;
 mod history;
 pub mod invariants;

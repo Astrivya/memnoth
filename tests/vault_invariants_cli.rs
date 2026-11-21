@@ -52,18 +52,22 @@ fn clean_vault_reports_ten_rows_and_never_fakes_a_pass() {
         .collect();
     assert_eq!(ids, ALL_IDS);
 
-    // MI-3, MI-6 and MI-10 are plan-only columns. Counting them as a pass
-    // would claim a schema the vault does not have.
+    // MI-6 and MI-10 have columns in schema v5 but their write paths still
+    // do not record a retraction timestamp or a trust decision. Counting them
+    // as passes would claim behaviour the product does not have.
     for row in rows {
         let id = row["id"].as_str().unwrap();
-        if matches!(id, "MI-3" | "MI-6" | "MI-10") {
+        if matches!(id, "MI-6" | "MI-10") {
             assert_eq!(
                 row["status"], "not_modelled",
                 "{id} must not be reported as a pass"
             );
         }
     }
-    assert_eq!(data["not_modelled"], 3);
+    // MI-3 is now a real counted check because predicate exists in v5.
+    let mi3 = rows.iter().find(|row| row["id"] == "MI-3").unwrap();
+    assert_eq!(mi3["status"], "pass");
+    assert_eq!(data["not_modelled"], 2);
     assert_eq!(data["violations"], 0);
 }
 
