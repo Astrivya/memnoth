@@ -203,6 +203,92 @@ pub fn status(ctx: &AppContext) -> Result<Outcome, ErrorOutcome> {
     ))
 }
 
+/// `memnoth vault invariants` — the ten memory rules, proved read-only.
+///
+/// This is a gate, not a report. A violated rule or a proof that could not run
+/// exits non-zero; a rule the current schema cannot express is printed as
+/// `not_modelled` and never counted as a pass. The checker lives in the engine
+/// (`memnoth_engine::store::invariants`) and touches no state: running it must
+/// not change the vault it judges.
+pub fn invariants(ctx: &AppContext, json_output: bool) -> Result<Outcome, ErrorOutcome> {
+    use memnoth_engine::store::invariants::{InvariantStatus, check_invariants};
+
+    let engine = open_for(ctx, "invariants")?;
+    let report = check_invariants(engine.connection());
+
+    fn word(status: InvariantStatus) -> &'static str {
+        match status {
+            InvariantStatus::Pass => "pass",
+            InvariantStatus::Violation => "violation",
+            InvariantStatus::NotModelled => "not_modelled",
+        }
+    }
+
+    let mut text = String::from("vault invariants\n");
+    for row in &report.rows {
+        let count = row
+            .affected_count
+            .map(|n| format!(" ({n} affected)"))
+            .unwrap_or_default();
+        text.push_str(&format!(
+            "  {:<6} {:<14} {}{}\n",
+            row.id,
+            word(row.status),
+            row.title,
+            count
+        ));
+    }
+    let violations = report.violations();
+    let not_modelled = report.not_modelled();
+    text.push_str(&format!(
+        "\n  violations {} · not_modelled {}\n",
+        violations.len(),
+        not_modelled.len()
+    ));
+    text.push_str(if report.has_violations() {
+        "  gate: FAIL — a rule was violated or a proof could not run\n"
+    } else {
+        "  gate: pass\n"
+    });
+
+    let rows: Vec<Value> = report
+        .rows
+        .iter()
+        .map(|row| {
+            json!({
+                "id": row.id,
+                "title": row.title,
+                "status": word(row.status),
+                "evidence": row.evidence,
+                "affected_count": row.affected_count,
+            })
+        })
+        .collect();
+    let data = json!({
+        "schema": "mn-invariants/1",
+        "vault": ctx.vault_path.display().to_string(),
+        "rows": rows,
+        "has_violations": report.has_violations(),
+        "violations": violations.len(),
+        "not_modelled": not_modelled.len(),
+        "gate": if report.has_violations() { "fail" } else { "pass" },
+    });
+
+    let mut outcome = Outcome::new(
+        "vault.invariants",
+        if json_output {
+            String::new()
+        } else {
+            text.trim_end().to_string()
+        },
+        data,
+    );
+    if report.has_violations() {
+        outcome.exit_code = ExitCode::Unexpected as u8;
+    }
+    Ok(outcome)
+}
+
 /// `memnoth vault asof`.
 pub fn asof(
     ctx: &AppContext,

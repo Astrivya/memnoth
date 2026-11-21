@@ -103,6 +103,7 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
         Verb::Vault(args) => match &args.action {
             VaultCommand::Init => vault::init(ctx),
             VaultCommand::Status => vault::status(ctx),
+            VaultCommand::Invariants { json } => vault::invariants(ctx, *json),
             VaultCommand::AsOf { at, name, limit } => {
                 vault::asof(ctx, at.as_deref(), name.as_deref(), *limit)
             }

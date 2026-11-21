@@ -2423,6 +2423,16 @@ pub enum VaultCommand {
     Init,
     /// What the vault holds now: namespaces, counts, path, size.
     Status,
+    /// Read-only proofs of the ten memory invariants (MI-1 … MI-10).
+    ///
+    /// A violated rule, or a proof that could not run, exits non-zero: a check
+    /// that cannot execute is never a pass. Rules the current schema cannot
+    /// express are reported as `not_modelled`, never counted as compliant.
+    Invariants {
+        /// Machine-readable output on stdout.
+        #[arg(long)]
+        json: bool,
+    },
     /// What the vault believed at an instant.
     ///
     /// `--at` takes RFC 3339 (`2026-09-01T00:00:00Z`), a date
