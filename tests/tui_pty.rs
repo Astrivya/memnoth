@@ -382,23 +382,41 @@ fn the_deck_focus_round_trip_at_eighty_columns() {
         "Alt+A did not reopen the deck after m:\n{}",
         session.diagnose()
     );
-    // Enter focuses: the composer target names the child, and Esc returns.
+    // Enter opens the read-only run detail (looking and steering are separate,
+    // explicit actions since 493449a). Assert the detail names the child, then
+    // Esc back to the roster. `s` opens the steer composer for the same run.
     session.send("\r");
     assert!(
-        session.wait_for_any(&["composer"], Duration::from_secs(10)),
-        "Enter did not focus the child:\n{}",
+        session.wait_for_any(&["SELECTED RUN", "scout"], Duration::from_secs(10)),
+        "Enter did not open the child's run detail:\n{}",
         session.diagnose()
     );
-    let focus = session.text();
+    let detail = session.text();
     assert!(
-        focus.contains("scout") || focus.contains("composer"),
-        "focus does not name its child:\n{focus}"
+        detail.contains("scout"),
+        "run detail does not name its child:\n{detail}"
     );
-    session.dump("focus at 80x24");
+    session.dump("run detail at 80x24");
     session.send(&char::from(27).to_string());
     assert!(
         session.wait_for_any(&["Agent Deck"], Duration::from_secs(10)),
         "Esc did not return to the deck:\n{}",
+        session.diagnose()
+    );
+    session.send("s");
+    assert!(
+        session.wait_for_any(
+            &["Steer", "Write the direction", "composer"],
+            Duration::from_secs(10)
+        ),
+        "s did not open the steer composer:\n{}",
+        session.diagnose()
+    );
+    session.dump("steer composer at 80x24");
+    session.send(&char::from(27).to_string());
+    assert!(
+        session.wait_for_any(&["Agent Deck"], Duration::from_secs(10)),
+        "Esc did not return from the composer:\n{}",
         session.diagnose()
     );
     assert!(session.quit(), "ctrl-d must leave after the round trip");

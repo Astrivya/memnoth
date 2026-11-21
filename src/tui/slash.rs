@@ -257,6 +257,21 @@ impl SlashMenu {
         let trailing_space = rest.ends_with(' ');
         let path = rest.trim_end();
         let path_name = format!("/{path}");
+        // A bare line that is itself a complete, runnable command is not a
+        // prefix to drill into. `/org` opens the organization overview; the
+        // dropdown must not rewrite it to the first child `/org show` on Enter
+        // (which needs auth and hides the local, read-only overview). Families
+        // whose root has no runnable action resolve to Usage/Unknown and keep
+        // their child navigation.
+        let root_resolves = matches!(
+            crate::tui::app::parse_line(&path_name),
+            crate::tui::app::Parsed::Run(_)
+                | crate::tui::app::Parsed::OrganizationOverlay
+                | crate::tui::app::Parsed::Help
+        );
+        if !trailing_space && root_resolves {
+            return None;
+        }
         let path_prefix = format!("{path_name} ");
         let split = path.rsplit_once(' ');
         let parent_prefix = split.map(|(parent, _)| format!("/{parent} "));
@@ -920,6 +935,17 @@ mod tests {
         let mut menu = SlashMenu::new();
         menu.sync(line, line.chars().count());
         menu
+    }
+
+    #[test]
+    fn a_complete_root_command_is_not_rewritten_to_its_first_child() {
+        // `/org` is a complete command opening the local, read-only overview;
+        // the dropdown must not enter subcommand mode and rewrite it to
+        // `/org show` on Enter (which needs auth). Families whose root has no
+        // runnable action (e.g. `/vault`) still drill into their children.
+        let menu = SlashMenu::new();
+        assert_eq!(menu.subcommand_stage("org"), None);
+        assert!(menu.subcommand_stage("vault").is_some());
     }
 
     #[test]
