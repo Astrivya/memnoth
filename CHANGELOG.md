@@ -34,6 +34,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Static marketing claims.** Landing and setup copy now says "One install" rather than "One binary", and the setup-section claims were corrected to describe what the installer actually does.
 - **Signed-release provisioning.** A minisign key is provisioned as a GitHub secret, pubkeys are checked in, and the release workflow installs minisign, bakes the pubkey into binaries and requires a signature in the post-publish check. This is source-side provisioning only: the already-published 0.1.1 release is still unsigned.
 
+## [0.1.2] - 2026-11-21
+
+The first minisign-signed release: `SHA256SUMS` is signed with the repository's
+minisign key and the signature is embedded in `manifest.json`, so `mn update`
+verifies an update before it installs it. OS-level signing remains conditional
+on credentials (D4, known-issues §9): macOS/Windows artifacts are unsigned in
+this release and carry the documented Gatekeeper/SmartScreen caveat.
+
+### Added
+
+- Read-only `mn vault invariants` gate and MCP `vault_invariants` over the ten memory invariants; violations and un-runnable proofs fail closed.
+- Two-clock `vault asof --knew <when>` / MCP `known_ms`: recorded time is independent of validity time, and unrecorded facts are excluded, not guessed.
+- Hidden `/evidence` TUI verb and five-page overlay composing belief → author → approval → commit → impact with an honest measured/partial/not_recorded/stale vocabulary.
+- Six deterministic, model-free benchmark verifiers (`mn bench trs-verify`, `kg-verify`, `handoff-verify`, `repoqa-verify`, `lme-verify`, `proof`); all are labelled diagnostics, not official scores.
+- Additive vault schema v5 (predicate/object/trust/episode_id/idem_key) and a hash-chained belief-events ledger.
+
+### Changed
+
+- SCIM-provisioned users are joined to the configured org in one transaction and deprovisioning is a soft revoke with an audit record.
+- `mn mcp add` preserves Zed JSONC comments and unrelated settings; `mn update --rollback` can select a sanctioned previous version; sync import refuses a decrypted vault that fails its invariants.
+
 ## [0.1.0-beta.13] - 2026-11-21
 
 ### Added - Vault invariants

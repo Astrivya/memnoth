@@ -1,6 +1,6 @@
 [package]
 name = "memnoth-agent"
-version = "0.1.1"
+version = "0.1.2"
 license.workspace = true
 edition = "2024"
 description = "Agent runtime: run registry, separate from the session message list"

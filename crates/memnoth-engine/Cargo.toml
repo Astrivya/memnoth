@@ -1,6 +1,6 @@
 [package]
 name = "memnoth-engine"
-version = "0.1.1"
+version = "0.1.2"
 license.workspace = true
 edition = "2024"
 description = "memnoth temporal property-graph memory engine: schema v2, supersede/revoke/as-of semantics"

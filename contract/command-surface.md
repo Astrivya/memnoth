@@ -1332,6 +1332,26 @@ memnoth why rate_limit --at 2026-09-01
 
 ---
 
+### `memnoth evidence`
+
+Compose belief, author, approval, commit and impact for one subject
+
+Five read-only pages over the existing why, lineage, receipt and impact backends. Every link states whether it was measured, partial, not_recorded or stale. Nothing is upgraded to a receipt on the strength of a session-only approval.
+
+**Examples:**
+
+```bash
+memnoth evidence rate_limit
+```
+
+**Required arguments:**
+
+- `--subject` (string) — Symbol or entity whose evidence chain to compose
+
+**Overlay:** `Fullscreen` | **Danger:** `Safe` | **Auth:** `None`
+
+---
+
 ## MERGE
 
 ### `memnoth merge`

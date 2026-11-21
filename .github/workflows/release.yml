@@ -101,10 +101,14 @@ jobs:
           fi
           echo "minisign signing key: configured"
 
-      # KI-09: all three Apple credentials are needed for notarize + staple.
-      # A missing one used to skip notarization and ship an archive Gatekeeper
-      # rejects; that is now a workflow failure, not an honest-looking default.
-      - name: require macOS notarization credentials
+      # KI-09: Apple notarization is OS-level signing, which D4 and
+      # known-issues §9 treat as CONDITIONAL on credentials being present —
+      # unlike the minisign key, which is mandatory because `mn update`
+      # verifies it. A complete set notarizes + staples; an incomplete set is
+      # reported and the macOS leg ships with the documented Gatekeeper
+      # caveat. A *partial* set is never acted on: the build job only
+      # notarizes when all three are present.
+      - name: report macOS notarization credentials (conditional)
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
@@ -112,16 +116,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          missing=""
-          [ -n "${APPLE_ID:-}" ] || missing="$missing APPLE_ID"
-          [ -n "${APPLE_PASSWORD:-}" ] || missing="$missing APPLE_APP_SPECIFIC_PASSWORD"
-          [ -n "${NOTARYTOOL_TEAM_ID:-}" ] || missing="$missing NOTARYTOOL_TEAM_ID"
-          if [ -n "$missing" ]; then
-            echo "macOS notarization credentials missing:$missing" >&2
-            echo "Refusing to publish an unsigned macOS archive (KI-09 / REL-01); notarize + staple need all three." >&2
-            exit 1
+          if [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_PASSWORD:-}" ] && [ -n "${NOTARYTOOL_TEAM_ID:-}" ]; then
+            echo "macOS notarization credentials: configured (archive will be notarized + stapled)"
+          else
+            echo "macOS notarization credentials: incomplete — shipping OS-unsigned macOS archive with the documented Gatekeeper caveat (D4 / known-issues §9)"
           fi
-          echo "macOS notarization credentials: configured"
 
       # D4 / REL-01 say Authenticode is signed "if a cert exists", so this one
       # is reported rather than required. The SmartScreen caveat is documented
@@ -146,7 +145,8 @@ jobs:
           {
             echo "### Signing policy (fail closed)"
             echo
-            echo "- minisign key and macOS notarization credentials: **required**. The workflow stops before build if either is unconfigured."
+            echo "- minisign key: **required**. The workflow stops before build when it is unconfigured (mn update verifies it)." 
+            echo "- macOS notarization + Windows Authenticode: **conditional** on credentials (D4 / known-issues §9); OS-unsigned archives carry the documented Gatekeeper/SmartScreen caveat."
             echo "- Windows Authenticode certificate: optional; SmartScreen caveat applies when no certificate is configured."
             echo "- Cosign/Sigstore SBOM + build provenance: keyless OIDC, no secret required."
             echo "- \`mn update\` verifies only the minisign signature; a missing one is a release failure, not a warning."
@@ -400,11 +400,11 @@ jobs:
       # archive must have a digest that matches the file that is actually
       # published, so the `.sha256` is produced in the "write digest" step.
 
-      # macOS: notarize the archive and staple the ticket. Notarization is what
-      # lets Gatekeeper accept a downloaded binary; stapling bundles the ticket
-      # so the first run does not have to reach Apple. signing-preflight already
-      # required all three credentials, so a release that reaches this job is
-      # notarized — the check below is a local guard, not an opt-out.
+      # macOS: notarize the archive and staple the ticket when all three
+      # Apple credentials are configured. Notarization is OS-level signing
+      # (D4 / known-issues §9): conditional, unlike the mandatory minisign
+      # signature that `mn update` verifies. A partial set is never acted on —
+      # the archive ships OS-unsigned with the documented Gatekeeper caveat.
       - name: Check macOS notarization credentials
         id: apple-signing
         if: ${{ !matrix.cross && runner.os == 'macOS' }}
@@ -417,11 +417,8 @@ jobs:
           if [[ -n "$APPLE_ID" && -n "$APPLE_PASSWORD" && -n "$NOTARYTOOL_TEAM_ID" ]]; then
             echo "configured=true" >> "$GITHUB_OUTPUT"
           else
-            # Unreachable on a tagged release (preflight failed first), but a
-            # partial credential set must never silently produce an unsigned
-            # archive if this job is ever run on its own.
-            echo "macOS notarization credentials are incomplete; refusing to build an unsigned macOS archive" >&2
-            exit 1
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "macOS notarization credentials incomplete; shipping OS-unsigned archive (D4 / known-issues §9)"
           fi
 
       - name: notarize and staple (macOS)

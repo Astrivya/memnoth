@@ -1,5 +1,5 @@
 {
-  "command_count": 161,
+  "command_count": 162,
   "commands": [
     {
       "cli_path": [
@@ -1934,6 +1934,66 @@
       "tags": [
         "impact",
         "code"
+      ],
+      "timeout_secs": null
+    },
+    {
+      "cli_path": [
+        "evidence"
+      ],
+      "handler": "evidence",
+      "id": "evidence",
+      "json_output": true,
+      "min_version": null,
+      "related": [
+        "why",
+        "lineage",
+        "report.receipt",
+        "impact"
+      ],
+      "slash": {
+        "aliases": [],
+        "auth": "none",
+        "categories": [
+          "memory"
+        ],
+        "danger": "safe",
+        "deprecated": null,
+        "description": "Compose belief, author, approval, commit and impact for one subject",
+        "examples": [
+          "evidence rate_limit"
+        ],
+        "hidden": true,
+        "long_description": "Five read-only pages over the existing why, lineage, receipt and impact backends. Every link states whether it was measured, partial, not_recorded or stale. Nothing is upgraded to a receipt on the strength of a session-only approval.",
+        "name": "evidence",
+        "overlay": "fullscreen",
+        "palette": "evidence <subject>",
+        "params": [
+          {
+            "default": null,
+            "deprecated": null,
+            "description": "Symbol or entity whose evidence chain to compose",
+            "env": null,
+            "hidden": false,
+            "long": null,
+            "name": "subject",
+            "param_type": {
+              "completions": null,
+              "pattern": null,
+              "type": "string"
+            },
+            "position": null,
+            "positional": false,
+            "required": true,
+            "short": null
+          }
+        ],
+        "profile": null
+      },
+      "streaming": false,
+      "tags": [
+        "evidence",
+        "memory"
       ],
       "timeout_secs": null
     },
