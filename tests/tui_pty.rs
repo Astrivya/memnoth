@@ -403,12 +403,20 @@ fn the_deck_focus_round_trip_at_eighty_columns() {
         "Esc did not return to the deck:\n{}",
         session.diagnose()
     );
+    // The deck is still open after the detail's Esc. `quit()` sends one Esc to
+    // close an overlay before Ctrl-D, so close the deck here first; otherwise
+    // Ctrl-D is swallowed by the deck and the screen cannot be left.
+    session.send(&char::from(27).to_string());
+    assert!(
+        session.wait_for_any(&["Ask Memnoth", "type message"], Duration::from_secs(10)),
+        "Esc did not close the deck back to the prompt:\n{}",
+        session.diagnose()
+    );
     // The steer composer is a separate feature with its own unit tests
     // (`src/tui/agents/deck.rs`, `s` key), and this seeded deck has a pending
     // attention request plus a completed child — a state where `s` has no
-    // selected, steerable run. Do not assert it through this PTY round trip:
-    // the regression this test guards is "Enter opens the read-only detail",
-    // which is asserted above.
+    // selected, steerable run. The regression this test guards is "Enter
+    // opens the read-only detail", which is asserted above.
     assert!(session.quit(), "ctrl-d must leave after the round trip");
 }
 
