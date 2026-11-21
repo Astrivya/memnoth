@@ -102,6 +102,15 @@ pub enum BenchCommand {
     Scoreboard(ScoreboardArgs),
     /// Show the 32-cell ablation matrix state.
     Ablation(AblationArgs),
+    /// Verify deterministic temporal-recall cases with no model or network.
+    TrsVerify(TrsVerifyArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub struct TrsVerifyArgs {
+    /// Fixture JSON (defaults to ci/trs-cases.json).
+    #[arg(long)]
+    pub cases: Option<PathBuf>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -185,6 +194,7 @@ pub fn run(_ctx: &AppContext, args: &BenchArgs) -> Result<Outcome> {
         BenchCommand::Run(run) => run_bench(run),
         BenchCommand::Scoreboard(scoreboard) => render_scoreboard(scoreboard),
         BenchCommand::Ablation(ablation) => show_ablation(ablation),
+        BenchCommand::TrsVerify(verify) => crate::bench_trs::run(verify),
     }
 }
 

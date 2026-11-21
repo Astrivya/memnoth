@@ -33,6 +33,7 @@ pub mod demo;
 pub use context::{AppContext, Config, DEFAULT_MCP_URL, DEFAULT_PROFILE};
 pub mod acp;
 pub mod bench;
+pub mod bench_trs;
 pub mod billing;
 pub mod budget;
 pub mod checkpoint;

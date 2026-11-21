@@ -1,0 +1,67 @@
+{
+  "schema": "mn-trs/1",
+  "comment": "Deterministic Temporal Recall Suite. Ground truth is written from the op list, never from the engine under test. T0 = 1700000000000, DAY = 86400000. current/as-of/knowledge cases exercise two independent clocks; the last case checks that an unrecorded learning time is excluded rather than guessed.",
+  "cases": [
+    {
+      "id": "trs-current-opens-only",
+      "kind": "current",
+      "entity": "retry-cap",
+      "ops": [
+        { "op": "add", "name": "retry-cap", "valid_from": 1700000000000, "recorded_at": 1700000000000 },
+        { "op": "fact", "content": "cap is 3", "valid_from": 1700000000000, "valid_to": 1700086400000, "recorded_at": 1700000000000, "author": "asha" },
+        { "op": "fact", "content": "cap is 5", "valid_from": 1700086400000, "recorded_at": 1700086400000, "author": "asha" }
+      ],
+      "at": 1700172800000,
+      "expect": ["cap is 5"]
+    },
+    {
+      "id": "trs-asof-returns-the-closed-belief",
+      "kind": "as-of",
+      "entity": "retry-cap",
+      "ops": [
+        { "op": "add", "name": "retry-cap", "valid_from": 1700000000000, "recorded_at": 1700000000000 },
+        { "op": "fact", "content": "cap is 3", "valid_from": 1700000000000, "valid_to": 1700086400000, "recorded_at": 1700000000000, "author": "asha" },
+        { "op": "fact", "content": "cap is 5", "valid_from": 1700086400000, "recorded_at": 1700086400000, "author": "asha" }
+      ],
+      "at": 1700043200000,
+      "expect": ["cap is 3"]
+    },
+    {
+      "id": "trs-knowledge-excludes-later-learning",
+      "kind": "knowledge",
+      "entity": "gateway-timeout",
+      "ops": [
+        { "op": "add", "name": "gateway-timeout", "valid_from": 1700000000000, "recorded_at": 1700000000000 },
+        { "op": "fact", "content": "timeout rose in September", "valid_from": 1700000000000, "recorded_at": 1700000000000, "author": "asha" },
+        { "op": "fact", "content": "timeout measured at 30s", "valid_from": 1700000000000, "recorded_at": 1700432000000, "author": "bob" }
+      ],
+      "at": 1700518400000,
+      "known": 1700172800000,
+      "expect": ["timeout rose in September"]
+    },
+    {
+      "id": "trs-half-open-boundary",
+      "kind": "as-of",
+      "entity": "feature-flag",
+      "ops": [
+        { "op": "add", "name": "feature-flag", "valid_from": 1700000000000, "recorded_at": 1700000000000 },
+        { "op": "fact", "content": "flag off", "valid_from": 1700000000000, "valid_to": 1700086400000, "recorded_at": 1700000000000, "author": "asha" },
+        { "op": "fact", "content": "flag on", "valid_from": 1700086400000, "recorded_at": 1700086400000, "author": "asha" }
+      ],
+      "at": 1700086400000,
+      "expect": ["flag on"]
+    },
+    {
+      "id": "trs-unrecorded-learning-is-excluded",
+      "kind": "knowledge",
+      "entity": "mystery-source",
+      "ops": [
+        { "op": "add", "name": "mystery-source", "valid_from": 1700000000000, "recorded_at": 1700000000000 },
+        { "op": "fact", "content": "no one recorded when", "valid_from": 1700000000000, "recorded_at": null, "author": "unknown" },
+        { "op": "fact", "content": "recorded normally", "valid_from": 1700000000000, "recorded_at": 1700000000000, "author": "asha" }
+      ],
+      "at": 1700172800000,
+      "expect": ["recorded normally"]
+    }
+  ]
+}
