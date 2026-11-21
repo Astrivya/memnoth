@@ -313,20 +313,19 @@ fn checks(ctx: &AppContext, auth: bool) -> Result<Vec<Check>> {
     rows.push(trust_check(ctx));
 
     if auth {
-        rows.push(
-            match crate::auth::auth_status(ctx, &crate::cli::AuthStatusArgs {}) {
-                Ok(status) if status.data["authenticated"].as_bool().unwrap_or(false) => {
-                    observed("auth", "signed in".to_string())
-                }
-                Ok(_) => warn(
-                    "auth",
-                    "not signed in — run `mn auth login` (never run automatically by --fix)"
-                        .to_string(),
-                    false,
-                ),
-                Err(error) => warn("auth", format!("{error}"), false),
-            },
-        );
+        // Use the read-only probe: the real auth_status opens a credential
+        // store that creates ~/.memnoth, which would make a `--dry-run` flip
+        // the very "state" check it is comparing.
+        rows.push(if crate::auth::signed_in_readonly() {
+            observed("auth", "signed in".to_string())
+        } else {
+            warn(
+                "auth",
+                "not signed in — run `mn auth login` (never run automatically by --fix)"
+                    .to_string(),
+                false,
+            )
+        });
     }
 
     Ok(rows)

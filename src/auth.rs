@@ -881,6 +881,33 @@ pub fn create_credential_store() -> Result<MultiCredentialStore> {
 /// which creates `~/.memnoth` via `create_dir_all` — a diagnostic must not have
 /// that side effect, or `--dry-run`'s "before" and "after" checks disagree on
 /// the very directory it just created. Returns `(exists, permissions_ok)`.
+/// Construct the same multi-store as [`create_credential_store`] but without
+/// creating the credential directory. Used by `mn doctor`, whose checks must
+/// not mutate the machine they are inspecting.
+pub fn create_credential_store_readonly() -> Result<MultiCredentialStore> {
+    let keyring = KeyringCredentialStore::new("memnoth");
+    let rt = Runtime::new()?;
+    let file = rt.block_on(FileCredentialStore::at_default_readonly())?;
+    Ok(MultiCredentialStore::new(vec![
+        CredentialStore::Keyring(keyring),
+        CredentialStore::File(file),
+    ]))
+}
+
+/// Read-only sign-in probe for `mn doctor`: report whether a `whoami` is
+/// cached, without creating anything.
+pub fn signed_in_readonly() -> bool {
+    let Ok(store) = create_credential_store_readonly() else {
+        return false;
+    };
+    store
+        .get_sync("whoami")
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .is_some()
+}
+
 #[cfg(unix)]
 pub fn credential_file_state() -> (bool, bool) {
     use std::os::unix::fs::PermissionsExt;

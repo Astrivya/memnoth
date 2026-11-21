@@ -279,6 +279,19 @@ impl FileCredentialStore {
         Ok(store)
     }
 
+    /// Read-only variant: open the store at the default location WITHOUT
+    /// creating its directory. For diagnostics (`mn doctor`) that must not have
+    /// side effects. `load()` already treats a missing file as empty, so no
+    /// directory needs to exist to read it.
+    pub async fn at_default_readonly() -> Result<Self> {
+        let store = Self {
+            path: default_credentials_path(),
+            cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+        };
+        store.load().await?;
+        Ok(store)
+    }
+
     /// Load credentials from disk into memory.
     async fn load(&self) -> Result<()> {
         if !self.path.exists() {
