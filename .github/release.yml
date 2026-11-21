@@ -1,0 +1,43 @@
+# Automatic release-note categories for astrivya/memnoth.
+#
+# GitHub reads this file when the release workflow's `softprops/action-gh-release`
+# step runs with `generate_release_notes: true` (the "Generate release notes" API).
+# It groups merged pull requests by label. A pull request whose labels match no
+# category below lands in "Other Changes", so every PR still appears.
+# The labels named here must actually be applied to PRs for a category to fill.
+
+changelog:
+  exclude:
+    labels:
+      - skip ci
+      - dependencies
+      - ignore-for-release
+
+  categories:
+    - title: Breaking Changes
+      labels:
+        - breaking
+        - breaking-change
+    - title: Added
+      labels:
+        - enhancement
+        - feature
+    - title: Fixed
+      labels:
+        - bug
+        - fix
+    - title: Changed
+      labels:
+        - changed
+        - refactor
+    - title: Documentation
+      labels:
+        - documentation
+        - docs
+    - title: Maintenance
+      labels:
+        - maintenance
+        - chore
+    - title: Other Changes
+      labels:
+        - "*"
