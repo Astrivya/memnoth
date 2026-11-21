@@ -114,7 +114,7 @@ impl ContextOverlay {
     fn reload(&mut self, ctx: &AppContext) {
         self.note = None;
 
-        match crate::vault::asof(ctx, None, None, LIMIT) {
+        match crate::vault::asof(ctx, None, None, None, LIMIT) {
             Ok(outcome) => self.beliefs = beliefs_from(&outcome.data),
             Err(error) => {
                 self.beliefs.clear();

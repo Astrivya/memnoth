@@ -1605,6 +1605,10 @@ pub fn verb_for(name: &str, input: &Value) -> Result<Verb> {
         "vault_asof" => Ok(Verb::Vault(VaultArgs {
             action: VaultCommand::AsOf {
                 at: Some(text("at")?),
+                knew: input
+                    .get("known_ms")
+                    .and_then(Value::as_i64)
+                    .map(|ms| ms.to_string()),
                 name: input
                     .get("name")
                     .and_then(Value::as_str)

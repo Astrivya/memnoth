@@ -103,8 +103,8 @@ pub use store::{
     content_hash_observation, intervals_overlap, normalize_instant, utc_day,
 };
 pub use vault_history::{
-    recall_with_contradictions, vault_contradictions, vault_contradictions_all,
-    vault_history as entity_history, vault_timeline,
+    current_facts_known, recall_with_contradictions, vault_contradictions,
+    vault_contradictions_all, vault_history as entity_history, vault_timeline,
 };
 pub use workflow::{
     AgentToolDef, Dag, DagNode, Hook, HookCallback, HookPoint, Hooks, JournalEntry, MAX_BUDGET,

@@ -340,6 +340,53 @@ pub fn current_facts(engine: &MemoryEngine, entity_id: i64, as_of: i64) -> Resul
     Ok(facts)
 }
 
+/// The facts one entity held at `as_of` that were **already recorded** by
+/// `known`: the second clock. Valid time asks what was true then; recorded time
+/// asks what the vault had learned by then. A fact with no `recorded_at` is
+/// excluded rather than guessed — the SQL comparison against NULL is false for
+/// the same reason.
+pub fn current_facts_known(
+    engine: &MemoryEngine,
+    entity_id: i64,
+    as_of: i64,
+    known: i64,
+) -> Result<Vec<Value>> {
+    let conn = engine.connection();
+    let mut stmt = conn
+        .prepare(
+            "SELECT content, kind, confidence, valid_from, valid_to, recorded_at, provenance \
+               FROM observations \
+              WHERE entity_id = ?1 \
+                AND valid_from <= ?2 \
+                AND (valid_to IS NULL OR valid_to > ?2) \
+                AND (invalid_at IS NULL OR invalid_at > ?2) \
+                AND recorded_at IS NOT NULL AND recorded_at <= ?3 \
+              ORDER BY valid_from, id",
+        )
+        .context("prepare known-fact query")?;
+    let rows = stmt.query_map(params![entity_id, as_of, known], |row| {
+        let content: String = row.get(0)?;
+        let kind: String = row.get(1)?;
+        let confidence: f64 = row.get(2)?;
+        let valid_from: i64 = row.get(3)?;
+        let valid_to: Option<i64> = row.get(4)?;
+        let recorded_at: Option<i64> = row.get(5)?;
+        let provenance: Option<String> = row.get(6)?;
+        let mut fact = provenance_of(provenance.as_deref(), recorded_at);
+        fact["fact"] = Value::String(content);
+        fact["kind"] = Value::String(kind);
+        fact["confidence"] = json!(confidence);
+        fact["valid_from"] = json!(valid_from);
+        fact["valid_to"] = json!(valid_to);
+        Ok(fact)
+    })?;
+    let mut facts = Vec::new();
+    for row in rows {
+        facts.push(row?);
+    }
+    Ok(facts)
+}
+
 /// The facts believed during one version's validity window, each carrying its
 /// source/date/author chain.
 ///

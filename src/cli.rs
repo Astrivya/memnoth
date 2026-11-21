@@ -2448,6 +2448,13 @@ pub enum VaultCommand {
         /// The instant to reconstruct. Defaults to now.
         #[arg(long, value_name = "WHEN")]
         at: Option<String>,
+        /// Second clock: only facts the vault had recorded by this instant.
+        ///
+        /// `--at` asks what was true then; `--knew` asks what we had learned by
+        /// then. Both take the same three date forms. A fact whose recording
+        /// time was never captured is excluded, never guessed.
+        #[arg(long, value_name = "WHEN")]
+        knew: Option<String>,
         /// Restrict the answer to one entity.
         #[arg(long, value_name = "NAME")]
         name: Option<String>,

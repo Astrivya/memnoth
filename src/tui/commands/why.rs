@@ -54,7 +54,7 @@ pub fn run(ctx: &AppContext, symbol: &str, at: Option<&str>) -> Result<Outcome, 
 
     // ── Belief: what was believed about this symbol at the instant ──────
     let asof_outcome =
-        vault::asof(ctx, Some(&rfc3339(instant)), Some(symbol), 1).map_err(|e| e.clone());
+        vault::asof(ctx, Some(&rfc3339(instant)), None, Some(symbol), 1).map_err(|e| e.clone());
     let asof_data = asof_outcome
         .as_ref()
         .map(|o| o.data.clone())

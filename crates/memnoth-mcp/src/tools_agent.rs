@@ -127,6 +127,11 @@ pub fn tool_definitions() -> Vec<Value> {
                     "integer",
                     "Epoch millis; use the 'now' tool to get the current instant",
                 ),
+                opt(
+                    "known_ms",
+                    "integer",
+                    "Second clock: only facts recorded by this instant are returned. Omit for validity-time only.",
+                ),
             ],
             READ_ONLY,
             vault_asof_schema(),
@@ -227,6 +232,7 @@ fn vault_asof_schema() -> Value {
         json!({
             "entity": {"type": "string"},
             "as_of_ms": {"type": "integer", "description": "The instant asked about"},
+            "known_ms": {"type": "integer", "description": "The recorded-time cut; present only when the caller supplied one"},
             "now_ms": {"type": "integer", "description": "Server clock when the answer was computed"},
             "believed_at": {
                 "type": "array",
@@ -699,6 +705,14 @@ pub(crate) fn vault_asof(engine: &MemoryEngine, args: &Value, now: i64) -> Resul
         .or_else(|| chain.first().and_then(|v| v["entity_id"].as_i64()))
         .unwrap_or(0);
     // facts + relations believed at as_of
+    // The second clock. `recorded_at <= known` is a separate question from
+    // `valid_from <= as_of`: the first asks what we had learned by then, the
+    // second what was true then. NULL recorded_at is excluded rather than
+    // guessed, matching the SQL comparison's own semantics.
+    let known = args
+        .get("known_ms")
+        .map(|_| arg_usize(args, "known_ms", 0) as i64);
+
     let mut facts = Vec::new();
     let mut rels = Vec::new();
     if entity_id > 0 {
@@ -706,13 +720,7 @@ pub(crate) fn vault_asof(engine: &MemoryEngine, args: &Value, now: i64) -> Resul
         // `provenance` (`{"user","agent"}`) — same shape the CLI's vault
         // history returns so a fact's provenance is identical whichever
         // surface reads it.
-        if let Ok(mut stmt) = engine.connection().prepare(
-            "SELECT content, kind, confidence, valid_from, recorded_at, provenance \
-                 FROM observations WHERE entity_id = ?1 AND valid_from <= ?2 \
-                   AND (valid_to IS NULL OR valid_to > ?2) \
-                   AND (invalid_at IS NULL OR invalid_at > ?2) \
-                 ORDER BY valid_from, id",
-        ) && let Ok(rows) = stmt.query_map(params![entity_id, as_of], |r| {
+        let map_row = |r: &rusqlite::Row<'_>| -> rusqlite::Result<Value> {
             let provenance: String = r.get(5)?;
             Ok(json!({
                 "content": r.get::<_, String>(0)?,
@@ -723,7 +731,30 @@ pub(crate) fn vault_asof(engine: &MemoryEngine, args: &Value, now: i64) -> Resul
                 "provenance": serde_json::from_str::<Value>(&provenance)
                     .unwrap_or(Value::Null),
             }))
-        }) {
+        };
+        if let Some(known_ms) = known {
+            if let Ok(mut stmt) = engine.connection().prepare(
+                "SELECT content, kind, confidence, valid_from, recorded_at, provenance \
+                     FROM observations WHERE entity_id = ?1 AND valid_from <= ?2 \
+                       AND (valid_to IS NULL OR valid_to > ?2) \
+                       AND (invalid_at IS NULL OR invalid_at > ?2) \
+                       AND recorded_at IS NOT NULL AND recorded_at <= ?3 \
+                     ORDER BY valid_from, id",
+            ) && let Ok(rows) =
+                stmt.query_map(params![entity_id, as_of, known_ms], |r| map_row(r))
+            {
+                for row in rows {
+                    facts.push(row?);
+                }
+            }
+        } else if let Ok(mut stmt) = engine.connection().prepare(
+            "SELECT content, kind, confidence, valid_from, recorded_at, provenance \
+                 FROM observations WHERE entity_id = ?1 AND valid_from <= ?2 \
+                   AND (valid_to IS NULL OR valid_to > ?2) \
+                   AND (invalid_at IS NULL OR invalid_at > ?2) \
+                 ORDER BY valid_from, id",
+        ) && let Ok(rows) = stmt.query_map(params![entity_id, as_of], |r| map_row(r))
+        {
             for row in rows {
                 facts.push(row?);
             }
@@ -735,7 +766,7 @@ pub(crate) fn vault_asof(engine: &MemoryEngine, args: &Value, now: i64) -> Resul
                     .collect();
         }
     }
-    Ok(json!({
+    let mut result = json!({
         "entity": name,
         "as_of_ms": as_of,
         "now_ms": now,
@@ -743,7 +774,11 @@ pub(crate) fn vault_asof(engine: &MemoryEngine, args: &Value, now: i64) -> Resul
         "facts": facts,
         "relations": rels,
         "note": if believed.is_empty() { "entity was not believed at this instant" } else { "" },
-    }))
+    });
+    if let Some(known_ms) = known {
+        result["known_ms"] = json!(known_ms);
+    }
+    Ok(result)
 }
 
 /// The team's unattended queue: beliefs proposed by agents and teammates that
@@ -1077,6 +1112,48 @@ pub(crate) fn vault_asof_team(engine: &MemoryEngine, name: &str, at_ms: i64) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use memnoth_engine::EntityKind;
+
+    #[test]
+    fn vault_asof_known_ms_is_a_second_independent_clock() {
+        const T0: i64 = 1_700_000_000_000;
+        const DAY: i64 = 86_400_000;
+        let engine = MemoryEngine::open_in_memory().expect("in-memory vault");
+        let id = engine
+            .add_entity(EntityKind::Concept, "clock", 0.9, T0)
+            .expect("entity");
+        let conn = engine.connection();
+        conn.execute(
+            "INSERT INTO observations \
+                (entity_id, content, kind, confidence, valid_from, recorded_at, provenance) \
+             VALUES (?1, 'early', 'fact', 1.0, ?2, ?2, '{\"user\":\"a\"}')",
+            params![id, T0],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO observations \
+                (entity_id, content, kind, confidence, valid_from, recorded_at, provenance) \
+             VALUES (?1, 'late', 'fact', 1.0, ?2, ?3, '{\"user\":\"a\"}')",
+            params![id, T0, T0 + 10 * DAY],
+        )
+        .unwrap();
+
+        let at = T0 + 20 * DAY;
+        let all = vault_asof(&engine, &json!({"name": "clock", "as_of_ms": at}), at).unwrap();
+        assert_eq!(all["facts"].as_array().unwrap().len(), 2);
+        assert!(all.get("known_ms").is_none(), "no cut was asked for");
+
+        let known = vault_asof(
+            &engine,
+            &json!({"name": "clock", "as_of_ms": at, "known_ms": T0 + 5 * DAY}),
+            at,
+        )
+        .unwrap();
+        assert_eq!(known["known_ms"], T0 + 5 * DAY);
+        let facts = known["facts"].as_array().unwrap();
+        assert_eq!(facts.len(), 1, "a fact learned later was not known then");
+        assert_eq!(facts[0]["content"], "early");
+    }
 
     #[test]
     fn vault_invariants_reports_ten_rows_without_faking_a_pass() {

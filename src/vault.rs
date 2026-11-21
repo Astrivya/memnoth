@@ -293,6 +293,7 @@ pub fn invariants(ctx: &AppContext, json_output: bool) -> Result<Outcome, ErrorO
 pub fn asof(
     ctx: &AppContext,
     at: Option<&str>,
+    knew: Option<&str>,
     name: Option<&str>,
     limit: usize,
 ) -> Result<Outcome, ErrorOutcome> {
@@ -305,6 +306,18 @@ pub fn asof(
         })?,
         None => now_ms(),
     };
+    let known = knew
+        .map(|when| {
+            parse_when(when).map_err(|e| {
+                ErrorOutcome::new(ExitCode::Unexpected, format!("invalid --knew value: {e}"))
+                    .with_cause("unrecognized date format")
+                    .with_fix(
+                        "use RFC 3339, a date, or epoch milliseconds — the same forms as --at",
+                    )
+                    .with_docs_url(crate::context::docs_url("vault/asof"))
+            })
+        })
+        .transpose()?;
     let engine = ctx.open_vault().map_err(|e| {
         ErrorOutcome::new(ExitCode::Unexpected, "failed to open vault")
             .with_cause(e.to_string())
@@ -338,26 +351,51 @@ pub fn asof(
 
     let mut facts = Vec::new();
     for entity in &entities {
-        for observation in engine.observations_for(entity.id, instant).map_err(|e| {
-            ErrorOutcome::new(ExitCode::Unexpected, "failed to read observations")
-                .with_cause(e.to_string())
-                .with_fix("check vault integrity with `memnoth vault status`")
-                .with_docs_url(crate::context::docs_url("vault/asof"))
-        })? {
-            facts.push(json!({
-                "entity": entity.name,
-                "entity_id": entity.id,
-                "content": observation.content,
-                "kind": observation.kind,
-                "confidence": observation.confidence,
-                "valid_from": observation.valid_from,
-                "valid_from_iso": rfc3339(observation.valid_from),
-            }));
+        if let Some(known_ms) = known {
+            // The second clock: what the vault had learned by `known_ms`, not
+            // merely what was true at `instant`. Unrecorded facts are excluded
+            // by the engine rather than guessed here.
+            let known_facts =
+                memnoth_engine::current_facts_known(&engine, entity.id, instant, known_ms)
+                    .map_err(|e| vault_failure("asof", "failed to read known facts", e))?;
+            for fact in known_facts {
+                facts.push(json!({
+                    "entity": entity.name,
+                    "entity_id": entity.id,
+                    "content": fact["fact"],
+                    "kind": fact["kind"],
+                    "confidence": fact["confidence"],
+                    "valid_from": fact["valid_from"],
+                    "valid_from_iso": rfc3339(fact["valid_from"].as_i64().unwrap_or(0)),
+                    "recorded_at": fact["date"],
+                }));
+            }
+        } else {
+            for observation in engine.observations_for(entity.id, instant).map_err(|e| {
+                ErrorOutcome::new(ExitCode::Unexpected, "failed to read observations")
+                    .with_cause(e.to_string())
+                    .with_fix("check vault integrity with `memnoth vault status`")
+                    .with_docs_url(crate::context::docs_url("vault/asof"))
+            })? {
+                facts.push(json!({
+                    "entity": entity.name,
+                    "entity_id": entity.id,
+                    "content": observation.content,
+                    "kind": observation.kind,
+                    "confidence": observation.confidence,
+                    "valid_from": observation.valid_from,
+                    "valid_from_iso": rfc3339(observation.valid_from),
+                }));
+            }
         }
     }
 
     let stamp = rfc3339(instant);
+    let known_iso = known.map(rfc3339);
     let mut text = format!("as of {stamp}\n");
+    if let Some(known_iso) = &known_iso {
+        text.push_str(&format!("known by {known_iso}\n"));
+    }
     let next_commands = if entities.is_empty() {
         if let Some(name) = name {
             text.push_str("  nothing was believed about this at that instant\n");
@@ -418,6 +456,8 @@ pub fn asof(
         json!({
             "at": instant,
             "at_iso": stamp,
+            "knew": known,
+            "knew_iso": known_iso,
             "name": name,
             "entities": entities.iter().map(entity_json).collect::<Vec<_>>(),
             "facts": facts,
@@ -3495,12 +3535,12 @@ mod tests {
         let observation = &engine.find_entities_by_name("auth", now_ms()).unwrap()[0];
         let before = observation.valid_from - 1;
 
-        let outcome = asof(&ctx, Some(&before.to_string()), Some("auth"), 10).unwrap();
+        let outcome = asof(&ctx, Some(&before.to_string()), None, Some("auth"), 10).unwrap();
         assert_eq!(
             outcome.data["count"], 0,
             "nothing was believed before the fact"
         );
-        let outcome = asof(&ctx, None, Some("auth"), 10).unwrap();
+        let outcome = asof(&ctx, None, None, Some("auth"), 10).unwrap();
         assert_eq!(outcome.data["count"], 1);
         assert_eq!(outcome.data["facts"][0]["kind"], "decision");
         let _ = std::fs::remove_dir_all(&dir);

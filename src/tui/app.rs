@@ -3201,13 +3201,19 @@ fn parse_vault(args: &[String]) -> Parsed {
                 .get("at")
                 .cloned()
                 .or_else(|| positional.first().cloned());
+            let knew = flags.get("knew").cloned();
             let name = flags.get("name").cloned();
             let limit = flags
                 .get("limit")
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(200);
             Parsed::Run(Verb::Vault(VaultArgs {
-                action: VaultCommand::AsOf { at, name, limit },
+                action: VaultCommand::AsOf {
+                    at,
+                    knew,
+                    name,
+                    limit,
+                },
             }))
         }
         "history" => match rest.first() {

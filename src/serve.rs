@@ -532,6 +532,7 @@ async fn vault_asof(
     match crate::vault::asof(
         &state.ctx,
         params.at.as_deref(),
+        params.knew.as_deref(),
         params.name.as_deref(),
         limit,
     ) {
@@ -666,6 +667,7 @@ struct LimitParams {
 #[derive(Deserialize)]
 struct AsOfParams {
     at: Option<String>,
+    knew: Option<String>,
     name: Option<String>,
     limit: Option<usize>,
 }
