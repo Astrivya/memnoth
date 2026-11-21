@@ -1257,6 +1257,7 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
         }
         Verb::Why(args) => crate::tui::commands::why::run(ctx, &args.symbol, args.at.as_deref()),
         Verb::Impact(args) => crate::tui::commands::impact::run(ctx, args),
+        Verb::Evidence(args) => crate::tui::commands::evidence::run(ctx, &args.subject),
         Verb::Plan(args) => {
             crate::tui::commands::plan::run(ctx, args.name.as_deref(), args.step.as_deref())
         }

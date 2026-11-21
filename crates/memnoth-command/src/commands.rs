@@ -1008,6 +1008,54 @@ pub fn build_p0_registry() -> RegistryBuilder {
         })
         .unwrap();
 
+    // The evidence chain is one read-only composition over the four backends
+    // above, projected onto the memory surface. It stays hidden from `--help`
+    // (apply_public_surface also hides it) but remains a real, typeable verb.
+    builder = builder
+        .command(CommandSpec {
+            id: "evidence".into(),
+            cli_path: vec!["evidence".into()],
+            slash: SlashSpec {
+                name: "evidence".into(),
+                palette: Some("evidence <subject>".into()),
+                description: "Compose belief, author, approval, commit and impact for one subject"
+                    .into(),
+                long_description: Some(
+                    "Five read-only pages over the existing why, lineage, receipt and impact \
+                     backends. Every link states whether it was measured, partial, \
+                     not_recorded or stale. Nothing is upgraded to a receipt on the strength \
+                     of a session-only approval."
+                        .into(),
+                ),
+                params: vec![ParamSpec::string(
+                    "subject",
+                    "Symbol or entity whose evidence chain to compose",
+                )],
+                overlay: OverlayType::Fullscreen,
+                danger: DangerLevel::Safe,
+                auth: AuthLevel::None,
+                profile: None,
+                categories: vec!["memory".into()],
+                aliases: vec![],
+                hidden: true,
+                deprecated: None,
+                examples: vec!["evidence rate_limit".into()],
+            },
+            handler: "evidence".into(),
+            json_output: true,
+            streaming: false,
+            timeout_secs: None,
+            min_version: None,
+            tags: vec!["evidence".into(), "memory".into()],
+            related: vec![
+                "why".into(),
+                "lineage".into(),
+                "report.receipt".into(),
+                "impact".into(),
+            ],
+        })
+        .unwrap();
+
     // ── Cloud commands ──────────────────────────────────────────────
 
     builder = builder

@@ -971,9 +971,26 @@ impl App {
     /// down. `/home` brings it back, which is why it is a flag and not a
     /// consequence of the transcript being empty.
     pub fn push(&mut self, role: EntryRole, text: impl Into<String>) {
+        let text: String = text.into();
+        // `/evidence` writes a readable header as its first line. Lift the
+        // subject out and open the five-page overlay, but keep the whole text:
+        // the transcript and the session file must show the same honest header.
+        // This detects an answer shape, never a second command list — the verb
+        // and its single registry row remain the only definitions.
+        if role == EntryRole::Answer
+            && let Some(rest) = text.strip_prefix(crate::tui::commands::evidence::ENVELOPE_MARKER)
+            && let Some((subject, _)) =
+                rest.split_once(crate::tui::commands::evidence::HEADER_SUFFIX)
+        {
+            let subject = subject.to_string();
+            crate::tui::overlays::present(
+                self,
+                Box::new(crate::tui::overlays::EvidenceOverlay::with_subject(subject)),
+            );
+        }
         self.entries.push(Entry {
             role,
-            text: text.into(),
+            text,
             // The same clock the session file records against, so a resumed
             // transcript and a live one put the same kind of stamp on a row.
             at_ms: crate::session::now_ms(),
@@ -2195,6 +2212,18 @@ fn parse_line_inner(raw: &str, suggest: bool) -> Parsed {
                     .and_then(|value| value.parse().ok())
                     .unwrap_or(2),
                 diff: flags.contains_key("diff"),
+            }))
+        }
+        // One hidden verb, projected from the one registry row. It runs through
+        // the ordinary `Parsed::Run` door, so no second command list and no new
+        // Parsed variant (which would need a second dispatcher) is introduced.
+        "evidence" => {
+            let (_, positional) = split_flags(&args);
+            if positional.is_empty() {
+                return Parsed::Usage("usage: /evidence <subject>".to_string());
+            }
+            Parsed::Run(Verb::Evidence(crate::cli::EvidenceArgs {
+                subject: positional.join(" "),
             }))
         }
         "plan" => {

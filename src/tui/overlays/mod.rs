@@ -77,6 +77,8 @@ pub enum OverlayKind {
     Goal,
     /// `/plan`: the session's stored plan artifact, read-only.
     Plan,
+    /// `/evidence`: the five-page mn-evidence/1 chain on the memory surface.
+    Evidence,
 }
 
 /// Trait for all overlays.
@@ -222,6 +224,14 @@ impl OverlayStack {
         !self.overlays.is_empty()
     }
 
+    /// Whether the top overlay is `kind`. The footer reads this to name the
+    /// keys that actually work on the screen in front of the person.
+    pub fn top_is(&self, kind: OverlayKind) -> bool {
+        self.overlays
+            .last()
+            .is_some_and(|overlay| overlay.kind() == kind)
+    }
+
     /// Handle a key event for the top overlay.
     ///
     /// `None` means there was no overlay at all. An overlay that is open
@@ -290,6 +300,7 @@ pub fn create_overlay(kind: OverlayKind) -> Box<dyn Overlay> {
         OverlayKind::Checkpoints => Box::new(checkpoints::CheckpointsOverlay::new()),
         OverlayKind::Goal => Box::new(crate::tui::agents::goal::GoalOverlay::new()),
         OverlayKind::Plan => Box::new(crate::tui::agents::plan::PlanOverlay::new()),
+        OverlayKind::Evidence => Box::new(EvidenceOverlay::new()),
     }
 }
 
@@ -323,6 +334,7 @@ pub fn parse_slash_command(input: &str) -> Option<OverlayKind> {
         "palette" => Some(OverlayKind::Palette),
         "commands" => Some(OverlayKind::Commands),
         "connect" => Some(OverlayKind::Connect),
+        "evidence" => Some(OverlayKind::Evidence),
         _ => None,
     }
 }
@@ -333,6 +345,7 @@ mod commands;
 mod connect;
 mod context;
 mod diff;
+mod evidence;
 mod help;
 mod mcps;
 mod models;
@@ -358,6 +371,7 @@ pub use commands::CommandsOverlay;
 pub use connect::ConnectOverlay;
 pub use context::ContextOverlay;
 pub use diff::DiffOverlay;
+pub use evidence::EvidenceOverlay;
 pub use help::HelpOverlay;
 pub use models::ModelsOverlay;
 pub use onboarding::OnboardingOverlay;
@@ -403,6 +417,7 @@ mod reachability {
         OverlayKind::Checkpoints,
         OverlayKind::Goal,
         OverlayKind::Plan,
+        OverlayKind::Evidence,
     ];
 
     #[test]

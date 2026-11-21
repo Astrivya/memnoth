@@ -18,6 +18,7 @@ pub mod checkpoint;
 pub mod compact;
 pub mod delegate;
 pub mod drift;
+pub mod evidence;
 pub mod export;
 pub mod goal;
 pub mod handoff;

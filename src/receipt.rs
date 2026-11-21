@@ -379,13 +379,19 @@ pub fn write(ctx: &AppContext, commit: Option<&str>) -> Result<Receipt> {
         },
         agent: Agent {
             session: session_id,
+            // Delegation runs have no local identity yet. `"unknown"` or the
+            // session id would be a plausible substitute, not a measured run.
             run_id: None,
             agent: "memnoth".to_string(),
             model,
         },
         authority: Authority {
             user: actor_identity(),
+            // Org is a verified principal from the control plane, not the vault
+            // namespace or the OS user. Neither is an org, so neither is named.
             org: None,
+            // No signed policy document exists locally; a config hash is not a
+            // policy version. `None` means "not measured", never version zero.
             policy_version: None,
             sandbox: "policy".to_string(),
             approvals,
@@ -751,6 +757,25 @@ fn beliefs_in_play(
         Err(error) => return (None, Some(format!("vault unavailable: {error}"))),
     };
     let now = crate::session::now_ms();
+    let (beliefs, unavailable) = beliefs_from_engine(&engine, symbols, now);
+    if beliefs.is_empty() && unavailable.is_some() {
+        (None, unavailable)
+    } else {
+        (Some(beliefs), unavailable)
+    }
+}
+
+/// Build receipt beliefs from the vault facts currently held for `symbols`.
+///
+/// Public so a caller can prove against a seeded vault that a predicate (schema
+/// v5) and its provenance survive into the document. Every field is measured or
+/// `None` with its name in `unknown`; an author is never invented, and a
+/// predicate that was never recorded stays `None` rather than becoming a guess.
+pub fn beliefs_from_engine(
+    engine: &memnoth_engine::MemoryEngine,
+    symbols: &[String],
+    now: i64,
+) -> (Vec<Belief>, Option<String>) {
     let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
     let mut beliefs = Vec::new();
     let mut failures: Vec<String> = Vec::new();
@@ -763,8 +788,7 @@ fn beliefs_in_play(
             }
         };
         for entity in entities {
-            let facts = match memnoth_engine::vault_history::current_facts(&engine, entity.id, now)
-            {
+            let facts = match memnoth_engine::vault_history::current_facts(engine, entity.id, now) {
                 Ok(facts) => facts,
                 Err(error) => {
                     failures.push(format!("{}: {error}", entity.name));
@@ -778,7 +802,9 @@ fn beliefs_in_play(
                 }
                 beliefs.push(Belief {
                     entity: entity.name.clone(),
-                    predicate: None,
+                    // Schema v5: the predicate the observation was recorded
+                    // under. `None` means it was never recorded, not "generic".
+                    predicate: predicate_for(engine, entity.id, &text, fact["valid_from"].as_i64()),
                     text,
                     kind: fact["kind"].as_str().map(str::to_string),
                     author: fact["author"].as_str().map(str::to_string),
@@ -801,30 +827,73 @@ fn beliefs_in_play(
     }
     let unavailable =
         (!failures.is_empty()).then(|| format!("vault query incomplete: {}", failures.join("; ")));
-    if beliefs.is_empty() && unavailable.is_some() {
-        (None, unavailable)
-    } else {
-        (Some(beliefs), unavailable)
-    }
+    (beliefs, unavailable)
 }
 
-/// The provenance check: every recorded belief either names its author or says
-/// which fields nobody recorded.
-fn beliefs_check(receipt: &Receipt) -> Check {
+/// The `observations.predicate` a fact was recorded under (schema v5).
+///
+/// A predicate is only ever read, never inferred from the fact's text: a vault
+/// that predates v5, or a free-text observation without one, is `None` — the
+/// "not measured" value — and not a plausible name. The match is on the same
+/// entity, content and valid-from the fact came from, so a corrected fact does
+/// not borrow the predicate of the belief it superseded.
+fn predicate_for(
+    engine: &memnoth_engine::MemoryEngine,
+    entity_id: i64,
+    content: &str,
+    valid_from: Option<i64>,
+) -> Option<String> {
+    let valid_from = valid_from?;
+    engine
+        .connection()
+        .query_row(
+            "SELECT predicate FROM observations \
+             WHERE entity_id = ?1 AND content = ?2 AND valid_from = ?3 \
+               AND predicate IS NOT NULL AND TRIM(predicate) <> '' \
+             ORDER BY id LIMIT 1",
+            rusqlite::params![entity_id, content, valid_from],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+}
+
+/// The provenance check: a belief that carries provenance but names no author
+/// fails — recording *who* wrote a fact and omitting the person is an integrity
+/// gap. A belief with no provenance at all is reported as unknown, not failed
+/// and not signed by the agent; that is the measured-or-null honesty contract.
+pub fn beliefs_check(receipt: &Receipt) -> Check {
     match &receipt.beliefs {
         Some(beliefs) => {
-            let unattributed = beliefs.iter().filter(|b| b.author.is_none()).count();
+            let mut unattributed_with_provenance = 0usize;
+            let mut unknown_provenance = 0usize;
+            for belief in beliefs {
+                if attributed(belief.author.as_deref()) {
+                    continue;
+                }
+                if belief_has_provenance(belief) {
+                    unattributed_with_provenance += 1;
+                } else {
+                    unknown_provenance += 1;
+                }
+            }
+            let ok = unattributed_with_provenance == 0;
             Check {
                 name: "beliefs".to_string(),
-                ok: true,
+                ok,
                 detail: if beliefs.is_empty() {
                     "measured: no vault fact names an impacted symbol".to_string()
-                } else if unattributed == 0 {
+                } else if ok && unknown_provenance == 0 {
                     format!("{} belief(s), every one names a person", beliefs.len())
+                } else if ok {
+                    format!(
+                        "{} belief(s), {unknown_provenance} without recorded provenance \
+                         (reported as unknown, not filled)",
+                        beliefs.len()
+                    )
                 } else {
                     format!(
-                        "{} belief(s), {unattributed} without a recorded author \
-                         (named in `unknown`, not filled)",
+                        "{} belief(s), {unattributed_with_provenance} with provenance but no \
+                         recorded author (named in `unknown`, not filled)",
                         beliefs.len()
                     )
                 },
@@ -842,6 +911,23 @@ fn beliefs_check(receipt: &Receipt) -> Check {
             ),
         },
     }
+}
+
+/// A name that answers "who"; `"unknown"`, empty and whitespace are not names.
+fn attributed(name: Option<&str>) -> bool {
+    name.is_some_and(|name| {
+        let name = name.trim();
+        !name.is_empty() && !name.eq_ignore_ascii_case("unknown")
+    })
+}
+
+/// Whether a belief carries any provenance at all: a recorder, a source or a
+/// recorded date. An author by itself is handled by [`attributed`] before this
+/// is asked, so "has provenance but no author" means a partial chain.
+fn belief_has_provenance(belief: &Belief) -> bool {
+    attributed(belief.agent.as_deref())
+        || attributed(belief.source.as_deref())
+        || belief.recorded_at.is_some()
 }
 
 fn latest_session(ctx: &AppContext) -> (Option<String>, Option<String>, Vec<Approval>) {

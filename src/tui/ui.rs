@@ -30,6 +30,20 @@ const CONTEXT_MIN_WIDTH: u16 = 88;
 /// The footer is state, not decoration: at most five keys, and only ones that
 /// do something in the state the screen is in.
 fn footer_hint(app: &App) -> String {
+    // The evidence overlay owns every key while it is up, so its hint comes
+    // first: a key that works on the screen behind it is not a key the person
+    // can use now.
+    if app
+        .overlay_stack
+        .top_is(crate::tui::overlays::OverlayKind::Evidence)
+    {
+        return "tab/] page · [ back · ↑↓ row · v detail · l/c/i jump · esc close".to_string();
+    }
+    // The memory surface (Ctrl+4) is still a title until a chain is composed.
+    // Naming the command is honest; drawing a fake chain would not be.
+    if app.surface == crate::tui::surface::Surface::Memory && !app.overlay_stack.has_overlay() {
+        return "/evidence <subject> composes the five-page chain on this surface".to_string();
+    }
     if app.approval.is_some() || app.pending_shell.is_some() {
         "y approve · n / esc reject · the box names exactly what changes".to_string()
     } else if let Some(needs) = app.slash.needs() {

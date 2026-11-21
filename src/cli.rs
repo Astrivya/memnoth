@@ -273,6 +273,9 @@ pub enum Verb {
     /// Trust: list trusted folders, or forget one.
     #[command(hide = true)]
     Trust(TrustArgs),
+    /// Compose the evidence chain for one subject: belief, author, approval, commit, impact.
+    #[command(hide = true)]
+    Evidence(EvidenceArgs),
 }
 
 /// Arguments for `mn drift`.
@@ -325,6 +328,14 @@ pub struct ImpactArgs {
     /// Show the diff form.
     #[arg(long)]
     pub diff: bool,
+}
+
+/// Arguments for `mn evidence`.
+#[derive(Debug, Args)]
+pub struct EvidenceArgs {
+    /// The symbol or entity whose evidence chain to compose.
+    #[arg(value_name = "SUBJECT")]
+    pub subject: String,
 }
 
 /// Arguments for `mn goal`.
