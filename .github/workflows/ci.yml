@@ -277,15 +277,15 @@ jobs:
             scope: cli-tests-3
             archive_args: >-
               -p memnoth
-              --test release_manifest --test schema_verb --test security
-              --test serve_auth --test slash_hierarchy --test surfaces
-              --test sync_crypto
+              --test mcp_add --test release_manifest --test schema_verb
+              --test security --test serve_auth --test slash_hierarchy
+              --test surfaces --test sync_crypto
             doctests: false
           - os: windows-latest
             scope: cli-tests-4
             archive_args: >-
               -p memnoth
-              --test tui_pty --test update_local_release
+              --test setup_end_to_end --test tui_pty --test update_local_release
               --test update_signed_release --test vault_invariants
               --test version_surfaces --test version_verb
             doctests: false
