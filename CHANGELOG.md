@@ -66,6 +66,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Zed settings are JSON-with-comments. `mn mcp add` will not rewrite such a file; it prints a snippet for the Zed Command Palette instead, so registration needs a manual step.
 - winget publication is manual: CI fills the manifest from the built Windows archive, but a maintainer must open the winget-pkgs pull request.
 
+## [0.1.0-beta.12] - 2026-11-19
+
+### Added
+
+- Filter for the Agent Deck attention inbox.
+
+### Fixed - Release
+
+- Grant release provenance write permission.
+- Prepare beta 12 release.
+
+## [0.1.0-beta.11] - 2026-11-19
+
+### Fixed - Release
+
+- Include the license in the standalone MCP package.
+- Gate releases on generated command surfaces.
+- Prepare beta 11 release.
+
+## [0.1.0-beta.10] - 2026-11-19
+
+### Added
+
+- Full-screen project browser in the TUI.
+
+### Fixed - Release
+
+- Bind release assets to their source tags.
+- Publish only generated release assets.
+- Close the release SBOM loop.
+- Prepare beta 10 release.
+
 ## [0.1.0-beta.9] - 2026-11-19
 
 ### Fixed - Release
