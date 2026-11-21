@@ -33,7 +33,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use memnoth_capability::Profile;
 use memnoth_mcp_client::{Client, StdioTransport};
@@ -41,7 +41,7 @@ use memnoth_mcp_client::{Client, StdioTransport};
 use crate::context::AppContext;
 
 pub use clients::ClientStatus;
-use clients::{ClientKind, Entry};
+use clients::{ClientKind, Entry, SERVER_NAME};
 pub use render::{
     render_add, render_call, render_doctor, render_exposes, render_list, render_logs,
     render_profile_set, render_profile_show, render_remove, render_restart, render_selftest,
@@ -509,6 +509,7 @@ pub fn add(ctx: &AppContext, options: AddOptions<'_>) -> Result<AddReport> {
 
     let mut results = Vec::new();
     let mut failures: Vec<String> = Vec::new();
+    let mut zed_written = false;
     for kind in &kinds {
         if *kind == ClientKind::Claude
             && let Some(binary) = clients::find_binary(kind.binary())
@@ -533,6 +534,38 @@ pub fn add(ctx: &AppContext, options: AddOptions<'_>) -> Result<AddReport> {
                 failures.push(format!("{}: {}", kind.name(), status.detail));
             }
             results.push(status);
+            continue;
+        }
+        if *kind == ClientKind::Zed {
+            // Zed's settings are JSONC. The shared JSON writer reserializes the
+            // whole file, so it refuses a commented file rather than deleting
+            // the comments — which used to leave only the Command Palette
+            // snippet. Use the comment-preserving surgical writer here. Strict
+            // JSON files and fresh registrations still take the shared path.
+            match add_zed_settings(&home, &ctx.root, &entry, dry_run) {
+                Ok(status) => {
+                    zed_written |= status.registered;
+                    results.push(status);
+                }
+                Err(error) => {
+                    let detail = format!("not written: {error}");
+                    if explicit {
+                        failures.push(format!("{}: {error}", kind.name()));
+                    }
+                    results.push(ClientStatus {
+                        client: kind.name().to_string(),
+                        path: ClientKind::Zed
+                            .config_path_for(&home, Some(&ctx.root))
+                            .display()
+                            .to_string(),
+                        present: true,
+                        registered: false,
+                        found: false,
+                        ok: false,
+                        detail,
+                    });
+                }
+            }
             continue;
         }
         match clients::write_for_workspace(*kind, &home, Some(&ctx.root), &entry, dry_run) {
@@ -603,7 +636,9 @@ pub fn add(ctx: &AppContext, options: AddOptions<'_>) -> Result<AddReport> {
         for kind in ClientKind::ALL {
             snippets.push(clients::snippet(kind, &entry));
         }
-    } else if kinds.contains(&ClientKind::Zed) {
+    } else if kinds.contains(&ClientKind::Zed) && !zed_written {
+        // The Command Palette snippet is a fallback for a Zed file we could not
+        // write, not a second "success" story after the config was written.
         snippets.push(clients::snippet(ClientKind::Zed, &entry));
     }
 
@@ -620,6 +655,484 @@ pub fn add(ctx: &AppContext, options: AddOptions<'_>) -> Result<AddReport> {
         snippets,
         verification,
     })
+}
+
+/// Register with Zed without destroying its JSONC settings.
+///
+/// Zed's `settings.json` is JSON-with-comments by design. The shared JSON
+/// writer parses strictly and reserializes the whole file, so it refuses a
+/// JSONC file rather than silently deleting the comments. Here the file is
+/// masked (comments and trailing commas become spaces, byte offsets kept),
+/// validated, and edited at those offsets: every byte we were not asked to
+/// change survives exactly as the user typed it.
+fn add_zed_settings(
+    home: &Path,
+    workspace: &Path,
+    entry: &Entry,
+    dry_run: bool,
+) -> Result<ClientStatus> {
+    let path = ClientKind::Zed.config_path_for(home, Some(workspace));
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error).with_context(|| format!("cannot read {}", path.display())),
+    };
+
+    // A fresh file or strict JSON keeps the existing, well-tested merge path,
+    // including its handling of headers and of switching transports.
+    if text.trim().is_empty() || serde_json::from_str::<Value>(&text).is_ok() {
+        return clients::write_for_workspace(
+            ClientKind::Zed,
+            home,
+            Some(workspace),
+            entry,
+            dry_run,
+        );
+    }
+
+    write_zed_jsonc(&path, &text, entry, dry_run)?;
+
+    if dry_run {
+        return Ok(ClientStatus {
+            client: ClientKind::Zed.name().to_string(),
+            path: path.display().to_string(),
+            present: !text.is_empty(),
+            registered: true,
+            found: true,
+            ok: true,
+            detail: format!("would write {} (JSONC comments preserved)", path.display()),
+        });
+    }
+
+    // Read back through the same status path `doctor` and verification use,
+    // then replace the stale note that said this writer will not rewrite JSONC.
+    let mut status =
+        clients::status_for_workspace(ClientKind::Zed, home, Some(workspace), &entry.url);
+    if status.registered {
+        status.detail = format!("wrote {} (JSONC comments preserved)", path.display());
+        status.ok = true;
+    } else {
+        status.ok = false;
+        status.detail = format!(
+            "wrote {} but no `memnoth` entry was found on read-back",
+            path.display()
+        );
+    }
+    Ok(status)
+}
+
+/// Insert or update `context_servers.memnoth` in a JSONC Zed settings file by
+/// splicing bytes into the original text. The masked copy is only used to find
+/// offsets and to fail closed; it is never written back to disk.
+fn write_zed_jsonc(path: &Path, text: &str, entry: &Entry, dry_run: bool) -> Result<()> {
+    let masked = mask_jsonc(text);
+    let root: Value = serde_json::from_str(&masked).with_context(|| {
+        format!(
+            "{} is not valid JSON; refusing to rewrite it",
+            path.display()
+        )
+    })?;
+    let bytes = masked.as_bytes();
+    let root_open = bytes
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .filter(|at| bytes[*at] == b'{')
+        .with_context(|| format!("{} does not hold a JSON object", path.display()))?;
+    let root_close = matching_close(bytes, root_open)
+        .with_context(|| format!("{} has an unbalanced root object", path.display()))?;
+
+    let wanted = zed_entry_json(entry);
+    let existing = root
+        .get("context_servers")
+        .and_then(|servers| servers.get(SERVER_NAME));
+    let merged = merge_zed_entry(existing, wanted, entry);
+
+    let mut edits: Vec<(usize, usize, Vec<u8>)> = Vec::new();
+    match find_member_value(&masked, "context_servers", root_open + 1, root_close, 1) {
+        Some(value_at) => {
+            if bytes.get(value_at) != Some(&b'{') {
+                bail!(
+                    "`context_servers` in {} is not an object; refusing to rewrite it",
+                    path.display()
+                );
+            }
+            let close = matching_close(bytes, value_at).with_context(|| {
+                format!(
+                    "`context_servers` in {} is unbalanced; refusing to rewrite it",
+                    path.display()
+                )
+            })?;
+            match find_member_value(&masked, SERVER_NAME, value_at + 1, close, 2) {
+                Some(value_start) => {
+                    let mut end_at = json_value_end(bytes, value_start).with_context(|| {
+                        format!(
+                            "cannot find the end of `memnoth` in {}; refusing to rewrite it",
+                            path.display()
+                        )
+                    })?;
+                    while end_at > value_start && bytes[end_at - 1].is_ascii_whitespace() {
+                        end_at -= 1;
+                    }
+                    let indent = line_indent(bytes, value_start);
+                    edits.push((
+                        value_start,
+                        end_at,
+                        indent_pretty(&merged, &indent).into_bytes(),
+                    ));
+                }
+                None => {
+                    let base = line_indent(bytes, value_at);
+                    let child = format!("{base}  ");
+                    let insertion = format!(
+                        "\n{child}\"{}\": {},",
+                        SERVER_NAME,
+                        indent_pretty(&merged, &child)
+                    );
+                    edits.push((value_at + 1, value_at + 1, insertion.into_bytes()));
+                }
+            }
+        }
+        None => {
+            let base = line_indent(bytes, root_open);
+            let child = format!("{base}  ");
+            let insertion = format!(
+                "\n{child}\"context_servers\": {{\n{child}  \"{}\": {}\n{child}}},",
+                SERVER_NAME,
+                indent_pretty(&merged, &format!("{child}  "))
+            );
+            edits.push((root_open + 1, root_open + 1, insertion.into_bytes()));
+        }
+    }
+
+    // Apply from the end so the earlier offsets stay valid.
+    edits.sort_by_key(|left| std::cmp::Reverse(left.0));
+    let mut output = text.as_bytes().to_vec();
+    for (start, end, replacement) in edits {
+        output.splice(start..end, replacement);
+    }
+    // Fail closed: never write a file we cannot read back as JSONC.
+    let edited = String::from_utf8(output.clone())
+        .with_context(|| format!("{} would no longer be UTF-8", path.display()))?;
+    serde_json::from_str::<Value>(&mask_jsonc(&edited)).with_context(|| {
+        format!(
+            "the edited {} is not valid JSONC; refusing to rewrite it",
+            path.display()
+        )
+    })?;
+    if dry_run {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("cannot create {}", parent.display()))?;
+    }
+    std::fs::write(path, output).with_context(|| format!("cannot write {}", path.display()))
+}
+
+/// The same entry shape the shared client writer uses, built from the fields
+/// the public `Entry` exposes.
+fn zed_entry_json(entry: &Entry) -> Value {
+    let mut object = Map::new();
+    if let Some(command) = &entry.command {
+        object.insert("command".into(), json!(command));
+        object.insert("args".into(), json!(entry.args));
+        if !entry.env.is_empty() {
+            object.insert("env".into(), json!(entry.env));
+        }
+        return Value::Object(object);
+    }
+    object.insert("url".into(), json!(entry.url));
+    if let Some(token) = &entry.token {
+        let mut headers = Map::new();
+        headers.insert("Authorization".into(), json!(format!("Bearer {token}")));
+        object.insert("headers".into(), Value::Object(headers));
+    }
+    Value::Object(object)
+}
+
+/// Merge the wanted entry into an existing one: fields we do not own survive,
+/// headers merge by name, and switching transports drops stale fields.
+fn merge_zed_entry(existing: Option<&Value>, wanted: Value, entry: &Entry) -> Value {
+    let mut merged = match existing {
+        Some(Value::Object(fields)) => fields.clone(),
+        _ => Map::new(),
+    };
+    if let Value::Object(wanted) = wanted {
+        for (key, value) in wanted {
+            if key == "headers" {
+                let headers = merged
+                    .entry("headers".to_string())
+                    .or_insert_with(|| Value::Object(Map::new()));
+                if let (Some(headers), Value::Object(new_headers)) =
+                    (headers.as_object_mut(), value)
+                {
+                    for (name, value) in new_headers {
+                        headers.insert(name, value);
+                    }
+                }
+            } else {
+                merged.insert(key, value);
+            }
+        }
+    }
+    if entry.command.is_some() {
+        merged.remove("url");
+        merged.remove("headers");
+    } else {
+        merged.remove("command");
+        merged.remove("args");
+        merged.remove("env");
+    }
+    Value::Object(merged)
+}
+
+/// A byte-length-preserving JSONC mask: comments and trailing commas become
+/// spaces, every other byte is copied. Offsets in the result name the same
+/// bytes in the original file, so edits can be spliced into the original text.
+fn mask_jsonc(text: &str) -> String {
+    let original = text.as_bytes();
+    let mut masked = original.to_vec();
+    let mut index = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    while index < original.len() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if original[index] == b'\\' {
+                escaped = true;
+            } else if original[index] == b'"' {
+                in_string = false;
+            }
+            index += 1;
+            continue;
+        }
+        match original[index] {
+            b'"' => {
+                in_string = true;
+                index += 1;
+            }
+            b'/' if original.get(index + 1) == Some(&b'/') => {
+                let start = index;
+                index += 2;
+                while index < original.len() && original[index] != b'\n' {
+                    index += 1;
+                }
+                blank_comment(&mut masked, start, index);
+            }
+            b'/' if original.get(index + 1) == Some(&b'*') => {
+                let start = index;
+                index += 2;
+                while index + 1 < original.len()
+                    && !(original[index] == b'*' && original[index + 1] == b'/')
+                {
+                    index += 1;
+                }
+                index = (index + 2).min(original.len());
+                blank_comment(&mut masked, start, index);
+            }
+            _ => index += 1,
+        }
+    }
+
+    let mut trailing_commas = Vec::new();
+    let mut pending: Option<usize> = None;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (at, byte) in masked.iter().enumerate() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if *byte == b'\\' {
+                escaped = true;
+            } else if *byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match *byte {
+            b'"' => {
+                in_string = true;
+                pending = None;
+            }
+            b',' => pending = Some(at),
+            b'}' | b']' => {
+                if let Some(at) = pending.take() {
+                    trailing_commas.push(at);
+                }
+            }
+            b if b.is_ascii_whitespace() => {}
+            _ => pending = None,
+        }
+    }
+    for at in trailing_commas {
+        masked[at] = b' ';
+    }
+    // Every changed byte became an ASCII space and comment regions were
+    // blanked in full, including any multi-byte characters inside them.
+    String::from_utf8(masked).expect("masked JSONC stays UTF-8")
+}
+
+fn blank_comment(out: &mut [u8], from: usize, to: usize) {
+    for byte in &mut out[from..to] {
+        if *byte != b'\n' && *byte != b'\r' {
+            *byte = b' ';
+        }
+    }
+}
+
+/// Byte offset of the value of `key` at the expected object depth, or `None`.
+fn find_member_value(
+    masked: &str,
+    key: &str,
+    from: usize,
+    to: usize,
+    depth: usize,
+) -> Option<usize> {
+    let needle = format!("\"{key}\"");
+    let mut search = from;
+    while search < to {
+        let relative = masked.get(search..to)?.find(&needle)?;
+        let key_start = search + relative;
+        let bytes = masked.as_bytes();
+        let mut at = key_start + needle.len();
+        while at < to && bytes[at].is_ascii_whitespace() {
+            at += 1;
+        }
+        if bytes.get(at) == Some(&b':') && jsonc_depth_at(bytes, key_start) == depth {
+            at += 1;
+            while at < to && bytes[at].is_ascii_whitespace() {
+                at += 1;
+            }
+            return Some(at);
+        }
+        search = key_start + needle.len();
+    }
+    None
+}
+
+/// Depth of `at` in masked JSON (a root-level member is at depth 1).
+fn jsonc_depth_at(bytes: &[u8], at: usize) -> usize {
+    let mut depth: usize = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    for byte in &bytes[..at] {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if *byte == b'\\' {
+                escaped = true;
+            } else if *byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match *byte {
+            b'"' => in_string = true,
+            b'{' | b'[' => depth += 1,
+            b'}' | b']' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    depth
+}
+
+/// Index of the closing bracket matching the one at `open`.
+fn matching_close(bytes: &[u8], open: usize) -> Option<usize> {
+    let mut depth: usize = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (at, &byte) in bytes.iter().enumerate().skip(open) {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b'{' | b'[' => depth += 1,
+            b'}' | b']' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(at);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Exclusive end of the JSON value beginning at `start`.
+fn json_value_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut depth: usize = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (at, &byte) in bytes.iter().enumerate().skip(start) {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b'{' | b'[' => depth += 1,
+            b'}' | b']' if depth == 0 => return Some(at),
+            b'}' | b']' => depth -= 1,
+            b',' if depth == 0 => return Some(at),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Leading whitespace of the line containing `at`.
+fn line_indent(bytes: &[u8], at: usize) -> String {
+    let start = bytes[..at]
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |index| index + 1);
+    let mut indent = String::new();
+    for byte in &bytes[start..at] {
+        if *byte == b' ' || *byte == b'\t' {
+            indent.push(*byte as char);
+        } else {
+            break;
+        }
+    }
+    indent
+}
+
+/// Pretty value indented as the value of a key at `key_indent`.
+fn indent_pretty(value: &Value, key_indent: &str) -> String {
+    let pretty = serde_json::to_string_pretty(value).expect("entry is serializable");
+    let inner = format!("{key_indent}  ");
+    let lines: Vec<&str> = pretty.lines().collect();
+    let mut out = String::new();
+    for (index, line) in lines.iter().enumerate() {
+        if index == 0 {
+            out.push_str(line);
+        } else {
+            out.push('\n');
+            out.push_str(if index + 1 == lines.len() {
+                key_indent
+            } else {
+                &inner
+            });
+            out.push_str(line);
+        }
+    }
+    out
 }
 
 /// The paths and binary one registration probe needs.

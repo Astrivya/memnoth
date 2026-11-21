@@ -14,8 +14,23 @@
 //! Key material lives in [`Zeroizing`] buffers. A wrong phrase decrypts to an
 //! authentication error; nothing in this module opens, truncates or rewrites a
 //! local file, so the caller can fail closed before it applies anything.
+//!
+//! ## Epoch-keyed plaintext cache
+//!
+//! [`PlaintextCache`] is an in-process cache for data that has already been
+//! decrypted locally. Every entry is keyed by `(project, org, revision epoch)`
+//! plus an entry id. A revocation advances the epoch for a `(project, org)`
+//! scope, dropping and zeroizing all plaintext for that scope; an epoch the
+//! process has not been told is legitimate is refused before any plaintext is
+//! stored or served (fail closed).
+//!
+//! This is a local primitive only. It does **not** implement hosted semantic
+//! search or remote revocation, and nothing here proves that another device has
+//! applied a bump: that device is revoked only when it pulls the new epoch.
+//! Evicted plaintext is not copied into an index or snapshot, so offline it is
+//! physically unrecallable from this cache.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use argon2::{Algorithm, Argon2, Params, Version};
@@ -309,6 +324,275 @@ impl Manifest {
         serde_json::from_slice(&plaintext).map_err(|_| CryptoError::MalformedManifest)
     }
 }
+
+/// A revision epoch: one generation of decrypted data for a `(project, org)`
+/// scope. Larger values supersede smaller ones.
+///
+/// The value is an opaque counter chosen by a local revocation or a pulled
+/// manifest. The cache never invents an epoch from plaintext.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RevisionEpoch(u64);
+
+impl RevisionEpoch {
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+
+    /// The epoch after this one. Saturating: an epoch must never wrap back to
+    /// zero, because a wrapped epoch could be mistaken for an older, revoked
+    /// generation.
+    pub fn next(self) -> Self {
+        Self(self.0.saturating_add(1))
+    }
+}
+
+impl fmt::Display for RevisionEpoch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// The identity of one cache scope: the `(project, org)` pair whose plaintext
+/// is invalidated together.
+///
+/// Both identifiers are trimmed and ASCII-lowercased, matching the salts from
+/// [`OrgSalt::for_org`] and [`project_graph_salt`], so the same logical scope
+/// cannot be addressed under two spellings.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ScopeId {
+    project: String,
+    org: String,
+}
+
+impl ScopeId {
+    pub fn new(project: &str, org: &str) -> Self {
+        Self {
+            project: project.trim().to_ascii_lowercase(),
+            org: org.trim().to_ascii_lowercase(),
+        }
+    }
+
+    pub fn project(&self) -> &str {
+        &self.project
+    }
+
+    pub fn org(&self) -> &str {
+        &self.org
+    }
+}
+
+/// Why a plaintext entry could not be stored or served.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CacheError {
+    /// The `(project, org)` scope has no recognized epoch at all. The caller
+    /// cannot know what is current, so the request is refused.
+    UnknownScope,
+    /// The presented epoch is not recognized for the scope (stale, foreign or
+    /// revoked). Storing or serving plaintext under it would risk revoked data.
+    UnknownEpoch {
+        scope: ScopeId,
+        epoch: RevisionEpoch,
+    },
+    /// Authentication of an envelope failed while filling the cache.
+    Crypto(CryptoError),
+}
+
+impl fmt::Display for CacheError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownScope => f.write_str("the cache scope has no recognized revision epoch"),
+            Self::UnknownEpoch { scope, epoch } => write!(
+                f,
+                "revision epoch {epoch} is not recognized for {}/{}",
+                scope.project, scope.org
+            ),
+            Self::Crypto(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for CacheError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Crypto(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+/// Full primary key of a cached plaintext entry: `(project, org, epoch, entry)`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct EntryKey {
+    scope: ScopeId,
+    epoch: RevisionEpoch,
+    entry: String,
+}
+
+/// An in-process cache of decrypted local data, invalidated by revision epoch.
+///
+/// Entries are held in zeroizing buffers and dropped (zeroized) on revocation.
+/// There is no index, snapshot or search structure: evicted plaintext cannot be
+/// reconstructed from this cache, and no remote service holds a copy of it.
+#[derive(Debug, Default)]
+pub struct PlaintextCache {
+    /// Epochs the local process has been told are legitimate for a scope. An
+    /// epoch outside this set is uncertain and is refused before any plaintext
+    /// is touched. More than one epoch can be recognized while two devices are
+    /// still converging; a bump collapses the set to a single new epoch.
+    recognized: BTreeMap<ScopeId, BTreeSet<RevisionEpoch>>,
+    entries: BTreeMap<EntryKey, Zeroizing<Vec<u8>>>,
+}
+
+impl PlaintextCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Recognize `epoch` as a legitimate revision for `scope`. This is the local
+    /// act of learning which generation is authoritative (e.g. after a
+    /// successful pull). It never decrypts or stores plaintext by itself.
+    pub fn recognize_epoch(&mut self, scope: &ScopeId, epoch: RevisionEpoch) {
+        self.recognized
+            .entry(scope.clone())
+            .or_default()
+            .insert(epoch);
+    }
+
+    /// Whether `epoch` is currently recognized for `scope`.
+    pub fn is_epoch_known(&self, scope: &ScopeId, epoch: RevisionEpoch) -> bool {
+        self.recognized
+            .get(scope)
+            .is_some_and(|epochs| epochs.contains(&epoch))
+    }
+
+    /// Refuse an epoch the process has not recognized for the scope.
+    ///
+    /// Callers that do their own decryption can use this before touching
+    /// plaintext; every cache method applies the same check internally.
+    pub fn require_epoch(&self, scope: &ScopeId, epoch: RevisionEpoch) -> Result<(), CacheError> {
+        if self.is_epoch_known(scope, epoch) {
+            Ok(())
+        } else if self.recognized.contains_key(scope) {
+            Err(CacheError::UnknownEpoch {
+                scope: scope.clone(),
+                epoch,
+            })
+        } else {
+            Err(CacheError::UnknownScope)
+        }
+    }
+
+    /// Store decrypted `plaintext` under an exact `(scope, epoch, entry)` key.
+    /// Refuses any epoch that is not currently recognized for the scope.
+    pub fn put(
+        &mut self,
+        scope: &ScopeId,
+        epoch: RevisionEpoch,
+        entry: &str,
+        plaintext: Zeroizing<Vec<u8>>,
+    ) -> Result<(), CacheError> {
+        self.require_epoch(scope, epoch)?;
+        self.entries.insert(
+            EntryKey {
+                scope: scope.clone(),
+                epoch,
+                entry: entry.to_string(),
+            },
+            plaintext,
+        );
+        Ok(())
+    }
+
+    /// Borrow cached plaintext for an exact key. `Ok(None)` is a miss for a
+    /// *known* epoch; any uncertain epoch is refused before the lookup.
+    pub fn get(
+        &self,
+        scope: &ScopeId,
+        epoch: RevisionEpoch,
+        entry: &str,
+    ) -> Result<Option<&Zeroizing<Vec<u8>>>, CacheError> {
+        self.require_epoch(scope, epoch)?;
+        Ok(self.entries.get(&EntryKey {
+            scope: scope.clone(),
+            epoch,
+            entry: entry.to_string(),
+        }))
+    }
+
+    /// Decrypt `envelope` under `key` only when `epoch` is recognized for
+    /// `scope`, then cache the plaintext under `entry`. Later calls for the
+    /// same key are served from the cache.
+    ///
+    /// The crypto is exactly the module's existing XChaCha20-Poly1305
+    /// [`decrypt`]; this method changes neither key derivation nor the wire
+    /// format. The epoch check runs first, so an uncertain epoch never reaches
+    /// the cipher, the cache, or the caller.
+    pub fn decrypt_cached(
+        &mut self,
+        key: &OrgKey,
+        scope: &ScopeId,
+        epoch: RevisionEpoch,
+        entry: &str,
+        envelope: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>, CacheError> {
+        self.require_epoch(scope, epoch)?;
+        let cache_key = EntryKey {
+            scope: scope.clone(),
+            epoch,
+            entry: entry.to_string(),
+        };
+        if let Some(plaintext) = self.entries.get(&cache_key) {
+            return Ok(plaintext.clone());
+        }
+        let plaintext = decrypt(key, envelope).map_err(CacheError::Crypto)?;
+        self.entries.insert(cache_key, plaintext.clone());
+        Ok(plaintext)
+    }
+
+    /// Revoke every cached plaintext for `scope` by advancing its epoch.
+    ///
+    /// The new epoch becomes the only recognized epoch for the scope; older
+    /// epochs become uncertain immediately (they fail closed), and every
+    /// cached entry under the scope is dropped and zeroized, whichever epoch it
+    /// was stored under. Eviction is local: other devices are revoked only once
+    /// they pull the new epoch.
+    pub fn bump_epoch(&mut self, scope: &ScopeId) -> Result<RevisionEpoch, CacheError> {
+        let current = self
+            .recognized
+            .get(scope)
+            .and_then(|epochs| epochs.iter().max().copied())
+            .ok_or(CacheError::UnknownScope)?;
+        let next = current.next();
+        self.recognized
+            .insert(scope.clone(), BTreeSet::from([next]));
+        self.entries.retain(|key, _| &key.scope != scope);
+        Ok(next)
+    }
+
+    /// Drop every cached plaintext for `scope` without changing its epoch.
+    ///
+    /// Use this when cached data must be revoked now but no new epoch has been
+    /// established yet. Recognized epochs are left untouched, so the scope can
+    /// be repopulated from a fresh pull under the same epoch.
+    pub fn invalidate_scope(&mut self, scope: &ScopeId) {
+        self.entries.retain(|key, _| &key.scope != scope);
+    }
+
+    /// Number of cached plaintext entries. Metadata only; no plaintext leaks.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether the cache holds no plaintext entries.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -11,9 +11,10 @@
 //! harmless and `println!` in the TUI writes over the alternate screen, so the
 //! log is the outcome and each front end decides where it goes.
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 use memnoth_update::{
-    Channel, Manifest, UpdateConfig, check_for_update, detect_managed_install, fetch_manifest_at,
+    Channel, Manifest, UpdateConfig, check_for_update, detect_managed_install, fetch_manifest,
+    fetch_manifest_at,
 };
 use std::env;
 use std::fs;
@@ -63,12 +64,27 @@ pub fn execute_update(
                 "cannot locate the running binary: {error}"
             )))
         })?;
-        let restored = memnoth_update::rollback_binary(&running).map_err(failure)?;
-        return Ok(Outcome::text(format!(
-            "Restored {} from {}.\nStart it again to run the previous build.",
-            running.display(),
-            restored.display()
-        )));
+
+        // The single `.old` slot is still the cheapest way back: it holds the
+        // exact bytes the last update replaced and needs no network at all.
+        let backup = memnoth_update::backup_path(&running);
+        if backup.exists() {
+            let restored = memnoth_update::rollback_binary(&running).map_err(failure)?;
+            return Ok(Outcome::text(format!(
+                "Restored {} from {}.\nStart it again to run the previous build.",
+                running.display(),
+                restored.display()
+            )));
+        }
+
+        // No slot left — a second update overwrote it, or this machine never
+        // took one. Fall back to the release directory: the versions the tree
+        // still advertises in `previous_versions` are the sanctioned rollback
+        // targets. This is a deliberate downgrade, and `--rollback` is the
+        // explicit request for it; everything else the updater checks (the
+        // signature, the per-target checksum, the artifact's existence and the
+        // version it reports) is checked again before the swap.
+        return rollback_from_release(&running, &config);
     }
 
     if args.check {
@@ -90,6 +106,153 @@ pub fn execute_update(
         ))),
         Err(e) => Err(failure(e)),
     }
+}
+
+/// Read the versions a release tree still advertises as available for a
+/// rollback. This is the manifest's `previous_versions` field — previously a
+/// dead text hint in `mn update --check`. It is now the allowlist a downgrade
+/// has to name, so an arbitrary version cannot be fetched just because someone
+/// typed it.
+pub fn available_rollback_versions(config: &UpdateConfig) -> Result<Vec<String>> {
+    let latest = fetch_manifest(config, config.channel)?;
+    Ok(latest
+        .previous_versions
+        .iter()
+        .map(|entry| entry.version.trim_start_matches('v').to_string())
+        .collect())
+}
+
+/// The newest version in `versions`, compared with the updater's own semver
+/// policy rather than a string sort (`0.1.10` must sort above `0.1.9`).
+/// `check_version_policy(b, a, false)` is `Ok` exactly when `a >= b`.
+fn newest_version(versions: &[String]) -> Option<String> {
+    versions
+        .iter()
+        .max_by(|a, b| {
+            if memnoth_update::check_version_policy(b, a, false).is_ok() {
+                std::cmp::Ordering::Greater
+            } else {
+                std::cmp::Ordering::Less
+            }
+        })
+        .cloned()
+}
+
+/// Roll back without a `.old` slot by picking the newest version the release
+/// tree still advertises and installing it with the full verification path.
+///
+/// `--rollback` is itself the explicit request for a downgrade, which is why
+/// `allow_downgrade` is true here. The choice is still bounded by
+/// `previous_versions` and every authenticity check still runs.
+fn rollback_from_release(
+    current_exe: &Path,
+    config: &UpdateConfig,
+) -> Result<Outcome, ErrorOutcome> {
+    let available = available_rollback_versions(config).map_err(failure)?;
+    let Some(target) = newest_version(&available) else {
+        return Err(ErrorOutcome::usage(format!(
+            "no previous binary at {} and no previous versions are advertised by {} — \
+             nothing to roll back to",
+            memnoth_update::backup_path(current_exe).display(),
+            config.dist_base_url
+        )));
+    };
+    rollback_to_version(current_exe, config, &target, true, false).map_err(failure)?;
+    Ok(Outcome::text(format!(
+        "Rolled back to memnoth {target} from the release directory.\n\
+         Start it again to run that build. Available versions: {}",
+        available.join(", ")
+    )))
+}
+
+/// Install a previously released version selected from the release directory.
+///
+/// This is the version picker that closes the gap left by the single `<exe>.old`
+/// slot. A version is a valid rollback target only when `latest/manifest.json`
+/// lists it in `previous_versions`; a name outside that list is refused, so
+/// rollback cannot become a way to fetch an arbitrary artifact. The chosen
+/// version's own manifest is then read and handed to `apply_update_to`, which
+/// re-checks the signature, the per-target checksum, that an artifact exists for
+/// this platform, and that the unpacked binary answers the promised version
+/// *before* it swaps. Every one of those failures is fail-closed.
+///
+/// `allow_downgrade` gates the version policy: rolling back to an older build
+/// is refused unless the caller was explicit (`--force`/`--yes`, or the
+/// `--rollback` verb itself). `no_verify` mirrors the rest of the update API;
+/// the normal path passes `false` so the signature is always checked.
+pub fn rollback_to_version(
+    current_exe: &Path,
+    config: &UpdateConfig,
+    version: &str,
+    allow_downgrade: bool,
+    no_verify: bool,
+) -> Result<()> {
+    let wanted = version.trim().trim_start_matches('v').to_string();
+    if wanted.is_empty() {
+        bail!("no version was given for the rollback");
+    }
+
+    // `previous_versions` is the authority, not the text hint it used to be.
+    let latest = fetch_manifest(config, config.channel)?;
+    let is_advertised = latest
+        .previous_versions
+        .iter()
+        .any(|entry| entry.version.trim().trim_start_matches('v') == wanted);
+    if !is_advertised {
+        bail!(
+            "version {wanted} is not in this release's previous_versions; \
+             refusing to fetch an unlisted artifact"
+        );
+    }
+
+    // dist.sh publishes each release under `v<version>/` (and some hosts under
+    // the bare version). Try both, exactly as a deliberate `--version` does.
+    let mut last_error = None;
+    let mut chosen = None;
+    for dir in [format!("v{wanted}"), wanted.clone()] {
+        match fetch_manifest_at(&config.dist_base_url, &dir) {
+            Ok(manifest) => {
+                if manifest.version.trim_start_matches('v') != wanted {
+                    bail!(
+                        "the manifest at {dir} describes {} instead of {wanted}",
+                        manifest.version
+                    );
+                }
+                chosen = Some((dir, manifest));
+                break;
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+    let (dir, manifest) = chosen.ok_or_else(|| {
+        anyhow!(
+            "no release directory for version {wanted} at {}: {}",
+            config.dist_base_url,
+            last_error.map(|e| e.to_string()).unwrap_or_default()
+        )
+    })?;
+
+    if manifest.channel != config.channel {
+        bail!(
+            "version {wanted} is on the {} channel, but {} was requested",
+            manifest.channel.dist_subdir(),
+            config.channel.dist_subdir()
+        );
+    }
+
+    // Fail closed on a downgrade unless the caller asked for it explicitly.
+    memnoth_update::check_version_policy(
+        &config.current_version,
+        &manifest.version,
+        allow_downgrade,
+    )?;
+
+    // `explicit = true` is safe here: the downgrade decision was just made
+    // above. `apply_update_to` still runs signature (unless no_verify),
+    // checksum, target-platform and `--version` checks before swapping.
+    memnoth_update::apply_update_to(current_exe, config, &manifest, true, &dir, no_verify)?;
+
+    Ok(())
 }
 
 /// Execute install verb.

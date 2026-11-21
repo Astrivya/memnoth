@@ -78,6 +78,113 @@ impl Sandbox {
             self.home.join(".config").join("zed").join("settings.json")
         }
     }
+
+    fn write_zed_settings(&self, text: &str) {
+        let path = self.zed_settings();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+}
+
+/// A JSONC settings file with both comment styles, trailing commas, and a
+/// server and a key that are not ours. Every one of those must survive `add`.
+const ZED_JSONC: &str = r#"{
+  // keep: the user's theme
+  "theme": "One Dark",
+  "context_servers": {
+    /* another server the user owns */
+    "other": { "command": "node", "args": ["other.js"], },
+  },
+}
+"#;
+
+/// Test-only JSONC reader: the production mask is exercised through the real
+/// binary in the tests below; this just lets the assertions read the result.
+fn parse_jsonc(text: &str) -> serde_json::Value {
+    let chars: Vec<char> = text.chars().collect();
+    let mut stripped = String::new();
+    let mut index = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    while index < chars.len() {
+        let ch = chars[index];
+        if in_string {
+            stripped.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            index += 1;
+            continue;
+        }
+        if ch == '"' {
+            in_string = true;
+            stripped.push(ch);
+            index += 1;
+            continue;
+        }
+        if ch == '/' && chars.get(index + 1) == Some(&'/') {
+            while index < chars.len() && chars[index] != '\n' {
+                index += 1;
+            }
+            continue;
+        }
+        if ch == '/' && chars.get(index + 1) == Some(&'*') {
+            index += 2;
+            while index + 1 < chars.len() && !(chars[index] == '*' && chars[index + 1] == '/') {
+                index += 1;
+            }
+            index = (index + 2).min(chars.len());
+            stripped.push(' ');
+            continue;
+        }
+        stripped.push(ch);
+        index += 1;
+    }
+    let chars: Vec<char> = stripped.chars().collect();
+    let mut clean = String::new();
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut pending: Option<usize> = None;
+    for ch in chars {
+        if in_string {
+            clean.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => {
+                in_string = true;
+                pending = None;
+                clean.push(ch);
+            }
+            ',' => {
+                pending = Some(clean.len());
+                clean.push(ch);
+            }
+            '}' | ']' => {
+                if let Some(at) = pending.take() {
+                    clean.replace_range(at..at + 1, " ");
+                }
+                clean.push(ch);
+            }
+            ch if ch.is_whitespace() => clean.push(ch),
+            _ => {
+                pending = None;
+                clean.push(ch);
+            }
+        }
+    }
+    serde_json::from_str(&clean).expect("edited Zed settings must still parse as JSONC")
 }
 
 /// The four clients named on the marketing site must all accept the one-click
@@ -328,4 +435,159 @@ fn install_fake_claude(bin: &Path, log: &Path) {
     let mut permissions = std::fs::metadata(&script).unwrap().permissions();
     permissions.set_mode(0o755);
     std::fs::set_permissions(&script, permissions).unwrap();
+}
+
+/// A commented Zed settings file is now written directly: the comments, the
+/// trailing commas, the unrelated key and the other server all survive, and
+/// the Command Palette snippet is no longer the only outcome.
+#[test]
+fn zed_jsonc_is_written_with_comments_and_unrelated_settings_preserved() {
+    let sandbox = Sandbox::new();
+    sandbox.write_zed_settings(ZED_JSONC);
+
+    let output = sandbox.run(&["mcp", "add", "--local", "--clients", "zed", "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{}", Sandbox::text(&output));
+    let data = &Sandbox::json(&output)["data"];
+    let results = data["results"].as_array().unwrap();
+    assert_eq!(results.len(), 1, "{results:?}");
+    assert_eq!(results[0]["ok"], true, "{}", results[0]["detail"]);
+    assert_eq!(results[0]["registered"], true, "{}", results[0]["detail"]);
+    let snippets = data["snippets"].as_array().unwrap();
+    assert!(
+        !snippets.iter().any(|snippet| snippet
+            .as_str()
+            .is_some_and(|s| s.contains("Command Palette"))),
+        "a written config must not fall back to the snippet: {snippets:?}"
+    );
+
+    let written = std::fs::read_to_string(sandbox.zed_settings()).unwrap();
+    assert!(written.contains("// keep: the user's theme"), "{written}");
+    assert!(
+        written.contains("/* another server the user owns */"),
+        "{written}"
+    );
+    let root = parse_jsonc(&written);
+    assert_eq!(root["theme"], "One Dark");
+    assert_eq!(root["context_servers"]["other"]["command"], "node");
+    let entry = &root["context_servers"]["memnoth"];
+    assert_eq!(entry["args"][0], "mcp");
+    assert_eq!(entry["args"][1], "serve");
+    assert_eq!(entry["env"]["MEMNOTH_MCP_READ_ONLY"], "1");
+    assert!(entry.get("url").is_none(), "{entry}");
+}
+
+/// Re-running `add` updates the same entry in place instead of appending a
+/// second one, and leaves an already-correct file byte-identical.
+#[test]
+fn zed_jsonc_re_add_is_idempotent() {
+    let sandbox = Sandbox::new();
+    sandbox.write_zed_settings(ZED_JSONC);
+
+    let first = sandbox.run(&["mcp", "add", "--local", "--clients", "zed", "--json"]);
+    assert_eq!(first.status.code(), Some(0), "{}", Sandbox::text(&first));
+    let once = std::fs::read_to_string(sandbox.zed_settings()).unwrap();
+
+    let second = sandbox.run(&["mcp", "add", "--local", "--clients", "zed", "--json"]);
+    assert_eq!(second.status.code(), Some(0), "{}", Sandbox::text(&second));
+    let twice = std::fs::read_to_string(sandbox.zed_settings()).unwrap();
+    assert_eq!(once, twice, "a second add must not change the file");
+
+    let root = parse_jsonc(&twice);
+    let servers = root["context_servers"].as_object().unwrap();
+    assert_eq!(servers.keys().filter(|key| *key == "memnoth").count(), 1);
+    assert!(twice.contains("// keep: the user's theme"), "{twice}");
+}
+
+/// Fields inside an existing memnoth entry that we do not own survive the
+/// update, and switching to local mode drops the stale HTTP fields.
+#[test]
+fn zed_jsonc_updates_an_existing_entry_without_touching_its_neighbours() {
+    let sandbox = Sandbox::new();
+    sandbox.write_zed_settings(
+        "{\n  // top note\n  \"context_servers\": {\n    \"memnoth\": {\n      \"url\": \"https://old.example/mcp\",\n      \"custom_field\": \"keep me\",\n    },\n    \"other\": { \"command\": \"node\" },\n  },\n}\n",
+    );
+
+    let output = sandbox.run(&["mcp", "add", "--local", "--clients", "zed", "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{}", Sandbox::text(&output));
+
+    let written = std::fs::read_to_string(sandbox.zed_settings()).unwrap();
+    assert!(written.contains("// top note"), "{written}");
+    assert!(written.contains("keep me"), "{written}");
+    let root = parse_jsonc(&written);
+    let entry = &root["context_servers"]["memnoth"];
+    assert_eq!(entry["custom_field"], "keep me");
+    assert!(!entry["command"].as_str().unwrap().is_empty());
+    assert!(entry.get("url").is_none(), "{entry}");
+    assert_eq!(root["context_servers"]["other"]["command"], "node");
+}
+
+/// A Zed settings file that is not valid even as JSONC is never rewritten:
+/// the command fails and the file is left byte-for-byte untouched.
+#[test]
+fn zed_malformed_jsonc_fails_closed() {
+    let sandbox = Sandbox::new();
+    let original = "{\n  // broken\n  \"context_servers\": { \"memnoth\": {\n";
+    sandbox.write_zed_settings(original);
+
+    let output = sandbox.run(&["mcp", "add", "--local", "--clients", "zed", "--json"]);
+    assert_ne!(output.status.code(), Some(0), "{}", Sandbox::text(&output));
+    let text = Sandbox::text(&output);
+    assert!(text.contains("refusing to rewrite"), "{text}");
+    assert_eq!(
+        std::fs::read_to_string(sandbox.zed_settings()).unwrap(),
+        original
+    );
+}
+
+/// Fail closed on a shape we cannot safely edit, too, not just broken syntax.
+#[test]
+fn zed_jsonc_with_a_non_object_context_servers_fails_closed() {
+    let sandbox = Sandbox::new();
+    let original = "{\n  // note\n  \"context_servers\": [],\n}\n";
+    sandbox.write_zed_settings(original);
+
+    let output = sandbox.run(&["mcp", "add", "--local", "--clients", "zed", "--json"]);
+    assert_ne!(output.status.code(), Some(0), "{}", Sandbox::text(&output));
+    let text = Sandbox::text(&output);
+    assert!(text.contains("is not an object"), "{text}");
+    assert_eq!(
+        std::fs::read_to_string(sandbox.zed_settings()).unwrap(),
+        original
+    );
+}
+
+/// `--dry-run` validates the JSONC path but leaves the user's file untouched.
+#[test]
+fn zed_jsonc_dry_run_leaves_the_file_untouched() {
+    let sandbox = Sandbox::new();
+    sandbox.write_zed_settings(ZED_JSONC);
+
+    let output = sandbox.run(&[
+        "mcp",
+        "add",
+        "--local",
+        "--clients",
+        "zed",
+        "--dry-run",
+        "--json",
+    ]);
+    assert_eq!(output.status.code(), Some(0), "{}", Sandbox::text(&output));
+    assert_eq!(
+        std::fs::read_to_string(sandbox.zed_settings()).unwrap(),
+        ZED_JSONC
+    );
+}
+
+/// `//` and `/* */` inside a string value are data, not comments to strip.
+#[test]
+fn zed_jsonc_comment_markers_inside_strings_are_data() {
+    let sandbox = Sandbox::new();
+    let original = "{\n  \"note\": \"http://example.test//path /* still data */\",\n  \"context_servers\": {},\n}\n";
+    sandbox.write_zed_settings(original);
+
+    let output = sandbox.run(&["mcp", "add", "--local", "--clients", "zed", "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{}", Sandbox::text(&output));
+    let root = parse_jsonc(&std::fs::read_to_string(sandbox.zed_settings()).unwrap());
+    assert_eq!(root["note"], "http://example.test//path /* still data */");
+    assert!(root["context_servers"]["memnoth"].is_object());
 }

@@ -13,11 +13,17 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 
+use memnoth::update_cmd::{available_rollback_versions, rollback_to_version};
 use memnoth_update::{
     Channel, UpdateConfig, apply_update_to, backup_path, fetch_manifest, target_triple,
 };
 use sha2::{Digest, Sha256};
+
+/// `apply_update_to` uses temp files named after the process id, so tests in
+/// this binary that swap a binary must not overlap.
+static APPLY_LOCK: Mutex<()> = Mutex::new(());
 
 /// The binary this build produced, staged as if it were the published artifact.
 const BUILT: &str = env!("CARGO_BIN_EXE_memnoth");
@@ -106,6 +112,7 @@ fn installed_copy(dir: &Path) -> PathBuf {
 
 #[test]
 fn a_staged_release_installs_onto_an_installed_copy_and_keeps_the_old_bytes() {
+    let _guard = APPLY_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let dir = tempfile::tempdir().unwrap();
     let version = built_version();
     stage_release(dir.path(), &version);
@@ -192,4 +199,162 @@ fn a_local_source_is_read_as_a_path_not_a_host() {
         assert_eq!(manifest.version, version);
         assert_eq!(manifest.targets.len(), 1);
     }
+}
+
+/// Stage one previous release under `v<version>/`, the directory dist.sh
+/// publishes for every version it keeps. The archive holds the real built
+/// binary so the updater's `--version` check can pass.
+fn stage_version_dir(root: &Path, version: &str) -> PathBuf {
+    let triple = target_triple();
+    let filename = format!("memnoth-{version}-{triple}.zip");
+    let dir = root.join(format!("v{version}"));
+    fs::create_dir_all(&dir).unwrap();
+    let archive = dir.join(&filename);
+
+    let file = fs::File::create(&archive).unwrap();
+    let mut zip = zip::ZipWriter::new(file);
+    let entry = if cfg!(windows) {
+        "memnoth.exe"
+    } else {
+        "memnoth"
+    };
+    zip.start_file(entry, zip::write::SimpleFileOptions::default())
+        .unwrap();
+    zip.write_all(&fs::read(BUILT).unwrap()).unwrap();
+    zip.finish().unwrap();
+
+    let manifest = format!(
+        r#"{{
+  "version": "{version}",
+  "channel": "stable",
+  "targets": [
+    {{ "triple": "{triple}", "filename": "{filename}", "sha256": "{digest}" }}
+  ],
+  "checksums": {{ "sha256": "{digest}" }},
+  "signatures": {{ "minisign": null, "cosign": null }},
+  "uninstall": null,
+  "previous_versions": [],
+  "published_at": "2026-11-13T00:00:00Z",
+  "notes": null
+}}"#,
+        digest = sha256(&archive)
+    );
+    fs::write(dir.join("manifest.json"), manifest).unwrap();
+    archive
+}
+
+/// Rewrite `latest/manifest.json` so its `previous_versions` advertises the
+/// given versions, the way dist.sh does from the version directories on disk.
+fn advertise_previous(root: &Path, latest_version: &str, previous: &[String]) {
+    let entries = previous
+        .iter()
+        .map(|version| format!(r#"{{"version": "{version}", "url": "v{version}/"}}"#))
+        .collect::<Vec<_>>()
+        .join(",");
+    let manifest = format!(
+        r#"{{
+  "version": "{latest_version}",
+  "channel": "stable",
+  "targets": [],
+  "checksums": {{ "sha256": "" }},
+  "signatures": {{ "minisign": null, "cosign": null }},
+  "uninstall": null,
+  "previous_versions": [{entries}],
+  "published_at": "2026-11-13T00:00:00Z",
+  "notes": null
+}}"#
+    );
+    let latest = root.join("latest");
+    fs::create_dir_all(&latest).unwrap();
+    fs::write(latest.join("manifest.json"), manifest).unwrap();
+}
+
+fn rollback_config(root: &Path) -> UpdateConfig {
+    UpdateConfig {
+        current_version: "99.0.0".to_string(), // the staged version is a downgrade
+        ..config_for(root)
+    }
+}
+
+#[test]
+fn rollback_selects_a_previous_version_from_the_release_directory() {
+    let _guard = APPLY_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let version = built_version();
+    stage_version_dir(dir.path(), &version);
+    advertise_previous(dir.path(), "99.0.0", std::slice::from_ref(&version));
+    assert_eq!(
+        available_rollback_versions(&rollback_config(dir.path())).unwrap(),
+        vec![version.clone()]
+    );
+
+    let install_dir = dir.path().join("install");
+    fs::create_dir_all(&install_dir).unwrap();
+    let installed = installed_copy(&install_dir);
+    let config = rollback_config(dir.path());
+
+    // This file stages unsigned releases, matching its sibling test; signature
+    // fail-closed is covered in update_signed_release.rs.
+    rollback_to_version(&installed, &config, &version, true, true)
+        .expect("an advertised previous version installs");
+
+    let output = Command::new(&installed).arg("--version").output().unwrap();
+    assert!(output.status.success(), "the rolled-back copy does not run");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains(&version),
+        "the installed binary is not the selected previous version"
+    );
+}
+
+#[test]
+fn rollback_refuses_a_downgrade_that_was_not_asked_for_explicitly() {
+    let dir = tempfile::tempdir().unwrap();
+    let version = built_version();
+    stage_version_dir(dir.path(), &version);
+    advertise_previous(dir.path(), "99.0.0", std::slice::from_ref(&version));
+
+    let install_dir = dir.path().join("install");
+    fs::create_dir_all(&install_dir).unwrap();
+    let installed = installed_copy(&install_dir);
+    let config = rollback_config(dir.path());
+
+    let error = rollback_to_version(&installed, &config, &version, false, true)
+        .expect_err("a downgrade needs an explicit force");
+    assert!(
+        format!("{error:#}").contains("Refusing to downgrade"),
+        "{error:#}"
+    );
+    assert_eq!(
+        fs::read(&installed).unwrap(),
+        b"the build that was installed before\n",
+        "a refused rollback must not touch the installed binary"
+    );
+}
+
+#[test]
+fn rollback_refuses_a_version_the_release_tree_does_not_advertise() {
+    let dir = tempfile::tempdir().unwrap();
+    let version = built_version();
+    stage_version_dir(dir.path(), &version);
+    // The artifact exists, but nothing advertises it: that is a hostile or
+    // stale name, not a sanctioned rollback target.
+    advertise_previous(dir.path(), "99.0.0", &[]);
+
+    let install_dir = dir.path().join("install");
+    fs::create_dir_all(&install_dir).unwrap();
+    let installed = installed_copy(&install_dir);
+    let config = rollback_config(dir.path());
+
+    let error = rollback_to_version(&installed, &config, &version, true, true)
+        .expect_err("an unlisted version is not a rollback target");
+    assert!(
+        error
+            .to_string()
+            .contains("not in this release's previous_versions"),
+        "{error:#}"
+    );
+    assert_eq!(
+        fs::read(&installed).unwrap(),
+        b"the build that was installed before\n"
+    );
 }

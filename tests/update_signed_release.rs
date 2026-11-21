@@ -23,14 +23,39 @@
 //! `cargo test --test update_signed_release -p memnoth`
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 
 use chrono::Utc;
+use memnoth::update_cmd::rollback_to_version;
 use memnoth_update::{
-    Channel, Checksums, Manifest, Signatures, Target, UpdateConfig, fetch_manifest, target_triple,
-    verify_signatures,
+    Channel, Checksums, Manifest, PreviousVersion, Signatures, Target, UpdateConfig,
+    fetch_manifest, target_triple, verify_signatures,
 };
+use sha2::{Digest, Sha256};
+
+/// The binary this build produced, staged as the artifact inside a release.
+const BUILT: &str = env!("CARGO_BIN_EXE_memnoth");
+
+/// `apply_update_to` uses temp files named after the process id, so tests that
+/// swap a binary must not overlap.
+static APPLY_LOCK: Mutex<()> = Mutex::new(());
+
+fn built_version() -> String {
+    let output = Command::new(BUILT).arg("--version").output().unwrap();
+    assert!(output.status.success());
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .nth(1)
+        .unwrap_or_else(|| panic!("no version in the built binary's --version"))
+        .to_string()
+}
+
+fn sha256(path: &Path) -> String {
+    hex::encode(Sha256::digest(fs::read(path).unwrap()))
+}
 
 /// Public key published by the `minisign-verify` crate (README / `tests::verify`).
 const TEST_PUBKEY: &str = "RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3";
@@ -361,5 +386,321 @@ fn a_test_time_generated_keypair_round_trips_through_the_updater() {
     assert!(
         verify_signatures(&sums, &manifest, &config).is_err(),
         "a freshly generated signature must fail over tampered bytes"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Rollback to a previous version in the release directory, verified end to end.
+// ---------------------------------------------------------------------------
+
+/// An installed binary distinct from the artifact, so a swap is observable.
+fn installed_in(dir: &Path) -> PathBuf {
+    let name = if cfg!(windows) { "mn.exe" } else { "mn" };
+    let path = dir.join(name);
+    fs::write(&path, b"the newer build that should be replaced\n").unwrap();
+    path
+}
+
+/// Build a manifest for a staged rollback release. `previous` is the allowlist
+/// the newest release advertises; the version directory itself advertises none.
+fn rollback_manifest(
+    version: &str,
+    signature: Option<String>,
+    triple: &str,
+    filename: &str,
+    digest: &str,
+    previous: &[String],
+) -> Manifest {
+    Manifest {
+        version: version.to_string(),
+        channel: Channel::Stable,
+        targets: vec![Target {
+            triple: triple.to_string(),
+            filename: filename.to_string(),
+            sha256: digest.to_string(),
+        }],
+        checksums: Checksums {
+            sha256: digest.to_string(),
+        },
+        signatures: Signatures {
+            minisign: signature,
+            cosign: None,
+        },
+        uninstall: None,
+        previous_versions: previous
+            .iter()
+            .map(|version| PreviousVersion {
+                version: version.clone(),
+                url: format!("v{version}/"),
+            })
+            .collect(),
+        published_at: Utc::now(),
+        notes: None,
+    }
+}
+
+/// Stage a `v<version>/` release and a `latest/` that advertises it, the layout
+/// dist.sh publishes. Returns the artifact path so a test can remove or inspect
+/// it. The signature vector covers `SIGNED_BYTES`, written as `SHA256SUMS`.
+fn stage_signed_rollback(
+    root: &Path,
+    version: &str,
+    triple: &str,
+    signature: Option<String>,
+) -> PathBuf {
+    let filename = format!("memnoth-{version}-{triple}.zip");
+    let version_dir = root.join(format!("v{version}"));
+    fs::create_dir_all(&version_dir).unwrap();
+    let archive = version_dir.join(&filename);
+    {
+        let file = fs::File::create(&archive).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let entry = if cfg!(windows) {
+            "memnoth.exe"
+        } else {
+            "memnoth"
+        };
+        zip.start_file(entry, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(&fs::read(BUILT).unwrap()).unwrap();
+        zip.finish().unwrap();
+    }
+    let digest = sha256(&archive);
+
+    let version_manifest =
+        rollback_manifest(version, signature.clone(), triple, &filename, &digest, &[]);
+    fs::write(
+        version_dir.join("manifest.json"),
+        serde_json::to_vec(&version_manifest).unwrap(),
+    )
+    .unwrap();
+
+    let latest = rollback_manifest(
+        "99.0.0",
+        signature,
+        triple,
+        &filename,
+        &digest,
+        &[version.to_string()],
+    );
+    let latest_dir = root.join("latest");
+    fs::create_dir_all(&latest_dir).unwrap();
+    fs::write(
+        latest_dir.join("manifest.json"),
+        serde_json::to_vec(&latest).unwrap(),
+    )
+    .unwrap();
+
+    fs::write(sums_path(root), SIGNED_BYTES).unwrap();
+    archive
+}
+
+fn rollback_config(root: &Path, pubkey: Option<&str>) -> UpdateConfig {
+    UpdateConfig {
+        current_version: "99.0.0".to_string(), // the staged version is a downgrade
+        ..config_for(root, pubkey.map(str::to_string))
+    }
+}
+
+#[test]
+fn a_signed_previous_version_rolls_back_with_full_verification() {
+    let _guard = APPLY_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let dir = tempfile::tempdir().expect("tempdir");
+    let version = built_version();
+    stage_signed_rollback(
+        dir.path(),
+        &version,
+        &target_triple(),
+        Some(TEST_SIGNATURE.to_string()),
+    );
+
+    let install_dir = dir.path().join("install");
+    fs::create_dir_all(&install_dir).unwrap();
+    let installed = installed_in(&install_dir);
+    let config = rollback_config(dir.path(), Some(TEST_PUBKEY));
+
+    rollback_to_version(&installed, &config, &version, true, false)
+        .expect("a signed previous version must install");
+
+    let output = Command::new(&installed).arg("--version").output().unwrap();
+    assert!(output.status.success(), "the rolled-back copy does not run");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains(&version),
+        "the installed binary is not the selected previous version"
+    );
+}
+
+#[test]
+fn rollback_refuses_a_tampered_signature_without_swapping() {
+    let _guard = APPLY_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let dir = tempfile::tempdir().expect("tempdir");
+    let version = built_version();
+    stage_signed_rollback(
+        dir.path(),
+        &version,
+        &target_triple(),
+        Some(TAMPERED_SIGNATURE.to_string()),
+    );
+
+    let install_dir = dir.path().join("install");
+    fs::create_dir_all(&install_dir).unwrap();
+    let installed = installed_in(&install_dir);
+    let config = rollback_config(dir.path(), Some(TEST_PUBKEY));
+
+    let error = rollback_to_version(&installed, &config, &version, true, false)
+        .expect_err("a tampered signature must not roll back");
+    assert!(
+        error.to_string().contains("Minisign verification failed"),
+        "{error:#}"
+    );
+    assert_eq!(
+        fs::read(&installed).unwrap(),
+        b"the newer build that should be replaced\n"
+    );
+}
+
+#[test]
+fn rollback_refuses_an_unsigned_previous_version() {
+    let _guard = APPLY_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let dir = tempfile::tempdir().expect("tempdir");
+    let version = built_version();
+    stage_signed_rollback(dir.path(), &version, &target_triple(), None);
+
+    let install_dir = dir.path().join("install");
+    fs::create_dir_all(&install_dir).unwrap();
+    let installed = installed_in(&install_dir);
+    let config = rollback_config(dir.path(), Some(TEST_PUBKEY));
+
+    let error = rollback_to_version(&installed, &config, &version, true, false)
+        .expect_err("an unsigned previous version is not a verified rollback");
+    assert!(error.to_string().contains("unsigned"), "{error:#}");
+    assert_eq!(
+        fs::read(&installed).unwrap(),
+        b"the newer build that should be replaced\n"
+    );
+}
+
+#[test]
+fn rollback_refuses_a_previous_version_signed_by_an_unknown_key() {
+    let _guard = APPLY_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let dir = tempfile::tempdir().expect("tempdir");
+    let version = built_version();
+    stage_signed_rollback(
+        dir.path(),
+        &version,
+        &target_triple(),
+        Some(TEST_SIGNATURE.to_string()),
+    );
+
+    let install_dir = dir.path().join("install");
+    fs::create_dir_all(&install_dir).unwrap();
+    let installed = installed_in(&install_dir);
+    let config = rollback_config(dir.path(), Some(WRONG_PUBKEY));
+
+    let error = rollback_to_version(&installed, &config, &version, true, false)
+        .expect_err("a signature under another key must refuse the rollback");
+    assert!(
+        error.to_string().contains("Minisign verification failed"),
+        "{error:#}"
+    );
+    assert_eq!(
+        fs::read(&installed).unwrap(),
+        b"the newer build that should be replaced\n"
+    );
+}
+
+#[test]
+fn rollback_refuses_an_artifact_for_a_different_target() {
+    let _guard = APPLY_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let dir = tempfile::tempdir().expect("tempdir");
+    let version = built_version();
+    let wrong = if target_triple() == "aarch64-apple-darwin" {
+        "x86_64-apple-darwin"
+    } else {
+        "aarch64-apple-darwin"
+    };
+    stage_signed_rollback(
+        dir.path(),
+        &version,
+        wrong,
+        Some(TEST_SIGNATURE.to_string()),
+    );
+
+    let install_dir = dir.path().join("install");
+    fs::create_dir_all(&install_dir).unwrap();
+    let installed = installed_in(&install_dir);
+    let config = rollback_config(dir.path(), Some(TEST_PUBKEY));
+
+    let error = rollback_to_version(&installed, &config, &version, true, false)
+        .expect_err("an artifact for another platform must not be installed");
+    assert!(
+        error.to_string().contains("no release artifact for target"),
+        "{error:#}"
+    );
+    assert_eq!(
+        fs::read(&installed).unwrap(),
+        b"the newer build that should be replaced\n"
+    );
+}
+
+#[test]
+fn rollback_refuses_a_missing_previous_artifact() {
+    let _guard = APPLY_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let dir = tempfile::tempdir().expect("tempdir");
+    let version = built_version();
+    let archive = stage_signed_rollback(
+        dir.path(),
+        &version,
+        &target_triple(),
+        Some(TEST_SIGNATURE.to_string()),
+    );
+    fs::remove_file(&archive).unwrap();
+
+    let install_dir = dir.path().join("install");
+    fs::create_dir_all(&install_dir).unwrap();
+    let installed = installed_in(&install_dir);
+    let config = rollback_config(dir.path(), Some(TEST_PUBKEY));
+
+    let error = rollback_to_version(&installed, &config, &version, true, false)
+        .expect_err("a missing artifact must refuse the rollback");
+    assert!(error.to_string().contains("copying"), "{error:#}");
+    assert_eq!(
+        fs::read(&installed).unwrap(),
+        b"the newer build that should be replaced\n"
+    );
+}
+
+#[test]
+fn rollback_refuses_a_previous_version_with_a_wrong_checksum() {
+    let _guard = APPLY_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let dir = tempfile::tempdir().expect("tempdir");
+    let version = built_version();
+    stage_signed_rollback(
+        dir.path(),
+        &version,
+        &target_triple(),
+        Some(TEST_SIGNATURE.to_string()),
+    );
+
+    // Tamper the per-target digest in the version's own manifest. The signature
+    // over SHA256SUMS still verifies; the artifact digest no longer does.
+    let version_dir = dir.path().join(format!("v{version}"));
+    let manifest_path = version_dir.join("manifest.json");
+    let mut manifest: Manifest =
+        serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    manifest.targets[0].sha256 = "0".repeat(64);
+    fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+    let install_dir = dir.path().join("install");
+    fs::create_dir_all(&install_dir).unwrap();
+    let installed = installed_in(&install_dir);
+    let config = rollback_config(dir.path(), Some(TEST_PUBKEY));
+
+    let error = rollback_to_version(&installed, &config, &version, true, false)
+        .expect_err("a bad checksum must refuse the rollback");
+    assert!(error.to_string().contains("Checksum mismatch"), "{error:#}");
+    assert_eq!(
+        fs::read(&installed).unwrap(),
+        b"the newer build that should be replaced\n"
     );
 }

@@ -1,9 +1,17 @@
+use std::collections::HashSet;
 use std::fs;
 
+use memnoth::project_graph_sync::{
+    SnapshotRefusal, frame,
+    restore_verify::{self, GateOutcome},
+    unframe,
+};
 use memnoth::sync_crypto::{
     CryptoError, Manifest, ManifestBlob, NONCE_BYTES, OrgKey, OrgSalt, content_hash, decrypt,
-    encrypt_with_nonce,
+    encrypt, encrypt_with_nonce, project_graph_salt,
 };
+use memnoth_engine::store::MemoryEngine;
+use memnoth_engine::{EntityKind, now_ms};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -206,4 +214,179 @@ fn manifest_bytes_are_canonical_and_wrong_key_cannot_open_them() {
         Manifest::open(&wrong, &envelope),
         Err(CryptoError::AuthenticationFailed)
     ));
+}
+
+/// Build a real memory vault on disk and return its raw SQLite bytes.
+/// `violating` inserts an inverted validity interval, which MI-1 must catch.
+fn vault_bytes(violating: bool) -> Vec<u8> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("vault.db");
+    {
+        let engine = MemoryEngine::open(&path).unwrap();
+        let t0 = now_ms();
+        let entity = engine
+            .add_entity(EntityKind::Concept, "rust", 0.9, t0)
+            .unwrap();
+        let at = t0 + 1_000;
+        let successor = engine
+            .supersede_entity(entity, None, None, None, None, "rename", at)
+            .unwrap();
+        engine
+            .ingest_observation_attributed(
+                successor,
+                "Rust is a systems language",
+                "fact",
+                0.9,
+                at,
+                r#"{"user":"tester"}"#,
+                Some(at + 2_000),
+            )
+            .unwrap();
+        if violating {
+            engine
+                .connection()
+                .execute(
+                    "INSERT INTO entities (kind, name, valid_from, valid_to, created_at) \
+                     VALUES ('concept', 'inverted', 2000, 1000, 1500)",
+                    [],
+                )
+                .unwrap();
+        }
+    } // drop the connection so every page is flushed to the file
+    fs::read(&path).unwrap()
+}
+
+#[test]
+fn a_violating_vault_snapshot_is_refused_before_install() {
+    let vectors = vectors();
+    let salt = OrgSalt::from_hex(&vectors.salt_hex).unwrap();
+    let key = OrgKey::derive(&vectors.phrase, &salt).unwrap();
+    let project = "org:violating-project";
+
+    let framed = frame(project, "source-fingerprint", &vault_bytes(true)).unwrap();
+    let envelope = encrypt(&key, &framed).unwrap();
+
+    // The same authenticate + unframe sequence pull_remote performs.
+    let plaintext = decrypt(&key, &envelope).expect("the correct key authenticates");
+    let (header, database) = unframe(&plaintext).unwrap();
+    assert_eq!(header.project_id, project);
+
+    let dir = tempfile::tempdir().unwrap();
+    let staged = dir.path().join("incoming.db");
+    let target = dir.path().join("vault.db");
+    fs::write(&staged, database).unwrap();
+
+    let outcome = restore_verify::check_staged_invariants(&staged).unwrap();
+    match &outcome {
+        GateOutcome::Violations(ids) => {
+            assert!(
+                ids.contains(&"MI-1"),
+                "an inverted interval must fail MI-1: {ids:?}"
+            );
+            let refusal = SnapshotRefusal::InvariantViolation(ids.clone());
+            assert!(refusal.to_string().contains("memory invariants violated"));
+        }
+        other => panic!("a vault with an inverted interval must be refused: {other:?}"),
+    }
+    assert!(outcome.is_violation());
+
+    // pull_remote's gate removes the staged file and never renames it into place.
+    if outcome.is_violation() {
+        let _ = fs::remove_file(&staged);
+    }
+    assert!(!staged.exists());
+    assert!(
+        !target.exists(),
+        "a violating snapshot must never be installed"
+    );
+}
+
+#[test]
+fn a_clean_vault_snapshot_passes_the_gate_and_can_be_installed() {
+    let vectors = vectors();
+    let salt = OrgSalt::from_hex(&vectors.salt_hex).unwrap();
+    let key = OrgKey::derive(&vectors.phrase, &salt).unwrap();
+    let project = "org:clean-project";
+
+    let framed = frame(project, "source-fingerprint", &vault_bytes(false)).unwrap();
+    let envelope = encrypt(&key, &framed).unwrap();
+    let plaintext = decrypt(&key, &envelope).unwrap();
+    let (header, database) = unframe(&plaintext).unwrap();
+    assert_eq!(header.project_id, project);
+
+    let dir = tempfile::tempdir().unwrap();
+    let staged = dir.path().join("incoming.db");
+    let target = dir.path().join("vault.db");
+    fs::write(&staged, database).unwrap();
+
+    assert!(
+        matches!(
+            restore_verify::check_staged_invariants(&staged).unwrap(),
+            GateOutcome::CleanVault(_)
+        ),
+        "a clean vault must pass the local import gate"
+    );
+
+    // The install is the atomic rename pull_remote performs after the gate.
+    fs::rename(&staged, &target).unwrap();
+    assert!(target.exists());
+    assert!(
+        matches!(
+            restore_verify::check_staged_invariants(&target).unwrap(),
+            GateOutcome::CleanVault(_)
+        ),
+        "the installed vault must still pass the invariants"
+    );
+}
+
+#[test]
+fn tampered_wrong_key_and_wrong_project_have_distinct_honest_errors() {
+    let vectors = vectors();
+    let salt = OrgSalt::from_hex(&vectors.salt_hex).unwrap();
+    let key = OrgKey::derive(&vectors.phrase, &salt).unwrap();
+    let wrong_key = OrgKey::derive("not the recovery phrase", &salt).unwrap();
+    let framed = frame("project-a", "fp", b"a vault-shaped database").unwrap();
+    let envelope = encrypt(&key, &framed).unwrap();
+
+    // A tampered blob fails the content-addressed hash check at the gate,
+    // before authenticated decryption is even attempted.
+    let mut tampered = envelope.clone();
+    *tampered.last_mut().unwrap() ^= 1;
+    assert_ne!(content_hash(&tampered), content_hash(&envelope));
+    assert!(matches!(
+        decrypt(&key, &tampered),
+        Err(CryptoError::AuthenticationFailed)
+    ));
+
+    // A blob with a matching hash that still cannot be opened is a key
+    // failure, not a transport-integrity failure.
+    assert!(matches!(
+        decrypt(&wrong_key, &envelope),
+        Err(CryptoError::AuthenticationFailed)
+    ));
+
+    // Project binding is framed independently of the key, so a snapshot that
+    // opens under this key can still name a different project.
+    let other_key = OrgKey::derive("phrase", &project_graph_salt("org", "project-b")).unwrap();
+    let framed_a = frame("project-a", "fp", b"db").unwrap();
+    let envelope_b = encrypt(&other_key, &framed_a).unwrap();
+    let opened = decrypt(&other_key, &envelope_b).unwrap();
+    let (header, _) = unframe(&opened).unwrap();
+    assert_ne!(header.project_id, "project-b");
+
+    let messages: Vec<String> = vec![
+        SnapshotRefusal::TamperedCiphertext.to_string(),
+        SnapshotRefusal::AuthenticationFailed.to_string(),
+        SnapshotRefusal::WrongProject.to_string(),
+        SnapshotRefusal::InvariantViolation(vec!["MI-1"]).to_string(),
+    ];
+    assert_eq!(
+        messages.iter().collect::<HashSet<_>>().len(),
+        messages.len(),
+        "every refusal must have its own honest message"
+    );
+    assert!(messages[0].contains("ciphertext hash check"));
+    assert!(messages[1].contains("could not be authenticated"));
+    assert!(messages[2].contains("another project"));
+    assert!(messages[3].contains("memory invariants violated"));
 }

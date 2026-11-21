@@ -3,6 +3,7 @@
 //! Graphs are derived from the local checkout. The service receives only an
 //! authenticated ciphertext snapshot; project ACLs are enforced by Cloud.
 
+use std::fmt;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -16,8 +17,51 @@ use zeroize::Zeroizing;
 use crate::context::AppContext;
 use crate::sync_crypto::{OrgKey, content_hash, decrypt, encrypt, project_graph_salt};
 
+// The local import gate lives with the engine's store sources but is compiled
+// into this crate by path, so the engine's `store.rs` is not modified. It uses
+// the public engine API only and never mutates the staged database.
+#[path = "../crates/memnoth-engine/src/store/restore_verify.rs"]
+pub mod restore_verify;
+
 const SNAPSHOT_MAGIC: &[u8; 8] = b"MNKG\0\0\0\x01";
 const MAX_SNAPSHOT_BYTES: usize = 64 * 1024 * 1024;
+
+/// Distinct, honest reasons a pulled encrypted snapshot is refused before any
+/// local file is replaced. A tampered blob, a wrong key, a snapshot bound to
+/// another project, and a vault that fails its memory invariants must never
+/// collapse into one generic error.
+#[derive(Debug)]
+pub enum SnapshotRefusal {
+    /// The downloaded ciphertext hash does not match Cloud's metadata.
+    TamperedCiphertext,
+    /// The recovery phrase / key could not authenticate the envelope.
+    AuthenticationFailed,
+    /// The framed snapshot header names a different project.
+    WrongProject,
+    /// A decrypted memory vault failed one or more modelled invariants.
+    InvariantViolation(Vec<&'static str>),
+}
+
+impl fmt::Display for SnapshotRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TamperedCiphertext => {
+                f.write_str("downloaded project graph failed the ciphertext hash check")
+            }
+            Self::AuthenticationFailed => f.write_str("project graph could not be authenticated"),
+            Self::WrongProject => {
+                f.write_str("encrypted graph snapshot belongs to another project")
+            }
+            Self::InvariantViolation(ids) => write!(
+                f,
+                "refusing to install snapshot: memory invariants violated ({})",
+                ids.join(", ")
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SnapshotRefusal {}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct Cursor {
@@ -33,10 +77,11 @@ struct Cursor {
     synced_at_unix_secs: Option<u64>,
 }
 
+/// Plaintext metadata framed in front of the database bytes before encryption.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct SnapshotHeader {
-    project_id: String,
-    source_fingerprint: String,
+pub struct SnapshotHeader {
+    pub project_id: String,
+    pub source_fingerprint: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -353,19 +398,28 @@ fn pull_remote(
         bail!("downloaded project graph size does not match Cloud metadata");
     }
     if content_hash(&ciphertext) != expected_hash {
-        bail!("downloaded project graph failed the ciphertext hash check");
+        return Err(SnapshotRefusal::TamperedCiphertext.into());
     }
     let key = OrgKey::derive(phrase, &project_graph_salt(org, project_id))
         .context("deriving the project graph encryption key")?;
     let plaintext =
-        decrypt(&key, &ciphertext).context("project graph could not be authenticated")?;
+        decrypt(&key, &ciphertext).map_err(|_| SnapshotRefusal::AuthenticationFailed)?;
     let (header, database) = unframe(&plaintext)?;
     if header.project_id != project_id {
-        bail!("encrypted graph snapshot belongs to another project");
+        return Err(SnapshotRefusal::WrongProject.into());
     }
     let staged = paths.dir.join("incoming.graph.db");
     write_atomic(&staged, database)?;
     verify_database(&staged)?;
+    // Local import gate: a decrypted memory vault that breaks a modelled rule
+    // is never installed. Non-vault databases (a code graph) are out of scope
+    // for the memory rules and pass through unchanged.
+    if let restore_verify::GateOutcome::Violations(ids) =
+        restore_verify::check_staged_invariants(&staged)?
+    {
+        let _ = fs::remove_file(&staged);
+        return Err(SnapshotRefusal::InvariantViolation(ids).into());
+    }
     ensure_graph_fresh(&ctx.root, &staged)?;
     let fingerprint = source_fingerprint(&ctx.root, &staged)?;
     if fingerprint != header.source_fingerprint {
@@ -638,7 +692,8 @@ fn unindexed_source_count(root: &Path, database: &Path) -> Result<usize> {
         .count())
 }
 
-fn frame(project_id: &str, fingerprint: &str, database: &[u8]) -> Result<Vec<u8>> {
+/// Frame a snapshot as `magic || header_len || header || database`.
+pub fn frame(project_id: &str, fingerprint: &str, database: &[u8]) -> Result<Vec<u8>> {
     let header = serde_json::to_vec(&SnapshotHeader {
         project_id: project_id.to_string(),
         source_fingerprint: fingerprint.to_string(),
@@ -652,7 +707,8 @@ fn frame(project_id: &str, fingerprint: &str, database: &[u8]) -> Result<Vec<u8>
     Ok(output)
 }
 
-fn unframe(bytes: &[u8]) -> Result<(SnapshotHeader, &[u8])> {
+/// Split a framed snapshot back into its header and database bytes.
+pub fn unframe(bytes: &[u8]) -> Result<(SnapshotHeader, &[u8])> {
     if bytes.len() < 12 || &bytes[..8] != SNAPSHOT_MAGIC {
         bail!("encrypted graph snapshot has an unsupported format");
     }
