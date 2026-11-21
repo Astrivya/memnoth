@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **One-command install setup (opt-in).** `curl … | bash -s -- --setup` (and the Windows one-liner with `--setup`) installs the release and then runs `mn setup --yes` once. Without the flag the installer behaves exactly as before. The installers also retry the same release path once against the canonical GitHub release host when the configured source fails; the switch is announced and the archive is still checksum-verified.
+- **Honest setup report.** `mn setup` installs shell completions through the same public code path `mn completion install` uses, and reports `ready`, `not_ready` and an overall verdict with a reason for every step it could not complete. `--yes` accepts the safe defaults and never signs in or claims a skipped step was done.
+- **Per-package CI splitting.** Windows test archives and jobs are split into small per-package scopes, release verification and npm publishing run as short separate jobs, and fuzzing runs as a parallel per-target matrix instead of one long job.
+- **Install-surface automation gates.** CI verifies the published install surface after a release, and the post-publish check requires a signature on the artifacts.
+- **Support-widget availability probe.** `GET /api/support/chat` reports `available: true` or `available: false` with `code: "support_unavailable"`, without exposing a key value, so the widget can check availability before a visitor types anything.
+- **winget manifest auto-fill.** The release workflow writes a filled `dist/<tag>/winget.yaml` from the built Windows archive and fails if a placeholder survives templating. Publishing to winget-pkgs remains a human step.
+- **One-click MCP deep links.** The landing page requests freshly minted per-user links from `POST /api/mcp/install` for Cursor and VS Code instead of pasting a static config into the URL, and offers manual host links when a link cannot be prepared. The CLI's one-click client configs were corrected with registration tests.
+- **D33 dry-run rehearsal harness.** `deploy/rehearsal_d33.py` (11 tests) exercises paired-backup and purge replay offline. It is a dry run and explicitly does not close the live D33 gate.
+
+### Changed
+
+- **Docs and AGENTS drift corrections.** CLI docs now align install and MCP setup commands with the published release, list every setup step, and regenerate the command surfaces with them. Workspace agent guidance and operational docs were corrected to describe the shipped install and signing surface.
+- **Symmetric production install routing.** Both `/install` and `/install.ps1` are routed from the host Caddy config to `/srv/memnoth-dist`, so they serve identical published bytes. The routes are versioned and validated, with URL smoke checks and a documented host-level override.
+- **Guest membership expiry.** Guest memberships now expire 30 days after invite acceptance.
+- **Service-account auth routing.** Service-account tokens are routed through the hashed API-key lookup instead of the ordinary session path.
+
+### Fixed
+
+- **Zed settings path no longer escapes a sandbox home.** `mn mcp add` resolved Zed's settings through `%APPDATA%` regardless of the home it was given, pointing a sandbox caller at the real user's JSONC file. The path is now a pure function of the supplied home, with tests for the sandbox boundary and for preferring an existing settings file.
+- **Support widget no longer shows a broken composer when unconfigured.** When the assistant key is absent the widget reads the availability probe and shows an honest fallback instead of an input that cannot be used.
+- **npm README onboarding phrases.** Restored the canonical onboarding phrases in the standalone MCP package README.
+- **PowerShell 5.1 `--setup` binding.** The Windows one-liner passes `--setup` through the argument array instead of as a named parameter, so Windows PowerShell 5.1 does not reject it during parameter validation before the installer body runs.
+- **Static marketing claims.** Landing and setup copy now says "One install" rather than "One binary", and the setup-section claims were corrected to describe what the installer actually does.
+- **Signed-release provisioning.** A minisign key is provisioned as a GitHub secret, pubkeys are checked in, and the release workflow installs minisign, bakes the pubkey into binaries and requires a signature in the post-publish check. This is source-side provisioning only: the already-published 0.1.1 release is still unsigned.
+
+## [0.1.1] - 2026-11-20
+
+### Added
+
+- Full-screen project and team browsers in the TUI, with a searchable Agent Deck roster and attention inbox and team detail inspection from the connected org view.
+- Measured session usage in the TUI (`/usage` and `--json`): per-turn input and output, context occupancy and provider/model identity read from persisted receipts, with unknown fields kept distinct from measured zero.
+- Live tool lifecycle rows in the Agent Deck: call identities, independent success/failure/interruption states, bounded redacted expandable results and a Ctrl-R affordance for the latest row.
+- Durable per-project graph-sync revisions reserved before upload, with offline upload/restore/replay regression coverage.
+- `@astrivya/mcp@0.1.1` published through npm trusted publishing with SLSA provenance; the `latest` tag resolves to 0.1.1.
+
+### Changed
+
+- Release builds are gated on generated command surfaces, the workflow has provenance write permission, and the Rust toolchain is pinned. MCP gateway images are built natively per architecture in parallel, with a Debian Bookworm GLIBC compatibility guard.
+- Nextest runs are sharded across explicit slices with build reuse; test archives are cached and extracted at the workspace target path.
+- MCP read-only behaviour relies on the inherited environment and preserves an explicit read-only launch setting.
+
+### Fixed
+
+- Legacy CLI graph schemas are read correctly during project sync; the paired upload/restore outcome itself remains unverified.
+- Orphaned agent runs are distinguished from active ones, Agent Deck peeks stay visible, and an unavailable team detail context no longer breaks the view.
+- Sampled session age is ignored in usage parity, and active and remaining context is shown in the usage report.
+- The standalone MCP package includes its license; release assets are bound to their source tags and only generated assets are published.
+- npm provenance metadata names the correct repository.
+
+### Known issues
+
+- The published 0.1.1 artifacts are unsigned: no minisign signature is attached, so `mn update` refuses to apply them. Signing is provisioned in source, but a new signed release has not been cut.
+- D33 paired backups are a dry run only. The live Azure rehearsal, scheduled capture, key custody, a hard 30-day deletion guarantee and a full encrypted restore remain open, and backups stay disabled.
+- PTY and screen-reader acceptance for the advanced TUI is open: five ConPTY tests are ignored on non-interactive hosts, and a real screen-reader pass has not been done.
+- Zed settings are JSON-with-comments. `mn mcp add` will not rewrite such a file; it prints a snippet for the Zed Command Palette instead, so registration needs a manual step.
+- winget publication is manual: CI fills the manifest from the built Windows archive, but a maintainer must open the winget-pkgs pull request.
+
 ## [0.1.0-beta.9] - 2026-11-19
 
 ### Fixed - Release
