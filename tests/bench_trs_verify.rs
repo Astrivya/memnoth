@@ -30,7 +30,7 @@ fn the_committed_deterministic_suite_passes_without_a_model() {
     let data = &value["data"];
     assert_eq!(data["gate"], "pass");
     assert_eq!(data["failed"], 0);
-    assert!(data["cases"].as_u64().unwrap() >= 5);
+    assert!(data["cases"].as_u64().unwrap() >= 7);
 }
 
 #[test]

@@ -52,6 +52,33 @@
       "expect": ["flag on"]
     },
     {
+      "id": "trs-why-names-the-attributing-human",
+      "kind": "why",
+      "entity": "auth-window",
+      "ops": [
+        { "op": "add", "name": "auth-window", "valid_from": 1700000000000, "recorded_at": 1700000000000 },
+        { "op": "fact", "content": "window is 15 minutes", "valid_from": 1700000000000, "recorded_at": 1700000000000, "author": "asha" }
+      ],
+      "at": 1700172800000,
+      "expect": ["window is 15 minutes"],
+      "expect_authors": ["asha"]
+    },
+    {
+      "id": "trs-change-between-two-instants",
+      "kind": "change",
+      "entity": "rollback-flag",
+      "ops": [
+        { "op": "add", "name": "rollback-flag", "valid_from": 1700000000000, "recorded_at": 1700000000000 },
+        { "op": "fact", "content": "flag off", "valid_from": 1700000000000, "valid_to": 1700086400000, "recorded_at": 1700000000000, "author": "asha" },
+        { "op": "fact", "content": "flag on", "valid_from": 1700086400000, "recorded_at": 1700086400000, "author": "bob" }
+      ],
+      "from": 1700000000000,
+      "at": 1700172800000,
+      "expect": ["flag on"],
+      "expect_added": ["flag on"],
+      "expect_removed": ["flag off"]
+    },
+    {
       "id": "trs-unrecorded-learning-is-excluded",
       "kind": "knowledge",
       "entity": "mystery-source",

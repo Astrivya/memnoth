@@ -38,9 +38,17 @@ struct Case {
     entity: String,
     ops: Vec<Op>,
     at: i64,
+    /// The earlier instant for a `change` question.
+    from: Option<i64>,
     /// When present, only facts recorded by this instant may be returned.
     known: Option<i64>,
     expect: Vec<String>,
+    /// `why` question: the authors the answer must name. Absence is reported
+    /// as null, never filled in with an agent or OS user.
+    expect_authors: Option<Vec<String>>,
+    /// `change` question: facts that must appear between `from` and `at`.
+    expect_added: Option<Vec<String>>,
+    expect_removed: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -66,6 +74,12 @@ struct CaseResult {
     passed: bool,
     expected: Vec<String>,
     observed: Vec<String>,
+    expected_authors: Option<Vec<String>>,
+    observed_authors: Option<Vec<String>>,
+    expected_added: Option<Vec<String>>,
+    observed_added: Option<Vec<String>>,
+    expected_removed: Option<Vec<String>>,
+    observed_removed: Option<Vec<String>>,
     reason: String,
 }
 
@@ -123,16 +137,35 @@ fn seed(case: &Case) -> Result<(MemoryEngine, i64)> {
 /// Answer one case through the engine's two-clock query. `known` defaults to
 /// the asked instant, so an as-of question means "believed and learned by
 /// then" — never a fact recorded in the future.
-fn answer(case: &Case, engine: &MemoryEngine, entity_id: i64) -> Result<Vec<String>> {
-    let known = case.known.unwrap_or(case.at);
-    let facts = current_facts_known(engine, entity_id, case.at, known)
+fn answer(
+    case: &Case,
+    engine: &MemoryEngine,
+    entity_id: i64,
+    at: i64,
+    known: i64,
+) -> Result<(Vec<String>, Vec<String>)> {
+    let facts = current_facts_known(engine, entity_id, at, known)
         .with_context(|| format!("answer case {}", case.id))?;
-    let mut observed: Vec<String> = facts
+    let mut contents: Vec<String> = facts
         .iter()
         .filter_map(|fact| fact["fact"].as_str().map(str::to_owned))
         .collect();
-    observed.sort();
-    Ok(observed)
+    contents.sort();
+    let mut authors: Vec<String> = facts
+        .iter()
+        .filter_map(|fact| fact["author"].as_str().map(str::to_owned))
+        .collect();
+    authors.sort();
+    authors.dedup();
+    Ok((contents, authors))
+}
+
+/// Set difference over sorted fact lists: the `change` question type.
+fn difference(left: &[String], right: &[String]) -> Vec<String> {
+    left.iter()
+        .filter(|item| !right.contains(item))
+        .cloned()
+        .collect()
 }
 
 /// Verify every case. Returns the structured report; the caller sets the exit
@@ -168,10 +201,45 @@ pub fn verify(fixture_path: &Path) -> Result<Value> {
             );
         }
         let (engine, entity_id) = seed(case)?;
-        let observed = answer(case, &engine, entity_id)?;
-        let mut expected = case.expect.clone();
-        expected.sort();
-        let passed = observed == expected;
+        let known = case.known.unwrap_or(case.at);
+        let (observed, authors) = answer(case, &engine, entity_id, case.at, known)?;
+        let (observed_added, observed_removed) = match case.from {
+            Some(from) => {
+                let (before, _) = answer(case, &engine, entity_id, from, from)?;
+                (
+                    Some(difference(&observed, &before)),
+                    Some(difference(&before, &observed)),
+                )
+            }
+            None => (None, None),
+        };
+        let observed_authors = case.expect_authors.as_ref().map(|_| authors);
+
+        let sorted = |values: &[String]| {
+            let mut values = values.to_vec();
+            values.sort();
+            values.dedup();
+            values
+        };
+        let expected = sorted(&case.expect);
+        let expected_authors = case.expect_authors.as_ref().map(|v| sorted(v));
+        let expected_added = case.expect_added.as_ref().map(|v| sorted(v));
+        let expected_removed = case.expect_removed.as_ref().map(|v| sorted(v));
+
+        let mut reasons = Vec::new();
+        if expected != observed {
+            reasons.push("facts");
+        }
+        if expected_authors != observed_authors {
+            reasons.push("authors");
+        }
+        if expected_added != observed_added {
+            reasons.push("added");
+        }
+        if expected_removed != observed_removed {
+            reasons.push("removed");
+        }
+        let passed = reasons.is_empty();
         if !passed {
             failures += 1;
         }
@@ -182,10 +250,16 @@ pub fn verify(fixture_path: &Path) -> Result<Value> {
             passed,
             expected,
             observed,
+            expected_authors,
+            observed_authors,
+            expected_added,
+            observed_added,
+            expected_removed,
+            observed_removed,
             reason: if passed {
                 String::new()
             } else {
-                "returned facts differ from the fixture's ground truth".to_string()
+                format!("mismatch in: {}", reasons.join(", "))
             },
         });
     }
@@ -228,7 +302,16 @@ mod tests {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("ci/trs-cases.json");
         let report = verify(&path).expect("verify committed fixture");
         assert_eq!(report["gate"], "pass", "fixture: {report}");
-        assert!(report["cases"].as_u64().unwrap() >= 5);
+        assert!(report["cases"].as_u64().unwrap() >= 7);
+        let kinds: Vec<&str> = report["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["kind"].as_str().unwrap())
+            .collect();
+        for kind in ["current", "as-of", "knowledge", "why", "change"] {
+            assert!(kinds.contains(&kind), "fixture must exercise {kind}");
+        }
     }
 
     #[test]
