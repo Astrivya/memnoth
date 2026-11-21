@@ -1228,7 +1228,7 @@ memnoth mcp add --clients claude,cursor,codex --profile code
 
 **Required arguments:**
 
-- `--clients` (array) — Clients to write: claude, cursor, codex, zed. Comma-separated.
+- `--clients` (array) — Clients to write: claude, cursor, codex, zed, opencode. Comma-separated.
 
 **Optional arguments:**
 

@@ -701,8 +701,8 @@ pub fn build_p0_registry() -> RegistryBuilder {
                 params: vec![
                     ParamSpec::array(
                         "clients",
-                        "Clients to write: claude, cursor, codex, zed. Comma-separated.",
-                        ParamType::Enum { choices: vec!["claude".into(), "cursor".into(), "codex".into(), "zed".into()] },
+                        "Clients to write: claude, cursor, codex, zed, opencode. Comma-separated.",
+                        ParamType::Enum { choices: vec!["claude".into(), "cursor".into(), "codex".into(), "zed".into(), "opencode".into()] },
                     ).short('c'),
                     ParamSpec::enum_opt("profile", "Tool profile to register. Defaults to memory for --local, full otherwise.", vec!["micro".into(), "memory".into(), "coord".into(), "code".into(), "full".into(), "agent".into()], ""),
                     ParamSpec::string_opt("url", "Server endpoint. Defaults to the configured URL", ""),
