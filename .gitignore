@@ -12,6 +12,9 @@
 *.db-wal
 *.db-shm
 
+# Local workspace state written by Astrivya tooling; not source.
+.astrivya/
+
 # Local TUI smoke output (scripts/tui-smoke.py): a screen capture and a
 # throwaway workspace, not part of the product.
 /.smoke/
