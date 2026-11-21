@@ -40,7 +40,8 @@ See [known issues](../../docs/operations/known-issues.md).
 <!-- Install/update commands, signature status, and a rollback path. -->
 
 - Install / update: `curl -fsSL https://memnoth.astrivya.ai/install | bash` (Linux, macOS) or `irm https://memnoth.astrivya.ai/install.ps1 | iex` (Windows PowerShell).
-- Signature status: state signed / unsigned and whether `mn update` will self-update.
+- Signature status: state signed / unsigned and whether `mn update` will self-update. A release produced by the signing workflow has a minisign signature in `manifest.json`; verify it with `minisign -Vm SHA256SUMS -P RWSDhmQUkjBxUYq1DlNa3BJFOxAvo1X9S2lg2IGwLiIh/x7Dbc+f6oHt`. The previously published `0.1.1` is unsigned and will not self-update — do not describe it as signed.
+- OS signing: macOS archives are notarized + stapled, and the Windows zip is Authenticode-signed, only when those credentials are configured in the release job. State which applies; when absent, link the SmartScreen / Gatekeeper caveat in `plans/decisions.md` (D4).
 - Rollback: pin the previous tag and reinstall with the same one-liner.
 
 ## What's next

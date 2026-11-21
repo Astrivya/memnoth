@@ -32,11 +32,21 @@ name: release
 # `MEMNOTH_MINISIGN_PUBKEY` so `mn update` verifies against it by default.
 #
 # SBOM (CycloneDX + SPDX) and SLSA provenance are generated for every
-# published artifact.
+# published artifact. That provenance is Sigstore/cosign keyless (OIDC), so it
+# needs no secret. The manifest's `signatures.cosign` stays null on purpose:
+# this build has no cosign verifier, and an uncheckable cosign claim would make
+# `mn update` refuse an otherwise valid release (D4).
 #
 # The digest is written after signing, so it always describes the file that is
 # actually published — a re-signed or notarized archive is never paired with a
 # stale digest.
+#
+# FAIL CLOSED (KI-01 / KI-09 / REL-01): `signing-preflight` runs before any
+# build or publication. The minisign key and the Apple notarization credentials
+# are required; a release without them never reaches `dist` or npm. The Windows
+# Authenticode certificate is optional (D4: "if a cert exists"). A missing
+# required secret stops the workflow instead of silently emitting an unsigned
+# manifest that `mn update` would refuse.
 #
 # The workflow lives in this repository because this is the repository a tag is
 # pushed to. A copy in a directory that is not under version control cannot be
@@ -62,6 +72,87 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # KI-01 / KI-09 / REL-01 — fail closed at the door.
+  #
+  # A release cannot be signed after it is published. This job checks the
+  # human-supplied signing secrets before anything is built, attached to a
+  # draft, or pushed to npm. It is a `needs` of `build`, so no artifact exists
+  # when a required secret is missing. `dist.sh` still re-checks the minisign
+  # key when it assembles the bundle; this gate adds the same hard stop for the
+  # macOS notarization credentials, which used to ship an unsigned archive
+  # silently. Secrets are referenced by name only — no value is ever stored
+  # in this repository.
+  signing-preflight:
+    name: signing preflight (fail closed)
+    runs-on: ubuntu-latest
+    steps:
+      # KI-01: without the minisign key there is no manifest signature and
+      # `mn update` refuses the release. The key content is never echoed.
+      - name: require minisign signing key
+        env:
+          MEMNOTH_MINISIGN_SECRET_KEY: ${{ secrets.MEMNOTH_MINISIGN_SECRET_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${MEMNOTH_MINISIGN_SECRET_KEY:-}" ]; then
+            echo "MEMNOTH_MINISIGN_SECRET_KEY is not configured: refusing to publish an unsigned release (KI-01)." >&2
+            echo "The updater verifies SHA256SUMS against this key; without it mn update refuses the release." >&2
+            exit 1
+          fi
+          echo "minisign signing key: configured"
+
+      # KI-09: all three Apple credentials are needed for notarize + staple.
+      # A missing one used to skip notarization and ship an archive Gatekeeper
+      # rejects; that is now a workflow failure, not an honest-looking default.
+      - name: require macOS notarization credentials
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          NOTARYTOOL_TEAM_ID: ${{ secrets.NOTARYTOOL_TEAM_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=""
+          [ -n "${APPLE_ID:-}" ] || missing="$missing APPLE_ID"
+          [ -n "${APPLE_PASSWORD:-}" ] || missing="$missing APPLE_APP_SPECIFIC_PASSWORD"
+          [ -n "${NOTARYTOOL_TEAM_ID:-}" ] || missing="$missing NOTARYTOOL_TEAM_ID"
+          if [ -n "$missing" ]; then
+            echo "macOS notarization credentials missing:$missing" >&2
+            echo "Refusing to publish an unsigned macOS archive (KI-09 / REL-01); notarize + staple need all three." >&2
+            exit 1
+          fi
+          echo "macOS notarization credentials: configured"
+
+      # D4 / REL-01 say Authenticode is signed "if a cert exists", so this one
+      # is reported rather than required. The SmartScreen caveat is documented
+      # in decisions.md when it is absent.
+      - name: report Windows Authenticode certificate (optional)
+        env:
+          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${WINDOWS_CERTIFICATE_BASE64:-}" ] && [ -n "${WINDOWS_CERTIFICATE_PASSWORD:-}" ]; then
+            echo "Windows Authenticode certificate: configured; the build job will sign the zip"
+          else
+            echo "Windows Authenticode certificate: not configured; shipping unsigned per D4/REL-01 (SmartScreen caveat documented in decisions.md)"
+          fi
+
+      - name: record signing policy in the job summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "### Signing policy (fail closed)"
+            echo
+            echo "- minisign key and macOS notarization credentials: **required**. The workflow stops before build if either is unconfigured."
+            echo "- Windows Authenticode certificate: optional; SmartScreen caveat applies when no certificate is configured."
+            echo "- Cosign/Sigstore SBOM + build provenance: keyless OIDC, no secret required."
+            echo "- \`mn update\` verifies only the minisign signature; a missing one is a release failure, not a warning."
+            echo "- Only a release built with these secrets configured is signed. The previously published \`0.1.1\` is unsigned."
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # A tag push does not run the branch CI, so the release gates on the same
   # checks itself. A release that has not passed them is not a release.
   # The four checks are separate jobs so they run in parallel instead of one
@@ -144,7 +235,10 @@ jobs:
 
   build:
     name: build (${{ matrix.target }})
-    needs: [verify-fmt, verify-generated, verify-clippy, verify-test]
+    # signing-preflight is a gate, not just another check: no archive is built
+    # (and therefore no release can be published) when a required signing
+    # secret is absent.
+    needs: [verify-fmt, verify-generated, verify-clippy, verify-test, signing-preflight]
     runs-on: ${{ matrix.os }}
     env:
       # Compiled into every shipped binary by option_env! in memnoth-update, so
@@ -306,23 +400,28 @@ jobs:
       # archive must have a digest that matches the file that is actually
       # published, so the `.sha256` is produced in the "write digest" step.
 
-      # macOS: notarize the archive and staple the ticket when Apple
-      # credentials are configured. Notarization is what lets Gatekeeper accept
-      # a downloaded binary; stapling bundles the ticket so the first run does
-      # not have to reach Apple. Without the credentials the archive ships
-      # unsigned, which is the honest default.
+      # macOS: notarize the archive and staple the ticket. Notarization is what
+      # lets Gatekeeper accept a downloaded binary; stapling bundles the ticket
+      # so the first run does not have to reach Apple. signing-preflight already
+      # required all three credentials, so a release that reaches this job is
+      # notarized — the check below is a local guard, not an opt-out.
       - name: Check macOS notarization credentials
         id: apple-signing
         if: ${{ !matrix.cross && runner.os == 'macOS' }}
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          NOTARYTOOL_TEAM_ID: ${{ secrets.NOTARYTOOL_TEAM_ID }}
         shell: bash
         run: |
-          if [[ -n "$APPLE_ID" && -n "$APPLE_PASSWORD" ]]; then
+          if [[ -n "$APPLE_ID" && -n "$APPLE_PASSWORD" && -n "$NOTARYTOOL_TEAM_ID" ]]; then
             echo "configured=true" >> "$GITHUB_OUTPUT"
           else
-            echo "configured=false" >> "$GITHUB_OUTPUT"
+            # Unreachable on a tagged release (preflight failed first), but a
+            # partial credential set must never silently produce an unsigned
+            # archive if this job is ever run on its own.
+            echo "macOS notarization credentials are incomplete; refusing to build an unsigned macOS archive" >&2
+            exit 1
           fi
 
       - name: notarize and staple (macOS)
@@ -346,10 +445,19 @@ jobs:
               --apple-id "$APPLE_ID" \
               --team-id "$NOTARYTOOL_TEAM_ID" \
               --password "$APPLE_PASSWORD"
+          result="$(mktemp)"
           xcrun notarytool submit "$artifact" \
               --keychain-profile "memnoth" \
               --wait \
-              --output json > /dev/null
+              --output json > "$result"
+          # A submission that is not Accepted is not a signed release. Fail here
+          # instead of stapling nothing and shipping an archive Gatekeeper
+          # rejects; this is the same fail-closed rule the minisign path uses.
+          status=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("status", ""))' "$result")
+          [ "$status" = "Accepted" ] || {
+            echo "notarization status for $artifact is '$status', expected Accepted" >&2
+            exit 1
+          }
           xcrun stapler staple "$artifact"
 
       # Windows: Authenticode-sign the zip when a certificate is configured.
@@ -537,6 +645,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # signing-preflight already required the secret. Guard here too so a
+          # standalone job re-run cannot write an empty key and hand dist.sh a
+          # path that looks configured but cannot sign anything.
+          [ -n "${MEMNOTH_MINISIGN_KEY_CONTENT:-}" ] || {
+            echo "MEMNOTH_MINISIGN_SECRET_KEY is empty; refusing to assemble an unsigned bundle" >&2
+            exit 1
+          }
           key_file="$RUNNER_TEMP/memnoth-minisign.key"
           printf '%s\n' "$MEMNOTH_MINISIGN_KEY_CONTENT" > "$key_file"
           chmod 600 "$key_file"
@@ -926,10 +1041,12 @@ jobs:
             exit 1
           }
 
-  # SLSA provenance for the release, attesting that the published artifacts
-  # were produced by this workflow from the tagged commit. This waits for
-  # npm-publish as well: the subject-path `dist/**` includes the npm tarball,
-  # so the attestation must describe a release whose npm package is published.
+  # Sigstore/cosign provenance for the release. Both attestations are keyless
+  # (OIDC id-token) and need no secret: D4 chose this as an addition to, never a
+  # replacement for, the offline minisign signature the updater checks. This
+  # waits for npm-publish as well: the subject-path `dist/**` includes the npm
+  # tarball, so the attestations must describe a release whose npm package is
+  # published. The manifest's `signatures.cosign` stays null — see the header.
   provenance:
     name: provenance
     needs: [dist, npm-publish]
@@ -945,9 +1062,22 @@ jobs:
           name: memnoth-dist-${{ needs.dist.outputs.tag }}
           path: dist
 
-      - uses: actions/attest-build-provenance@v1
+      - name: attest SLSA build provenance (Sigstore, keyless)
+        uses: actions/attest-build-provenance@v1
         with:
           subject-path: "dist/**"
+
+      # Bind the canonical SPDX SBOM to the artifact it describes. syft writes
+      # these SBOMs in the dist job after signing, so they cover the exact bytes
+      # that were published. `actions/attest` is first-party GitHub (it replaces
+      # the deprecated actions/attest-sbom) and uses the same OIDC identity as
+      # attest-build-provenance above — no new secret, no runtime dependency in
+      # the shipped CLI.
+      - name: attest SBOM (Sigstore/cosign, keyless)
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/${{ needs.dist.outputs.tag }}/memnoth-x86_64-unknown-linux-gnu.tar.gz
+          sbom-path: dist/${{ needs.dist.outputs.tag }}/memnoth-x86_64-unknown-linux-gnu.sbom.spdx.json
 
   # Post-publish contract check. `dist` has built and attached the assets and
   # `npm-publish` has published the npm package; this job re-reads the bundle

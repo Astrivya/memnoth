@@ -34,6 +34,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Static marketing claims.** Landing and setup copy now says "One install" rather than "One binary", and the setup-section claims were corrected to describe what the installer actually does.
 - **Signed-release provisioning.** A minisign key is provisioned as a GitHub secret, pubkeys are checked in, and the release workflow installs minisign, bakes the pubkey into binaries and requires a signature in the post-publish check. This is source-side provisioning only: the already-published 0.1.1 release is still unsigned.
 
+## [0.1.0-beta.13] - 2026-11-21
+
+### Added - Vault invariants
+
+- `mn vault invariants [--json]` proves the ten memory rules (MI-1 … MI-10) as read-only checks against the vault. Each row is a `pass`, a `violation` with an affected-row count, or `not_modelled` — a rule the schema or write path cannot express is never counted as compliant. A clean vault exits zero; a seeded violation exits non-zero. The MCP surface exposes the same check as `vault_invariants`, so an agent and the CLI read the same ten rows.
+
+### Added - Two-clock as-of
+
+- `mn vault asof --knew <ms>` and the `known_ms` argument on the MCP `vault_asof` call add a second, recorded-time clock beside the existing valid-time `--at` instant. "What was true then" and "what we had learned by then" are now independent questions: the recorded-time cut filters observation materialization without moving valid time.
+
+### Added - Deterministic TRS lane
+
+- `mn bench trs-verify [--json] [--cases <file>]` runs a committed, fixture-based temporal-recall suite against the engine itself — no model, network or API key — and exits non-zero on a wrong answer. The committed `ci/trs-cases.json` passes; a seeded bad expectation fails the gate.
+
+### Changed - Vault schema v5
+
+- The vault migration is additive to schema v5: observations gain `predicate`, `object`, `forgotten_at`, `trust` (default 2), `episode_id` and `idem_key`, with a partial unique index on open `(entity, predicate)` beliefs. `user_version` is written as 5 only after every column, index and duplicate-resolution pass succeeds, so an older vault opens unchanged and a failed migration cannot claim the v5 shape. With `predicate` present, MI-3 becomes a real counted check; MI-6 and MI-10 stay `not_modelled` because the retraction and trust write paths still do not record the facts those rules require, rather than being reported as passes.
+
+### Not included
+
+- This is a source-side entry, not a signed release: no release was cut, no manifest was republished, and the published 0.1.1 artifacts remain unsigned.
+- Not D33 / backups: backups stay disabled; no scheduled capture, key custody or live rehearsal.
+- Not paired restore: the production graph upload → purge → restore round trip is still unverified.
+- Not team memory: no team or cloud memory surface shipped here.
+- Not PMF: no product-market-fit claim, reproducible scoreboard, or "#1" result.
+
 ## [0.1.1] - 2026-11-20
 
 ### Added
