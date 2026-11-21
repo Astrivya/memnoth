@@ -24,16 +24,16 @@
 //!
 //! # Tool Profiles
 //!
-//! memnoth exposes 48 tools on the full profile (plus 6 agent-mode tools)
+//! memnoth exposes 49 tools on the full profile (plus 6 agent-mode tools)
 //! across 6 profiles:
 //!
 //! | Profile | Tools | Use Case |
 //! |---------|-------|----------|
 //! | `micro` | 4 | Minimal context (coding agents) |
 //! | `memory` | 22 | Memory-focused workflows, incl. the temporal quartet |
-//! | `code` | 19 | Code intelligence: KG navigation + fs/git toolbox |
+//! | `code` | 20 | Code intelligence: KG navigation + fs/git toolbox + receipt verification |
 //! | `coord` | 14 | Multi-agent coordination |
-//! | `full` | 48 | Complete feature set (no allowlist: Full means all) |
+//! | `full` | 49 | Complete feature set (no allowlist: Full means all) |
 //! | `agent` | 6 | Agent session management (HTTP transport only) |
 //!
 //! Membership is declared once per tool in `TOOL_PROFILES`; the counts above
@@ -361,7 +361,7 @@ pub enum Profile {
     /// Code-intelligence profile: the KG navigation verbs, the same index
     /// health set, and the filesystem/git toolbox.
     Code,
-    /// Full profile: every non-agent tool (48). There is deliberately NO
+    /// Full profile: every non-agent tool (49). There is deliberately NO
     /// allowlist for Full — `allows` is unconditional for it, so a new tool
     /// is reachable the moment it is defined; never a second list.
     Full,
@@ -387,7 +387,7 @@ impl Profile {
     ///
     /// **Refuses an unrecognised value.** This process decides which tools a host
     /// is even told about, so a typo must not widen the surface: a machine whose
-    /// operator meant `memory` (22 tools) used to expose `full` (48 tools), and
+    /// operator meant `memory` (22 tools) used to expose `full` (49 tools), and
     /// the only signal was one stderr line nobody reads.
     pub fn from_env() -> anyhow::Result<Self> {
         let raw = std::env::var("MEMNOTH_MCP_PROFILE").ok();
@@ -2030,13 +2030,18 @@ fn note_access(engine: &MemoryEngine, entity_id: i64, at: i64) {
 struct McpSurface {
     engine: *const MemoryEngine,
     coord: *const Coord,
+    /// The vault file this server serves, when it has one. Needed by the
+    /// receipt verifier to find `.memnoth/receipts/<commit>.json`; it never
+    /// widens what a tool may read beyond the workspace it was launched for.
+    workspace: Option<PathBuf>,
 }
 
 impl McpSurface {
-    fn new(engine: &MemoryEngine, coord: &Coord) -> Self {
+    fn new(engine: &MemoryEngine, coord: &Coord, workspace: Option<&Path>) -> Self {
         Self {
             engine: engine as *const MemoryEngine,
             coord: coord as *const Coord,
+            workspace: workspace.map(Path::to_path_buf),
         }
     }
 
@@ -2046,6 +2051,10 @@ impl McpSurface {
 
     fn coord(&self) -> &Coord {
         unsafe { &*self.coord }
+    }
+
+    fn workspace(&self) -> Option<&Path> {
+        self.workspace.as_deref()
     }
 }
 /// Raw pointers are `Send` but not `Sync`; the surface is only ever
@@ -2202,6 +2211,14 @@ tool_def!(
     Approval::ReadOnly,
     CostClass::Moderate,
     CacheClass::Session,
+);
+tool_def!(
+    TOOL_EVIDENCE_RECEIPT_VERIFY,
+    "evidence_receipt_verify",
+    "Verify an mn-receipt/1 change receipt",
+    Approval::ReadOnly,
+    CostClass::Moderate,
+    CacheClass::NoStore,
 );
 tool_def!(
     TOOL_VAULT_TOP,
@@ -2989,6 +3006,11 @@ fn mcp_registry() -> Registry {
     });
 
     registry.add(McpTool {
+        def: &TOOL_EVIDENCE_RECEIPT_VERIFY,
+        call: |args, surface| tools_agent::evidence_receipt_verify(args, surface.workspace()),
+    });
+
+    registry.add(McpTool {
         def: &TOOL_VAULT_TOP,
         call: |args, surface| {
             let now = memnoth_engine::now_ms();
@@ -3313,7 +3335,7 @@ fn run_via_registry(
     vault: Option<&Path>,
     profile: Profile,
 ) -> Result<Value> {
-    let surface = McpSurface::new(engine, coord);
+    let surface = McpSurface::new(engine, coord, vault);
     let workspace = vault.unwrap_or(Path::new(""));
     let context = ToolContext::new(workspace).with_extra(surface);
     let cap_profile = mcp_profile_to_capability(profile);
@@ -7732,6 +7754,7 @@ const TYPED_OUTPUT_TOOLS: &[&str] = &[
     "vault_contradictions",
     "vault_invariants",
     "vault_top",
+    "evidence_receipt_verify",
     "vault_proposals",
     "coord_join",
     "coord_heartbeat",

@@ -14,7 +14,7 @@
 //! first in steering; these are narrow, well-described verbs the agent picks
 //! deliberately. All bounded (no unbounded reads), read-only where possible.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -112,8 +112,15 @@ pub fn tool_definitions() -> Vec<Value> {
         ),
         typed_tool(
             "vault_history",
-            "Full temporal history of an entity: every birth/rename/revoke/supersede with validity windows and change reasons, from the engine journal. Use to answer 'what happened to X over time' or 'why did X change'.",
-            &[req("name", "string", "Entity name (current or historical)")],
+            "Full temporal history of an entity: every birth/rename/revoke/supersede with validity windows and change reasons, from the engine journal. Every version carries a `chain` of facts with the source -> date -> author provenance behind that belief; pass `fact` to narrow the chain to one claim and answer 'why do we believe X' without reading unrelated facts. Missing provenance is reported as null with the fields nobody recorded named in `unknown`, never invented.",
+            &[
+                req("name", "string", "Entity name (current or historical)"),
+                opt(
+                    "fact",
+                    "string",
+                    "Only keep chain facts whose text contains this substring (case-insensitive). Omit for the whole chain. Empty result means the vault recorded no such fact — not that the entity has no history.",
+                ),
+            ],
             READ_ONLY,
             vault_history_schema(),
         ),
@@ -138,7 +145,7 @@ pub fn tool_definitions() -> Vec<Value> {
         ),
         typed_tool(
             "vault_contradictions",
-            "Find contradicted facts about an entity: revoked/superseded facts and relations with the reason and when they were invalidated. Use before trusting a current belief — if the vault changed its mind, the reason is recorded here.",
+            "Find contradicted beliefs about an entity: journaled versions that closed with a reason and revoked relations, PLUS the current belief that replaced them. Both sides are returned — `previous_*` is the belief that closed and `current_belief` is what the vault holds now (with its own fact provenance). Use before trusting a current belief: if the vault changed its mind, the reason is recorded here. Delegates to the engine so this answer and `mn vault contradictions` cannot disagree.",
             &[req("name", "string", "Entity name")],
             READ_ONLY,
             vault_contradictions_schema(),
@@ -149,6 +156,28 @@ pub fn tool_definitions() -> Vec<Value> {
             &[],
             READ_ONLY,
             vault_invariants_schema(),
+        ),
+        // Evidence: the verify half of the change chain. Read-only, local, and
+        // deliberately in `code`+`full` rather than `memory` so the default
+        // memory profile keeps its 22-tool ceiling (provenance and both-sided
+        // contradiction are answered by vault_history / vault_contradictions).
+        typed_tool(
+            "evidence_receipt_verify",
+            "Verify an `mn-receipt/1` change receipt against its commit: schema family/version, commit binding, patch SHA-256, file list, approval attribution and measured-or-null beliefs. Reads `.memnoth/receipts/<commit>.json` from the served vault, or verifies a caller-supplied `receipt` document. Reports every check, including ones it could not run. This is a local consistency check against a commit and digest, NOT an authenticity attestation or a digital signature.",
+            &[
+                opt(
+                    "commit",
+                    "string",
+                    "Commit to verify (default HEAD). A full 40/64-hex object name is read from disk even if git no longer knows the commit.",
+                ),
+                opt(
+                    "receipt",
+                    "object",
+                    "A receipt document supplied by the caller instead of reading one from the vault. Git-dependent checks are reported as not checked when no vault path is available.",
+                ),
+            ],
+            READ_ONLY,
+            evidence_receipt_verify_schema(),
         ),
         typed_tool(
             "vault_top",
@@ -265,12 +294,53 @@ fn vault_contradictions_schema() -> Value {
             "contradictions": {
                 "type": "array",
                 "items": {"type": "object"},
-                "description": "Journaled versions and revoked relations, each with when and why the vault changed its mind"
+                "description": "Journaled versions and revoked relations, each with when and why the vault changed its mind. The closing side carries previous_name/previous_summary."
             },
             "count": {"type": "integer"},
+            "current_belief": {
+                "type": "object",
+                "description": "The other side of the disagreement: the still-open belief with its facts and provenance. `present:false` means every generation is closed — no current belief is invented."
+            },
             "guidance": {"type": "string", "description": "How to treat the current belief given what was found"},
         }),
-        &["entity", "contradictions", "count", "guidance"],
+        &[
+            "entity",
+            "contradictions",
+            "count",
+            "current_belief",
+            "guidance",
+        ],
+    )
+}
+
+/// The verify report: a closed envelope with one row per check. `note` states
+/// the claims fence in the payload itself, so a host that renders only the
+/// structured half cannot silently turn a consistency check into an
+/// authenticity claim.
+fn evidence_receipt_verify_schema() -> Value {
+    output_object(
+        json!({
+            "schema": {"type": "string", "description": "The receipt schema that was verified, e.g. mn-receipt/1"},
+            "commit": {"type": "string", "description": "The commit the verification was requested for"},
+            "bound_commit": {"type": "string", "description": "The commit the receipt actually names"},
+            "ok": {"type": "boolean", "description": "True only when every check passed"},
+            "checks": {
+                "type": "array",
+                "description": "One row per check, including checks that could not run",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "ok": {"type": "boolean"},
+                        "detail": {"type": "string"},
+                    },
+                    "required": ["name", "ok", "detail"],
+                    "additionalProperties": false,
+                }
+            },
+            "note": {"type": "string", "description": "Claims fence: local consistency check, not an authenticity attestation"},
+        }),
+        &["schema", "commit", "bound_commit", "ok", "checks", "note"],
     )
 }
 
@@ -675,7 +745,35 @@ pub(crate) fn vault_history(engine: &MemoryEngine, args: &Value) -> Result<Value
     // same shape: each version carries its `chain` of facts with the source →
     // date → author provenance chain. A missing source is reported as null
     // with "source" named in `unknown`, never invented.
-    memnoth_engine::entity_history(engine, &name)
+    let mut result = memnoth_engine::entity_history(engine, &name)?;
+    // Provenance is already in the chain; `fact` only narrows it to the claim
+    // the caller asked "why" about. This is a projection over engine output,
+    // never a second provenance implementation: the author/source/date fields
+    // come straight from `provenance_of` in the engine, so a fact's provenance
+    // is identical whether read here or through `mn vault history`.
+    let needle = args
+        .get("fact")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_ascii_lowercase);
+    if let Some(needle) = needle {
+        let mut unattributed = 0usize;
+        if let Some(versions) = result["versions"].as_array_mut() {
+            for version in versions.iter_mut() {
+                if let Some(chain) = version["chain"].as_array_mut() {
+                    chain.retain(|fact| {
+                        fact["fact"]
+                            .as_str()
+                            .is_some_and(|text| text.to_ascii_lowercase().contains(&needle))
+                    });
+                    unattributed += chain.iter().filter(|fact| fact["author"].is_null()).count();
+                }
+            }
+        }
+        result["unattributed_facts"] = json!(unattributed);
+    }
+    Ok(result)
 }
 
 pub(crate) fn vault_asof(engine: &MemoryEngine, args: &Value, now: i64) -> Result<Value> {
@@ -959,60 +1057,22 @@ pub(crate) fn vault_top(engine: &MemoryEngine, args: &Value, now: i64) -> Result
 
 pub(crate) fn vault_contradictions(engine: &MemoryEngine, args: &Value) -> Result<Value> {
     let name = arg_str(args, "name")?;
-    let chain = entity_chain(engine, &name)?;
-    let ids: Vec<i64> = chain
-        .iter()
-        .filter_map(|v| v["entity_id"].as_i64())
-        .collect();
-    let mut contradicted = Vec::new();
-    for id in ids {
-        let conn = engine.connection();
-        // journaled entity versions record renames/revokes with reasons
-        let mut stmt = conn
-            .prepare(
-                "SELECT snapshot, valid_from, valid_to, change_reason \
-                 FROM entity_versions WHERE entity_id = ?1 AND change_reason IS NOT NULL \
-                 ORDER BY valid_from",
-            )
-            .context("prepare contradiction query")?;
-        let rows = stmt.query_map(params![id], |r| {
-            let snapshot: String = r.get(0)?;
-            let parsed: Value = serde_json::from_str(&snapshot).unwrap_or(Value::Null);
-            Ok(json!({
-                "previous": parsed,
-                "valid_to": r.get::<_, Option<i64>>(2)?,
-                "reason": r.get::<_, Option<String>>(3)?,
-            }))
-        })?;
-        for row in rows {
-            contradicted.push(row?);
-        }
-        // revoked relations
-        let mut rstmt = conn
-            .prepare(
-                "SELECT source_id, target_id, kind, revoked_at \
-                 FROM relations WHERE source_id = ?1 AND revoked_at IS NOT NULL \
-                 ORDER BY revoked_at",
-            )
-            .context("prepare revoked relation query")?;
-        let rrows = rstmt.query_map(params![id], |r| {
-            Ok(json!({
-                "source_id": r.get::<_, i64>(0)?,
-                "target_id": r.get::<_, i64>(1)?,
-                "kind": r.get::<_, String>(2)?,
-                "revoked_at": r.get::<_, Option<i64>>(3)?,
-            }))
-        })?;
-        for row in rrows {
-            contradicted.push(row?);
-        }
+    // Delegate to the engine's name-scoped audit. This MCP surface used to carry
+    // its own SQL copy of the query; it double-counted a generation whose live
+    // row and journal row share an entity_id and returned only the closing side.
+    // The engine de-duplicates and adds `current_belief`, so the two surfaces
+    // answer the same question with the same both-sides shape.
+    let mut result = memnoth_engine::vault_contradictions(engine, &name)?;
+    // `current_belief` is an object in the declared schema even when every
+    // generation is closed. `present:false` says that plainly rather than
+    // emitting null (which a strict host would reject against the schema) and
+    // rather than inventing a belief that does not exist.
+    if result["current_belief"].is_null() {
+        result["current_belief"] = json!({"present": false});
+    } else {
+        result["current_belief"]["present"] = json!(true);
     }
-    Ok(json!({
-        "entity": name,
-        "contradictions": contradicted,
-        "count": contradicted.len(),
-        "guidance": "previous versions carry the change_reason; treat current belief with caution where contradictions exist",
-    }))
+    Ok(result)
 }
 
 /// The vault invariant gate, read-only. Delegates to the engine checker so the
@@ -1109,6 +1169,320 @@ pub(crate) fn vault_asof_team(engine: &MemoryEngine, name: &str, at_ms: i64) -> 
     Ok(row)
 }
 
+// -------------------------------------------------------------------------
+// evidence: receipt verification
+//
+// The `mn-receipt/1` document model lives in the CLI crate, which this server
+// cannot depend on (the dependency direction is CLI -> mcp). Until that model
+// and `verify()` are extracted into a shared `memnoth-evidence` crate, this is
+// the smallest equivalent: the document is read as JSON and every check is
+// recomputed locally. The checks mirror `receipt.rs` so the two surfaces cannot
+// disagree about what "verified" means. No new dependency is introduced —
+// `sha2` is already a dependency of this crate.
+// -------------------------------------------------------------------------
+
+const RECEIPT_SCHEMA_FAMILY: &str = "mn-receipt";
+const RECEIPT_SCHEMA_VERSION: u32 = 1;
+
+const RECEIPT_CLAIMS_FENCE: &str = "Local consistency check: schema, commit binding, patch digest \
+     and file list are recomputed from the local repository where one is available; approvals and \
+     beliefs are read as recorded, with unmeasured fields named rather than filled. This is NOT an \
+     authenticity attestation or a digital signature, and it makes no claim about a hosted service.";
+
+fn receipt_schema_supported(schema: &str) -> bool {
+    match schema.rsplit_once('/') {
+        Some((family, major)) => {
+            family == RECEIPT_SCHEMA_FAMILY && major.parse::<u32>() == Ok(RECEIPT_SCHEMA_VERSION)
+        }
+        None => false,
+    }
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        out.push(DIGITS[(byte >> 4) as usize] as char);
+        out.push(DIGITS[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex_encode(&hasher.finalize()[..])
+}
+
+fn git_bytes(root: &Path, args: &[&str]) -> std::result::Result<Vec<u8>, String> {
+    let output = std::process::Command::new("git")
+        .current_dir(root)
+        .args(args)
+        .output()
+        .map_err(|e| format!("run `git {}`: {e}", args.join(" ")))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(output.stdout)
+}
+
+fn git_text(root: &Path, args: &[&str]) -> std::result::Result<String, String> {
+    Ok(String::from_utf8_lossy(&git_bytes(root, args)?)
+        .trim()
+        .to_string())
+}
+
+fn push_check(checks: &mut Vec<Value>, name: &str, ok: bool, detail: String) {
+    checks.push(json!({"name": name, "ok": ok, "detail": detail}));
+}
+
+/// Verify an `mn-receipt/1` document against its commit.
+///
+/// Every check is reported, including the ones that could not run. A receipt
+/// whose commit left the repository is verified as far as it can be: the
+/// schema, binding, approvals and beliefs are still readable, and the checks
+/// that need the commit say so instead of disappearing from the report — a
+/// report listing only what it checked reads as a report where all passed.
+pub(crate) fn evidence_receipt_verify(args: &Value, workspace: Option<&Path>) -> Result<Value> {
+    let wanted = args
+        .get("commit")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .unwrap_or("HEAD")
+        .to_owned();
+
+    // A caller-supplied document wins; otherwise read the receipt this vault
+    // wrote. A full object name whose receipt is on disk is readable even when
+    // git no longer knows the commit (amend / rebase / force-push).
+    let receipt: Value = if let Some(supplied) = args.get("receipt") {
+        match supplied {
+            Value::String(text) => {
+                serde_json::from_str(text).context("caller-supplied receipt is not JSON")?
+            }
+            Value::Object(_) => supplied.clone(),
+            other => anyhow::bail!("`receipt` must be an object or a JSON string, got {other}"),
+        }
+    } else {
+        let root = workspace.ok_or_else(|| {
+            anyhow::anyhow!(
+                "no vault path is bound to this server; pass `receipt` explicitly to verify a \
+                 caller-supplied document"
+            )
+        })?;
+        let path = root
+            .join(".memnoth")
+            .join("receipts")
+            .join(format!("{wanted}.json"));
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("no receipt for {wanted} at {}", path.display()))?;
+        serde_json::from_str(&text)
+            .with_context(|| format!("{} is not a valid mn-receipt/1 document", path.display()))?
+    };
+
+    let schema = receipt["schema"].as_str().unwrap_or("").to_owned();
+    let bound = receipt["change"]["commit"]
+        .as_str()
+        .unwrap_or("")
+        .to_owned();
+    let mut checks: Vec<Value> = Vec::new();
+
+    let schema_ok = receipt_schema_supported(&schema);
+    push_check(
+        &mut checks,
+        "schema",
+        schema_ok,
+        if schema.is_empty() {
+            "the receipt has no schema field".to_string()
+        } else if schema_ok {
+            format!("`{schema}` is this build's schema")
+        } else {
+            format!("found `{schema}`; this build reads `mn-receipt/1` only")
+        },
+    );
+
+    let commit_ok = !bound.is_empty() && bound == wanted;
+    push_check(
+        &mut checks,
+        "commit",
+        commit_ok,
+        if commit_ok {
+            format!("the receipt is bound to {wanted}")
+        } else {
+            format!(
+                "the receipt is bound to {}, but verification was requested for {wanted}",
+                if bound.is_empty() { "nothing" } else { &bound }
+            )
+        },
+    );
+
+    let repo = workspace.map(Path::to_path_buf);
+    let exists = repo.as_deref().is_some_and(|root| {
+        git_text(
+            root,
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("{bound}^{{commit}}"),
+            ],
+        )
+        .is_ok()
+    });
+    push_check(
+        &mut checks,
+        "commit-exists",
+        exists,
+        if exists {
+            format!("{bound} is in this repository")
+        } else if repo.is_none() {
+            "not checked: no repository path is bound to this server".to_string()
+        } else {
+            format!(
+                "{bound} is not in this repository: the history it described moved \
+                 (amend, rebase or force-push)"
+            )
+        },
+    );
+
+    if exists && let Some(root) = repo.as_deref() {
+        let base = receipt["change"]["base"]
+            .as_str()
+            .filter(|text| !text.is_empty());
+        let patch_args: Vec<&str> = match base {
+            Some(base) => vec!["diff", "--binary", "--full-index", base, bound.as_str()],
+            None => vec![
+                "show",
+                "--binary",
+                "--full-index",
+                "--format=",
+                bound.as_str(),
+            ],
+        };
+        let patch = git_bytes(root, &patch_args).unwrap_or_default();
+        let digest = sha256_hex(&patch);
+        let expected = receipt["change"]["patch_sha256"].as_str().unwrap_or("");
+        push_check(
+            &mut checks,
+            "patch",
+            !expected.is_empty() && digest == expected,
+            format!("patch sha256 {digest}"),
+        );
+
+        let status_args: Vec<&str> = match base {
+            Some(base) => vec!["diff", "--name-status", "-M", base, bound.as_str()],
+            None => vec!["show", "--name-status", "-M", "--format=", bound.as_str()],
+        };
+        let status = git_text(root, &status_args).unwrap_or_default();
+        let measured: BTreeSet<String> = status
+            .lines()
+            .filter_map(|line| line.split('\t').next_back().map(str::to_owned))
+            .collect();
+        let recorded: BTreeSet<String> = receipt["change"]["files"]
+            .as_array()
+            .map(|files| {
+                files
+                    .iter()
+                    .filter_map(|file| file["path"].as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        push_check(
+            &mut checks,
+            "files",
+            recorded == measured,
+            format!(
+                "receipt lists {} file(s), git shows {}",
+                recorded.len(),
+                measured.len()
+            ),
+        );
+    } else {
+        for name in ["patch", "files"] {
+            push_check(
+                &mut checks,
+                name,
+                false,
+                if repo.is_none() {
+                    "not checked: no repository path is bound to this server".to_string()
+                } else {
+                    format!("not checked: {bound} is not in this repository")
+                },
+            );
+        }
+    }
+
+    let approvals = receipt["authority"]["approvals"].as_array();
+    let unattributed = approvals
+        .map(|rows| {
+            rows.iter()
+                .filter(|row| {
+                    row["approved_by"]
+                        .as_str()
+                        .is_none_or(|name| name.trim().is_empty() || name == "unknown")
+                })
+                .count()
+        })
+        .unwrap_or(0);
+    push_check(
+        &mut checks,
+        "approvals-attributed",
+        unattributed == 0,
+        if approvals.is_none_or(|rows| rows.is_empty()) {
+            "no approvals were needed for this change".to_string()
+        } else if unattributed == 0 {
+            format!(
+                "{} approval(s), every one names a person",
+                approvals.map_or(0, Vec::len)
+            )
+        } else {
+            format!("{unattributed} approval(s) name no person")
+        },
+    );
+
+    // Measured-or-null: an empty measured list and an unmeasured field are not
+    // the same claim, and the report keeps them apart.
+    let beliefs_detail = match receipt.get("beliefs") {
+        Some(Value::Array(beliefs)) => {
+            let missing = beliefs
+                .iter()
+                .filter(|belief| belief["author"].is_null())
+                .count();
+            if beliefs.is_empty() {
+                "measured: no vault fact names an impacted symbol".to_string()
+            } else if missing == 0 {
+                format!("{} belief(s), every one names a person", beliefs.len())
+            } else {
+                format!(
+                    "{} belief(s), {missing} without a recorded author (named in `unknown`, not \
+                     filled)",
+                    beliefs.len()
+                )
+            }
+        }
+        _ => format!(
+            "not measured: {}",
+            receipt["beliefs_unavailable"]
+                .as_str()
+                .unwrap_or("no reason recorded")
+        ),
+    };
+    push_check(&mut checks, "beliefs", true, beliefs_detail);
+
+    let ok = checks
+        .iter()
+        .all(|check| check["ok"].as_bool().unwrap_or(false));
+    Ok(json!({
+        "schema": schema,
+        "commit": wanted,
+        "bound_commit": bound,
+        "ok": ok,
+        "checks": checks,
+        "note": RECEIPT_CLAIMS_FENCE,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1163,13 +1537,175 @@ mod tests {
         assert_eq!(value["schema"], "mn-invariants/1");
         assert_eq!(value["gate"], "pass");
         assert_eq!(value["violations"], 0);
-        assert_eq!(value["not_modelled"], 3);
+        assert_eq!(value["not_modelled"], 2);
 
         let rows = value["rows"].as_array().expect("rows array");
         assert_eq!(rows.len(), 10);
         assert!(
             rows.iter()
-                .any(|row| row["id"] == "MI-3" && row["status"] == "not_modelled")
+                .any(|row| row["id"] == "MI-3" && row["status"] == "pass")
+        );
+    }
+
+    /// Provenance is not a new tool: it is the chain `vault_history` already
+    /// returns from the engine, narrowed to the fact asked about. A missing
+    /// author must stay null and be named in `unknown`, never filled in.
+    #[test]
+    fn vault_history_fact_filter_narrows_the_provenance_chain() {
+        const T0: i64 = 1_700_000_000_000;
+        let engine = MemoryEngine::open_in_memory().expect("in-memory vault");
+        let id = engine
+            .add_entity(EntityKind::Concept, "provenance-target", 0.9, T0)
+            .expect("entity");
+        let conn = engine.connection();
+        for (content, provenance, recorded) in [
+            (
+                "alpha claim",
+                r#"{"user":"alice","source":"postmortem.md","agent":"mn"}"#,
+                T0,
+            ),
+            ("beta claim", "{}", T0 + 1),
+        ] {
+            conn.execute(
+                "INSERT INTO observations \
+                    (entity_id, content, kind, confidence, valid_from, recorded_at, provenance) \
+                 VALUES (?1, ?2, 'fact', 1.0, ?3, ?4, ?5)",
+                params![id, content, T0, recorded, provenance],
+            )
+            .unwrap();
+        }
+
+        let all = vault_history(&engine, &json!({"name": "provenance-target"})).unwrap();
+        let chain = all["versions"][0]["chain"].as_array().unwrap();
+        assert_eq!(chain.len(), 2, "the whole chain is returned by default");
+        assert_eq!(
+            all["unattributed_facts"], 1,
+            "the empty-provenance row has no author"
+        );
+
+        let narrowed = vault_history(
+            &engine,
+            &json!({"name": "provenance-target", "fact": "ALPHA"}),
+        )
+        .unwrap();
+        let chain = narrowed["versions"][0]["chain"].as_array().unwrap();
+        assert_eq!(chain.len(), 1, "only the asked-about fact survives");
+        assert_eq!(chain[0]["fact"], "alpha claim");
+        assert_eq!(chain[0]["author"], "alice");
+        assert_eq!(chain[0]["source"], "postmortem.md");
+        assert_eq!(chain[0]["date"], T0);
+        assert_eq!(narrowed["unattributed_facts"], 0);
+
+        let missing = vault_history(
+            &engine,
+            &json!({"name": "provenance-target", "fact": "ghost"}),
+        )
+        .unwrap();
+        assert_eq!(missing["unattributed_facts"], 0);
+        assert!(
+            missing["versions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|v| v["chain"].as_array().is_some_and(Vec::is_empty)),
+            "no fact matched — the entity still exists, but no provenance is invented"
+        );
+    }
+
+    /// The MCP copy of contradiction detection used to carry its own SQL and
+    /// return only the closing side. Now it delegates to the engine and always
+    /// exposes the current side as an object with `present`.
+    #[test]
+    fn vault_contradictions_always_exposes_both_sides() {
+        let engine = MemoryEngine::open_in_memory().expect("in-memory vault");
+        let value = vault_contradictions(&engine, &json!({"name": "nobody"})).unwrap();
+        assert_eq!(value["entity"], "nobody");
+        assert_eq!(value["count"], 0);
+        assert!(value["contradictions"].as_array().unwrap().is_empty());
+        assert_eq!(
+            value["current_belief"]["present"], false,
+            "no open belief is invented when every generation is closed"
+        );
+        assert!(
+            value["guidance"].as_str().unwrap().contains("both sides"),
+            "the answer says what the two halves mean"
+        );
+    }
+
+    fn sample_receipt() -> Value {
+        json!({
+            "schema": "mn-receipt/1",
+            "change": {
+                "commit": "abc123",
+                "patch_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+                "files": []
+            },
+            "authority": {"approvals": []},
+            "beliefs": []
+        })
+    }
+
+    #[test]
+    fn receipt_verify_reports_every_check_and_no_authenticity_claim() {
+        let report = evidence_receipt_verify(
+            &json!({"commit": "abc123", "receipt": sample_receipt()}),
+            None,
+        )
+        .unwrap();
+        assert_eq!(report["schema"], "mn-receipt/1");
+        assert_eq!(report["bound_commit"], "abc123");
+        assert!(!report["ok"].as_bool().unwrap(), "no repo was bound");
+        let checks = report["checks"].as_array().unwrap();
+        let names: Vec<&str> = checks
+            .iter()
+            .map(|check| check["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "schema",
+                "commit",
+                "commit-exists",
+                "patch",
+                "files",
+                "approvals-attributed",
+                "beliefs"
+            ]
+        );
+        let note = report["note"].as_str().unwrap();
+        assert!(note.contains("NOT an authenticity attestation"));
+        assert!(!note.to_ascii_lowercase().contains("signed"));
+        assert!(
+            checks
+                .iter()
+                .find(|check| check["name"] == "commit-exists")
+                .unwrap()["detail"]
+                .as_str()
+                .unwrap()
+                .starts_with("not checked"),
+            "a check that could not run is reported, not silently passed"
+        );
+    }
+
+    #[test]
+    fn receipt_verify_refuses_a_schema_it_cannot_read() {
+        let mut receipt = sample_receipt();
+        receipt["schema"] = json!("mn-receipt/2");
+        let report =
+            evidence_receipt_verify(&json!({"commit": "abc123", "receipt": receipt}), None)
+                .unwrap();
+        let schema_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "schema")
+            .unwrap();
+        assert_eq!(schema_check["ok"], false);
+        assert!(
+            schema_check["detail"]
+                .as_str()
+                .unwrap()
+                .contains("mn-receipt/1")
         );
     }
 }

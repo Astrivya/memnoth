@@ -489,7 +489,7 @@ fn modern_request_with_the_current_version_needs_no_handshake() {
     )
     .unwrap();
     assert_eq!(resp["result"]["resultType"], "complete");
-    assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 48);
+    assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 49);
 }
 
 #[test]
@@ -941,6 +941,22 @@ fn typed_outputs_match_their_declared_schemas() {
     for (index, name) in TYPED_OUTPUT_TOOLS.iter().enumerate() {
         let args = match *name {
             "vault_asof" => json!({"name": "typed-entity", "as_of_ms": 1}),
+            // A caller-supplied document keeps this typed-schema check independent
+            // of the filesystem: with no vault bound, the git-dependent checks
+            // report "not checked" instead of inventing a repository.
+            "evidence_receipt_verify" => json!({
+                "commit": "abc123",
+                "receipt": {
+                    "schema": "mn-receipt/1",
+                    "change": {
+                        "commit": "abc123",
+                        "patch_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+                        "files": []
+                    },
+                    "authority": {"approvals": []},
+                    "beliefs": []
+                }
+            }),
             "vault_top" => json!({"limit": 5}),
             "vault_proposals" => json!({}),
             "coord_heartbeat" | "coord_leave" => json!({"session_id": session_id.clone()}),

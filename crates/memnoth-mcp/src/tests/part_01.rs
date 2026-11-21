@@ -181,11 +181,11 @@ async fn legacy_stdio_lifecycle_keeps_the_profile_tool_boundary() {
 }
 
 #[test]
-fn tools_list_full_surface_has_54() {
+fn tools_list_full_surface_has_49() {
     let (e, c) = setup();
     let resp = handle_message(&e, &c, rpc(2, "tools/list", json!({}))).unwrap();
     let tools = resp["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 48);
+    assert_eq!(tools.len(), 49);
 }
 
 #[test]
@@ -441,7 +441,7 @@ fn profile_parse_maps_env_values() {
 
 /// The environment is the machine's policy, so an unset variable must take the
 /// **documented** default (`memory`, 22 tools) and an unrecognised value must
-/// stop the process. Both used to fall back to `full` (48 tools): a typo in a
+/// stop the process. Both used to fall back to `full` (49 tools): a typo in a
 /// host's launch command silently widened the surface, and the only signal was
 /// a stderr line nothing reads. This is the regression test for that.
 #[test]
@@ -729,9 +729,9 @@ fn profile_filters_tool_list() {
     };
     assert_eq!(count(Profile::Micro), 4);
     assert_eq!(count(Profile::Memory), 22);
-    assert_eq!(count(Profile::Code), 19);
+    assert_eq!(count(Profile::Code), 20);
     assert_eq!(count(Profile::Coord), 14);
-    assert_eq!(count(Profile::Full), 48);
+    assert_eq!(count(Profile::Full), 49);
 }
 
 /// The moat, asserted by name — with the docstring's own reason in the
@@ -968,6 +968,24 @@ fn memory_profile_stays_within_a_defensible_size() {
                  to `code`: the profile that names a category must reach that category's moat"
         );
     }
+    // The evidence work deliberately did NOT raise this ceiling to 25.
+    // Provenance is a `fact` filter on vault_history; both-sided contradiction
+    // is the engine-delegating vault_contradictions; only receipt verification
+    // is a new verb, and a receipt describes a *code* change, so it belongs to
+    // code+full. `evidence_asof` was dropped entirely: vault_asof already
+    // carries the independent `known_ms` clock.
+    assert!(
+        !names
+            .iter()
+            .any(|name| name.as_str() == "evidence_receipt_verify"),
+        "receipt verification answers questions about a commit and its code-graph \
+             impact; it belongs to code+full, not the default memory profile"
+    );
+    assert!(
+        code.iter()
+            .any(|name| name.as_str() == "evidence_receipt_verify"),
+        "the code profile must carry local receipt verification"
+    );
 }
 
 /// The default fusion is a **measured** decision, not a preference: the

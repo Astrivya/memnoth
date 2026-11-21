@@ -233,10 +233,10 @@ The `--version` flag works completely offline without spawning the binary.
 | `MEMNOTH_MCP_PROFILE` | Tools | What it is for |
 |---|---|---|
 | `memory` | 22 | The vault, the temporal quartet (`vault_history`, `vault_asof`, `vault_contradictions`, `vault_top`), the invariant gate (`vault_invariants`), vault hygiene (`mem_duplicates`), index health |
-| `code` | 19 | Code-graph navigation plus the filesystem/git toolbox |
+| `code` | 20 | Code-graph navigation, the filesystem/git toolbox, and local receipt verification |
 | `coord` | 14 | Multi-agent claims, tasks, messaging |
 | `micro` | 4 | Smallest useful set |
-| `full` | 48 | Everything |
+| `full` | 49 | Everything |
 
 A tool you expected but cannot see is a profile setting, not a missing
 capability — the server reports the active profile and its tool count in the

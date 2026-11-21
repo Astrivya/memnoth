@@ -161,7 +161,7 @@ pub const TOOL_PROFILES: &[(&str, &[Profile])] = &[
         &[Profile::Memory, Profile::Code, Profile::Full],
     ),
     // Code-only on purpose: a memory host has `kg_status`/`kg_coverage` for
-    // staleness, and the `memory` profile has a hard 21-tool ceiling
+    // staleness, and the `memory` profile has a hard 22-tool ceiling
     // (`memory_profile_stays_within_a_defensible_size`). `kg_doctor` is a
     // *code-graph* verdict — parse failures, unresolved call sites, semantic
     // state — so it belongs to the profile that owns the code graph.
@@ -190,6 +190,12 @@ pub const TOOL_PROFILES: &[(&str, &[Profile])] = &[
     ("git_diff", &[Profile::Code, Profile::Full]),
     ("git_log", &[Profile::Code, Profile::Full]),
     ("think", &[Profile::Code, Profile::Full]),
+    // Evidence: local receipt verification. Code+full only, so the default
+    // `memory` profile keeps its 22-tool ceiling — provenance and both-sided
+    // contradiction are already answered there by vault_history /
+    // vault_contradictions. Read-only, so it stays callable under
+    // MEMNOTH_MCP_READ_ONLY=1.
+    ("evidence_receipt_verify", &[Profile::Code, Profile::Full]),
     // ── coordination ───────────────────────────────────────────────────
     ("coord_join", &[Profile::Coord, Profile::Full]),
     ("coord_heartbeat", &[Profile::Coord, Profile::Full]),
@@ -207,7 +213,7 @@ pub const TOOL_PROFILES: &[(&str, &[Profile])] = &[
     ("coord_inbox", &[Profile::Coord, Profile::Full]),
     // The team's unattended queue: beliefs agents and teammates proposed that no
     // person has accepted yet. Coordination owns it because acceptance is a team
-    // decision; `memory` sits exactly at its 21-tool ceiling, and widening that
+    // decision; `memory` sits exactly at its 22-tool ceiling, and widening that
     // ceiling to carry a review queue would trade the memory surface's context
     // budget for a workflow it does not own.
     ("vault_proposals", &[Profile::Coord, Profile::Full]),
@@ -384,9 +390,9 @@ mod tests {
             vec![
                 ("micro", 4),
                 ("memory", 22),
-                ("code", 26),
+                ("code", 27),
                 ("coord", 14),
-                ("full", 55)
+                ("full", 56)
             ],
             "a profile changed size: update the published tables with it"
         );
@@ -403,9 +409,9 @@ mod tests {
             vec![
                 ("micro", 4),
                 ("memory", 22),
-                ("code", 26),
+                ("code", 27),
                 ("coord", 14),
-                ("full", 55),
+                ("full", 56),
             ],
             "surface_report must match TOOL_PROFILES membership",
         );
