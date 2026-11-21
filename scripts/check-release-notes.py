@@ -250,8 +250,14 @@ def run_checks(cfg: Config) -> list[Result]:
         results.append(Result("unreleased", "Unreleased / newest heading", PASS, detail))
 
     # 4. The documented generated copy in the web checkout is byte-identical.
+    #    A CLI-only checkout (CI) has no sibling web repo; WARN with the reason
+    #    instead of failing a gate on a checkout that never had the file. The
+    #    web repo's own check:docs gate verifies the copy where it exists.
     contract_file = cfg.web_contract / "changelog.md"
-    if not contract_file.is_file():
+    if not cfg.web_root.is_dir():
+        detail = f"web checkout absent at {cfg.web_root}; contract copy not checked"
+        results.append(Result("contract_copy", "Contract changelog copy", WARN, detail))
+    elif not contract_file.is_file():
         detail = f"missing {short(contract_file, cfg.web_root)} (generated copy of the changelog)"
         results.append(Result("contract_copy", "Contract changelog copy", FAIL, detail))
     elif not changelog_ok:

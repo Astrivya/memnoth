@@ -406,7 +406,9 @@ fn the_deck_focus_round_trip_at_eighty_columns() {
     session.send("s");
     assert!(
         session.wait_for_any(
-            &["Steer", "Write the direction", "composer"],
+            // The seeded scout has no delegator and is completed, so the honest
+            // steer answer is "status: not wired" — not a writable composer.
+            &["Steer", "Write the direction", "status: not wired"],
             Duration::from_secs(10)
         ),
         "s did not open the steer composer:\n{}",
