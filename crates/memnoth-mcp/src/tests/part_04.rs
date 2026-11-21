@@ -617,7 +617,7 @@ fn npm_onboarding_names_the_vault_and_distinguishes_registration_flows() {
 
 /// The `//!` profile table at the top of this file is the first surface a
 /// host author reads, and it already drifted once (Full 42 vs 44, Memory 19
-/// vs 21) while every mechanical guard stayed green — because no guard read
+/// vs 22) while every mechanical guard stayed green — because no guard read
 /// the header. This one does: each documented count must match
 /// `Profile::tool_names`, so the header, the manifest and the CLI docs move
 /// together with the table or the build fails here instead of in a host

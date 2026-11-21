@@ -489,7 +489,7 @@ fn modern_request_with_the_current_version_needs_no_handshake() {
     )
     .unwrap();
     assert_eq!(resp["result"]["resultType"], "complete");
-    assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 47);
+    assert_eq!(resp["result"]["tools"].as_array().unwrap().len(), 48);
 }
 
 #[test]

@@ -139,6 +139,13 @@ pub fn tool_definitions() -> Vec<Value> {
             vault_contradictions_schema(),
         ),
         typed_tool(
+            "vault_invariants",
+            "Read-only proofs of the ten vault memory invariants (MI-1..MI-10): one row per rule with pass, violation or not_modelled. A rule the current schema cannot express is never counted as a pass. Use as a gate before trusting recall or syncing a vault.",
+            &[],
+            READ_ONLY,
+            vault_invariants_schema(),
+        ),
+        typed_tool(
             "vault_top",
             "Most-referenced entities right now, ranked by access frequency then recency (every mem_search / mem_find_facts / mem_related read feeds the counters). Use to answer 'what is the team actually working on' or to scope context injection to what matters. Pass decay_ms to rank by exponential half-life decay instead, so stale hits age out and recent ones dominate.",
             &[
@@ -258,6 +265,40 @@ fn vault_contradictions_schema() -> Value {
             "guidance": {"type": "string", "description": "How to treat the current belief given what was found"},
         }),
         &["entity", "contradictions", "count", "guidance"],
+    )
+}
+
+fn vault_invariants_schema() -> Value {
+    output_object(
+        json!({
+            "schema": {"type": "string", "description": "mn-invariants/1"},
+            "rows": {
+                "type": "array",
+                "description": "Exactly ten rows, MI-1 through MI-10, in order",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "title": {"type": "string"},
+                        "status": {"type": "string", "enum": ["pass", "violation", "not_modelled"]},
+                        "evidence": {"type": "string"},
+                        "affected_count": {"type": ["integer", "null"]},
+                    }
+                }
+            },
+            "has_violations": {"type": "boolean"},
+            "violations": {"type": "integer"},
+            "not_modelled": {"type": "integer"},
+            "gate": {"type": "string", "enum": ["pass", "fail"]},
+        }),
+        &[
+            "schema",
+            "rows",
+            "has_violations",
+            "violations",
+            "not_modelled",
+            "gate",
+        ],
     )
 }
 
@@ -939,6 +980,45 @@ pub(crate) fn vault_contradictions(engine: &MemoryEngine, args: &Value) -> Resul
     }))
 }
 
+/// The vault invariant gate, read-only. Delegates to the engine checker so the
+/// MCP surface and `mn vault invariants` cannot disagree about a rule's status.
+pub(crate) fn vault_invariants(engine: &MemoryEngine, _args: &Value) -> Result<Value> {
+    use memnoth_engine::store::invariants::{InvariantStatus, check_invariants};
+
+    let report = check_invariants(engine.connection());
+
+    fn word(status: InvariantStatus) -> &'static str {
+        match status {
+            InvariantStatus::Pass => "pass",
+            InvariantStatus::Violation => "violation",
+            InvariantStatus::NotModelled => "not_modelled",
+        }
+    }
+
+    let rows: Vec<Value> = report
+        .rows
+        .iter()
+        .map(|row| {
+            json!({
+                "id": row.id,
+                "title": row.title,
+                "status": word(row.status),
+                "evidence": row.evidence,
+                "affected_count": row.affected_count,
+            })
+        })
+        .collect();
+
+    Ok(json!({
+        "schema": "mn-invariants/1",
+        "rows": rows,
+        "has_violations": report.has_violations(),
+        "violations": report.violations().len(),
+        "not_modelled": report.not_modelled().len(),
+        "gate": if report.has_violations() { "fail" } else { "pass" },
+    }))
+}
+
 /// Search the shared team vault: same shape as `mem_search` but reads the
 /// team namespace path configured by `mcp add --team`.
 pub(crate) fn mem_search_team(engine: &MemoryEngine, query: &str) -> Result<Value> {
@@ -992,4 +1072,27 @@ pub(crate) fn vault_asof_team(engine: &MemoryEngine, name: &str, at_ms: i64) -> 
         }))
     })?;
     Ok(row)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vault_invariants_reports_ten_rows_without_faking_a_pass() {
+        let engine = MemoryEngine::open_in_memory().expect("in-memory vault");
+        let value = vault_invariants(&engine, &json!({})).expect("invariants tool");
+
+        assert_eq!(value["schema"], "mn-invariants/1");
+        assert_eq!(value["gate"], "pass");
+        assert_eq!(value["violations"], 0);
+        assert_eq!(value["not_modelled"], 3);
+
+        let rows = value["rows"].as_array().expect("rows array");
+        assert_eq!(rows.len(), 10);
+        assert!(
+            rows.iter()
+                .any(|row| row["id"] == "MI-3" && row["status"] == "not_modelled")
+        );
+    }
 }

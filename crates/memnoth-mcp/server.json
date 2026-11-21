@@ -18,28 +18,25 @@
           "toolCount": 14
         },
         "full": {
-          "toolCount": 47
+          "toolCount": 48
         },
         "memory": {
           "includes": [
             "vault_history",
             "vault_asof",
             "vault_contradictions",
+            "vault_invariants",
             "vault_top",
             "mem_supersede",
             "mem_forget"
           ],
-          "toolCount": 21
+          "toolCount": 22
         },
         "micro": {
           "toolCount": 4
         }
       },
       "protocolVersions": [
-        "2026-07-28"
-      ],
-      "stdioLifecycleVersions": [
-        "2025-11-25",
         "2026-07-28"
       ],
       "retrievalTierCost": {
@@ -74,14 +71,18 @@
           }
         ]
       },
+      "stdioLifecycleVersions": [
+        "2025-11-25",
+        "2026-07-28"
+      ],
       "toolSchemaCost": {
         "//": "Bytes of the tools/list payload each profile makes a host pay - the context tax, published instead of asserted. Every rival in this category publishes this number (1.9K / ~7K / 11.6K / 170 tokens); memnoth published none. Filled in by `cargo test -p memnoth-mcp -- --ignored regenerate_manifest_schema_cost` after a build, and a test fails if these ever drift from the shipping definitions.",
         "bytesPerProfile": {
           "agent": 3396,
           "code": 17571,
           "coord": 7531,
-          "full": 37918,
-          "memory": 19463,
+          "full": 39121,
+          "memory": 20666,
           "micro": 3199
         }
       },
@@ -121,7 +122,7 @@
             "full"
           ],
           "default": "memory",
-          "description": "Tool surface to expose: micro=4, memory=21, code=19, coord=14, full=47. Default: memory.",
+          "description": "Tool surface to expose: micro=4, memory=22, code=19, coord=14, full=48. Default: memory.",
           "name": "MEMNOTH_MCP_PROFILE"
         }
       ],

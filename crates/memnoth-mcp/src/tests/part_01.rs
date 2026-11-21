@@ -104,7 +104,7 @@ async fn stdio_supports_legacy_initialize_and_legacy_tools_list() {
     responses.read_line(&mut line).await.unwrap();
     let listed: Value = serde_json::from_str(&line).unwrap();
     assert_eq!(listed["id"], 2);
-    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 21);
+    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 22);
     assert!(listed["result"].get("resultType").is_none());
     assert!(listed["result"].get("_meta").is_none());
     assert!(listed["result"].get("ttlMs").is_none());
@@ -185,7 +185,7 @@ fn tools_list_full_surface_has_54() {
     let (e, c) = setup();
     let resp = handle_message(&e, &c, rpc(2, "tools/list", json!({}))).unwrap();
     let tools = resp["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 47);
+    assert_eq!(tools.len(), 48);
 }
 
 #[test]
@@ -440,8 +440,8 @@ fn profile_parse_maps_env_values() {
 }
 
 /// The environment is the machine's policy, so an unset variable must take the
-/// **documented** default (`memory`, 21 tools) and an unrecognised value must
-/// stop the process. Both used to fall back to `full` (51 tools): a typo in a
+/// **documented** default (`memory`, 22 tools) and an unrecognised value must
+/// stop the process. Both used to fall back to `full` (48 tools): a typo in a
 /// host's launch command silently widened the surface, and the only signal was
 /// a stderr line nothing reads. This is the regression test for that.
 #[test]
@@ -728,10 +728,10 @@ fn profile_filters_tool_list() {
             .len()
     };
     assert_eq!(count(Profile::Micro), 4);
-    assert_eq!(count(Profile::Memory), 21);
+    assert_eq!(count(Profile::Memory), 22);
     assert_eq!(count(Profile::Code), 19);
     assert_eq!(count(Profile::Coord), 14);
-    assert_eq!(count(Profile::Full), 47);
+    assert_eq!(count(Profile::Full), 48);
 }
 
 /// The moat, asserted by name — with the docstring's own reason in the
@@ -923,7 +923,9 @@ fn profile_membership_is_a_pure_function_of_metadata() {
 /// available.
 ///
 /// Raised 20 → 21 once, deliberately, for `mem_supersede` + `mem_forget`: the
-/// write half of the temporal vocabulary. Every read of that journal already
+/// write half of the temporal vocabulary. Raised 21 → 22 for `vault_invariants`,
+/// the gate that proves the journal's ten rules without trusting a green CI run.
+/// Every read of that journal already
 /// existed while nothing could write to one, which made the moat unexercisable
 /// — a host could see a superseded belief and not supersede anything. Two tools
 /// buying the only capability in this table no rival can answer is cheap at
@@ -933,8 +935,8 @@ fn profile_membership_is_a_pure_function_of_metadata() {
 fn memory_profile_stays_within_a_defensible_size() {
     let names = Profile::Memory.tool_names();
     assert!(
-        names.len() <= 21,
-        "Profile::Memory exposes {} tools, over the 21-tool ceiling.\n\
+        names.len() <= 22,
+        "Profile::Memory exposes {} tools, over the 22-tool ceiling.\n\
              Profiles exist to cut context tax, which memorix markets explicitly: it ships micro \
              9 / lite 20, codegraph advertises one tool, codebase-memory-mcp ships scout 7 / \
              analysis 11. A host that wanted everything would load `full`.\n\

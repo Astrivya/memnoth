@@ -1560,7 +1560,7 @@ mod tests {
         assert!(listed.starts_with("HTTP/1.1 200"), "{listed}");
         let listed_body: Value =
             serde_json::from_str(listed.split("\r\n\r\n").nth(1).unwrap()).unwrap();
-        assert_eq!(listed_body["result"]["tools"].as_array().unwrap().len(), 47);
+        assert_eq!(listed_body["result"]["tools"].as_array().unwrap().len(), 48);
 
         // The legacy handshake is not served even with a valid version.
         let legacy_raw = post_body(5, "initialize");

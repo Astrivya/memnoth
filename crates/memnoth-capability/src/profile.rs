@@ -133,6 +133,7 @@ pub const TOOL_PROFILES: &[(&str, &[Profile])] = &[
     ("vault_history", &[Profile::Memory, Profile::Full]),
     ("vault_asof", &[Profile::Memory, Profile::Full]),
     ("vault_contradictions", &[Profile::Memory, Profile::Full]),
+    ("vault_invariants", &[Profile::Memory, Profile::Full]),
     ("vault_top", &[Profile::Memory, Profile::Full]),
     // The clock: a temporal profile that cannot tell the time is half a moat.
     ("now", &[Profile::Memory, Profile::Code, Profile::Full]),
@@ -382,10 +383,10 @@ mod tests {
             counts,
             vec![
                 ("micro", 4),
-                ("memory", 21),
+                ("memory", 22),
                 ("code", 26),
                 ("coord", 14),
-                ("full", 54)
+                ("full", 55)
             ],
             "a profile changed size: update the published tables with it"
         );
@@ -401,10 +402,10 @@ mod tests {
             counts,
             vec![
                 ("micro", 4),
-                ("memory", 21),
+                ("memory", 22),
                 ("code", 26),
                 ("coord", 14),
-                ("full", 54),
+                ("full", 55),
             ],
             "surface_report must match TOOL_PROFILES membership",
         );

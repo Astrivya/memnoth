@@ -24,16 +24,16 @@
 //!
 //! # Tool Profiles
 //!
-//! memnoth exposes 47 tools on the full profile (plus 6 agent-mode tools)
+//! memnoth exposes 48 tools on the full profile (plus 6 agent-mode tools)
 //! across 6 profiles:
 //!
 //! | Profile | Tools | Use Case |
 //! |---------|-------|----------|
 //! | `micro` | 4 | Minimal context (coding agents) |
-//! | `memory` | 21 | Memory-focused workflows, incl. the temporal quartet |
+//! | `memory` | 22 | Memory-focused workflows, incl. the temporal quartet |
 //! | `code` | 19 | Code intelligence: KG navigation + fs/git toolbox |
 //! | `coord` | 14 | Multi-agent coordination |
-//! | `full` | 47 | Complete feature set (no allowlist: Full means all) |
+//! | `full` | 48 | Complete feature set (no allowlist: Full means all) |
 //! | `agent` | 6 | Agent session management (HTTP transport only) |
 //!
 //! Membership is declared once per tool in `TOOL_PROFILES`; the counts above
@@ -352,7 +352,7 @@ Read/Grep/file-reading round-trips."#;
 pub enum Profile {
     /// Minimal profile with 4 tools (for coding agents)
     Micro,
-    /// Memory profile with 21 tools: the vault surface, the **temporal
+    /// Memory profile with 22 tools: the vault surface, the **temporal
     /// quartet**, vault hygiene (`mem_duplicates` / `mem_merge`), the
     /// index-health verbs that let a host check its own index, and the clock.
     Memory,
@@ -361,7 +361,7 @@ pub enum Profile {
     /// Code-intelligence profile: the KG navigation verbs, the same index
     /// health set, and the filesystem/git toolbox.
     Code,
-    /// Full profile: every non-agent tool (47). There is deliberately NO
+    /// Full profile: every non-agent tool (48). There is deliberately NO
     /// allowlist for Full — `allows` is unconditional for it, so a new tool
     /// is reachable the moment it is defined; never a second list.
     Full,
@@ -387,7 +387,7 @@ impl Profile {
     ///
     /// **Refuses an unrecognised value.** This process decides which tools a host
     /// is even told about, so a typo must not widen the surface: a machine whose
-    /// operator meant `memory` (21 tools) used to expose `full` (51 tools), and
+    /// operator meant `memory` (22 tools) used to expose `full` (48 tools), and
     /// the only signal was one stderr line nobody reads.
     pub fn from_env() -> anyhow::Result<Self> {
         let raw = std::env::var("MEMNOTH_MCP_PROFILE").ok();
@@ -498,7 +498,7 @@ impl Profile {
 /// applies: `memorix` ships micro 9 / lite 20 / team 28 / full 40+, `codegraph`
 /// advertises one tool by default, `codebase-memory-mcp` ships 15. `Memory` is
 /// what a memory-focused host loads *instead of* a bigger profile, so it is
-/// held at 21 — one over memorix lite's solo-memory tier. The shape rule behind
+/// held at 22 — two over memorix lite's solo-memory tier. The shape rule behind
 /// that ceiling outlived the number: code navigation stays in `code` rather than
 /// being absorbed, so `Memory` grows only when the memory category itself does.
 const _: () = ();
@@ -2196,6 +2196,14 @@ tool_def!(
     CacheClass::Session,
 );
 tool_def!(
+    TOOL_VAULT_INVARIANTS,
+    "vault_invariants",
+    "Read-only vault invariant gate",
+    Approval::ReadOnly,
+    CostClass::Moderate,
+    CacheClass::Session,
+);
+tool_def!(
     TOOL_VAULT_TOP,
     "vault_top",
     "Top entities by access",
@@ -2973,6 +2981,11 @@ fn mcp_registry() -> Registry {
     registry.add(McpTool {
         def: &TOOL_VAULT_CONTRADICTIONS,
         call: |args, surface| tools_agent::vault_contradictions(surface.engine(), args),
+    });
+
+    registry.add(McpTool {
+        def: &TOOL_VAULT_INVARIANTS,
+        call: |args, surface| tools_agent::vault_invariants(surface.engine(), args),
     });
 
     registry.add(McpTool {
@@ -7717,6 +7730,7 @@ const TYPED_OUTPUT_TOOLS: &[&str] = &[
     "vault_history",
     "vault_asof",
     "vault_contradictions",
+    "vault_invariants",
     "vault_top",
     "vault_proposals",
     "coord_join",
