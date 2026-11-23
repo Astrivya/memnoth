@@ -35,6 +35,11 @@ path = "src/bin/mn.rs"
 name = "memnoth"
 path = "src/lib.rs"
 
+[features]
+# ALG19 — opt-in compact graph storage experiment. Off by default: the shipped
+# graph.db format and the CLI verb surface are unchanged.
+graph-compression = []
+
 [dependencies]
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

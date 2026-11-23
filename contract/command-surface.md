@@ -2639,6 +2639,78 @@ memnoth sync restore --phrase '…' --force
 
 ---
 
+## TEAM
+
+### `memnoth team`
+
+Local-only team surface on this machine
+
+**Examples:**
+
+```bash
+memnoth team
+```
+
+**Overlay:** `None` | **Danger:** `Safe` | **Auth:** `None`
+
+---
+
+### `memnoth team namespace`
+
+Vault namespaces that exist on this machine
+
+**Examples:**
+
+```bash
+memnoth team namespace
+```
+
+**Overlay:** `None` | **Danger:** `Safe` | **Auth:** `None`
+
+---
+
+### `memnoth team inbox`
+
+Local proposal review inbox on this machine
+
+**Examples:**
+
+```bash
+memnoth team inbox
+```
+
+**Overlay:** `None` | **Danger:** `Safe` | **Auth:** `None`
+
+---
+
+### `memnoth team attribution`
+
+Attribution recorded on this machine
+
+**Examples:**
+
+```bash
+memnoth team attribution
+```
+
+**Overlay:** `None` | **Danger:** `Safe` | **Auth:** `None`
+
+---
+
+### `memnoth team memory`
+
+Team memory status on this machine: not available
+
+**Examples:**
+
+```bash
+memnoth team memory
+```
+
+**Overlay:** `None` | **Danger:** `Safe` | **Auth:** `None`
+
+---
+
 ## TEAMS
 
 ### `memnoth teams join`

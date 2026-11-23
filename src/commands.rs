@@ -1,11 +1,11 @@
-use anyhow::Context;
+use anyhow::{Context, Result};
 use memnoth_capability::Profile;
 use memnoth_skills::{SkillCommand as SkillsSkillCommand, execute_skill_command};
 
 use crate::auth::{auth_status, login, logout, whoami};
 use crate::cli::{
     AuthCommand, ConnectCommand, KgCommand, McpCommand, McpProfileCommand, SkillCommand,
-    TeamsCommand, VaultCommand, Verb,
+    TeamLocalCommand, TeamsCommand, VaultCommand, Verb,
 };
 use crate::completion::{Shell, install, render_completions, uninstall};
 use crate::context::AppContext;
@@ -785,6 +785,24 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
                 Ok(Outcome::new("team.import_export", output, json!({})))
             }
         },
+        // D28: the singular `team` verb is a local-only surface. It never
+        // reaches an account, an organization, a seat count or a cloud
+        // endpoint; every arm below answers about this machine only.
+        Verb::Team(args) => match &args.action {
+            Some(TeamLocalCommand::Namespace) => {
+                local_team_namespace(ctx).map_err(|e| ErrorOutcome::from_anyhow(&e))
+            }
+            Some(TeamLocalCommand::Inbox) => {
+                local_team_inbox(ctx).map_err(|e| ErrorOutcome::from_anyhow(&e))
+            }
+            Some(TeamLocalCommand::Attribution) => {
+                local_team_attribution(ctx).map_err(|e| ErrorOutcome::from_anyhow(&e))
+            }
+            Some(TeamLocalCommand::Memory) => {
+                local_team_memory(ctx).map_err(|e| ErrorOutcome::from_anyhow(&e))
+            }
+            None => local_team_status(ctx).map_err(|e| ErrorOutcome::from_anyhow(&e)),
+        },
         Verb::Cloud(args) => cloud::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
         Verb::Config(args) => match &args.action {
             crate::cli::ConfigCommand::Get(args) => {
@@ -1267,6 +1285,207 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
         Verb::Demo => demo::run(ctx),
         Verb::Brief => crate::tui::commands::brief::run(ctx),
     }
+}
+
+/* ------------------------- D28: local-only team surface -------------------- */
+//
+// The hidden `team` verb answers only about this machine. It deliberately
+// reads no account, no organization, no seat count and no cloud endpoint:
+// before M2 + M5 + M8 there is no shared team memory to show, and a screen
+// that implies one is a promise the product cannot keep. Every string here
+// carries the literal "on this machine" so a screenshot, a log line or a JSON
+// reader cannot mistake it for a remote view.
+
+const LOCAL_QUALIFIER: &str = "on this machine";
+
+/// `mn team namespace` — vault namespaces that are files on this machine.
+fn local_team_namespace(ctx: &AppContext) -> anyhow::Result<Outcome> {
+    let dir = ctx
+        .vault_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let mut names: Vec<(String, String)> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let file = entry.file_name().to_string_lossy().into_owned();
+            let name = if file == "vault.db" {
+                Some("default".to_string())
+            } else {
+                file.strip_prefix("vault-")
+                    .and_then(|rest| rest.strip_suffix(".db"))
+                    .map(str::to_string)
+            };
+            if let Some(name) = name {
+                names.push((name, file));
+            }
+        }
+    }
+    names.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut text = String::from("Local namespaces on this machine\n");
+    text.push_str("--------------------------------\n");
+    if names.is_empty() {
+        text.push_str("  No vault namespaces are recorded on this machine yet.\n");
+    } else {
+        for (name, file) in &names {
+            text.push_str(&format!("  {name}  ({file})\n"));
+        }
+    }
+    text.push_str(&format!(
+        "\nCurrent namespace on this machine: {}\n",
+        ctx.namespace
+    ));
+    text.push_str("Namespaces are local vault files on this machine only.\n");
+
+    let data = json!({
+        "scope": "local_only",
+        "qualifier": LOCAL_QUALIFIER,
+        "namespaces": names.iter().map(|(name, file)| json!({
+            "name": name,
+            "file": file,
+        })).collect::<Vec<serde_json::Value>>(),
+        "current": ctx.namespace,
+    });
+    Ok(Outcome::new("team.namespace", text, data))
+}
+
+/// `mn team inbox` — review proposals in the local coordination records.
+fn local_team_inbox(ctx: &AppContext) -> anyhow::Result<Outcome> {
+    use rusqlite::OpenFlags;
+
+    let path = ctx.coord_path();
+    let mut proposals: Vec<serde_json::Value> = Vec::new();
+    if path.exists()
+        && let Ok(conn) =
+            rusqlite::Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        && let Ok(mut stmt) = conn.prepare(
+            "SELECT id, from_session, to_session, body FROM coord_messages ORDER BY created_at DESC LIMIT 50",
+        )
+        && let Ok(rows) = stmt.query_map([], |row| {
+            Ok(json!({
+                "id": row.get::<_, i64>(0)?,
+                "from": row.get::<_, String>(1)?,
+                "to": row.get::<_, Option<String>>(2)?,
+                "body": row.get::<_, String>(3)?,
+            }))
+        })
+    {
+        for row in rows.flatten() {
+            let body = row["body"].as_str().unwrap_or("").to_lowercase();
+            if body.contains("review") || body.contains("proposal") {
+                proposals.push(row);
+            }
+        }
+    }
+
+    let mut text = String::from("Local proposal review inbox on this machine\n");
+    text.push_str("--------------------------------------------\n");
+    if proposals.is_empty() {
+        text.push_str("  No review proposals are recorded on this machine.\n");
+    } else {
+        for proposal in &proposals {
+            text.push_str(&format!(
+                "  #{} from {}: {}\n",
+                proposal["id"], proposal["from"], proposal["body"]
+            ));
+        }
+    }
+    text.push_str("Proposals here are local coordination records on this machine only.\n");
+
+    let data = json!({
+        "scope": "local_only",
+        "qualifier": LOCAL_QUALIFIER,
+        "proposals": proposals,
+        "count": proposals.len(),
+    });
+    Ok(Outcome::new("team.inbox", text, data))
+}
+
+/// `mn team attribution` — who recorded the beliefs in the local vault.
+fn local_team_attribution(ctx: &AppContext) -> anyhow::Result<Outcome> {
+    let mut authors: Vec<String> = Vec::new();
+    if ctx.vault_path.exists()
+        && let Ok(engine) = crate::vault::open_existing(ctx)
+    {
+        let now = crate::session::now_ms();
+        if let Ok(entities) = engine.entities_as_of(now) {
+            for entity in entities {
+                if let Ok(facts) =
+                    memnoth_engine::vault_history::current_facts(&engine, entity.id, now)
+                {
+                    for fact in facts {
+                        if let Some(author) = fact["author"].as_str()
+                            && !author.trim().is_empty()
+                            && !authors.iter().any(|known| known.as_str() == author)
+                        {
+                            authors.push(author.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    authors.sort();
+
+    let mut text = String::from("Local attribution on this machine\n");
+    text.push_str("---------------------------------\n");
+    if authors.is_empty() {
+        text.push_str("  No authors are recorded on this machine yet.\n");
+    } else {
+        for author in &authors {
+            text.push_str(&format!("  {author}\n"));
+        }
+    }
+    text.push_str("Attribution is recorded by the local vault on this machine only.\n");
+
+    let data = json!({
+        "scope": "local_only",
+        "qualifier": LOCAL_QUALIFIER,
+        "authors": authors,
+    });
+    Ok(Outcome::new("team.attribution", text, data))
+}
+
+/// `mn team memory` — the honest state: no team memory before two machines.
+fn local_team_memory(_ctx: &AppContext) -> anyhow::Result<Outcome> {
+    let text = "\
+Team memory on this machine
+---------------------------
+Team memory requires two-machine restore; not available on this machine.
+Local vault files stay on this machine. Nothing is shared from this machine.
+";
+    let data = json!({
+        "scope": "local_only",
+        "qualifier": LOCAL_QUALIFIER,
+        "status": "not_available",
+        "reason": "requires two-machine restore",
+    });
+    Ok(Outcome::new("team.memory", text, data))
+}
+
+/// `mn team` with no subcommand — the four local screens in one answer.
+fn local_team_status(ctx: &AppContext) -> anyhow::Result<Outcome> {
+    let sections = [
+        local_team_namespace(ctx)?,
+        local_team_inbox(ctx)?,
+        local_team_attribution(ctx)?,
+        local_team_memory(ctx)?,
+    ];
+    let mut text =
+        String::from("Local team surface on this machine\n==================================\n");
+    for section in &sections {
+        text.push('\n');
+        text.push_str(&section.text);
+    }
+    let data = json!({
+        "scope": "local_only",
+        "qualifier": LOCAL_QUALIFIER,
+        "sections": sections.iter().map(|section| json!({
+            "command": section.command,
+            "data": section.data,
+        })).collect::<Vec<serde_json::Value>>(),
+    });
+    Ok(Outcome::new("team.status", text, data))
 }
 
 /// The one-line skill summary the session shows when a `/skill` line is wrong.

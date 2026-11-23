@@ -1,8 +1,8 @@
 //! Wire-shape regression tests: the client must parse what the control plane
 //! actually sends.
 //!
-//! Every fixture below is a literal response body copied from a server type —
-//! `memnoth-cloud`'s `src/types.rs` / `src/types/admin.rs` — not a prettified
+//! Every fixture below is a literal response body from the published API wire
+//! shapes defined by the control plane's OpenAPI document — not a prettified
 //! example. That is the point: the field names, the value types and which
 //! fields are nullable are the contract, so a rename on either side fails here
 //! rather than at a user's first `mn credits` or `mn auth login`.

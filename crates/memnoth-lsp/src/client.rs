@@ -6,38 +6,75 @@
 //! No server is spawned unless [`AutoStartPolicy`] permits it — `auto_lsp` must
 //! be set, the file's extension must match a known server, a root marker must
 //! be present, and the language must be on the allowlist (W7-05).
+//!
+//! Before any document request the client performs the LSP handshake: an
+//! `initialize` request carrying the workspace `rootUri` and the client's
+//! capabilities, a wait for the server's reply (from which `positionEncoding`
+//! is negotiated, defaulting to UTF-16), and an `initialized` notification.
+//! Requests are bounded by a short (2 s) deadline; the handshake and other
+//! slow calls use a long (10 s) one (S-COD-4).
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Child, Stdio};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
-use memnoth_codegraph::lsp::{AutoStartPolicy, PositionEncoding, ServerSpec, StartDecision};
-use serde_json::Value;
+use memnoth_codegraph::lsp::{
+    AutoStartPolicy, PositionEncoding, ServerSpec, StartDecision, decode_frame,
+};
+use serde_json::{Value, json};
 
 use crate::protocol::{FramedMessage, Id, RpcMessage};
+
+/// Soft deadline for an interactive request: answer or fail fast, never hang
+/// the editor (S-COD-4's 2 s deadline).
+pub const SHORT_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Hard deadline for slow calls — the `initialize` handshake above all, since
+/// a server may spend a moment indexing before it can answer (S-COD-4's 10 s
+/// deadline).
+pub const LONG_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A running language-server process plus its in-flight request table.
 pub struct LspClient {
     /// The language this server serves.
     pub language: String,
-    /// The negotiated position encoding.
+    /// The negotiated position encoding (set from the `initialize` reply).
     pub encoding: Mutex<Option<PositionEncoding>>,
     /// The next request id.
     next_id: Mutex<u64>,
-    /// Pending requests: id -> oneshot sender.
-    pending: Mutex<HashMap<u64, OneshotSender>>,
-    /// The server process stdin.
-    stdin: Mutex<Option<std::process::ChildStdin>>,
+    /// Pending requests: id -> waiter.
+    pending: Mutex<HashMap<u64, Waiter>>,
+    /// The server stdin (boxed so an in-memory transport can be injected).
+    stdin: Mutex<Option<Box<dyn Write + Send>>>,
     /// The child, so we can wait / kill it.
     child: Mutex<Option<Child>>,
     /// `textDocument/publishDiagnostics` by URI, newest per document.
     diagnostics: Mutex<HashMap<String, Vec<Value>>>,
 }
 
-type OneshotSender = tokio::sync::oneshot::Sender<Result<Value>>;
+/// How a caller waits for a reply: async callers use a tokio oneshot, the
+/// synchronous `initialize` handshake uses a std channel with a timeout.
+enum Waiter {
+    Async(tokio::sync::oneshot::Sender<Result<Value>>),
+    Sync(std::sync::mpsc::Sender<Result<Value>>),
+}
+
+impl Waiter {
+    fn send(self, answer: Result<Value>) {
+        match self {
+            Self::Async(tx) => {
+                let _ = tx.send(answer);
+            }
+            Self::Sync(tx) => {
+                let _ = tx.send(answer);
+            }
+        }
+    }
+}
 
 impl LspClient {
     /// Start the server described by `spec` in `root`, if the auto-start policy
@@ -82,74 +119,154 @@ impl LspClient {
             .take()
             .context("language server has no stdout")?;
 
+        Self::connect(
+            spec.language.to_string(),
+            root,
+            Box::new(stdin),
+            Box::new(stdout),
+            Some(child),
+        )
+    }
+
+    /// Attach to a server over arbitrary byte streams and run the handshake.
+    ///
+    /// Production callers get the streams from a spawned child (see
+    /// [`Self::spawn`]); tests pass in-memory pipes driven by a fake server.
+    /// `child` is `None` for such in-memory transports.
+    pub fn connect(
+        language: String,
+        root: &Path,
+        writer: Box<dyn Write + Send>,
+        reader: Box<dyn Read + Send>,
+        child: Option<Child>,
+    ) -> Result<Arc<Self>> {
         let client = Arc::new(Self {
-            language: spec.language.to_string(),
+            language,
             encoding: Mutex::new(None),
             next_id: Mutex::new(0),
             pending: Mutex::new(HashMap::new()),
-            stdin: Mutex::new(Some(stdin)),
-            child: Mutex::new(Some(child)),
+            stdin: Mutex::new(Some(writer)),
+            child: Mutex::new(child),
             diagnostics: Mutex::new(HashMap::new()),
         });
 
-        // Read server output on a blocking thread; `std::process` pipes are
-        // not tokio-native.
-        let client_reader = client.clone();
-        std::thread::spawn(move || {
-            let reader = BufReader::new(stdout);
-            for line in reader.lines() {
-                let Ok(line) = line else { break };
-                if line.trim().is_empty() {
-                    continue;
-                }
-                if let Ok(msg) = serde_json::from_str::<Value>(&line) {
-                    client_reader.handle_incoming(msg);
-                }
-            }
-        });
+        // Read server output on a blocking thread; `std::process` pipes (and
+        // the in-memory test pipes) are not tokio-native. `decode_frame`
+        // honours Content-Length, so servers that do not terminate their JSON
+        // with a newline are handled correctly.
+        let pump = client.clone();
+        std::thread::spawn(move || pump_messages(pump, reader));
 
+        client.initialize(root)?;
         Ok(client)
     }
 
-    /// Send a request and wait for the response (bounded by the client's
-    /// request timeout — W7-03).
-    pub async fn request(&self, method: &str, params: Value) -> Result<Value> {
-        let id = {
-            let mut next = self.next_id.lock().unwrap();
-            *next += 1;
-            Id::Num(*next)
-        };
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        {
-            let mut pending = self.pending.lock().unwrap();
-            pending.insert(id.num().unwrap_or(0), tx);
-        }
-        let msg = RpcMessage::request(id.clone(), method, params);
-        let body = serde_json::to_vec(&msg)?;
-        {
-            let mut guard = self.stdin.lock().unwrap();
-            let stdin = guard.as_mut().context("server stdin closed")?;
-            let framed = FramedMessage::frame(&body);
-            stdin.write_all(&framed).context("writing request")?;
-            stdin.flush().context("flushing request")?;
-        }
+    fn next_id(&self) -> u64 {
+        let mut next = self.next_id.lock().unwrap();
+        *next += 1;
+        *next
+    }
 
-        // Bounded wait so a hung server cannot block the caller forever.
-        tokio::time::timeout(std::time::Duration::from_secs(30), rx)
+    fn write_message(&self, msg: &RpcMessage) -> Result<()> {
+        let body = serde_json::to_vec(msg)?;
+        let framed = FramedMessage::frame(&body);
+        let mut guard = self.stdin.lock().unwrap();
+        let stdin = guard.as_mut().context("server stdin closed")?;
+        stdin.write_all(&framed).context("writing message")?;
+        stdin.flush().context("flushing message")?;
+        Ok(())
+    }
+
+    /// `initialize` → wait for the reply → negotiate `positionEncoding` →
+    /// `initialized`. A failure here leaves the client unusable, so the caller
+    /// (`spawn`) propagates it and the process is discarded.
+    fn initialize(&self, root: &Path) -> Result<()> {
+        let params = json!({
+            "processId": std::process::id(),
+            "rootUri": path_to_uri(root),
+            "capabilities": {
+                "general": { "positionEncodings": ["utf-8", "utf-16"] },
+                "workspace": { "workspaceFolders": false },
+                "textDocument": {
+                    "synchronization": {
+                        "dynamicRegistration": false,
+                        "willSave": false,
+                        "willSaveWaitUntil": false,
+                        "didSave": false,
+                    },
+                    "definition": { "dynamicRegistration": false },
+                    "references": { "dynamicRegistration": false },
+                    "documentSymbol": { "dynamicRegistration": false },
+                    "hover": { "dynamicRegistration": false },
+                    "rename": { "dynamicRegistration": false },
+                    "codeAction": { "dynamicRegistration": false },
+                },
+            },
+        });
+        let reply = self.request_sync("initialize", params, LONG_TIMEOUT)?;
+        *self.encoding.lock().unwrap() = Some(encoding_from(&reply));
+        self.notify("initialized", json!({}))
+    }
+
+    /// Send a request and wait synchronously (used by the handshake, which
+    /// runs before any tokio runtime is available).
+    fn request_sync(&self, method: &str, params: Value, timeout: Duration) -> Result<Value> {
+        let id = self.next_id();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.pending.lock().unwrap().insert(id, Waiter::Sync(tx));
+
+        let msg = RpcMessage::request(Id::Num(id), method, params);
+        if let Err(err) = self.write_message(&msg) {
+            self.pending.lock().unwrap().remove(&id);
+            return Err(err);
+        }
+        let answer = rx
+            .recv_timeout(timeout)
+            .context("language-server request timed out");
+        if answer.is_err() {
+            self.pending.lock().unwrap().remove(&id);
+        }
+        answer?
+    }
+
+    /// Send a request and wait for the response, bounded by `timeout`.
+    pub async fn request_with_timeout(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value> {
+        let id = self.next_id();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.pending.lock().unwrap().insert(id, Waiter::Async(tx));
+
+        let msg = RpcMessage::request(Id::Num(id), method, params);
+        if let Err(err) = self.write_message(&msg) {
+            self.pending.lock().unwrap().remove(&id);
+            return Err(err);
+        }
+        let waited = tokio::time::timeout(timeout, rx)
             .await
-            .context("language-server request timed out")??
+            .context("language-server request timed out");
+        match waited {
+            Ok(answer) => answer.context("language-server dropped the reply")?,
+            Err(err) => {
+                self.pending.lock().unwrap().remove(&id);
+                Err(err)
+            }
+        }
+    }
+
+    /// Send a request and wait, bounded by the short (2 s) deadline.
+    pub async fn request(&self, method: &str, params: Value) -> Result<Value> {
+        self.request_with_timeout(method, params, SHORT_TIMEOUT)
+            .await
     }
 
     /// Send a notification (no response expected).
     pub fn notify(&self, method: &str, params: Value) -> Result<()> {
         let msg = RpcMessage::notification(method, params);
-        let body = serde_json::to_vec(&msg)?;
-        let mut guard = self.stdin.lock().unwrap();
-        let stdin = guard.as_mut().context("server stdin closed")?;
-        let framed = FramedMessage::frame(&body);
-        stdin.write_all(&framed).context("writing notification")?;
-        stdin.flush().context("flushing notification")?;
-        Ok(())
+        self.write_message(&msg)
     }
 
     /// Route one document from the server: a reply to a waiter, or a
@@ -165,7 +282,7 @@ impl LspClient {
                     Some(error) => Err(anyhow::anyhow!("language server error: {error}")),
                     None => Ok(msg.get("result").cloned().unwrap_or(Value::Null)),
                 };
-                let _ = waiter.send(answer);
+                waiter.send(answer);
             }
             return;
         }
@@ -241,13 +358,52 @@ impl LspClient {
     }
 }
 
-impl Id {
-    fn num(&self) -> Option<u64> {
-        match self {
-            Id::Num(n) => Some(*n),
-            Id::Str(_) => None,
+/// Read whole Content-Length frames from `reader` and dispatch them.
+fn pump_messages(client: Arc<LspClient>, mut reader: Box<dyn Read + Send>) {
+    let mut buf: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        if let Some((body, consumed)) = decode_frame(&buf) {
+            buf.drain(..consumed);
+            if let Ok(msg) = serde_json::from_str::<Value>(&body) {
+                client.handle_incoming(msg);
+            }
+            continue;
+        }
+        match reader.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
         }
     }
+}
+
+/// A `Path` as a `file://` URI, matching the CLI's own URI convention.
+fn path_to_uri(root: &Path) -> String {
+    let text = root.to_string_lossy().replace('\\', "/");
+    if text.starts_with('/') {
+        format!("file://{text}")
+    } else {
+        format!("file:///{text}")
+    }
+}
+
+/// Read `positionEncoding` from an `initialize` reply.
+///
+/// LSP 3.17 returns a single string; tolerate an array as well. Absent or
+/// unknown values fall back to UTF-16, LSP's default.
+fn encoding_from(reply: &Value) -> PositionEncoding {
+    let negotiated = reply
+        .get("capabilities")
+        .and_then(|caps| {
+            caps.get("positionEncoding")
+                .or_else(|| caps.get("position_encoding"))
+        })
+        .and_then(|value| match value {
+            Value::String(s) => Some(s.as_str()),
+            Value::Array(items) => items.first().and_then(Value::as_str),
+            _ => None,
+        });
+    PositionEncoding::from_capabilities(negotiated)
 }
 
 /// A cheap handle used to send document sync notifications without awaiting
@@ -276,13 +432,15 @@ impl LspClientHandle {
         )
     }
 
-    /// Tell the server a document changed (W7-06 diagnostics after an edit).
-    pub fn did_change(&self, uri: &str, version: i32) -> Result<()> {
+    /// Tell the server a document changed, sending the real edited text as a
+    /// full-content change so diagnostics-after-edit reflect what the user
+    /// actually wrote (W7-06).
+    pub fn did_change(&self, uri: &str, version: i32, text: &str) -> Result<()> {
         self.client.notify(
             "textDocument/didChange",
             serde_json::json!({
                 "textDocument": { "uri": uri, "version": version },
-                "contentChanges": [{ "text": "" }],
+                "contentChanges": [{ "text": text }],
             }),
         )
     }
@@ -331,10 +489,15 @@ impl LspClientHandle {
             .await
     }
 
-    /// Workspace symbols (W7-04).
+    /// Workspace symbols (W7-04). A workspace-wide scan is slow, so use the
+    /// long deadline rather than the interactive one.
     pub async fn workspace_symbols(&self, query: &str) -> Result<Value> {
         self.client
-            .request("workspace/symbol", serde_json::json!({ "query": query }))
+            .request_with_timeout(
+                "workspace/symbol",
+                serde_json::json!({ "query": query }),
+                LONG_TIMEOUT,
+            )
             .await
     }
 
@@ -396,7 +559,6 @@ impl LspClientHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     fn client() -> LspClient {
         LspClient {
@@ -426,7 +588,7 @@ mod tests {
     fn a_reply_resolves_the_request_waiting_on_its_id() {
         let client = client();
         let (tx, mut rx) = tokio::sync::oneshot::channel();
-        client.pending.lock().unwrap().insert(7, tx);
+        client.pending.lock().unwrap().insert(7, Waiter::Async(tx));
         client.handle_incoming(json!({ "jsonrpc": "2.0", "id": 7, "result": { "ok": true } }));
         let answer = rx.try_recv().expect("the waiter was answered");
         assert_eq!(answer.unwrap()["ok"], true);
@@ -437,7 +599,7 @@ mod tests {
     fn an_error_reply_reaches_the_waiter_as_an_error() {
         let client = client();
         let (tx, mut rx) = tokio::sync::oneshot::channel();
-        client.pending.lock().unwrap().insert(9, tx);
+        client.pending.lock().unwrap().insert(9, Waiter::Async(tx));
         client.handle_incoming(json!({
             "jsonrpc": "2.0",
             "id": 9,
@@ -445,5 +607,42 @@ mod tests {
         }));
         let answer = rx.try_recv().expect("the waiter was answered");
         assert!(answer.unwrap_err().to_string().contains("no such method"));
+    }
+
+    #[test]
+    fn a_sync_reply_resolves_the_handshake_waiter() {
+        let client = client();
+        let (tx, rx) = std::sync::mpsc::channel();
+        client.pending.lock().unwrap().insert(3, Waiter::Sync(tx));
+        client.handle_incoming(json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "result": { "capabilities": { "positionEncoding": "utf-8" } }
+        }));
+        let answer = rx.try_recv().expect("the waiter was answered");
+        assert_eq!(answer.unwrap()["capabilities"]["positionEncoding"], "utf-8");
+    }
+
+    #[test]
+    fn position_encoding_is_read_from_a_string_and_defaults_to_utf16() {
+        assert_eq!(
+            encoding_from(&json!({ "capabilities": { "positionEncoding": "utf-8" } })),
+            PositionEncoding::Utf8
+        );
+        assert_eq!(
+            encoding_from(&json!({ "capabilities": { "positionEncoding": "utf-16" } })),
+            PositionEncoding::Utf16
+        );
+        assert_eq!(
+            encoding_from(&json!({ "capabilities": {} })),
+            PositionEncoding::Utf16
+        );
+        assert_eq!(encoding_from(&json!({})), PositionEncoding::Utf16);
+    }
+
+    #[test]
+    fn timeouts_have_the_documented_values() {
+        assert_eq!(SHORT_TIMEOUT, Duration::from_secs(2));
+        assert_eq!(LONG_TIMEOUT, Duration::from_secs(10));
     }
 }

@@ -10,7 +10,7 @@ Three auth modes behind one `Authenticator` trait, all in-process, fail-closed:
 | `hs256_user_jwt` | `Authorization: Bearer <jwt>` | HMAC-SHA256, `MEMNOTH_MCP_USER_TOKEN_SECRET` | `memnoth-mcp` | `astrivya-memnoth-install` |
 | `rs256_zitadel_session` | `Authorization: Bearer <jwt>` | RS256, JWKS from `https://auth.astrivya.ai/oauth/v2/keys` (`MEMNOTH_MCP_ZITADEL_JWKS_URL`) | configurable | configurable |
 
-Design doc: `D:\xclaw\memnoth-findings.md` §12.
+Design notes: the fail-closed verifier contract documented in the project's internal design notes §12.
 
 ## Hot-path targets
 

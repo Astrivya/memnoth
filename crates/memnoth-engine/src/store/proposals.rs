@@ -57,11 +57,16 @@ pub struct Proposal {
     pub decision_reason: Option<String>,
     /// The observation acceptance created, once accepted.
     pub observation_id: Option<i64>,
+    /// Person or agent accountable for deciding this proposal, if one was named.
+    pub owner: Option<String>,
+    /// When the proposed belief is claimed to have become true (ms since epoch).
+    /// `None` means "effective when a person accepts it".
+    pub effective_at: Option<i64>,
 }
 
 const SELECT_COLUMNS: &str = "id, entity_name, entity_kind, content, kind, confidence, \
      provenance, proposed_at, expires_at, status, decided_at, decided_by, decision_reason, \
-     observation_id";
+     observation_id, owner, effective_at";
 
 fn row_to_proposal(row: &rusqlite::Row<'_>) -> rusqlite::Result<Proposal> {
     Ok(Proposal {
@@ -79,13 +84,42 @@ fn row_to_proposal(row: &rusqlite::Row<'_>) -> rusqlite::Result<Proposal> {
         decided_by: row.get(11)?,
         decision_reason: row.get(12)?,
         observation_id: row.get(13)?,
+        owner: row.get(14)?,
+        effective_at: row.get(15)?,
     })
 }
 
 impl MemoryEngine {
+    /// Add the two MOAT-04 columns to a `proposals` table written before them.
+    ///
+    /// `SCHEMA_SQL` uses `CREATE TABLE IF NOT EXISTS`, so a fresh vault already
+    /// has them; on an older file the `ALTER`s are idempotent and the duplicate
+    /// error is the expected, ignored outcome. Keeping this here (rather than
+    /// in the opener) means every path that reads proposals is safe on both
+    /// old and new vaults without a version bump.
+    fn ensure_proposal_columns(&self) -> Result<()> {
+        for ddl in [
+            "ALTER TABLE proposals ADD COLUMN owner TEXT DEFAULT NULL",
+            "ALTER TABLE proposals ADD COLUMN effective_at INTEGER DEFAULT NULL",
+        ] {
+            match self.conn.execute(ddl, []) {
+                Ok(_) => {}
+                Err(rusqlite::Error::SqliteFailure(_, Some(message)))
+                    if message.contains("duplicate column name") => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    }
+
     /// Propose a belief. Returns `(id, created)`; `created == false` means an
     /// identical proposal from someone else is already waiting, and the caller
     /// just joined it instead of producing a second approval card.
+    ///
+    /// Owner and effective time default to `None`; use
+    /// [`Self::propose_belief_with`] to set them.
+    // Keep the original 7-arg signature stable for out-of-crate callers; the
+    // additive fields live on the `*_with` variant.
     #[allow(clippy::too_many_arguments)]
     pub fn propose_belief(
         &self,
@@ -97,7 +131,45 @@ impl MemoryEngine {
         provenance: &str,
         at: i64,
     ) -> Result<(i64, bool)> {
+        self.propose_belief_with(
+            entity_name,
+            entity_kind,
+            content,
+            kind,
+            confidence,
+            provenance,
+            at,
+            None,
+            None,
+        )
+    }
+
+    /// Propose a belief with an optional `owner` and `effective_at`.
+    ///
+    /// `owner` is the person or agent accountable for the decision;
+    /// `effective_at` is when the belief is claimed to have become true (ms
+    /// since epoch), independent of when it was proposed. Both are additive:
+    /// `None` preserves the pre-existing behaviour and older rows.
+    ///
+    /// Dedupe is unchanged: an identical, still-open proposal for the same
+    /// entity wins, and a joiner never overwrites the first proposer's fields.
+    #[allow(clippy::too_many_arguments)]
+    pub fn propose_belief_with(
+        &self,
+        entity_name: &str,
+        entity_kind: EntityKind,
+        content: &str,
+        kind: &str,
+        confidence: f64,
+        provenance: &str,
+        at: i64,
+        owner: Option<&str>,
+        effective_at: Option<i64>,
+    ) -> Result<(i64, bool)> {
+        self.ensure_proposal_columns()?;
         let at = normalize_instant(at);
+        let effective_at = effective_at.map(normalize_instant);
+        let owner = owner.map(str::trim).filter(|owner| !owner.is_empty());
         let name = entity_name.trim();
         if name.is_empty() {
             anyhow::bail!("a proposal needs the entity it is about");
@@ -130,8 +202,8 @@ impl MemoryEngine {
         self.conn.execute(
             "INSERT INTO proposals
                 (entity_name, entity_canonical, entity_kind, content, kind, confidence,
-                 provenance, content_hash, proposed_at, expires_at, status)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'proposed')",
+                 provenance, content_hash, proposed_at, expires_at, status, owner, effective_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'proposed', ?11, ?12)",
             params![
                 name,
                 canonical,
@@ -142,7 +214,9 @@ impl MemoryEngine {
                 provenance,
                 hash,
                 at,
-                at.saturating_add(PROPOSAL_TTL_MS)
+                at.saturating_add(PROPOSAL_TTL_MS),
+                owner,
+                effective_at
             ],
         )?;
         Ok((self.conn.last_insert_rowid(), true))
@@ -163,6 +237,7 @@ impl MemoryEngine {
     /// The queue, oldest first, expired rows included so a reader can see what
     /// was missed rather than what quietly vanished.
     pub fn list_proposals(&self, status: Option<&str>, now: i64) -> Result<Vec<Proposal>> {
+        self.ensure_proposal_columns()?;
         self.expire_proposals(now)?;
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {SELECT_COLUMNS} FROM proposals
@@ -177,6 +252,7 @@ impl MemoryEngine {
 
     /// One proposal by id, whatever its status.
     pub fn proposal(&self, id: i64) -> Result<Option<Proposal>> {
+        self.ensure_proposal_columns()?;
         Ok(self
             .conn
             .query_row(
@@ -223,14 +299,22 @@ impl MemoryEngine {
         }
         if let Some(object) = provenance.as_object_mut() {
             object.insert("accepted_by".to_string(), serde_json::json!(actor));
+            if let Some(owner) = proposal.owner.as_deref() {
+                object.insert("owner".to_string(), serde_json::json!(owner));
+            }
         }
 
+        // `effective_at` is when the belief is claimed to have become true;
+        // acceptance time is when a person let it in and stays in `recorded_at`.
+        // When no effective time was proposed, acceptance time remains the
+        // valid_from, preserving the pre-MOAT-04 behaviour.
+        let valid_from = proposal.effective_at.unwrap_or(now);
         let observation_id = self.ingest_observation_attributed(
             entity_id,
             &proposal.content,
             &proposal.kind,
             proposal.confidence,
-            now,
+            valid_from,
             &provenance.to_string(),
             Some(now),
         )?;

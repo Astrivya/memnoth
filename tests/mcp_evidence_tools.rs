@@ -51,6 +51,10 @@ fn call(server: &Path, root: &Path, profile: &str, args: &str) -> Output {
     command
         .env("MEMNOTH_MCP_BIN", server)
         .env("MEMNOTH_ROOT", root)
+        // The vault and trust store resolve from MEMNOTH_HOME, not MEMNOTH_ROOT.
+        // Isolate it so parallel tests never share (and race on) the real vault.
+        .env("MEMNOTH_HOME", root.join(".memnoth"))
+        .arg("--trust-folder")
         .args(["--root"])
         .arg(root)
         .args(["mcp", "call", "evidence_receipt_verify", "--args"])
@@ -144,7 +148,9 @@ fn receipt_verify_stays_callable_when_the_server_is_read_only() {
     let output = command
         .env("MEMNOTH_MCP_BIN", server)
         .env("MEMNOTH_ROOT", &root)
+        .env("MEMNOTH_HOME", root.join(".memnoth"))
         .env("MEMNOTH_MCP_READ_ONLY", "1")
+        .arg("--trust-folder")
         .args(["--root"])
         .arg(&root)
         .args(["mcp", "call", "evidence_receipt_verify", "--args"])

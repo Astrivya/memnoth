@@ -91,6 +91,68 @@ jobs:
       - name: Command crate registry schema
         run: cargo run --quiet -p memnoth-command -- schema --check
 
+  # The tree-sitter grammars are C/C++ sources compiled by each crate's
+  # build.rs; a plain `cargo check` of the workspace only exercises the host C
+  # compiler. Check the eight tree-sitter crates (runtime + seven grammars used
+  # by memnoth-codegraph) against every release target so a grammar that only
+  # builds on one toolchain fails here, not in a release build. `cargo check`
+  # still runs the build scripts (so the cross C compiler is exercised) while
+  # skipping linking and the release optimiser, which keeps the gate cheap.
+  # The target list mirrors .github/workflows/release.yml; the crate list lives
+  # in scripts/check-tree-sitter-targets.sh so there is one place to update.
+  tree-sitter-targets:
+    name: tree-sitter grammars (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: false
+          # No hosted aarch64 Linux runner; cross's image also pins the glibc
+          # version, matching how the release binary for this target is built.
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+            cross: false
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            cross: false
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            cross: false
+    steps:
+      - uses: actions/checkout@v4
+
+      # Non-cross legs need the target's std for `cargo check --target`. The
+      # cross leg uses cross's Docker images and does not need a host target.
+      - uses: dtolnay/rust-toolchain@stable
+        if: ${{ !matrix.cross }}
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # One cache per target: a C grammar is rebuilt per target anyway, and
+          # a shared key would only thrash. The target name keeps cells separate.
+          key: tree-sitter-targets-${{ matrix.target }}
+
+      - name: install cross
+        if: ${{ matrix.cross }}
+        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
+        with:
+          # Same pin as release.yml; `tool: cross` resolves to a fixed version.
+          tool: cross
+
+      - name: Check tree-sitter grammars for ${{ matrix.target }}
+        shell: bash
+        env:
+          TS_USE_CROSS: ${{ matrix.cross && '1' || '0' }}
+        run: bash scripts/check-tree-sitter-targets.sh "${{ matrix.target }}"
+
   # Build each platform's test binaries once, then execute the inventory
   # without recompiling. Non-Windows uses one workspace archive fanned out to
   # three shards; Windows gives every workspace member its own `-p <pkg>`

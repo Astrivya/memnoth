@@ -24,14 +24,17 @@ use event_schema::{
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::error::{AgentError, ErrorCode};
 use crate::result::AgentResult;
 use crate::runtime::{Run, RunRegistry};
+use crate::spec::SpawnScope;
 
 /// How deep a delegation chain may go before a spawn is refused.
 ///
@@ -59,6 +62,37 @@ pub const MAX_LIVE_CHILDREN: usize = 16;
 /// Concurrency is not the only runaway: a parent that spawns, waits, and spawns
 /// again never exceeds the live cap while still producing an unbounded tree.
 pub const MAX_SPAWNS_PER_SESSION: usize = 64;
+
+/// A cooperative cancellation token, checked at tool boundaries only.
+///
+/// This is the "never kill a thread" rule (F-06): cancelling sets a flag, and
+/// the child observes it on its next boundary. A tool already in flight is
+/// allowed to finish and report; the next boundary refuses. Cloning a token
+/// clones the handle to the same flag, so a parent can cancel a child from a
+/// `/kill` while the executor holds the other handle.
+#[derive(Debug, Clone, Default)]
+pub struct CancelToken {
+    flag: Arc<AtomicBool>,
+}
+
+impl CancelToken {
+    /// A token that has not been cancelled.
+    pub fn new() -> Self {
+        Self {
+            flag: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Request cancellation. Idempotent; every clone sees it immediately.
+    pub fn cancel(&self) {
+        self.flag.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether cancellation has been requested.
+    pub fn is_cancelled(&self) -> bool {
+        self.flag.load(Ordering::SeqCst)
+    }
+}
 
 static ATTENTION_REVISION: AtomicU64 = AtomicU64::new(1);
 
@@ -208,6 +242,8 @@ pub struct Delegator {
     /// O(1) change token for attention inbox readers. Globally advanced so a
     /// replacement Delegator cannot reuse another instance's cache key.
     attention_revision: u64,
+    /// Per-run cooperative cancellation handles, armed by the parent.
+    cancel_tokens: BTreeMap<String, CancelToken>,
 }
 
 impl Delegator {
@@ -248,6 +284,7 @@ impl Delegator {
             attention_seq: 0,
             event_seq: BTreeMap::new(),
             attention_revision: next_attention_revision(),
+            cancel_tokens: BTreeMap::new(),
         }
     }
 
@@ -361,6 +398,66 @@ impl Delegator {
         // writes the additive `run.spawn` kind (schema v1) without claiming
         // the child has started.
         Ok(node)
+    }
+
+    /// Arm a cooperative cancellation token for `id`.
+    ///
+    /// The parent keeps the returned handle (or a clone) and calls
+    /// [`CancelToken::cancel`] to stop the child. Nothing is killed: the next
+    /// tool boundary observes the flag and refuses.
+    pub fn arm_cancellation(&mut self, id: &str, token: CancelToken) -> Result<CancelToken> {
+        if !self.nodes.contains_key(id) {
+            bail!("no such run {id}: cannot arm cancellation");
+        }
+        self.cancel_tokens.insert(id.to_string(), token.clone());
+        Ok(token)
+    }
+
+    /// The cancellation handle armed for `id`, when one was.
+    pub fn cancellation_token(&self, id: &str) -> Option<CancelToken> {
+        self.cancel_tokens.get(id).cloned()
+    }
+
+    /// Whether spawning `agent` under `parent` would repeat an agent already
+    /// on the active chain — a run-time spawn cycle.
+    ///
+    /// Static cycles are rejected at spec load; this catches a cycle formed by
+    /// the call graph, e.g. a `review` child asking for another `review`.
+    pub fn would_cycle(&self, parent: &str, agent: &str) -> bool {
+        self.path_to_root(parent)
+            .iter()
+            .any(|node| node.agent == agent)
+    }
+
+    /// Spawn only when the parent's `Agent(...)` whitelist names the child and
+    /// the spawn would not cycle.
+    ///
+    /// This is the run-time half of Wave 5 §5.2: a spec's tool whitelist is
+    /// enforced at load, and this keeps a caller from bypassing it by naming an
+    /// agent directly at spawn time.
+    pub fn spawn_allowed(
+        &mut self,
+        parent: &str,
+        session_id: Option<&str>,
+        agent: &str,
+        task: &str,
+        scope: &SpawnScope,
+    ) -> Result<ChildRun> {
+        if !scope.allows(agent) {
+            return Err(AgentError::new(
+                ErrorCode::Tools,
+                format!("agent `{agent}` is not in the parent's spawn whitelist"),
+            )
+            .into());
+        }
+        if self.would_cycle(parent, agent) {
+            return Err(AgentError::new(
+                ErrorCode::Cycle,
+                format!("spawn cycle: `{agent}` is already on the active chain"),
+            )
+            .into());
+        }
+        self.spawn(Some(parent), session_id, agent, task)
     }
 
     /// The node for a run id.
@@ -638,19 +735,37 @@ impl Delegator {
         false
     }
 
-    /// A tool boundary: record the tool, or refuse if the chain is cancelled.
+    /// Check cooperative cancellation at a boundary, without claiming a tool
+    /// ran.
     ///
-    /// This is the cancellation point. A tool that started before the cancel is
-    /// allowed to finish — its result is already half-applied — and the next
-    /// boundary is where the child stops.
-    pub fn tool_boundary(&mut self, id: &str, tool: &str) -> Result<()> {
+    /// A tool that started before the cancel is allowed to finish; the next
+    /// boundary is where the child stops. A fired token retires the whole
+    /// subtree so descendants observe the cancel on their own next boundary.
+    pub fn check_cancellation(&mut self, id: &str) -> Result<()> {
         if !self.nodes.contains_key(id) {
             bail!("no such run {id}");
         }
-        if self.is_cancelled(id) {
+        let token_fired = self
+            .cancel_tokens
+            .get(id)
+            .is_some_and(CancelToken::is_cancelled);
+        if self.is_cancelled(id) || token_fired {
+            if !self.is_cancelled(id) {
+                let _ = self.registry.cancel(id);
+            }
             self.log(id, RUN_CANCELLED, "cancelled before tool boundary")?;
-            bail!("run {id} is cancelled; refusing {tool}");
+            bail!("run {id} is cancelled; refusing the next tool");
         }
+        Ok(())
+    }
+
+    /// A tool boundary: record the tool, or refuse if the chain is cancelled.
+    ///
+    /// Cancellation is checked before the `tool.use` row is written, so a
+    /// cancelled or over-budget step never leaves a row claiming it used a
+    /// tool it did not run.
+    pub fn tool_boundary(&mut self, id: &str, tool: &str) -> Result<()> {
+        self.check_cancellation(id)?;
         // `tool.use` is a typed fact about tool *use* at a boundary, with a
         // source label. It carries only the tool name in `detail`: never the
         // result, never reasoning text. Readers must not render it as either.
@@ -1356,5 +1471,73 @@ mod event_log_tests {
         assert_eq!(events[1].source, "");
         assert_eq!(events[1].state, EventState::Unknown);
         assert_eq!(events[1].version, 0, "missing version means legacy");
+    }
+}
+
+#[cfg(test)]
+mod loop_guards {
+    use super::*;
+
+    fn dir(name: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "memnoth-delegate-loop-{}-{name}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        path
+    }
+
+    #[test]
+    fn a_cancelled_token_is_checked_at_the_next_boundary_only() {
+        let mut tree = Delegator::with_cap(dir("token"), 2);
+        let root = tree.root(None, "scout", "map").unwrap();
+        let child = tree
+            .spawn(Some(&root.agent_id), None, "worker", "edit")
+            .unwrap();
+        let token = tree
+            .arm_cancellation(&child.agent_id, CancelToken::new())
+            .unwrap();
+
+        tree.tool_boundary(&child.agent_id, "first_read").unwrap();
+        token.cancel();
+        // The first tool already crossed its boundary; the *next* one refuses.
+        let error = tree
+            .tool_boundary(&child.agent_id, "write_file")
+            .expect_err("the token must stop the next tool");
+        assert!(error.to_string().contains("cancelled"), "{error}");
+        assert!(tree.is_cancelled(&child.agent_id));
+        assert!(
+            !tree.is_cancelled(&root.agent_id),
+            "the parent is not cancelled by a child token"
+        );
+        let log = tree.read_log(&child.agent_id).unwrap();
+        assert!(log.iter().any(|event| event.event == RUN_CANCELLED));
+    }
+
+    #[test]
+    fn a_spawn_outside_the_whitelist_is_refused() {
+        let mut tree = Delegator::new(dir("whitelist"));
+        let root = tree.root(None, "scout", "map").unwrap();
+        let scope = SpawnScope::Only(vec!["worker".to_string()]);
+        let ok = tree.spawn_allowed(&root.agent_id, None, "worker", "edit", &scope);
+        assert!(ok.is_ok(), "a named child is allowed");
+        let refused = tree.spawn_allowed(&root.agent_id, None, "critic", "review", &scope);
+        let message = refused.expect_err("not in the whitelist").to_string();
+        assert!(message.contains("spawn whitelist"), "{message}");
+        assert!(message.contains("E_AGENT_TOOLS"), "{message}");
+    }
+
+    #[test]
+    fn a_spawn_that_repeats_an_agent_on_the_chain_is_refused() {
+        let mut tree = Delegator::with_cap(dir("cycle"), 3);
+        let root = tree.root(None, "worker", "root").unwrap();
+        let scope = SpawnScope::Only(vec!["worker".to_string(), "checker".to_string()]);
+        let child = tree
+            .spawn_allowed(&root.agent_id, None, "checker", "check", &scope)
+            .unwrap();
+        let refused = tree.spawn_allowed(&child.agent_id, None, "worker", "again", &scope);
+        let message = refused.expect_err("cycle").to_string();
+        assert!(message.contains("spawn cycle"), "{message}");
+        assert!(message.contains("E_AGENT_CYCLE"), "{message}");
     }
 }

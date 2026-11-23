@@ -10,7 +10,7 @@
 //! 3. `jsonwebtoken::decode` with `aud` / `iss` / `exp` / `nbf`
 //!    validation against the configured policy.
 //!
-//! Per `D:\xclaw\memnoth-findings.md` §12, the verifier is fail-closed
+//! Per the internal design notes §12, the verifier is fail-closed
 //! and never falls through on JWKS unavailability.
 
 use std::marker::PhantomData;

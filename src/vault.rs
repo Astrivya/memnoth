@@ -28,6 +28,12 @@ use crate::output::{
     ErrorOutcome, ExitCode, Outcome, ellipsize, human_bytes, human_count, parse_when, rfc3339,
 };
 
+/// Local derived-cache purge, called by `forget --purge-cache` after a
+/// revocation. Declared here (rather than in `lib.rs`) so this slice stays
+/// self-contained; the module source lives in `src/cache_purge.rs`.
+#[path = "cache_purge.rs"]
+pub mod cache_purge;
+
 /// Observations a fact may be recorded as. An unknown kind is refused rather
 /// than stored: `kind` is what the brain feed and reflection select on, so a
 /// typo would write a row nothing ever reads.
@@ -1194,11 +1200,35 @@ pub fn recall(
 }
 
 /// `memnoth vault forget` — retract a belief with a reason.
+///
+/// Kept as the four-argument entry point used by the current command dispatch.
+/// The `--purge-cache` flag handling lives in [`forget_with_cache_purge`], which
+/// this wrapper calls with purging disabled; wiring the CLI flag only has to
+/// call that function with `purge_cache = true`.
 pub fn forget(
     ctx: &AppContext,
     name: &str,
     reason: &str,
     apply: bool,
+) -> Result<Outcome, ErrorOutcome> {
+    forget_with_cache_purge(ctx, name, reason, apply, false)
+}
+
+/// `memnoth vault forget --purge-cache` — retract a belief, then purge the
+/// **local** derived caches keyed by this namespace.
+///
+/// `purge_cache` is the parsed `--purge-cache` flag. When set (and only when the
+/// revocation is actually applied), every local embedding/response entry under
+/// `ctx.namespace` is invalidated: the revision epoch is advanced, the entries
+/// are physically removed and zeroized, and `cache_ttl = 0` is reported so no
+/// host may reuse the derived content. This is local only — no hosted or
+/// server-side cache is contacted.
+pub fn forget_with_cache_purge(
+    ctx: &AppContext,
+    name: &str,
+    reason: &str,
+    apply: bool,
+    purge_cache: bool,
 ) -> Result<Outcome, ErrorOutcome> {
     let engine = ctx.open_vault().map_err(|e| {
         ErrorOutcome::new(ExitCode::Unexpected, "failed to open vault")
@@ -1226,10 +1256,16 @@ pub fn forget(
 
     if !apply {
         // Dry run: show what would be forgotten
-        let text = format!(
+        let mut text = format!(
             "dry run: would forget\n  entity  {name} (#{})\n  reason  {reason}\n\nrun with --apply to confirm",
             entity.id
         );
+        if purge_cache {
+            text.push_str(&format!(
+                "\n  --purge-cache: would purge local derived caches for namespace {} (cache_ttl=0)",
+                ctx.namespace
+            ));
+        }
         return Ok(Outcome::new(
             "vault.forget",
             text,
@@ -1238,6 +1274,7 @@ pub fn forget(
                 "entity_id": entity.id,
                 "reason": reason,
                 "dry_run": true,
+                "purge_cache": purge_cache,
                 "next_commands": [
                     format!("memnoth vault forget {} --reason \"{}\" --apply", name, reason),
                     format!("memnoth vault history {}", name),
@@ -1254,10 +1291,24 @@ pub fn forget(
             .with_docs_url(crate::context::docs_url("vault/forget"))
     })?;
 
-    let text = format!(
+    // After the revocation, purge local derived content keyed by this
+    // namespace. This is a local act: it never contacts a hosted cache.
+    let purge_report = if purge_cache {
+        Some(cache_purge::purge_for_revocation(&ctx.namespace))
+    } else {
+        None
+    };
+
+    let mut text = format!(
         "forgotten\n  entity  {name} (#{})\n  reason  {reason}\n\n`memnoth vault history {name}` shows the full chain; `memnoth vault recall {name}` no longer returns it.",
         entity.id
     );
+    if let Some(report) = &purge_report {
+        text.push_str(&format!(
+            "\n\nlocal cache purge\n  namespace     {}\n  entries       {} removed\n  epoch         {}\n  cache_ttl     0\n  this is local only; no hosted cache was contacted.",
+            report.namespace, report.purged_entries, report.epoch
+        ));
+    }
 
     Ok(Outcome::new(
         "vault.forget",
@@ -1267,6 +1318,15 @@ pub fn forget(
             "entity_id": entity.id,
             "reason": reason,
             "at": now,
+            "purge_cache": purge_cache,
+            "cache_ttl": purge_report.as_ref().map(|r| json!(r.cache_ttl)).unwrap_or(Value::Null),
+            "cache_purge": purge_report.as_ref().map(|r| json!({
+                "namespace": r.namespace,
+                "purged_entries": r.purged_entries,
+                "epoch": r.epoch,
+                "cache_ttl": r.cache_ttl,
+                "scope": "local",
+            })).unwrap_or(Value::Null),
             "next_commands": [
                 format!("memnoth vault history {}", name),
                 format!("memnoth vault contradictions --name {}", name),

@@ -35,15 +35,20 @@ pub mod spec;
 
 pub use budget::BudgetLedger;
 pub use builtin::builtin_specs;
-pub use delegate::{ChildEvent, ChildRun, Delegator, MAX_DEPTH};
+pub use delegate::{CancelToken, ChildEvent, ChildRun, Delegator, MAX_DEPTH};
 pub use error::{AgentError, AgentResult, ErrorCode};
 pub use executor::{Executor, Step, StepAttention};
 pub use hooks::{Boundary, HookSpec, NoHooks, ToolGuard};
-pub use orphan::OrphanProbe;
-pub use result::{
-    CommandRun, Cost, Evidence, Exit, Finding, ProposedBelief as AgentProposedBelief,
+pub use orphan::{
+    OrphanProbe, ProbeOutcome, RecoverReport, RunIdentity, current_run_identity, reconcile, recover,
 };
-pub use runtime::{Run, RunEntry, RunRegistry, RunStatus};
+pub use result::{
+    CommandRun, Cost, Evidence, Exit, Finding, ProposedBelief as AgentProposedBelief, ResultRef,
+};
+pub use runtime::{
+    AgentPhase, AgentRun, Run, RunEntry, RunJournal, RunRegistry, RunStatus, RunTransition,
+    last_phases, orphan_candidates, replay_run_journal,
+};
 pub use spec::{
     AgentSpec, ApprovalProfile, Budget, CallArgs, Effort, Isolation, Layer, MemoryAccess,
     ModelChoice, Permission, SpawnScope, ToolPattern, ToolSet,

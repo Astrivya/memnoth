@@ -1,0 +1,93 @@
+{
+  "schema_version": "paired-restore-evidence-v1",
+  "gate": {
+    "program": "M2",
+    "id": "P22-005",
+    "status_claim": "open",
+    "closure_requested": false,
+    "closure_basis_observation_ids": [],
+    "closure_note": "<FILL: why the gate may be closed, or why it stays open>"
+  },
+  "context": {
+    "runtime_claim": "operator-manual",
+    "operator": {
+      "name": "<FILL: observing operator full name>",
+      "email": "<FILL: observing operator work email>",
+      "role": "<FILL: operator role and authority for this observation>"
+    },
+    "observed_on_utc": "<FILL: YYYY-MM-DDTHH:MM:SSZ>",
+    "environment": {
+      "cloud_base_url": "<FILL: production HTTPS origin that was observed>",
+      "org_id": "<FILL: production org identifier>",
+      "project_id": "<FILL: disposable production project identifier>",
+      "cli_revision": "<FILL: mn version / git revision used>",
+      "cloud_revision": "<FILL: deployed Cloud revision observed at /dist/deployed-cloud.json>",
+      "stopped_stack_id": "<FILL: identifier of the stopped recovery stack>"
+    }
+  },
+  "observed_steps": [],
+  "observations": {
+    "server_blob_inspection": {
+      "observed": false,
+      "evidence_ref": "<FILL: redacted transcript / ticket reference for the server-side inspection>",
+      "method": "<FILL: server-side inspection method used, without credentials>",
+      "digest_algorithm": "sha256",
+      "upload_digest": "<FILL: 64 lowercase hex digits recorded at upload>",
+      "server_digest": "<FILL: 64 lowercase hex digits computed server-side>",
+      "digest_match": false,
+      "plaintext_result": "<FILL: unreadable | readable>"
+    },
+    "wrong_key_wrong_project_refusal": {
+      "observed": false,
+      "evidence_ref": "<FILL: redacted transcript / ticket reference for the refusal probes>",
+      "wrong_key_result": "<FILL: refused | accepted>",
+      "wrong_key_status": "<FILL: observed HTTP status or error code for the wrong-key probe>",
+      "wrong_project_result": "<FILL: refused | accepted>",
+      "wrong_project_status": "<FILL: observed HTTP status or error code for the wrong-project probe>"
+    },
+    "tamper_refusal": {
+      "observed": false,
+      "evidence_ref": "<FILL: redacted transcript / ticket reference for the tamper probe>",
+      "tamper_vector": "<FILL: what was altered in the disposable ciphertext, without secrets>",
+      "verification_result": "<FILL: refused | accepted>",
+      "observed_error": "<FILL: verification error returned, with no secret material>"
+    },
+    "purge_replay_tombstone": {
+      "observed": false,
+      "evidence_ref": "<FILL: redacted transcript / ticket reference for the replay>",
+      "journal_reference": "<FILL: read-only purge-journal object reference, no SAS or credentials>",
+      "watermark_source": "<FILL: trusted recovery-manifest reference used for the watermark>",
+      "tombstone_result": "<FILL: tombstoned | not_tombstoned>",
+      "post_replay_state": "<FILL: observed state of the purged project after replay>"
+    },
+    "staged_restore_stopped_stack": {
+      "observed": false,
+      "evidence_ref": "<FILL: redacted transcript / ticket reference for the staged restore>",
+      "stack_state_before": "<FILL: stopped | running>",
+      "fence_attestation": "<FILL: how Cloud and every external MCP writer were confirmed stopped>",
+      "staging_path_reference": "<FILL: private same-filesystem staging location reference>",
+      "digest_verification_result": "<FILL: verified | failed>",
+      "restore_result": "<FILL: restored | failed>"
+    },
+    "recall_clean_checkout": {
+      "observed": false,
+      "evidence_ref": "<FILL: redacted transcript / ticket reference for the recall>",
+      "checkout_state": "<FILL: clean | dirty>",
+      "checkout_reference": "<FILL: clean checkout identifier / clone used for recall>",
+      "recall_result": "<FILL: recalled | not_recalled>",
+      "query_reference": "<FILL: redacted query used to recall the restored content>"
+    }
+  },
+  "claims": [
+    {
+      "id": "<FILL: stable claim id, e.g. claim-1>",
+      "statement": "<FILL: one claim directly supported by the listed observations>",
+      "supporting_observation_ids": [],
+      "strength": "observed"
+    }
+  ],
+  "secrets_attestation": {
+    "no_credentials_recorded": false,
+    "handling_note": "<FILL: how credentials were kept out of this file and the linked transcripts>"
+  }
+}

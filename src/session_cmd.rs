@@ -6,8 +6,15 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::context::AppContext;
+use crate::goals::GoalStore;
 use crate::output::Outcome;
 use crate::session::{SESSION_MODEL, SessionStore, validate_name};
+
+// P22-049/050: the declared handoff shape lives beside the session verb it
+// serves. Declaring it here rather than in lib.rs keeps it within this change's
+// file boundary while remaining reachable as `memnoth::session_cmd::handoff_reconcile`.
+#[path = "handoff_reconcile.rs"]
+pub mod handoff_reconcile;
 
 /// `memnoth session start [--resume NAME] [--model ID]` — start a new session.
 pub fn start(
@@ -511,6 +518,31 @@ pub fn attach(
     bundle["metadata"]["include_vault"] = json!(vault_embedded);
     bundle["metadata"]["include_kg"] = json!(kg_embedded);
 
+    // P22-049: promote bundles written from a git workspace to the declared
+    // `mn-handoff/1` shape. Goals and the plan's steps (constraints) are read
+    // from the same store `/goal` and `/plan` use; attempts come from the turn
+    // receipts and approvals awaiting re-check from the session ledger.
+    // A workspace with no revision gets the legacy shape unchanged, which is
+    // what keeps `attach`/`handoff` backward compatible with older bundles.
+    let goal_record = GoalStore::new(&ctx.home)
+        .record(&session.id)
+        .unwrap_or_default();
+    let goals = goal_record
+        .goal
+        .into_iter()
+        .map(|goal| handoff_reconcile::GoalState {
+            condition: goal.condition,
+            done: goal.done,
+            set_ms: goal.set_ms,
+        })
+        .collect();
+    let constraints = goal_record.plan.map(|plan| plan.steps).unwrap_or_default();
+    let manifest = handoff_reconcile::capture(&ctx.root, &session, goals, constraints);
+    let declared = manifest.repository.revision.is_some();
+    if declared {
+        handoff_reconcile::embed(&mut bundle, &manifest)?;
+    }
+
     let bundle_json =
         serde_json::to_string_pretty(&bundle).context("failed to serialize bundle")?;
 
@@ -524,6 +556,8 @@ pub fn attach(
         "include_vault": vault_embedded,
         "include_kg": kg_embedded,
         "size_bytes": size_bytes,
+        "schema": declared.then_some(handoff_reconcile::HANDOFF_SCHEMA),
+        "declared": declared,
     });
 
     let text = format!(
@@ -554,6 +588,24 @@ pub fn handoff(
 
     let bundle_json: serde_json::Value =
         serde_json::from_str(&bundle_content).context("failed to parse bundle JSON")?;
+
+    // P22-050: a declared bundle is only continued when its recorded state still
+    // matches this workspace. A different branch or revision, a dirty tree, or
+    // a check recorded against an older revision is refused before any session
+    // is written. Legacy bundles carry no manifest and keep the old path.
+    let manifest = handoff_reconcile::extract(&bundle_json);
+    if let Some(manifest) = &manifest {
+        let report = handoff_reconcile::reconcile(manifest, &ctx.root);
+        if !report.can_continue {
+            let reasons = report
+                .reasons
+                .iter()
+                .map(handoff_reconcile::ReconcileReason::message)
+                .collect::<Vec<_>>()
+                .join("; ");
+            bail!("handoff reconciliation refused: {reasons}");
+        }
+    }
 
     // Extract session data
     let session_data = &bundle_json["session"];
@@ -622,6 +674,12 @@ pub fn handoff(
     session.input_tokens = session_data["input_tokens"].as_u64().unwrap_or(0);
     session.output_tokens = session_data["output_tokens"].as_u64().unwrap_or(0);
 
+    // Declared bundles carry approvals awaiting re-check; legacy bundles do
+    // not, and their handoff behaves exactly as before.
+    if let Some(manifest) = &manifest {
+        handoff_reconcile::restore_approvals(&mut session, manifest);
+    }
+
     // Save to new location
     let store = SessionStore::new(&ctx.sessions_dir);
     let save_path = store.save(&session)?;
@@ -635,6 +693,8 @@ pub fn handoff(
         "writes": session.writes.len(),
         "checkpoints": session.checkpoints.len(),
         "path": save_path.display().to_string(),
+        "schema": manifest.as_ref().map(|m| m.schema.clone()),
+        "reconciled": manifest.is_some(),
     });
 
     let text = format!(

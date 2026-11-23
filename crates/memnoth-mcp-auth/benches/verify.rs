@@ -1,13 +1,11 @@
 //! Hot-path benchmarks for the auth crate.
 //!
-//! Targets (from `D:\xclaw\memnoth-findings.md` §12):
+//! Targets from the internal design notes:
 //! - cached HS256 verify: **<10μs p99**
 //! - cached RS256 verify: **<50μs p99**
 //!
 //! Run with:
 //! ```bash
-//! $env:CARGO_TARGET_DIR='D:\xclaw\memnoth\target\verify3'
-//! cd D:\xclaw\memnoth
 //! cargo bench -p memnoth-mcp-auth
 //! ```
 //!

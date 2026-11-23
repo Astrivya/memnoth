@@ -1,4 +1,8 @@
-//! Fuzz target: MCP JSON-RPC framing and tool arguments (W12-04 / P8-01).
+//! Fuzz target: MCP AgentBridge / harness frame round-trip (W12-04 / P8-01).
+//!
+//! The frames crossed by `memnoth-mcp`'s AgentBridge are `ClientFrame` and
+//! `ServerFrame` from `memnoth-harness-api`; the corpus covers both frame
+//! kinds plus malformed and JSON-RPC-shaped inputs that must be rejected.
 //!
 //! `cargo fuzz run mcp_framing`
 

@@ -75,11 +75,55 @@ impl BudgetLedger {
         Ok(())
     }
 
+    /// Tokens and USD already reserved across children.
+    pub fn usage(&self) -> (u64, f64) {
+        (self.reserved_tokens, self.reserved_usd)
+    }
+
+    /// The distinct exit status a run takes when this cap stops it.
+    ///
+    /// F-07: "over budget" is not a model failure or a user cancellation. The
+    /// parent can tell a pre-request refusal apart from a spent-then-failed run.
+    pub fn refusal_exit(&self) -> crate::result::Exit {
+        crate::result::Exit::BudgetRefused
+    }
+
+    /// Whether `error` is this ledger's pre-request refusal.
+    pub fn is_refusal(error: &AgentError) -> bool {
+        error.code == ErrorCode::Budget
+    }
+
     /// Narrow `child` by `parent` via [`Permission::glb`].
     ///
     /// Returns the narrowed permission (the child is narrowed, never widened)
     /// plus one sentence per narrowing made.
     pub fn narrow(parent: &Permission, child: &Permission) -> (Permission, Vec<String>) {
         child.glb(parent)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::result::Exit;
+
+    #[test]
+    fn a_request_over_what_remains_is_refused_before_it_is_made() {
+        let mut ledger = BudgetLedger::new(Budget {
+            tokens: Some(1_000),
+            usd: Some(1.0),
+        });
+        ledger.reserve(600, 0.4).unwrap();
+        assert_eq!(ledger.usage(), (600, 0.4));
+        assert_eq!(ledger.remaining().tokens, Some(400));
+
+        let refusal = ledger
+            .reserve(401, 0.0)
+            .expect_err("over the token ceiling");
+        assert!(BudgetLedger::is_refusal(&refusal));
+        assert_eq!(ErrorCode::Budget, refusal.code);
+        assert_eq!(ledger.usage(), (600, 0.4), "a refusal spends nothing");
+        assert_eq!(ledger.refusal_exit(), Exit::BudgetRefused);
+        assert_eq!(Exit::from_budget_error(&refusal), Some(Exit::BudgetRefused));
     }
 }

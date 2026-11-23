@@ -2400,6 +2400,7 @@ fn parse_line_inner(raw: &str, suggest: bool) -> Parsed {
         "projects" => parse_projects(&args),
         "keys" => parse_keys(&args),
         "org" => parse_org(&args),
+        "team" => parse_local_team(&args),
         "teams" => parse_teams(&args),
         "worktree" => parse_worktree(&args),
         "batch" => parse_batch(&args),
@@ -4416,6 +4417,22 @@ fn parse_org(args: &[String]) -> Parsed {
 
 /// The team verbs, including the invite that joins an organization.
 const TEAMS_USAGE: &str = "usage: /teams <list | create <name> | members [<id>] | join <code>>";
+
+/// `/team` — local-only team surface (namespaces, review inbox, attribution,
+/// availability). No account, no org, no remote claim.
+fn parse_local_team(args: &[String]) -> Parsed {
+    use crate::cli::{TeamArgs, TeamLocalCommand};
+    let action = match args.first().map(String::as_str) {
+        Some("namespace") => TeamLocalCommand::Namespace,
+        Some("inbox") => TeamLocalCommand::Inbox,
+        Some("attribution") => TeamLocalCommand::Attribution,
+        Some("memory") => TeamLocalCommand::Memory,
+        _ => return Parsed::Usage("usage: /team namespace|inbox|attribution|memory".to_string()),
+    };
+    Parsed::Run(Verb::Team(TeamArgs {
+        action: Some(action),
+    }))
+}
 
 /// `/teams` — the org's teams, and the invite that joins one.
 fn parse_teams(args: &[String]) -> Parsed {

@@ -4150,6 +4150,269 @@ fn provenance_value(name: &str, value: &str) -> Value {
     }
 }
 
+// --- Immutable eval manifest: the publishable-result gate -------------------
+//
+// A number pasted out of a terminal is not a result: it is a claim to strangers
+// that cannot be checked unless the run carries the exact input bytes, the
+// reader and judge that produced it, the temperature, the sampling frame and
+// trial count, the per-task cost and failures, and the date it was observed.
+// The manifest below is that record, and `guard_publishable_manifest` refuses
+// to emit a report missing any part of it.
+//
+// It is built once from typed arguments and frozen as JSON — there is no path
+// that edits a field after construction. Config is captured through
+// `provenance_value`, the same redactor `run_provenance` uses, so the cleartext
+// key that once leaked into reports cannot reappear here.
+
+/// Every field a publishable eval result must carry.
+///
+/// Single source of truth: `manifest_violations` reads this list, so adding a
+/// field here makes every manifest that predates it incomplete until it is
+/// carried — the same mechanism `Fusion::ALL` uses to keep the arena honest.
+pub(crate) const MANIFEST_REQUIRED_FIELDS: &[&str] = &[
+    "dataset_sha256", // identity of the input, not its path
+    "model_id",       // reader model
+    "model_version",
+    "temperature", // must be exactly 0
+    "judge_id",
+    "judge_version",
+    "reader_id",
+    "status", // "full" | "subset"
+    "sample_count",
+    "trials",
+    "per_task", // per-task tokens / tool_calls
+    "failures",
+    "observed_date",
+];
+
+/// Build an immutable manifest from every value a publishable result needs.
+///
+/// Each field is a typed argument rather than a caller-supplied `Value`, so a
+/// caller cannot hand over a half-filled manifest. `config` is captured through
+/// `provenance_value`, so secret environment variables are redacted before the
+/// manifest ever exists rather than scrubbed afterwards.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn eval_manifest(
+    dataset_sha256: &str,
+    model_id: &str,
+    model_version: &str,
+    temperature: f64,
+    judge_id: &str,
+    judge_version: &str,
+    reader_id: &str,
+    status: &str,
+    sample_count: usize,
+    trials: usize,
+    per_task: Vec<Value>,
+    failures: Vec<String>,
+    observed_date: &str,
+    config: &[(&str, String)],
+) -> Value {
+    let config: serde_json::Map<String, Value> = config
+        .iter()
+        .map(|(name, value)| (name.to_string(), provenance_value(name, value)))
+        .collect();
+    json!({
+        "dataset_sha256": dataset_sha256,
+        "model_id": model_id,
+        "model_version": model_version,
+        "temperature": temperature,
+        "judge_id": judge_id,
+        "judge_version": judge_version,
+        "reader_id": reader_id,
+        "status": status,
+        "sample_count": sample_count,
+        "trials": trials,
+        "per_task": per_task,
+        "failures": failures,
+        "observed_date": observed_date,
+        "config": config,
+    })
+}
+
+/// Every reason `manifest` cannot be published. Empty means complete.
+///
+/// Presence (and non-empty strings) is checked for every required field first,
+/// then value domains: a temperature other than 0, a status outside
+/// `full`/`subset`, zero samples or trials, per-task rows without tokens and
+/// tool_calls, a `failures` value that is not a list, and any `config` entry
+/// whose name marks it a secret but whose value escaped the redactor.
+fn manifest_violations(manifest: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    let Some(obj) = manifest.as_object() else {
+        return vec!["manifest is not an object".to_string()];
+    };
+
+    for field in MANIFEST_REQUIRED_FIELDS {
+        match obj.get(*field) {
+            None => out.push(format!("missing manifest field `{field}`")),
+            Some(Value::Null) => out.push(format!("null manifest field `{field}`")),
+            Some(Value::String(s)) if s.trim().is_empty() => {
+                out.push(format!("empty manifest field `{field}`"))
+            }
+            _ => {}
+        }
+    }
+
+    if obj.contains_key("temperature")
+        && obj.get("temperature").and_then(Value::as_f64) != Some(0.0)
+    {
+        out.push("`temperature` must be exactly 0".to_string());
+    }
+    if let Some(status) = obj.get("status").and_then(Value::as_str)
+        && !matches!(status, "full" | "subset")
+    {
+        out.push(format!(
+            "`status` must be `full` or `subset`, got `{status}`"
+        ));
+    }
+    for field in ["sample_count", "trials"] {
+        if obj.contains_key(field) && obj.get(field).and_then(Value::as_u64).unwrap_or(0) == 0 {
+            out.push(format!("`{field}` must be a positive integer"));
+        }
+    }
+    if let Some(rows) = obj.get("per_task") {
+        match rows.as_array() {
+            None => out.push("`per_task` must be an array".to_string()),
+            Some(rows) => {
+                for (i, row) in rows.iter().enumerate() {
+                    for key in ["tokens", "tool_calls"] {
+                        if row.get(key).and_then(Value::as_u64).is_none() {
+                            out.push(format!("per_task[{i}] missing numeric `{key}`"));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let Some(failures) = obj.get("failures")
+        && !failures.is_array()
+    {
+        out.push("`failures` must be an array".to_string());
+    }
+    if let Some(config) = obj.get("config").and_then(Value::as_object) {
+        for (name, value) in config {
+            if is_secret_env(name) && !value.as_str().unwrap_or_default().starts_with("<redacted:")
+            {
+                out.push(format!("config.{name} is a secret that was not redacted"));
+            }
+        }
+    }
+    out
+}
+
+/// The gate: refuse to emit a publishable result with an incomplete manifest.
+fn guard_publishable_manifest(manifest: &Value) -> Result<()> {
+    let violations = manifest_violations(manifest);
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "refusing to publish an eval result: incomplete manifest ({})",
+            violations.join("; ")
+        )
+    }
+}
+
+/// Behavioural tests for the manifest validator. These run in `--lib`; the
+/// integration test in `tests/eval_manifest.rs` pins the field set at source
+/// level so this list cannot shrink unnoticed.
+#[cfg(test)]
+mod eval_manifest_tests {
+    use super::*;
+
+    fn complete() -> Value {
+        eval_manifest(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "mn-reader",
+            "2.3.1",
+            0.0,
+            "mn-judge",
+            "4.0.0",
+            "mn-reader",
+            "full",
+            20,
+            3,
+            vec![json!({"task_id": "t1", "tokens": 12, "tool_calls": 2})],
+            vec!["t7 timed out".to_string()],
+            "2026-11-21",
+            &[("MEMNOTH_E2E_READER_TOKENS", "4096".to_string())],
+        )
+    }
+
+    #[test]
+    fn complete_manifest_is_accepted() {
+        let manifest = complete();
+        assert!(
+            manifest_violations(&manifest).is_empty(),
+            "{:?}",
+            manifest_violations(&manifest)
+        );
+        assert!(guard_publishable_manifest(&manifest).is_ok());
+    }
+
+    #[test]
+    fn each_missing_field_is_rejected() {
+        for field in MANIFEST_REQUIRED_FIELDS {
+            let mut manifest = complete();
+            manifest.as_object_mut().unwrap().remove(*field);
+            let violations = manifest_violations(&manifest);
+            assert!(
+                violations.iter().any(|v| v.contains(field)),
+                "removing `{field}` produced no violation: {violations:?}"
+            );
+            assert!(
+                guard_publishable_manifest(&manifest).is_err(),
+                "a manifest without `{field}` was not refused"
+            );
+        }
+    }
+
+    #[test]
+    fn temperature_must_be_zero() {
+        let mut manifest = complete();
+        manifest["temperature"] = json!(0.7);
+        assert!(
+            manifest_violations(&manifest)
+                .iter()
+                .any(|v| v.contains("temperature"))
+        );
+    }
+
+    #[test]
+    fn secret_is_redacted_and_cleartext_is_refused() {
+        let manifest = eval_manifest(
+            "sha",
+            "reader",
+            "1",
+            0.0,
+            "judge",
+            "1",
+            "reader",
+            "subset",
+            1,
+            1,
+            vec![json!({"tokens": 1, "tool_calls": 0})],
+            vec![],
+            "2026-11-21",
+            &[("MEMNOTH_E2E_KEYS", "sk-live-secret-value".to_string())],
+        );
+        let shown = manifest["config"]["MEMNOTH_E2E_KEYS"].as_str().unwrap();
+        assert!(shown.starts_with("<redacted:"), "{shown}");
+        assert!(!shown.contains("sk-live-secret-value"));
+        assert!(manifest_violations(&manifest).is_empty());
+
+        let mut leaked = manifest.clone();
+        leaked["config"]["MEMNOTH_E2E_KEYS"] = json!("sk-live-secret-value");
+        assert!(
+            manifest_violations(&leaked)
+                .iter()
+                .any(|v| v.contains("redacted") || v.contains("secret"))
+        );
+        assert!(guard_publishable_manifest(&leaked).is_err());
+    }
+}
+
 /// Write a machine-readable report when `MEMNOTH_EVAL_REPORT` names a path.
 ///
 /// Off by default: the fast inner loop prints and exits. Named on the runs whose numbers
@@ -4173,6 +4436,14 @@ fn record_report(kind: &str, dataset: &str, metrics: Value) -> Result<()> {
     let mut body = run_provenance(dataset);
     body["kind"] = json!(kind);
     body["metrics"] = metrics;
+    // A report carrying a manifest is a publishable result: refuse to write it
+    // if any required field is missing or a secret escaped redaction. Reports
+    // with no manifest (the fast inner loop) are unaffected.
+    for pointer in ["/eval_manifest", "/metrics/eval_manifest"] {
+        if let Some(manifest) = body.pointer(pointer) {
+            guard_publishable_manifest(manifest)?;
+        }
+    }
     // **Create the parent rather than trusting it to exist.** Measured the hard way: an arm launched
     // with a *relative* artifact directory ran its whole 48-question shard and then died here with
     // `os error 3`, because the harness executes with its cwd at the repo root while the shell had
@@ -12538,7 +12809,7 @@ fn evidence_e2e_qa() -> Result<()> {
         return Ok(());
     };
     let dataset = std::env::var("MEMNOTH_EVIDENCE_DATASET")
-        .unwrap_or_else(|_| "/d/xclaw/research/datasets/locomo10.json".into());
+        .unwrap_or_else(|_| "datasets/locomo10.json".into());
     let group_cap: Option<usize> = std::env::var("MEMNOTH_EVIDENCE_GROUPS")
         .ok()
         .and_then(|v| v.parse().ok());
@@ -15433,12 +15704,9 @@ mod loader_tests {
             dataset: dataset.to_string(),
             groups: Vec::new(),
         };
+        assert_eq!(corpus("datasets/locomo10.json").family(), "locomo");
         assert_eq!(
-            corpus("/d/xclaw/research/datasets/locomo10.json").family(),
-            "locomo"
-        );
-        assert_eq!(
-            corpus("/d/xclaw/research/datasets/longmemeval_s_cleaned.json").family(),
+            corpus("datasets/longmemeval_s_cleaned.json").family(),
             "longmemeval"
         );
         assert_eq!(corpus("synthetic").family(), "unknown");

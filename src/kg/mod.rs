@@ -47,9 +47,25 @@ use serde::Serialize;
 use crate::context::AppContext;
 use extract::{ExtractedSymbol, KEYWORDS};
 use memnoth_codegraph::impact::{RiskInputs, RiskScore};
-use memnoth_codegraph::precision::{Precision, best_available};
+use memnoth_codegraph::precision::{Precision, capabilities};
 use memnoth_search::workspace::{SearchScope, collect_file_entries, read_text_file};
 use store::{FileRow, Graph, SymbolRow};
+
+/// The precision an answer from this module may honestly claim.
+///
+/// `capabilities()` reports what the `memnoth-codegraph` crate compiled in —
+/// today tree-sitter is present and an LSP is not, so `best_available()` says
+/// `TreeSitter`. None of the verbs here call that parser or a language server:
+/// they read the SQLite graph produced by `extract::extract`, a regex/lexical
+/// scanner (see the module docs). No real parse resolved those edges, so the
+/// truthful tier is `lexical` even when a stronger backend is compiled in.
+///
+/// Taking the weakest of the scanner's tier and the build's capability keeps the
+/// invariant in one place: a stamp can never outrun the probe, and a lexical
+/// answer can never be presented as `tree-sitter` or `lsp`.
+fn kg_precision() -> Precision {
+    Precision::Lexical.weakest(capabilities().best())
+}
 
 /// Files larger than this are counted but not parsed.
 ///
@@ -923,7 +939,7 @@ pub fn impact(ctx: &AppContext, symbol: &str, depth: u32) -> Result<ImpactReport
         return Ok(ImpactReport {
             symbol: symbol.to_string(),
             resolved: false,
-            precision: Precision::Lexical,
+            precision: kg_precision(),
             definitions: Vec::new(),
             references: Vec::new(),
             references_direct: 0,
@@ -1062,7 +1078,7 @@ pub fn impact(ctx: &AppContext, symbol: &str, depth: u32) -> Result<ImpactReport
     Ok(ImpactReport {
         symbol: symbol.to_string(),
         resolved: true,
-        precision: best_available(),
+        precision: kg_precision(),
         definitions,
         references_direct: direct,
         references_transitive: references.len().saturating_sub(direct),
@@ -2148,7 +2164,7 @@ pub fn tests_for(ctx: &AppContext, symbol: &str) -> Result<TestsForReport> {
         return Ok(TestsForReport {
             symbol: symbol.to_string(),
             resolved: false,
-            precision: Precision::Lexical,
+            precision: kg_precision(),
             total_coverage: 0,
             tests: Vec::new(),
         });
@@ -2205,7 +2221,7 @@ pub fn tests_for(ctx: &AppContext, symbol: &str) -> Result<TestsForReport> {
     Ok(TestsForReport {
         symbol: symbol.to_string(),
         resolved: true,
-        precision: best_available(),
+        precision: kg_precision(),
         total_coverage: tests.len(),
         tests,
     })

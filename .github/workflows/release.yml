@@ -958,6 +958,28 @@ jobs:
             echo 'npm publishing is not configured; the verified tarball will ship as a GitHub release asset.'
           fi
 
+      # A release is resumable: if this exact version already reached npm (for
+      # example a previous run published the tarball but failed only in its
+      # post-publish verification), skip the publish and still run every check.
+      # Republishing an immutable version can never succeed and would turn a
+      # recoverable verification failure into a permanent one.
+      - name: check whether this version is already on npm
+        id: npm-existing
+        if: ${{ steps.npm-publish-auth.outputs.mode != 'skip' }}
+        env:
+          PACKAGE_NAME: "@astrivya/mcp"
+          PACKAGE_VERSION: ${{ needs.dist.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${PACKAGE_VERSION#v}"
+          if npm view --prefer-online "${PACKAGE_NAME}@${version}" version --json >/dev/null 2>&1; then
+            echo "already=true" >> "$GITHUB_OUTPUT"
+            echo "${PACKAGE_NAME}@${version} is already published; skipping publish, keeping verification"
+          else
+            echo "already=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: choose non-regressing npm channel tag
         id: npm-publish-tag
         if: ${{ steps.npm-publish-auth.outputs.mode != 'skip' }}
@@ -975,7 +997,7 @@ jobs:
       # with its validated assets exist. A registry failure then leaves a
       # recoverable draft instead of an unpaired public package version.
       - name: publish standalone npm package
-        if: ${{ steps.npm-publish-auth.outputs.mode == 'token' }}
+        if: ${{ steps.npm-publish-auth.outputs.mode == 'token' && steps.npm-existing.outputs.already != 'true' }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish "${{ steps.npm-package.outputs.package }}" --access public --tag "${{ steps.npm-publish-tag.outputs.tag }}" --provenance
@@ -984,7 +1006,7 @@ jobs:
       # trusted publisher on npm. This prevents missing first-publish auth from
       # failing the otherwise verified GitHub release.
       - name: publish standalone npm package with trusted publishing
-        if: ${{ steps.npm-publish-auth.outputs.mode == 'oidc' }}
+        if: ${{ steps.npm-publish-auth.outputs.mode == 'oidc' && steps.npm-existing.outputs.already != 'true' }}
         run: npm publish "${{ steps.npm-package.outputs.package }}" --access public --tag "${{ steps.npm-publish-tag.outputs.tag }}" --provenance
 
       # npm accepts the upload before its registry has finished processing it.
@@ -1031,7 +1053,25 @@ jobs:
           process.exit(1);
           NODE
 
-          installed_version="$(npm exec --yes --package="${PACKAGE_NAME}@${version}" -- memnoth-mcp --version)"
+          # The packument above can resolve the version before npm's local cache
+          # can install it: `npm exec` then reports ETARGET against a negatively
+          # cached packument even though the registry has the tarball. Use a
+          # brand-new cache per attempt (not just --prefer-online) and retry for
+          # a bounded window rather than failing a fully published release.
+          installed_version=""
+          smoke_log="$(mktemp)"
+          for attempt in $(seq 1 8); do
+            smoke_cache="$(mktemp -d)"
+            installed_version="$(npm_config_cache="$smoke_cache" npm exec --yes --prefer-online --package="${PACKAGE_NAME}@${version}" -- memnoth-mcp --version 2>"$smoke_log" || true)"
+            if [ "$installed_version" = "$version" ]; then
+              rm -rf "$smoke_cache"
+              break
+            fi
+            echo "npm install smoke attempt ${attempt}: got '${installed_version}', expected '${version}'; $(tail -n 1 "$smoke_log")" >&2
+            rm -rf "$smoke_cache"
+            sleep 15
+          done
+          rm -f "$smoke_log"
           expected_version="$version"
           test "$installed_version" = "$expected_version" || {
             echo "npm install smoke returned '$installed_version', expected '$expected_version'" >&2

@@ -1,0 +1,97 @@
+name: sandbox-matrix
+
+# G14 — the escape corpus on every OS we ship for.
+#
+# This workflow is deliberately separate from ci.yml and release.yml: it is a
+# gate on a claim, not a general test suite. Until it is green, the honest
+# product claim is "policy engine, network not enforced", never "sandboxed".
+#
+# What a row proves:
+#   * escape-corpus, selftest-parity, approval-latency — proved on all three
+#     runners. The corpus is host-independent (lexical shapes and absolute
+#     system paths), and the parity/latency checks use the real crate.
+#   * write-outside-root, read-ssh, open-socket — proved only where the runner
+#     actually applies a kernel boundary. The Windows build is policy-checked
+#     by design; Linux needs a working bwrap namespace. The script prints
+#     NOT ENFORCED on a runner with no boundary and never counts it as a pass.
+#
+# The claim guard is in scripts/check-sandbox-corpus.sh: a runner may only list
+# a control in `claims` if the script records that control as PASS. Adding
+# "write-outside-root" to a Windows claim turns this job red instead of
+# quietly asserting a guarantee nobody measured. The `claims` lists below are
+# intentionally minimal — they name only what every runner can prove today.
+# They are the ceiling a runner may assert, not a prediction of the result.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sandbox-matrix-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  MN_BIN: ./target/debug/mn
+
+jobs:
+  corpus:
+    name: sandbox corpus (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            claims: "escape-corpus,selftest-parity,approval-latency"
+          - os: macos-latest
+            claims: "escape-corpus,selftest-parity,approval-latency"
+          - os: windows-latest
+            claims: "escape-corpus,selftest-parity,approval-latency"
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins the workspace; dtolnay/rust-toolchain@stable
+      # only makes sure a toolchain exists before the cache and build run.
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Linux needs a real namespace for the strict boundary. This is best
+      # effort on purpose: AppArmor on some Ubuntu images forbids unprivileged
+      # user namespaces. When the probe fails the script reports NOT ENFORCED
+      # for the boundary controls instead of claiming a pass it did not earn.
+      - name: Install bubblewrap (Linux only)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap || echo "bwrap unavailable; boundary controls will report NOT ENFORCED"
+
+      - name: Build mn
+        shell: bash
+        run: cargo build --bin mn --locked
+
+      - name: Escape corpus and fail-closed controls
+        shell: bash
+        env:
+          SANDBOX_CLAIMS: ${{ matrix.claims }}
+          G14_LOG_DIR: target/g14-logs
+        run: bash scripts/check-sandbox-corpus.sh --bin "$MN_BIN" --claims "$SANDBOX_CLAIMS"
+
+      # A failure must leave evidence. The script writes one log per probe into
+      # G14_LOG_DIR; on a green run these are useful too, but keeping them only
+      # on failure avoids uploading a cache-sized directory every push.
+      - name: Keep probe logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sandbox-corpus-logs-${{ matrix.os }}
+          path: target/g14-logs/
+          if-no-files-found: ignore

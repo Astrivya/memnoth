@@ -24,6 +24,7 @@ use std::collections::BTreeMap;
 use anyhow::{Context, Result};
 use memnoth_engine::VaultSlice;
 
+use crate::budget::BudgetLedger;
 use crate::delegate::Delegator;
 use crate::hooks::{Boundary, NoHooks, ToolGuard};
 use crate::result::{AgentResult, Cost, Exit};
@@ -261,6 +262,158 @@ impl<'a, G: ToolGuard> Executor<'a, G> {
             turns: ran.len() as u32,
             exit: Exit::Completed,
         };
+        self.slices.insert(id.to_string(), slice);
+        self.delegator.finish(id, &result)?;
+        Ok(result)
+    }
+
+    /// Drive `id` under a shared budget ledger, refusing a step before its
+    /// tool is called when the request would exceed what remains (F-07).
+    ///
+    /// Budget is the last gate at each boundary, after cancellation and hooks:
+    /// a step that is refused here never reaches `call`, so no provider request
+    /// was made and no receipt is invented. The run is still terminal, and the
+    /// returned result carries the distinct [`Exit::BudgetRefused`] status.
+    /// `estimate` names the `(tokens, usd)` a step would spend; the ledger
+    /// spans children, so a sibling's spend is already deducted.
+    pub fn run_budgeted(
+        &mut self,
+        id: &str,
+        steps: &[Step],
+        ledger: &mut BudgetLedger,
+        mut estimate: impl FnMut(&Step) -> (u64, f64),
+        mut call: impl FnMut(&Step, &mut VaultSlice) -> Result<()>,
+    ) -> Result<AgentResult> {
+        let node = self
+            .delegator
+            .node(id)
+            .with_context(|| format!("no such run {id}"))?
+            .clone();
+        self.delegator.begin(id)?;
+
+        let mut slice = VaultSlice::spawn(id, &node.agent, 0);
+        let mut ran: Vec<String> = Vec::new();
+
+        for (turn, step) in steps.iter().enumerate() {
+            slice.turn = turn as u64;
+            // Cancellation is the first boundary check, before budget and
+            // before any row claims the tool ran.
+            self.delegator.check_cancellation(id)?;
+
+            if let Some(attention) = step.attention {
+                let summary = if step.detail.trim().is_empty() {
+                    step.tool.clone()
+                } else {
+                    format!("{} {}", step.tool, step.detail)
+                };
+                let request = self
+                    .delegator
+                    .queue_attention(id, attention.as_str(), &summary)?;
+                let reason = format!(
+                    "waiting for {} request {}: {}",
+                    attention.as_str(),
+                    request.id,
+                    summary
+                );
+                self.slices.insert(id.to_string(), slice.clone());
+                self.delegator.fail(id, &reason)?;
+                return Err(anyhow::anyhow!(reason));
+            }
+
+            if let Err(error) = self.guard.check(Boundary::PreToolUse, &step.tool) {
+                let refusal = crate::hooks::blocked(Boundary::PreToolUse, &step.tool, &error);
+                let request = self.delegator.queue_attention(
+                    id,
+                    StepAttention::Permission.as_str(),
+                    &refusal.to_string(),
+                )?;
+                let message = format!("{} (attention {})", refusal, request.id);
+                self.slices.insert(id.to_string(), slice.clone());
+                self.delegator.fail(id, &message)?;
+                return Err(error.context(message));
+            }
+
+            let (tokens, usd) = estimate(step);
+            if let Err(refusal) = ledger.reserve(tokens, usd) {
+                let reason = format!("budget refused pre-request: {refusal}");
+                self.slices.insert(id.to_string(), slice.clone());
+                self.delegator.fail(id, &reason)?;
+                let (used_tokens, used_usd) = ledger.usage();
+                return Ok(AgentResult {
+                    summary: format!("{} stopped before request: {}", node.agent, refusal),
+                    findings: Vec::new(),
+                    changed_files: Vec::new(),
+                    commands_run: Vec::new(),
+                    receipts: Vec::new(),
+                    proposed_beliefs: Vec::new(),
+                    cost: Cost {
+                        tokens: used_tokens,
+                        usd: used_usd,
+                    },
+                    turns: ran.len() as u32,
+                    exit: Exit::BudgetRefused,
+                });
+            }
+
+            // Only an admitted, funded step is recorded as tool use.
+            self.delegator.tool_boundary(id, &step.tool)?;
+
+            if let Err(error) = call(step, &mut slice) {
+                self.slices.insert(id.to_string(), slice.clone());
+                self.delegator.fail(id, &error.to_string())?;
+                return Err(error);
+            }
+            ran.push(step.tool.clone());
+
+            if let Err(error) = self.guard.check(Boundary::PostToolUse, &step.tool) {
+                let refusal = crate::hooks::blocked(Boundary::PostToolUse, &step.tool, &error);
+                self.slices.insert(id.to_string(), slice.clone());
+                self.delegator.fail(id, &refusal.to_string())?;
+                return Err(error.context(refusal.to_string()));
+            }
+        }
+
+        if let Err(error) = self.guard.check(Boundary::Stop, &node.agent) {
+            let refusal = crate::hooks::blocked(Boundary::Stop, &node.agent, &error);
+            self.slices.insert(id.to_string(), slice.clone());
+            self.delegator.fail(id, &refusal.to_string())?;
+            return Err(error.context(refusal.to_string()));
+        }
+
+        let (used_tokens, used_usd) = ledger.usage();
+        let mut result = AgentResult {
+            summary: format!(
+                "{} ran {} step(s): {}",
+                node.agent,
+                ran.len(),
+                if ran.is_empty() {
+                    "reported without tools".to_string()
+                } else {
+                    ran.join(", ")
+                }
+            ),
+            findings: Vec::new(),
+            changed_files: Vec::new(),
+            commands_run: Vec::new(),
+            receipts: Vec::new(),
+            proposed_beliefs: slice
+                .proposals()
+                .iter()
+                .enumerate()
+                .map(|(index, _)| crate::result::ProposedBelief {
+                    proposal_id: format!("{id}:{index}"),
+                })
+                .collect(),
+            cost: Cost {
+                tokens: used_tokens,
+                usd: used_usd,
+            },
+            turns: ran.len() as u32,
+            exit: Exit::Completed,
+        };
+        // Steps do not produce findings; a future producer must pass them
+        // through this gate before the result reaches a parent (F-04).
+        let _dropped = result.drop_unevidenced_findings();
         self.slices.insert(id.to_string(), slice);
         self.delegator.finish(id, &result)?;
         Ok(result)
@@ -665,5 +818,92 @@ mod tests {
         let error = anyhow::anyhow!("nope");
         let typed = crate::hooks::blocked(Boundary::PreToolUse, "rm_rf", &error);
         assert_eq!(typed.code, ErrorCode::Policy);
+    }
+
+    #[test]
+    fn an_over_budget_step_is_refused_before_the_tool_runs() {
+        use crate::spec::Budget;
+
+        let mut tree = Delegator::new(dir("budgeted"));
+        let child = tree.root(None, "worker", "edit").unwrap();
+        let mut ledger = BudgetLedger::new(Budget {
+            tokens: Some(1_000),
+            usd: None,
+        });
+        let mut called = Vec::new();
+        let result = Executor::without_hooks(&mut tree)
+            .run_budgeted(
+                &child.agent_id,
+                &steps(&["read_file", "write_file"]),
+                &mut ledger,
+                |step| {
+                    if step.tool == "write_file" {
+                        (2_000, 0.0)
+                    } else {
+                        (100, 0.0)
+                    }
+                },
+                |step, _| {
+                    called.push(step.tool.clone());
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert_eq!(called, vec!["read_file"], "the refused tool never ran");
+        assert_eq!(result.exit, Exit::BudgetRefused);
+        assert_eq!(result.turns, 1);
+        assert_eq!(result.cost.tokens, 100, "a refusal spends nothing");
+        assert_eq!(ledger.usage(), (100, 0.0));
+        assert_eq!(
+            tree.registry().get(&child.agent_id).unwrap().status,
+            RunStatus::Failed
+        );
+        let log = tree.read_log(&child.agent_id).unwrap();
+        assert!(log.iter().any(|event| event.event == "run.failed"));
+        assert!(
+            !log.iter()
+                .any(|event| event.event == "tool.use" && event.detail == "write_file")
+        );
+    }
+
+    #[test]
+    fn a_budget_spanning_children_refuses_the_second_child() {
+        use crate::spec::Budget;
+
+        let mut tree = Delegator::new(dir("shared-budget"));
+        let root = tree.root(None, "scout", "map").unwrap();
+        let first = tree
+            .spawn(Some(&root.agent_id), None, "worker", "one")
+            .unwrap();
+        let second = tree
+            .spawn(Some(&root.agent_id), None, "worker", "two")
+            .unwrap();
+        let mut ledger = BudgetLedger::new(Budget {
+            tokens: Some(1_000),
+            usd: None,
+        });
+        let mut executor = Executor::without_hooks(&mut tree);
+        let estimate = |_: &Step| (700, 0.0);
+
+        executor
+            .run_budgeted(
+                &first.agent_id,
+                &steps(&["read_file"]),
+                &mut ledger,
+                estimate,
+                |_, _| Ok(()),
+            )
+            .unwrap();
+        let second_result = executor
+            .run_budgeted(
+                &second.agent_id,
+                &steps(&["read_file"]),
+                &mut ledger,
+                estimate,
+                |_, _| Ok(()),
+            )
+            .unwrap();
+        assert_eq!(second_result.exit, Exit::BudgetRefused);
     }
 }

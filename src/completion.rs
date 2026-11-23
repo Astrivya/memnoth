@@ -12,12 +12,24 @@ pub fn detect_shell() -> Option<Shell> {
     Shell::from_env()
 }
 
+/// Home used to resolve completion paths. `MEMNOTH_COMPLETION_HOME` lets tests
+/// and advanced setups redirect completion files without touching the real user
+/// profile (notably on Windows, where the fallback resolves via the known folder
+/// API and cannot be redirected with `USERPROFILE`). Production leaves
+/// it unset, so completions install into the normal user home.
+fn completion_home() -> Option<PathBuf> {
+    std::env::var_os("MEMNOTH_COMPLETION_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(dirs::home_dir)
+}
+
 /// Get the standard completion directory for a given shell.
 fn completion_dir(shell: Shell) -> Result<PathBuf> {
     match shell {
         Shell::Bash => {
             // bash: ~/.local/share/bash-completion/completions or /usr/share/bash-completion/completions
-            if let Some(home) = dirs::home_dir() {
+            if let Some(home) = completion_home() {
                 Ok(home.join(".local/share/bash-completion/completions"))
             } else {
                 Err(anyhow::anyhow!("Could not determine home directory"))
@@ -25,7 +37,7 @@ fn completion_dir(shell: Shell) -> Result<PathBuf> {
         }
         Shell::Zsh => {
             // zsh: ~/.zsh/completions or any directory in $fpath
-            if let Some(home) = dirs::home_dir() {
+            if let Some(home) = completion_home() {
                 Ok(home.join(".zsh/completions"))
             } else {
                 Err(anyhow::anyhow!("Could not determine home directory"))
@@ -33,7 +45,7 @@ fn completion_dir(shell: Shell) -> Result<PathBuf> {
         }
         Shell::Fish => {
             // fish: ~/.config/fish/completions
-            if let Some(home) = dirs::home_dir() {
+            if let Some(home) = completion_home() {
                 Ok(home.join(".config/fish/completions"))
             } else {
                 Err(anyhow::anyhow!("Could not determine home directory"))
@@ -41,7 +53,7 @@ fn completion_dir(shell: Shell) -> Result<PathBuf> {
         }
         Shell::PowerShell => {
             // PowerShell: ~/.config/powershell/ or ~/Documents/WindowsPowerShell/
-            if let Some(home) = dirs::home_dir() {
+            if let Some(home) = completion_home() {
                 #[cfg(windows)]
                 {
                     Ok(home.join("Documents/WindowsPowerShell"))
@@ -56,7 +68,7 @@ fn completion_dir(shell: Shell) -> Result<PathBuf> {
         }
         Shell::Elvish => {
             // Elvish: ~/.config/elvish/lib
-            if let Some(home) = dirs::home_dir() {
+            if let Some(home) = completion_home() {
                 Ok(home.join(".config/elvish/lib"))
             } else {
                 Err(anyhow::anyhow!("Could not determine home directory"))

@@ -1,0 +1,2086 @@
+{
+  "schema": "mn-mts/1",
+  "note": "MTS-60 derived diagnostic: 60 mechanical cases (6 categories x 10) with hand-written expected outcomes, seeded temp checkouts, patch application and forbidden-file guards. NOT an official Terminal-Bench score; no model and no network are involved.",
+  "cases": [
+    {
+      "id": "mts-exact-01",
+      "category": "exact-file",
+      "seed": {
+        "files": [
+          {
+            "path": "src/sol1.py",
+            "content": "def solve_1(x):\n    # TODO: implement\n    return None\n"
+          },
+          {
+            "path": "tests/verifier_01.py",
+            "content": "guard\n"
+          },
+          {
+            "path": ".mts/check_01.json",
+            "content": "{}\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_01.py",
+        ".mts/check_01.json"
+      ],
+      "patch": "--- a/src/sol1.py\n+++ b/src/sol1.py\n@@ -1,3 +1,2 @@\n-def solve_1(x):\n-    # TODO: implement\n-    return None\n+def solve_1(x):\n+    return x * 1\n",
+      "expect": {
+        "kind": "exact-file",
+        "path": "src/sol1.py",
+        "content": "def solve_1(x):\n    return x * 1\n"
+      }
+    },
+    {
+      "id": "mts-exact-02",
+      "category": "exact-file",
+      "seed": {
+        "files": [
+          {
+            "path": "src/sol2.py",
+            "content": "def solve_2(x):\n    # TODO: implement\n    return None\n"
+          },
+          {
+            "path": "tests/verifier_02.py",
+            "content": "guard\n"
+          },
+          {
+            "path": ".mts/check_02.json",
+            "content": "{}\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_02.py",
+        ".mts/check_02.json"
+      ],
+      "patch": "--- a/src/sol2.py\n+++ b/src/sol2.py\n@@ -1,3 +1,2 @@\n-def solve_2(x):\n-    # TODO: implement\n-    return None\n+def solve_2(x):\n+    return x * 2\n",
+      "expect": {
+        "kind": "exact-file",
+        "path": "src/sol2.py",
+        "content": "def solve_2(x):\n    return x * 2\n"
+      }
+    },
+    {
+      "id": "mts-exact-03",
+      "category": "exact-file",
+      "seed": {
+        "files": [
+          {
+            "path": "src/sol3.py",
+            "content": "def solve_3(x):\n    # TODO: implement\n    return None\n"
+          },
+          {
+            "path": "tests/verifier_03.py",
+            "content": "guard\n"
+          },
+          {
+            "path": ".mts/check_03.json",
+            "content": "{}\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_03.py",
+        ".mts/check_03.json"
+      ],
+      "patch": "--- a/src/sol3.py\n+++ b/src/sol3.py\n@@ -1,3 +1,2 @@\n-def solve_3(x):\n-    # TODO: implement\n-    return None\n+def solve_3(x):\n+    return x * 3\n",
+      "expect": {
+        "kind": "exact-file",
+        "path": "src/sol3.py",
+        "content": "def solve_3(x):\n    return x * 3\n"
+      }
+    },
+    {
+      "id": "mts-exact-04",
+      "category": "exact-file",
+      "seed": {
+        "files": [
+          {
+            "path": "src/sol4.py",
+            "content": "def solve_4(x):\n    # TODO: implement\n    return None\n"
+          },
+          {
+            "path": "tests/verifier_04.py",
+            "content": "guard\n"
+          },
+          {
+            "path": ".mts/check_04.json",
+            "content": "{}\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_04.py",
+        ".mts/check_04.json"
+      ],
+      "patch": "--- a/src/sol4.py\n+++ b/src/sol4.py\n@@ -1,3 +1,2 @@\n-def solve_4(x):\n-    # TODO: implement\n-    return None\n+def solve_4(x):\n+    return x * 4\n",
+      "expect": {
+        "kind": "exact-file",
+        "path": "src/sol4.py",
+        "content": "def solve_4(x):\n    return x * 4\n"
+      }
+    },
+    {
+      "id": "mts-exact-05",
+      "category": "exact-file",
+      "seed": {
+        "files": [
+          {
+            "path": "src/sol5.py",
+            "content": "def solve_5(x):\n    # TODO: implement\n    return None\n"
+          },
+          {
+            "path": "tests/verifier_05.py",
+            "content": "guard\n"
+          },
+          {
+            "path": ".mts/check_05.json",
+            "content": "{}\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_05.py",
+        ".mts/check_05.json"
+      ],
+      "patch": "--- a/src/sol5.py\n+++ b/src/sol5.py\n@@ -1,3 +1,2 @@\n-def solve_5(x):\n-    # TODO: implement\n-    return None\n+def solve_5(x):\n+    return x * 5\n",
+      "expect": {
+        "kind": "exact-file",
+        "path": "src/sol5.py",
+        "content": "def solve_5(x):\n    return x * 5\n"
+      }
+    },
+    {
+      "id": "mts-exact-06",
+      "category": "exact-file",
+      "seed": {
+        "files": [
+          {
+            "path": "src/sol6.py",
+            "content": "def solve_6(x):\n    # TODO: implement\n    return None\n"
+          },
+          {
+            "path": "tests/verifier_06.py",
+            "content": "guard\n"
+          },
+          {
+            "path": ".mts/check_06.json",
+            "content": "{}\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_06.py",
+        ".mts/check_06.json"
+      ],
+      "patch": "--- a/src/sol6.py\n+++ b/src/sol6.py\n@@ -1,3 +1,2 @@\n-def solve_6(x):\n-    # TODO: implement\n-    return None\n+def solve_6(x):\n+    return x * 6\n",
+      "expect": {
+        "kind": "exact-file",
+        "path": "src/sol6.py",
+        "content": "def solve_6(x):\n    return x * 6\n"
+      }
+    },
+    {
+      "id": "mts-exact-07",
+      "category": "exact-file",
+      "seed": {
+        "files": [
+          {
+            "path": "src/sol7.py",
+            "content": "def solve_7(x):\n    # TODO: implement\n    return None\n"
+          },
+          {
+            "path": "tests/verifier_07.py",
+            "content": "guard\n"
+          },
+          {
+            "path": ".mts/check_07.json",
+            "content": "{}\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_07.py",
+        ".mts/check_07.json"
+      ],
+      "patch": "--- a/src/sol7.py\n+++ b/src/sol7.py\n@@ -1,3 +1,2 @@\n-def solve_7(x):\n-    # TODO: implement\n-    return None\n+def solve_7(x):\n+    return x * 7\n",
+      "expect": {
+        "kind": "exact-file",
+        "path": "src/sol7.py",
+        "content": "def solve_7(x):\n    return x * 7\n"
+      }
+    },
+    {
+      "id": "mts-exact-08",
+      "category": "exact-file",
+      "seed": {
+        "files": [
+          {
+            "path": "src/sol8.py",
+            "content": "def solve_8(x):\n    # TODO: implement\n    return None\n"
+          },
+          {
+            "path": "tests/verifier_08.py",
+            "content": "guard\n"
+          },
+          {
+            "path": ".mts/check_08.json",
+            "content": "{}\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_08.py",
+        ".mts/check_08.json"
+      ],
+      "patch": "--- a/src/sol8.py\n+++ b/src/sol8.py\n@@ -1,3 +1,2 @@\n-def solve_8(x):\n-    # TODO: implement\n-    return None\n+def solve_8(x):\n+    return x * 8\n",
+      "expect": {
+        "kind": "exact-file",
+        "path": "src/sol8.py",
+        "content": "def solve_8(x):\n    return x * 8\n"
+      }
+    },
+    {
+      "id": "mts-exact-09",
+      "category": "exact-file",
+      "seed": {
+        "files": [
+          {
+            "path": "src/sol9.py",
+            "content": "def solve_9(x):\n    # TODO: implement\n    return None\n"
+          },
+          {
+            "path": "tests/verifier_09.py",
+            "content": "guard\n"
+          },
+          {
+            "path": ".mts/check_09.json",
+            "content": "{}\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_09.py",
+        ".mts/check_09.json"
+      ],
+      "patch": "--- a/src/sol9.py\n+++ b/src/sol9.py\n@@ -1,3 +1,2 @@\n-def solve_9(x):\n-    # TODO: implement\n-    return None\n+def solve_9(x):\n+    return x * 9\n",
+      "expect": {
+        "kind": "exact-file",
+        "path": "src/sol9.py",
+        "content": "def solve_9(x):\n    return x * 9\n"
+      }
+    },
+    {
+      "id": "mts-exact-10",
+      "category": "exact-file",
+      "seed": {
+        "files": [
+          {
+            "path": "src/sol10.py",
+            "content": "def solve_10(x):\n    # TODO: implement\n    return None\n"
+          },
+          {
+            "path": "tests/verifier_10.py",
+            "content": "guard\n"
+          },
+          {
+            "path": ".mts/check_10.json",
+            "content": "{}\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_10.py",
+        ".mts/check_10.json"
+      ],
+      "patch": "--- a/src/sol10.py\n+++ b/src/sol10.py\n@@ -1,3 +1,2 @@\n-def solve_10(x):\n-    # TODO: implement\n-    return None\n+def solve_10(x):\n+    return x * 10\n",
+      "expect": {
+        "kind": "exact-file",
+        "path": "src/sol10.py",
+        "content": "def solve_10(x):\n    return x * 10\n"
+      }
+    },
+    {
+      "id": "mts-lines-01",
+      "category": "line-count",
+      "seed": {
+        "files": [
+          {
+            "path": "src/report1.txt",
+            "content": "line 0\nline 1\nline 2\nline 3\n"
+          },
+          {
+            "path": "tests/verifier_01.txt",
+            "content": "guard\n"
+          },
+          {
+            "path": ".mts/check_01.txt",
+            "content": "guard\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_01.txt",
+        ".mts/check_01.txt"
+      ],
+      "patch": "--- a/src/report1.txt\n+++ b/src/report1.txt\n@@ -1,4 +1,6 @@\n-line 0\n-line 1\n-line 2\n-line 3\n+line 0\n+line 1\n+line 2\n+line 3\n+summary 1\n+end 1\n",
+      "expect": {
+        "kind": "line-count",
+        "path": "src/report1.txt",
+        "lines": 6
+      }
+    },
+    {
+      "id": "mts-lines-02",
+      "category": "line-count",
+      "seed": {
+        "files": [
+          {
+            "path": "src/report2.txt",
+            "content": "line 0\nline 1\nline 2\nline 3\nline 4\n"
+          },
+          {
+            "path": "tests/verifier_02.txt",
+            "content": "guard\n"
+          },
+          {
+            "path": ".mts/check_02.txt",
+            "content": "guard\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_02.txt",
+        ".mts/check_02.txt"
+      ],
+      "patch": "--- a/src/report2.txt\n+++ b/src/report2.txt\n@@ -1,5 +1,7 @@\n-line 0\n-line 1\n-line 2\n-line 3\n-line 4\n+line 0\n+line 1\n+line 2\n+line 3\n+line 4\n+summary 2\n+end 2\n",
+      "expect": {
+        "kind": "line-count",
+        "path": "src/report2.txt",
+        "lines": 7
+      }
+    },
+    {
+      "id": "mts-lines-03",
+      "category": "line-count",
+      "seed": {
+        "files": [
+          {
+            "path": "src/report3.txt",
+            "content": "line 0\nline 1\nline 2\nline 3\nline 4\nline 5\n"
+          },
+          {
+            "path": "tests/verifier_03.txt",
+            "content": "guard\n"
+          },
+          {
+            "path": ".mts/check_03.txt",
+            "content": "guard\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_03.txt",
+        ".mts/check_03.txt"
+      ],
+      "patch": "--- a/src/report3.txt\n+++ b/src/report3.txt\n@@ -1,6 +1,8 @@\n-line 0\n-line 1\n-line 2\n-line 3\n-line 4\n-line 5\n+line 0\n+line 1\n+line 2\n+line 3\n+line 4\n+line 5\n+summary 3\n+end 3\n",
+      "expect": {
+        "kind": "line-count",
+        "path": "src/report3.txt",
+        "lines": 8
+      }
+    },
+    {
+      "id": "mts-lines-04",
+      "category": "line-count",
+      "seed": {
+        "files": [
+          {
+            "path": "src/report4.txt",
+            "content": "line 0\nline 1\nline 2\nline 3\nline 4\nline 5\nline 6\n"
+          },
+          {
+            "path": "tests/verifier_04.txt",
+            "content": "guard\n"
+          },
+          {
+            "path": ".mts/check_04.txt",
+            "content": "guard\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_04.txt",
+        ".mts/check_04.txt"
+      ],
+      "patch": "--- a/src/report4.txt\n+++ b/src/report4.txt\n@@ -1,7 +1,9 @@\n-line 0\n-line 1\n-line 2\n-line 3\n-line 4\n-line 5\n-line 6\n+line 0\n+line 1\n+line 2\n+line 3\n+line 4\n+line 5\n+line 6\n+summary 4\n+end 4\n",
+      "expect": {
+        "kind": "line-count",
+        "path": "src/report4.txt",
+        "lines": 9
+      }
+    },
+    {
+      "id": "mts-lines-05",
+      "category": "line-count",
+      "seed": {
+        "files": [
+          {
+            "path": "src/report5.txt",
+            "content": "line 0\nline 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\n"
+          },
+          {
+            "path": "tests/verifier_05.txt",
+            "content": "guard\n"
+          },
+          {
+            "path": ".mts/check_05.txt",
+            "content": "guard\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_05.txt",
+        ".mts/check_05.txt"
+      ],
+      "patch": "--- a/src/report5.txt\n+++ b/src/report5.txt\n@@ -1,8 +1,10 @@\n-line 0\n-line 1\n-line 2\n-line 3\n-line 4\n-line 5\n-line 6\n-line 7\n+line 0\n+line 1\n+line 2\n+line 3\n+line 4\n+line 5\n+line 6\n+line 7\n+summary 5\n+end 5\n",
+      "expect": {
+        "kind": "line-count",
+        "path": "src/report5.txt",
+        "lines": 10
+      }
+    },
+    {
+      "id": "mts-lines-06",
+      "category": "line-count",
+      "seed": {
+        "files": [
+          {
+            "path": "src/report6.txt",
+            "content": "line 0\nline 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\n"
+          },
+          {
+            "path": "tests/verifier_06.txt",
+            "content": "guard\n"
+          },
+          {
+            "path": ".mts/check_06.txt",
+            "content": "guard\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_06.txt",
+        ".mts/check_06.txt"
+      ],
+      "patch": "--- a/src/report6.txt\n+++ b/src/report6.txt\n@@ -1,9 +1,11 @@\n-line 0\n-line 1\n-line 2\n-line 3\n-line 4\n-line 5\n-line 6\n-line 7\n-line 8\n+line 0\n+line 1\n+line 2\n+line 3\n+line 4\n+line 5\n+line 6\n+line 7\n+line 8\n+summary 6\n+end 6\n",
+      "expect": {
+        "kind": "line-count",
+        "path": "src/report6.txt",
+        "lines": 11
+      }
+    },
+    {
+      "id": "mts-lines-07",
+      "category": "line-count",
+      "seed": {
+        "files": [
+          {
+            "path": "src/report7.txt",
+            "content": "line 0\nline 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\n"
+          },
+          {
+            "path": "tests/verifier_07.txt",
+            "content": "guard\n"
+          },
+          {
+            "path": ".mts/check_07.txt",
+            "content": "guard\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_07.txt",
+        ".mts/check_07.txt"
+      ],
+      "patch": "--- a/src/report7.txt\n+++ b/src/report7.txt\n@@ -1,10 +1,12 @@\n-line 0\n-line 1\n-line 2\n-line 3\n-line 4\n-line 5\n-line 6\n-line 7\n-line 8\n-line 9\n+line 0\n+line 1\n+line 2\n+line 3\n+line 4\n+line 5\n+line 6\n+line 7\n+line 8\n+line 9\n+summary 7\n+end 7\n",
+      "expect": {
+        "kind": "line-count",
+        "path": "src/report7.txt",
+        "lines": 12
+      }
+    },
+    {
+      "id": "mts-lines-08",
+      "category": "line-count",
+      "seed": {
+        "files": [
+          {
+            "path": "src/report8.txt",
+            "content": "line 0\nline 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\nline 10\n"
+          },
+          {
+            "path": "tests/verifier_08.txt",
+            "content": "guard\n"
+          },
+          {
+            "path": ".mts/check_08.txt",
+            "content": "guard\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_08.txt",
+        ".mts/check_08.txt"
+      ],
+      "patch": "--- a/src/report8.txt\n+++ b/src/report8.txt\n@@ -1,11 +1,13 @@\n-line 0\n-line 1\n-line 2\n-line 3\n-line 4\n-line 5\n-line 6\n-line 7\n-line 8\n-line 9\n-line 10\n+line 0\n+line 1\n+line 2\n+line 3\n+line 4\n+line 5\n+line 6\n+line 7\n+line 8\n+line 9\n+line 10\n+summary 8\n+end 8\n",
+      "expect": {
+        "kind": "line-count",
+        "path": "src/report8.txt",
+        "lines": 13
+      }
+    },
+    {
+      "id": "mts-lines-09",
+      "category": "line-count",
+      "seed": {
+        "files": [
+          {
+            "path": "src/report9.txt",
+            "content": "line 0\nline 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\nline 10\nline 11\n"
+          },
+          {
+            "path": "tests/verifier_09.txt",
+            "content": "guard\n"
+          },
+          {
+            "path": ".mts/check_09.txt",
+            "content": "guard\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_09.txt",
+        ".mts/check_09.txt"
+      ],
+      "patch": "--- a/src/report9.txt\n+++ b/src/report9.txt\n@@ -1,12 +1,14 @@\n-line 0\n-line 1\n-line 2\n-line 3\n-line 4\n-line 5\n-line 6\n-line 7\n-line 8\n-line 9\n-line 10\n-line 11\n+line 0\n+line 1\n+line 2\n+line 3\n+line 4\n+line 5\n+line 6\n+line 7\n+line 8\n+line 9\n+line 10\n+line 11\n+summary 9\n+end 9\n",
+      "expect": {
+        "kind": "line-count",
+        "path": "src/report9.txt",
+        "lines": 14
+      }
+    },
+    {
+      "id": "mts-lines-10",
+      "category": "line-count",
+      "seed": {
+        "files": [
+          {
+            "path": "src/report10.txt",
+            "content": "line 0\nline 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\nline 10\nline 11\nline 12\n"
+          },
+          {
+            "path": "tests/verifier_10.txt",
+            "content": "guard\n"
+          },
+          {
+            "path": ".mts/check_10.txt",
+            "content": "guard\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_10.txt",
+        ".mts/check_10.txt"
+      ],
+      "patch": "--- a/src/report10.txt\n+++ b/src/report10.txt\n@@ -1,13 +1,15 @@\n-line 0\n-line 1\n-line 2\n-line 3\n-line 4\n-line 5\n-line 6\n-line 7\n-line 8\n-line 9\n-line 10\n-line 11\n-line 12\n+line 0\n+line 1\n+line 2\n+line 3\n+line 4\n+line 5\n+line 6\n+line 7\n+line 8\n+line 9\n+line 10\n+line 11\n+line 12\n+summary 10\n+end 10\n",
+      "expect": {
+        "kind": "line-count",
+        "path": "src/report10.txt",
+        "lines": 15
+      }
+    },
+    {
+      "id": "mts-token-01",
+      "category": "token-present",
+      "seed": {
+        "files": [
+          {
+            "path": "src/impl1.rs",
+            "content": "pub fn compute(v: i32) -> i32 {\n    todo!()\n}\n"
+          },
+          {
+            "path": "tests/verifier_01.rs",
+            "content": "// guard\n"
+          },
+          {
+            "path": ".mts/check_01.rs",
+            "content": "// guard\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_01.rs",
+        ".mts/check_01.rs"
+      ],
+      "patch": "--- a/src/impl1.rs\n+++ b/src/impl1.rs\n@@ -1,3 +1,3 @@\n-pub fn compute(v: i32) -> i32 {\n-    todo!()\n-}\n+pub fn compute(v: i32) -> i32 {\n+    v * 1 + 1\n+}\n",
+      "expect": {
+        "kind": "token-present",
+        "path": "src/impl1.rs",
+        "all": [
+          "v * 1 + 1",
+          "pub fn compute"
+        ],
+        "none": [
+          "todo!()",
+          "unimplemented!()"
+        ]
+      }
+    },
+    {
+      "id": "mts-token-02",
+      "category": "token-present",
+      "seed": {
+        "files": [
+          {
+            "path": "src/impl2.rs",
+            "content": "pub fn compute(v: i32) -> i32 {\n    todo!()\n}\n"
+          },
+          {
+            "path": "tests/verifier_02.rs",
+            "content": "// guard\n"
+          },
+          {
+            "path": ".mts/check_02.rs",
+            "content": "// guard\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_02.rs",
+        ".mts/check_02.rs"
+      ],
+      "patch": "--- a/src/impl2.rs\n+++ b/src/impl2.rs\n@@ -1,3 +1,3 @@\n-pub fn compute(v: i32) -> i32 {\n-    todo!()\n-}\n+pub fn compute(v: i32) -> i32 {\n+    v * 2 + 1\n+}\n",
+      "expect": {
+        "kind": "token-present",
+        "path": "src/impl2.rs",
+        "all": [
+          "v * 2 + 1",
+          "pub fn compute"
+        ],
+        "none": [
+          "todo!()",
+          "unimplemented!()"
+        ]
+      }
+    },
+    {
+      "id": "mts-token-03",
+      "category": "token-present",
+      "seed": {
+        "files": [
+          {
+            "path": "src/impl3.rs",
+            "content": "pub fn compute(v: i32) -> i32 {\n    todo!()\n}\n"
+          },
+          {
+            "path": "tests/verifier_03.rs",
+            "content": "// guard\n"
+          },
+          {
+            "path": ".mts/check_03.rs",
+            "content": "// guard\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_03.rs",
+        ".mts/check_03.rs"
+      ],
+      "patch": "--- a/src/impl3.rs\n+++ b/src/impl3.rs\n@@ -1,3 +1,3 @@\n-pub fn compute(v: i32) -> i32 {\n-    todo!()\n-}\n+pub fn compute(v: i32) -> i32 {\n+    v * 3 + 1\n+}\n",
+      "expect": {
+        "kind": "token-present",
+        "path": "src/impl3.rs",
+        "all": [
+          "v * 3 + 1",
+          "pub fn compute"
+        ],
+        "none": [
+          "todo!()",
+          "unimplemented!()"
+        ]
+      }
+    },
+    {
+      "id": "mts-token-04",
+      "category": "token-present",
+      "seed": {
+        "files": [
+          {
+            "path": "src/impl4.rs",
+            "content": "pub fn compute(v: i32) -> i32 {\n    todo!()\n}\n"
+          },
+          {
+            "path": "tests/verifier_04.rs",
+            "content": "// guard\n"
+          },
+          {
+            "path": ".mts/check_04.rs",
+            "content": "// guard\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_04.rs",
+        ".mts/check_04.rs"
+      ],
+      "patch": "--- a/src/impl4.rs\n+++ b/src/impl4.rs\n@@ -1,3 +1,3 @@\n-pub fn compute(v: i32) -> i32 {\n-    todo!()\n-}\n+pub fn compute(v: i32) -> i32 {\n+    v * 4 + 1\n+}\n",
+      "expect": {
+        "kind": "token-present",
+        "path": "src/impl4.rs",
+        "all": [
+          "v * 4 + 1",
+          "pub fn compute"
+        ],
+        "none": [
+          "todo!()",
+          "unimplemented!()"
+        ]
+      }
+    },
+    {
+      "id": "mts-token-05",
+      "category": "token-present",
+      "seed": {
+        "files": [
+          {
+            "path": "src/impl5.rs",
+            "content": "pub fn compute(v: i32) -> i32 {\n    todo!()\n}\n"
+          },
+          {
+            "path": "tests/verifier_05.rs",
+            "content": "// guard\n"
+          },
+          {
+            "path": ".mts/check_05.rs",
+            "content": "// guard\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_05.rs",
+        ".mts/check_05.rs"
+      ],
+      "patch": "--- a/src/impl5.rs\n+++ b/src/impl5.rs\n@@ -1,3 +1,3 @@\n-pub fn compute(v: i32) -> i32 {\n-    todo!()\n-}\n+pub fn compute(v: i32) -> i32 {\n+    v * 5 + 1\n+}\n",
+      "expect": {
+        "kind": "token-present",
+        "path": "src/impl5.rs",
+        "all": [
+          "v * 5 + 1",
+          "pub fn compute"
+        ],
+        "none": [
+          "todo!()",
+          "unimplemented!()"
+        ]
+      }
+    },
+    {
+      "id": "mts-token-06",
+      "category": "token-present",
+      "seed": {
+        "files": [
+          {
+            "path": "src/impl6.rs",
+            "content": "pub fn compute(v: i32) -> i32 {\n    todo!()\n}\n"
+          },
+          {
+            "path": "tests/verifier_06.rs",
+            "content": "// guard\n"
+          },
+          {
+            "path": ".mts/check_06.rs",
+            "content": "// guard\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_06.rs",
+        ".mts/check_06.rs"
+      ],
+      "patch": "--- a/src/impl6.rs\n+++ b/src/impl6.rs\n@@ -1,3 +1,3 @@\n-pub fn compute(v: i32) -> i32 {\n-    todo!()\n-}\n+pub fn compute(v: i32) -> i32 {\n+    v * 6 + 1\n+}\n",
+      "expect": {
+        "kind": "token-present",
+        "path": "src/impl6.rs",
+        "all": [
+          "v * 6 + 1",
+          "pub fn compute"
+        ],
+        "none": [
+          "todo!()",
+          "unimplemented!()"
+        ]
+      }
+    },
+    {
+      "id": "mts-token-07",
+      "category": "token-present",
+      "seed": {
+        "files": [
+          {
+            "path": "src/impl7.rs",
+            "content": "pub fn compute(v: i32) -> i32 {\n    todo!()\n}\n"
+          },
+          {
+            "path": "tests/verifier_07.rs",
+            "content": "// guard\n"
+          },
+          {
+            "path": ".mts/check_07.rs",
+            "content": "// guard\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_07.rs",
+        ".mts/check_07.rs"
+      ],
+      "patch": "--- a/src/impl7.rs\n+++ b/src/impl7.rs\n@@ -1,3 +1,3 @@\n-pub fn compute(v: i32) -> i32 {\n-    todo!()\n-}\n+pub fn compute(v: i32) -> i32 {\n+    v * 7 + 1\n+}\n",
+      "expect": {
+        "kind": "token-present",
+        "path": "src/impl7.rs",
+        "all": [
+          "v * 7 + 1",
+          "pub fn compute"
+        ],
+        "none": [
+          "todo!()",
+          "unimplemented!()"
+        ]
+      }
+    },
+    {
+      "id": "mts-token-08",
+      "category": "token-present",
+      "seed": {
+        "files": [
+          {
+            "path": "src/impl8.rs",
+            "content": "pub fn compute(v: i32) -> i32 {\n    todo!()\n}\n"
+          },
+          {
+            "path": "tests/verifier_08.rs",
+            "content": "// guard\n"
+          },
+          {
+            "path": ".mts/check_08.rs",
+            "content": "// guard\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_08.rs",
+        ".mts/check_08.rs"
+      ],
+      "patch": "--- a/src/impl8.rs\n+++ b/src/impl8.rs\n@@ -1,3 +1,3 @@\n-pub fn compute(v: i32) -> i32 {\n-    todo!()\n-}\n+pub fn compute(v: i32) -> i32 {\n+    v * 8 + 1\n+}\n",
+      "expect": {
+        "kind": "token-present",
+        "path": "src/impl8.rs",
+        "all": [
+          "v * 8 + 1",
+          "pub fn compute"
+        ],
+        "none": [
+          "todo!()",
+          "unimplemented!()"
+        ]
+      }
+    },
+    {
+      "id": "mts-token-09",
+      "category": "token-present",
+      "seed": {
+        "files": [
+          {
+            "path": "src/impl9.rs",
+            "content": "pub fn compute(v: i32) -> i32 {\n    todo!()\n}\n"
+          },
+          {
+            "path": "tests/verifier_09.rs",
+            "content": "// guard\n"
+          },
+          {
+            "path": ".mts/check_09.rs",
+            "content": "// guard\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_09.rs",
+        ".mts/check_09.rs"
+      ],
+      "patch": "--- a/src/impl9.rs\n+++ b/src/impl9.rs\n@@ -1,3 +1,3 @@\n-pub fn compute(v: i32) -> i32 {\n-    todo!()\n-}\n+pub fn compute(v: i32) -> i32 {\n+    v * 9 + 1\n+}\n",
+      "expect": {
+        "kind": "token-present",
+        "path": "src/impl9.rs",
+        "all": [
+          "v * 9 + 1",
+          "pub fn compute"
+        ],
+        "none": [
+          "todo!()",
+          "unimplemented!()"
+        ]
+      }
+    },
+    {
+      "id": "mts-token-10",
+      "category": "token-present",
+      "seed": {
+        "files": [
+          {
+            "path": "src/impl10.rs",
+            "content": "pub fn compute(v: i32) -> i32 {\n    todo!()\n}\n"
+          },
+          {
+            "path": "tests/verifier_10.rs",
+            "content": "// guard\n"
+          },
+          {
+            "path": ".mts/check_10.rs",
+            "content": "// guard\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_10.rs",
+        ".mts/check_10.rs"
+      ],
+      "patch": "--- a/src/impl10.rs\n+++ b/src/impl10.rs\n@@ -1,3 +1,3 @@\n-pub fn compute(v: i32) -> i32 {\n-    todo!()\n-}\n+pub fn compute(v: i32) -> i32 {\n+    v * 10 + 1\n+}\n",
+      "expect": {
+        "kind": "token-present",
+        "path": "src/impl10.rs",
+        "all": [
+          "v * 10 + 1",
+          "pub fn compute"
+        ],
+        "none": [
+          "todo!()",
+          "unimplemented!()"
+        ]
+      }
+    },
+    {
+      "id": "mts-json-01",
+      "category": "json-field",
+      "seed": {
+        "files": [
+          {
+            "path": "config/settings1.json",
+            "content": "{\n  \"enabled\": true,\n  \"retries\": 0,\n  \"timeout_ms\": 1001\n}\n"
+          },
+          {
+            "path": "tests/verifier_01.json",
+            "content": "{}\n"
+          },
+          {
+            "path": ".mts/check_01.json",
+            "content": "{}\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_01.json",
+        ".mts/check_01.json"
+      ],
+      "patch": "--- a/config/settings1.json\n+++ b/config/settings1.json\n@@ -1,5 +1,5 @@\n-{\n-  \"enabled\": true,\n-  \"retries\": 0,\n-  \"timeout_ms\": 1001\n-}\n+{\n+  \"enabled\": true,\n+  \"retries\": 1,\n+  \"timeout_ms\": 1001\n+}\n",
+      "expect": {
+        "kind": "json-field",
+        "path": "config/settings1.json",
+        "field": "retries",
+        "value": 1
+      }
+    },
+    {
+      "id": "mts-json-02",
+      "category": "json-field",
+      "seed": {
+        "files": [
+          {
+            "path": "config/settings2.json",
+            "content": "{\n  \"enabled\": true,\n  \"retries\": 0,\n  \"timeout_ms\": 1002\n}\n"
+          },
+          {
+            "path": "tests/verifier_02.json",
+            "content": "{}\n"
+          },
+          {
+            "path": ".mts/check_02.json",
+            "content": "{}\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_02.json",
+        ".mts/check_02.json"
+      ],
+      "patch": "--- a/config/settings2.json\n+++ b/config/settings2.json\n@@ -1,5 +1,5 @@\n-{\n-  \"enabled\": true,\n-  \"retries\": 0,\n-  \"timeout_ms\": 1002\n-}\n+{\n+  \"enabled\": true,\n+  \"retries\": 2,\n+  \"timeout_ms\": 1002\n+}\n",
+      "expect": {
+        "kind": "json-field",
+        "path": "config/settings2.json",
+        "field": "retries",
+        "value": 2
+      }
+    },
+    {
+      "id": "mts-json-03",
+      "category": "json-field",
+      "seed": {
+        "files": [
+          {
+            "path": "config/settings3.json",
+            "content": "{\n  \"enabled\": true,\n  \"retries\": 0,\n  \"timeout_ms\": 1003\n}\n"
+          },
+          {
+            "path": "tests/verifier_03.json",
+            "content": "{}\n"
+          },
+          {
+            "path": ".mts/check_03.json",
+            "content": "{}\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_03.json",
+        ".mts/check_03.json"
+      ],
+      "patch": "--- a/config/settings3.json\n+++ b/config/settings3.json\n@@ -1,5 +1,5 @@\n-{\n-  \"enabled\": true,\n-  \"retries\": 0,\n-  \"timeout_ms\": 1003\n-}\n+{\n+  \"enabled\": true,\n+  \"retries\": 3,\n+  \"timeout_ms\": 1003\n+}\n",
+      "expect": {
+        "kind": "json-field",
+        "path": "config/settings3.json",
+        "field": "retries",
+        "value": 3
+      }
+    },
+    {
+      "id": "mts-json-04",
+      "category": "json-field",
+      "seed": {
+        "files": [
+          {
+            "path": "config/settings4.json",
+            "content": "{\n  \"enabled\": true,\n  \"retries\": 0,\n  \"timeout_ms\": 1004\n}\n"
+          },
+          {
+            "path": "tests/verifier_04.json",
+            "content": "{}\n"
+          },
+          {
+            "path": ".mts/check_04.json",
+            "content": "{}\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_04.json",
+        ".mts/check_04.json"
+      ],
+      "patch": "--- a/config/settings4.json\n+++ b/config/settings4.json\n@@ -1,5 +1,5 @@\n-{\n-  \"enabled\": true,\n-  \"retries\": 0,\n-  \"timeout_ms\": 1004\n-}\n+{\n+  \"enabled\": true,\n+  \"retries\": 4,\n+  \"timeout_ms\": 1004\n+}\n",
+      "expect": {
+        "kind": "json-field",
+        "path": "config/settings4.json",
+        "field": "retries",
+        "value": 4
+      }
+    },
+    {
+      "id": "mts-json-05",
+      "category": "json-field",
+      "seed": {
+        "files": [
+          {
+            "path": "config/settings5.json",
+            "content": "{\n  \"enabled\": true,\n  \"retries\": 0,\n  \"timeout_ms\": 1005\n}\n"
+          },
+          {
+            "path": "tests/verifier_05.json",
+            "content": "{}\n"
+          },
+          {
+            "path": ".mts/check_05.json",
+            "content": "{}\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_05.json",
+        ".mts/check_05.json"
+      ],
+      "patch": "--- a/config/settings5.json\n+++ b/config/settings5.json\n@@ -1,5 +1,5 @@\n-{\n-  \"enabled\": true,\n-  \"retries\": 0,\n-  \"timeout_ms\": 1005\n-}\n+{\n+  \"enabled\": true,\n+  \"retries\": 5,\n+  \"timeout_ms\": 1005\n+}\n",
+      "expect": {
+        "kind": "json-field",
+        "path": "config/settings5.json",
+        "field": "retries",
+        "value": 5
+      }
+    },
+    {
+      "id": "mts-json-06",
+      "category": "json-field",
+      "seed": {
+        "files": [
+          {
+            "path": "config/settings6.json",
+            "content": "{\n  \"enabled\": true,\n  \"retries\": 0,\n  \"timeout_ms\": 1006\n}\n"
+          },
+          {
+            "path": "tests/verifier_06.json",
+            "content": "{}\n"
+          },
+          {
+            "path": ".mts/check_06.json",
+            "content": "{}\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_06.json",
+        ".mts/check_06.json"
+      ],
+      "patch": "--- a/config/settings6.json\n+++ b/config/settings6.json\n@@ -1,5 +1,5 @@\n-{\n-  \"enabled\": true,\n-  \"retries\": 0,\n-  \"timeout_ms\": 1006\n-}\n+{\n+  \"enabled\": true,\n+  \"retries\": 6,\n+  \"timeout_ms\": 1006\n+}\n",
+      "expect": {
+        "kind": "json-field",
+        "path": "config/settings6.json",
+        "field": "retries",
+        "value": 6
+      }
+    },
+    {
+      "id": "mts-json-07",
+      "category": "json-field",
+      "seed": {
+        "files": [
+          {
+            "path": "config/settings7.json",
+            "content": "{\n  \"enabled\": true,\n  \"retries\": 0,\n  \"timeout_ms\": 1007\n}\n"
+          },
+          {
+            "path": "tests/verifier_07.json",
+            "content": "{}\n"
+          },
+          {
+            "path": ".mts/check_07.json",
+            "content": "{}\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_07.json",
+        ".mts/check_07.json"
+      ],
+      "patch": "--- a/config/settings7.json\n+++ b/config/settings7.json\n@@ -1,5 +1,5 @@\n-{\n-  \"enabled\": true,\n-  \"retries\": 0,\n-  \"timeout_ms\": 1007\n-}\n+{\n+  \"enabled\": true,\n+  \"retries\": 7,\n+  \"timeout_ms\": 1007\n+}\n",
+      "expect": {
+        "kind": "json-field",
+        "path": "config/settings7.json",
+        "field": "retries",
+        "value": 7
+      }
+    },
+    {
+      "id": "mts-json-08",
+      "category": "json-field",
+      "seed": {
+        "files": [
+          {
+            "path": "config/settings8.json",
+            "content": "{\n  \"enabled\": true,\n  \"retries\": 0,\n  \"timeout_ms\": 1008\n}\n"
+          },
+          {
+            "path": "tests/verifier_08.json",
+            "content": "{}\n"
+          },
+          {
+            "path": ".mts/check_08.json",
+            "content": "{}\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_08.json",
+        ".mts/check_08.json"
+      ],
+      "patch": "--- a/config/settings8.json\n+++ b/config/settings8.json\n@@ -1,5 +1,5 @@\n-{\n-  \"enabled\": true,\n-  \"retries\": 0,\n-  \"timeout_ms\": 1008\n-}\n+{\n+  \"enabled\": true,\n+  \"retries\": 8,\n+  \"timeout_ms\": 1008\n+}\n",
+      "expect": {
+        "kind": "json-field",
+        "path": "config/settings8.json",
+        "field": "retries",
+        "value": 8
+      }
+    },
+    {
+      "id": "mts-json-09",
+      "category": "json-field",
+      "seed": {
+        "files": [
+          {
+            "path": "config/settings9.json",
+            "content": "{\n  \"enabled\": true,\n  \"retries\": 0,\n  \"timeout_ms\": 1009\n}\n"
+          },
+          {
+            "path": "tests/verifier_09.json",
+            "content": "{}\n"
+          },
+          {
+            "path": ".mts/check_09.json",
+            "content": "{}\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_09.json",
+        ".mts/check_09.json"
+      ],
+      "patch": "--- a/config/settings9.json\n+++ b/config/settings9.json\n@@ -1,5 +1,5 @@\n-{\n-  \"enabled\": true,\n-  \"retries\": 0,\n-  \"timeout_ms\": 1009\n-}\n+{\n+  \"enabled\": true,\n+  \"retries\": 9,\n+  \"timeout_ms\": 1009\n+}\n",
+      "expect": {
+        "kind": "json-field",
+        "path": "config/settings9.json",
+        "field": "retries",
+        "value": 9
+      }
+    },
+    {
+      "id": "mts-json-10",
+      "category": "json-field",
+      "seed": {
+        "files": [
+          {
+            "path": "config/settings10.json",
+            "content": "{\n  \"enabled\": true,\n  \"retries\": 0,\n  \"timeout_ms\": 1010\n}\n"
+          },
+          {
+            "path": "tests/verifier_10.json",
+            "content": "{}\n"
+          },
+          {
+            "path": ".mts/check_10.json",
+            "content": "{}\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_10.json",
+        ".mts/check_10.json"
+      ],
+      "patch": "--- a/config/settings10.json\n+++ b/config/settings10.json\n@@ -1,5 +1,5 @@\n-{\n-  \"enabled\": true,\n-  \"retries\": 0,\n-  \"timeout_ms\": 1010\n-}\n+{\n+  \"enabled\": true,\n+  \"retries\": 10,\n+  \"timeout_ms\": 1010\n+}\n",
+      "expect": {
+        "kind": "json-field",
+        "path": "config/settings10.json",
+        "field": "retries",
+        "value": 10
+      }
+    },
+    {
+      "id": "mts-absent-01",
+      "category": "absent-marker",
+      "seed": {
+        "files": [
+          {
+            "path": "src/runner1.py",
+            "content": "def run():\n    # FIXME-1: replace this\n    return 0\n"
+          },
+          {
+            "path": "tests/verifier_01.py",
+            "content": "guard\n"
+          },
+          {
+            "path": ".mts/check_01.py",
+            "content": "guard\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_01.py",
+        ".mts/check_01.py"
+      ],
+      "patch": "--- a/src/runner1.py\n+++ b/src/runner1.py\n@@ -1,3 +1,2 @@\n-def run():\n-    # FIXME-1: replace this\n-    return 0\n+def run():\n+    return 1\n",
+      "expect": {
+        "kind": "absent-marker",
+        "path": "src/runner1.py",
+        "marker": "FIXME-1"
+      }
+    },
+    {
+      "id": "mts-absent-02",
+      "category": "absent-marker",
+      "seed": {
+        "files": [
+          {
+            "path": "src/runner2.py",
+            "content": "def run():\n    # FIXME-2: replace this\n    return 0\n"
+          },
+          {
+            "path": "tests/verifier_02.py",
+            "content": "guard\n"
+          },
+          {
+            "path": ".mts/check_02.py",
+            "content": "guard\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_02.py",
+        ".mts/check_02.py"
+      ],
+      "patch": "--- a/src/runner2.py\n+++ b/src/runner2.py\n@@ -1,3 +1,2 @@\n-def run():\n-    # FIXME-2: replace this\n-    return 0\n+def run():\n+    return 2\n",
+      "expect": {
+        "kind": "absent-marker",
+        "path": "src/runner2.py",
+        "marker": "FIXME-2"
+      }
+    },
+    {
+      "id": "mts-absent-03",
+      "category": "absent-marker",
+      "seed": {
+        "files": [
+          {
+            "path": "src/runner3.py",
+            "content": "def run():\n    # FIXME-3: replace this\n    return 0\n"
+          },
+          {
+            "path": "tests/verifier_03.py",
+            "content": "guard\n"
+          },
+          {
+            "path": ".mts/check_03.py",
+            "content": "guard\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_03.py",
+        ".mts/check_03.py"
+      ],
+      "patch": "--- a/src/runner3.py\n+++ b/src/runner3.py\n@@ -1,3 +1,2 @@\n-def run():\n-    # FIXME-3: replace this\n-    return 0\n+def run():\n+    return 3\n",
+      "expect": {
+        "kind": "absent-marker",
+        "path": "src/runner3.py",
+        "marker": "FIXME-3"
+      }
+    },
+    {
+      "id": "mts-absent-04",
+      "category": "absent-marker",
+      "seed": {
+        "files": [
+          {
+            "path": "src/runner4.py",
+            "content": "def run():\n    # FIXME-4: replace this\n    return 0\n"
+          },
+          {
+            "path": "tests/verifier_04.py",
+            "content": "guard\n"
+          },
+          {
+            "path": ".mts/check_04.py",
+            "content": "guard\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_04.py",
+        ".mts/check_04.py"
+      ],
+      "patch": "--- a/src/runner4.py\n+++ b/src/runner4.py\n@@ -1,3 +1,2 @@\n-def run():\n-    # FIXME-4: replace this\n-    return 0\n+def run():\n+    return 4\n",
+      "expect": {
+        "kind": "absent-marker",
+        "path": "src/runner4.py",
+        "marker": "FIXME-4"
+      }
+    },
+    {
+      "id": "mts-absent-05",
+      "category": "absent-marker",
+      "seed": {
+        "files": [
+          {
+            "path": "src/runner5.py",
+            "content": "def run():\n    # FIXME-5: replace this\n    return 0\n"
+          },
+          {
+            "path": "tests/verifier_05.py",
+            "content": "guard\n"
+          },
+          {
+            "path": ".mts/check_05.py",
+            "content": "guard\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_05.py",
+        ".mts/check_05.py"
+      ],
+      "patch": "--- a/src/runner5.py\n+++ b/src/runner5.py\n@@ -1,3 +1,2 @@\n-def run():\n-    # FIXME-5: replace this\n-    return 0\n+def run():\n+    return 5\n",
+      "expect": {
+        "kind": "absent-marker",
+        "path": "src/runner5.py",
+        "marker": "FIXME-5"
+      }
+    },
+    {
+      "id": "mts-absent-06",
+      "category": "absent-marker",
+      "seed": {
+        "files": [
+          {
+            "path": "src/runner6.py",
+            "content": "def run():\n    # FIXME-6: replace this\n    return 0\n"
+          },
+          {
+            "path": "tests/verifier_06.py",
+            "content": "guard\n"
+          },
+          {
+            "path": ".mts/check_06.py",
+            "content": "guard\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_06.py",
+        ".mts/check_06.py"
+      ],
+      "patch": "--- a/src/runner6.py\n+++ b/src/runner6.py\n@@ -1,3 +1,2 @@\n-def run():\n-    # FIXME-6: replace this\n-    return 0\n+def run():\n+    return 6\n",
+      "expect": {
+        "kind": "absent-marker",
+        "path": "src/runner6.py",
+        "marker": "FIXME-6"
+      }
+    },
+    {
+      "id": "mts-absent-07",
+      "category": "absent-marker",
+      "seed": {
+        "files": [
+          {
+            "path": "src/runner7.py",
+            "content": "def run():\n    # FIXME-7: replace this\n    return 0\n"
+          },
+          {
+            "path": "tests/verifier_07.py",
+            "content": "guard\n"
+          },
+          {
+            "path": ".mts/check_07.py",
+            "content": "guard\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_07.py",
+        ".mts/check_07.py"
+      ],
+      "patch": "--- a/src/runner7.py\n+++ b/src/runner7.py\n@@ -1,3 +1,2 @@\n-def run():\n-    # FIXME-7: replace this\n-    return 0\n+def run():\n+    return 7\n",
+      "expect": {
+        "kind": "absent-marker",
+        "path": "src/runner7.py",
+        "marker": "FIXME-7"
+      }
+    },
+    {
+      "id": "mts-absent-08",
+      "category": "absent-marker",
+      "seed": {
+        "files": [
+          {
+            "path": "src/runner8.py",
+            "content": "def run():\n    # FIXME-8: replace this\n    return 0\n"
+          },
+          {
+            "path": "tests/verifier_08.py",
+            "content": "guard\n"
+          },
+          {
+            "path": ".mts/check_08.py",
+            "content": "guard\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_08.py",
+        ".mts/check_08.py"
+      ],
+      "patch": "--- a/src/runner8.py\n+++ b/src/runner8.py\n@@ -1,3 +1,2 @@\n-def run():\n-    # FIXME-8: replace this\n-    return 0\n+def run():\n+    return 8\n",
+      "expect": {
+        "kind": "absent-marker",
+        "path": "src/runner8.py",
+        "marker": "FIXME-8"
+      }
+    },
+    {
+      "id": "mts-absent-09",
+      "category": "absent-marker",
+      "seed": {
+        "files": [
+          {
+            "path": "src/runner9.py",
+            "content": "def run():\n    # FIXME-9: replace this\n    return 0\n"
+          },
+          {
+            "path": "tests/verifier_09.py",
+            "content": "guard\n"
+          },
+          {
+            "path": ".mts/check_09.py",
+            "content": "guard\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_09.py",
+        ".mts/check_09.py"
+      ],
+      "patch": "--- a/src/runner9.py\n+++ b/src/runner9.py\n@@ -1,3 +1,2 @@\n-def run():\n-    # FIXME-9: replace this\n-    return 0\n+def run():\n+    return 9\n",
+      "expect": {
+        "kind": "absent-marker",
+        "path": "src/runner9.py",
+        "marker": "FIXME-9"
+      }
+    },
+    {
+      "id": "mts-absent-10",
+      "category": "absent-marker",
+      "seed": {
+        "files": [
+          {
+            "path": "src/runner10.py",
+            "content": "def run():\n    # FIXME-10: replace this\n    return 0\n"
+          },
+          {
+            "path": "tests/verifier_10.py",
+            "content": "guard\n"
+          },
+          {
+            "path": ".mts/check_10.py",
+            "content": "guard\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "tests/verifier_10.py",
+        ".mts/check_10.py"
+      ],
+      "patch": "--- a/src/runner10.py\n+++ b/src/runner10.py\n@@ -1,3 +1,2 @@\n-def run():\n-    # FIXME-10: replace this\n-    return 0\n+def run():\n+    return 10\n",
+      "expect": {
+        "kind": "absent-marker",
+        "path": "src/runner10.py",
+        "marker": "FIXME-10"
+      }
+    },
+    {
+      "id": "mts-multi-01",
+      "category": "multi-file",
+      "seed": {
+        "files": [
+          {
+            "path": "pkg/a1.txt",
+            "content": "old-a-1\n"
+          },
+          {
+            "path": "pkg/b1.txt",
+            "content": "old-b-1\n"
+          },
+          {
+            "path": "pkg/c1.txt",
+            "content": "old-c-1\n"
+          },
+          {
+            "path": "pkg/lock1.txt",
+            "content": "locked\n"
+          },
+          {
+            "path": "tools/verify1.py",
+            "content": "guard\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "pkg/lock1.txt",
+        "tools/verify1.py"
+      ],
+      "patch": "--- a/pkg/a1.txt\n+++ b/pkg/a1.txt\n@@ -1,1 +1,1 @@\n-old-a-1\n+new-a-1\n--- a/pkg/b1.txt\n+++ b/pkg/b1.txt\n@@ -1,1 +1,1 @@\n-old-b-1\n+new-b-1\n--- a/pkg/c1.txt\n+++ b/pkg/c1.txt\n@@ -1,1 +1,1 @@\n-old-c-1\n+new-c-1\n",
+      "expect": {
+        "kind": "multi-file",
+        "files": [
+          {
+            "path": "pkg/a1.txt",
+            "content": "new-a-1\n"
+          },
+          {
+            "path": "pkg/b1.txt",
+            "content": "new-b-1\n"
+          },
+          {
+            "path": "pkg/c1.txt",
+            "content": "new-c-1\n"
+          }
+        ]
+      }
+    },
+    {
+      "id": "mts-multi-02",
+      "category": "multi-file",
+      "seed": {
+        "files": [
+          {
+            "path": "pkg/a2.txt",
+            "content": "old-a-2\n"
+          },
+          {
+            "path": "pkg/b2.txt",
+            "content": "old-b-2\n"
+          },
+          {
+            "path": "pkg/c2.txt",
+            "content": "old-c-2\n"
+          },
+          {
+            "path": "pkg/lock2.txt",
+            "content": "locked\n"
+          },
+          {
+            "path": "tools/verify2.py",
+            "content": "guard\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "pkg/lock2.txt",
+        "tools/verify2.py"
+      ],
+      "patch": "--- a/pkg/a2.txt\n+++ b/pkg/a2.txt\n@@ -1,1 +1,1 @@\n-old-a-2\n+new-a-2\n--- a/pkg/b2.txt\n+++ b/pkg/b2.txt\n@@ -1,1 +1,1 @@\n-old-b-2\n+new-b-2\n--- a/pkg/c2.txt\n+++ b/pkg/c2.txt\n@@ -1,1 +1,1 @@\n-old-c-2\n+new-c-2\n",
+      "expect": {
+        "kind": "multi-file",
+        "files": [
+          {
+            "path": "pkg/a2.txt",
+            "content": "new-a-2\n"
+          },
+          {
+            "path": "pkg/b2.txt",
+            "content": "new-b-2\n"
+          },
+          {
+            "path": "pkg/c2.txt",
+            "content": "new-c-2\n"
+          }
+        ]
+      }
+    },
+    {
+      "id": "mts-multi-03",
+      "category": "multi-file",
+      "seed": {
+        "files": [
+          {
+            "path": "pkg/a3.txt",
+            "content": "old-a-3\n"
+          },
+          {
+            "path": "pkg/b3.txt",
+            "content": "old-b-3\n"
+          },
+          {
+            "path": "pkg/c3.txt",
+            "content": "old-c-3\n"
+          },
+          {
+            "path": "pkg/lock3.txt",
+            "content": "locked\n"
+          },
+          {
+            "path": "tools/verify3.py",
+            "content": "guard\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "pkg/lock3.txt",
+        "tools/verify3.py"
+      ],
+      "patch": "--- a/pkg/a3.txt\n+++ b/pkg/a3.txt\n@@ -1,1 +1,1 @@\n-old-a-3\n+new-a-3\n--- a/pkg/b3.txt\n+++ b/pkg/b3.txt\n@@ -1,1 +1,1 @@\n-old-b-3\n+new-b-3\n--- a/pkg/c3.txt\n+++ b/pkg/c3.txt\n@@ -1,1 +1,1 @@\n-old-c-3\n+new-c-3\n",
+      "expect": {
+        "kind": "multi-file",
+        "files": [
+          {
+            "path": "pkg/a3.txt",
+            "content": "new-a-3\n"
+          },
+          {
+            "path": "pkg/b3.txt",
+            "content": "new-b-3\n"
+          },
+          {
+            "path": "pkg/c3.txt",
+            "content": "new-c-3\n"
+          }
+        ]
+      }
+    },
+    {
+      "id": "mts-multi-04",
+      "category": "multi-file",
+      "seed": {
+        "files": [
+          {
+            "path": "pkg/a4.txt",
+            "content": "old-a-4\n"
+          },
+          {
+            "path": "pkg/b4.txt",
+            "content": "old-b-4\n"
+          },
+          {
+            "path": "pkg/c4.txt",
+            "content": "old-c-4\n"
+          },
+          {
+            "path": "pkg/lock4.txt",
+            "content": "locked\n"
+          },
+          {
+            "path": "tools/verify4.py",
+            "content": "guard\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "pkg/lock4.txt",
+        "tools/verify4.py"
+      ],
+      "patch": "--- a/pkg/a4.txt\n+++ b/pkg/a4.txt\n@@ -1,1 +1,1 @@\n-old-a-4\n+new-a-4\n--- a/pkg/b4.txt\n+++ b/pkg/b4.txt\n@@ -1,1 +1,1 @@\n-old-b-4\n+new-b-4\n--- a/pkg/c4.txt\n+++ b/pkg/c4.txt\n@@ -1,1 +1,1 @@\n-old-c-4\n+new-c-4\n",
+      "expect": {
+        "kind": "multi-file",
+        "files": [
+          {
+            "path": "pkg/a4.txt",
+            "content": "new-a-4\n"
+          },
+          {
+            "path": "pkg/b4.txt",
+            "content": "new-b-4\n"
+          },
+          {
+            "path": "pkg/c4.txt",
+            "content": "new-c-4\n"
+          }
+        ]
+      }
+    },
+    {
+      "id": "mts-multi-05",
+      "category": "multi-file",
+      "seed": {
+        "files": [
+          {
+            "path": "pkg/a5.txt",
+            "content": "old-a-5\n"
+          },
+          {
+            "path": "pkg/b5.txt",
+            "content": "old-b-5\n"
+          },
+          {
+            "path": "pkg/c5.txt",
+            "content": "old-c-5\n"
+          },
+          {
+            "path": "pkg/lock5.txt",
+            "content": "locked\n"
+          },
+          {
+            "path": "tools/verify5.py",
+            "content": "guard\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "pkg/lock5.txt",
+        "tools/verify5.py"
+      ],
+      "patch": "--- a/pkg/a5.txt\n+++ b/pkg/a5.txt\n@@ -1,1 +1,1 @@\n-old-a-5\n+new-a-5\n--- a/pkg/b5.txt\n+++ b/pkg/b5.txt\n@@ -1,1 +1,1 @@\n-old-b-5\n+new-b-5\n--- a/pkg/c5.txt\n+++ b/pkg/c5.txt\n@@ -1,1 +1,1 @@\n-old-c-5\n+new-c-5\n",
+      "expect": {
+        "kind": "multi-file",
+        "files": [
+          {
+            "path": "pkg/a5.txt",
+            "content": "new-a-5\n"
+          },
+          {
+            "path": "pkg/b5.txt",
+            "content": "new-b-5\n"
+          },
+          {
+            "path": "pkg/c5.txt",
+            "content": "new-c-5\n"
+          }
+        ]
+      }
+    },
+    {
+      "id": "mts-multi-06",
+      "category": "multi-file",
+      "seed": {
+        "files": [
+          {
+            "path": "pkg/a6.txt",
+            "content": "old-a-6\n"
+          },
+          {
+            "path": "pkg/b6.txt",
+            "content": "old-b-6\n"
+          },
+          {
+            "path": "pkg/c6.txt",
+            "content": "old-c-6\n"
+          },
+          {
+            "path": "pkg/lock6.txt",
+            "content": "locked\n"
+          },
+          {
+            "path": "tools/verify6.py",
+            "content": "guard\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "pkg/lock6.txt",
+        "tools/verify6.py"
+      ],
+      "patch": "--- a/pkg/a6.txt\n+++ b/pkg/a6.txt\n@@ -1,1 +1,1 @@\n-old-a-6\n+new-a-6\n--- a/pkg/b6.txt\n+++ b/pkg/b6.txt\n@@ -1,1 +1,1 @@\n-old-b-6\n+new-b-6\n--- a/pkg/c6.txt\n+++ b/pkg/c6.txt\n@@ -1,1 +1,1 @@\n-old-c-6\n+new-c-6\n",
+      "expect": {
+        "kind": "multi-file",
+        "files": [
+          {
+            "path": "pkg/a6.txt",
+            "content": "new-a-6\n"
+          },
+          {
+            "path": "pkg/b6.txt",
+            "content": "new-b-6\n"
+          },
+          {
+            "path": "pkg/c6.txt",
+            "content": "new-c-6\n"
+          }
+        ]
+      }
+    },
+    {
+      "id": "mts-multi-07",
+      "category": "multi-file",
+      "seed": {
+        "files": [
+          {
+            "path": "pkg/a7.txt",
+            "content": "old-a-7\n"
+          },
+          {
+            "path": "pkg/b7.txt",
+            "content": "old-b-7\n"
+          },
+          {
+            "path": "pkg/c7.txt",
+            "content": "old-c-7\n"
+          },
+          {
+            "path": "pkg/lock7.txt",
+            "content": "locked\n"
+          },
+          {
+            "path": "tools/verify7.py",
+            "content": "guard\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "pkg/lock7.txt",
+        "tools/verify7.py"
+      ],
+      "patch": "--- a/pkg/a7.txt\n+++ b/pkg/a7.txt\n@@ -1,1 +1,1 @@\n-old-a-7\n+new-a-7\n--- a/pkg/b7.txt\n+++ b/pkg/b7.txt\n@@ -1,1 +1,1 @@\n-old-b-7\n+new-b-7\n--- a/pkg/c7.txt\n+++ b/pkg/c7.txt\n@@ -1,1 +1,1 @@\n-old-c-7\n+new-c-7\n",
+      "expect": {
+        "kind": "multi-file",
+        "files": [
+          {
+            "path": "pkg/a7.txt",
+            "content": "new-a-7\n"
+          },
+          {
+            "path": "pkg/b7.txt",
+            "content": "new-b-7\n"
+          },
+          {
+            "path": "pkg/c7.txt",
+            "content": "new-c-7\n"
+          }
+        ]
+      }
+    },
+    {
+      "id": "mts-multi-08",
+      "category": "multi-file",
+      "seed": {
+        "files": [
+          {
+            "path": "pkg/a8.txt",
+            "content": "old-a-8\n"
+          },
+          {
+            "path": "pkg/b8.txt",
+            "content": "old-b-8\n"
+          },
+          {
+            "path": "pkg/c8.txt",
+            "content": "old-c-8\n"
+          },
+          {
+            "path": "pkg/lock8.txt",
+            "content": "locked\n"
+          },
+          {
+            "path": "tools/verify8.py",
+            "content": "guard\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "pkg/lock8.txt",
+        "tools/verify8.py"
+      ],
+      "patch": "--- a/pkg/a8.txt\n+++ b/pkg/a8.txt\n@@ -1,1 +1,1 @@\n-old-a-8\n+new-a-8\n--- a/pkg/b8.txt\n+++ b/pkg/b8.txt\n@@ -1,1 +1,1 @@\n-old-b-8\n+new-b-8\n--- a/pkg/c8.txt\n+++ b/pkg/c8.txt\n@@ -1,1 +1,1 @@\n-old-c-8\n+new-c-8\n",
+      "expect": {
+        "kind": "multi-file",
+        "files": [
+          {
+            "path": "pkg/a8.txt",
+            "content": "new-a-8\n"
+          },
+          {
+            "path": "pkg/b8.txt",
+            "content": "new-b-8\n"
+          },
+          {
+            "path": "pkg/c8.txt",
+            "content": "new-c-8\n"
+          }
+        ]
+      }
+    },
+    {
+      "id": "mts-multi-09",
+      "category": "multi-file",
+      "seed": {
+        "files": [
+          {
+            "path": "pkg/a9.txt",
+            "content": "old-a-9\n"
+          },
+          {
+            "path": "pkg/b9.txt",
+            "content": "old-b-9\n"
+          },
+          {
+            "path": "pkg/c9.txt",
+            "content": "old-c-9\n"
+          },
+          {
+            "path": "pkg/lock9.txt",
+            "content": "locked\n"
+          },
+          {
+            "path": "tools/verify9.py",
+            "content": "guard\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "pkg/lock9.txt",
+        "tools/verify9.py"
+      ],
+      "patch": "--- a/pkg/a9.txt\n+++ b/pkg/a9.txt\n@@ -1,1 +1,1 @@\n-old-a-9\n+new-a-9\n--- a/pkg/b9.txt\n+++ b/pkg/b9.txt\n@@ -1,1 +1,1 @@\n-old-b-9\n+new-b-9\n--- a/pkg/c9.txt\n+++ b/pkg/c9.txt\n@@ -1,1 +1,1 @@\n-old-c-9\n+new-c-9\n",
+      "expect": {
+        "kind": "multi-file",
+        "files": [
+          {
+            "path": "pkg/a9.txt",
+            "content": "new-a-9\n"
+          },
+          {
+            "path": "pkg/b9.txt",
+            "content": "new-b-9\n"
+          },
+          {
+            "path": "pkg/c9.txt",
+            "content": "new-c-9\n"
+          }
+        ]
+      }
+    },
+    {
+      "id": "mts-multi-10",
+      "category": "multi-file",
+      "seed": {
+        "files": [
+          {
+            "path": "pkg/a10.txt",
+            "content": "old-a-10\n"
+          },
+          {
+            "path": "pkg/b10.txt",
+            "content": "old-b-10\n"
+          },
+          {
+            "path": "pkg/c10.txt",
+            "content": "old-c-10\n"
+          },
+          {
+            "path": "pkg/lock10.txt",
+            "content": "locked\n"
+          },
+          {
+            "path": "tools/verify10.py",
+            "content": "guard\n"
+          }
+        ]
+      },
+      "forbidden": [
+        "pkg/lock10.txt",
+        "tools/verify10.py"
+      ],
+      "patch": "--- a/pkg/a10.txt\n+++ b/pkg/a10.txt\n@@ -1,1 +1,1 @@\n-old-a-10\n+new-a-10\n--- a/pkg/b10.txt\n+++ b/pkg/b10.txt\n@@ -1,1 +1,1 @@\n-old-b-10\n+new-b-10\n--- a/pkg/c10.txt\n+++ b/pkg/c10.txt\n@@ -1,1 +1,1 @@\n-old-c-10\n+new-c-10\n",
+      "expect": {
+        "kind": "multi-file",
+        "files": [
+          {
+            "path": "pkg/a10.txt",
+            "content": "new-a-10\n"
+          },
+          {
+            "path": "pkg/b10.txt",
+            "content": "new-b-10\n"
+          },
+          {
+            "path": "pkg/c10.txt",
+            "content": "new-c-10\n"
+          }
+        ]
+      }
+    }
+  ]
+}

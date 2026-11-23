@@ -1,5 +1,5 @@
 {
-  "command_count": 162,
+  "command_count": 167,
   "commands": [
     {
       "cli_path": [
@@ -9490,6 +9490,195 @@
       "streaming": false,
       "tags": [
         "teams"
+      ],
+      "timeout_secs": null
+    },
+    {
+      "cli_path": [
+        "team"
+      ],
+      "handler": "team",
+      "id": "team",
+      "json_output": true,
+      "min_version": null,
+      "related": [
+        "team.namespace"
+      ],
+      "slash": {
+        "aliases": [],
+        "auth": "none",
+        "categories": [
+          "team"
+        ],
+        "danger": "safe",
+        "deprecated": null,
+        "description": "Local-only team surface on this machine",
+        "examples": [
+          "team"
+        ],
+        "hidden": true,
+        "long_description": null,
+        "name": "team",
+        "overlay": "none",
+        "palette": null,
+        "params": [],
+        "profile": null
+      },
+      "streaming": false,
+      "tags": [
+        "team"
+      ],
+      "timeout_secs": null
+    },
+    {
+      "cli_path": [
+        "team",
+        "namespace"
+      ],
+      "handler": "team_namespace",
+      "id": "team.namespace",
+      "json_output": true,
+      "min_version": null,
+      "related": [
+        "team.inbox"
+      ],
+      "slash": {
+        "aliases": [],
+        "auth": "none",
+        "categories": [
+          "team"
+        ],
+        "danger": "safe",
+        "deprecated": null,
+        "description": "Vault namespaces that exist on this machine",
+        "examples": [
+          "team namespace"
+        ],
+        "hidden": true,
+        "long_description": null,
+        "name": "namespace",
+        "overlay": "none",
+        "palette": null,
+        "params": [],
+        "profile": null
+      },
+      "streaming": false,
+      "tags": [
+        "team"
+      ],
+      "timeout_secs": null
+    },
+    {
+      "cli_path": [
+        "team",
+        "inbox"
+      ],
+      "handler": "team_inbox",
+      "id": "team.inbox",
+      "json_output": true,
+      "min_version": null,
+      "related": [
+        "team.attribution"
+      ],
+      "slash": {
+        "aliases": [],
+        "auth": "none",
+        "categories": [
+          "team"
+        ],
+        "danger": "safe",
+        "deprecated": null,
+        "description": "Local proposal review inbox on this machine",
+        "examples": [
+          "team inbox"
+        ],
+        "hidden": true,
+        "long_description": null,
+        "name": "inbox",
+        "overlay": "none",
+        "palette": null,
+        "params": [],
+        "profile": null
+      },
+      "streaming": false,
+      "tags": [
+        "team"
+      ],
+      "timeout_secs": null
+    },
+    {
+      "cli_path": [
+        "team",
+        "attribution"
+      ],
+      "handler": "team_attribution",
+      "id": "team.attribution",
+      "json_output": true,
+      "min_version": null,
+      "related": [
+        "team.memory"
+      ],
+      "slash": {
+        "aliases": [],
+        "auth": "none",
+        "categories": [
+          "team"
+        ],
+        "danger": "safe",
+        "deprecated": null,
+        "description": "Attribution recorded on this machine",
+        "examples": [
+          "team attribution"
+        ],
+        "hidden": true,
+        "long_description": null,
+        "name": "attribution",
+        "overlay": "none",
+        "palette": null,
+        "params": [],
+        "profile": null
+      },
+      "streaming": false,
+      "tags": [
+        "team"
+      ],
+      "timeout_secs": null
+    },
+    {
+      "cli_path": [
+        "team",
+        "memory"
+      ],
+      "handler": "team_memory",
+      "id": "team.memory",
+      "json_output": true,
+      "min_version": null,
+      "related": [
+        "team"
+      ],
+      "slash": {
+        "aliases": [],
+        "auth": "none",
+        "categories": [
+          "team"
+        ],
+        "danger": "safe",
+        "deprecated": null,
+        "description": "Team memory status on this machine: not available",
+        "examples": [
+          "team memory"
+        ],
+        "hidden": true,
+        "long_description": null,
+        "name": "memory",
+        "overlay": "none",
+        "palette": null,
+        "params": [],
+        "profile": null
+      },
+      "streaming": false,
+      "tags": [
+        "team"
       ],
       "timeout_secs": null
     },

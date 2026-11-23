@@ -95,6 +95,9 @@ pub enum Verb {
     /// Team operations: join an organization via invite code.
     #[command(hide = true)]
     Teams(TeamsArgs),
+    /// Local-only team surface: namespaces, proposals and attribution (on this machine).
+    #[command(hide = true)]
+    Team(TeamArgs),
     /// Configuration: get, set, list, edit.
     Config(ConfigArgs),
     /// Cloud operations: sync, profile, billing, credits.
@@ -1177,6 +1180,31 @@ pub struct TeamsImportExportArgs {
     /// Export format.
     #[arg(long, value_name = "FORMAT", default_value = "markdown")]
     pub format: String,
+}
+
+/// `mn team …` — the local-only team surface (D28).
+///
+/// Every answer is about this machine: local vault namespaces, a local
+/// proposal review inbox, local attribution, and an honest note that team
+/// memory needs a two-machine restore and is not available. There is no
+/// account, no organization claim and no remote screen here.
+#[derive(Debug, Args)]
+pub struct TeamArgs {
+    #[command(subcommand)]
+    pub action: Option<TeamLocalCommand>,
+}
+
+/// Local-only team subcommands. Each one answers about this machine.
+#[derive(Debug, Subcommand)]
+pub enum TeamLocalCommand {
+    /// Vault namespaces that exist on this machine.
+    Namespace,
+    /// Proposal review inbox kept on this machine.
+    Inbox,
+    /// Attribution recorded on this machine.
+    Attribution,
+    /// Team memory availability on this machine.
+    Memory,
 }
 
 /// Arguments for `mn teams join`.

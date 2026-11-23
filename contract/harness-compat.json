@@ -1,0 +1,352 @@
+{
+  "schema": "mn-harness-compat/1",
+  "generated": false,
+  "purpose": "P22-016/025: a checkable, source-derived compatibility manifest for MCP harness clients. It records documented registration, profile, handshake expectation, the expected discovered-tool surface, and one safe retrieval plus one expected denial per client. It is a manifest, not a receipt: no client run is claimed, and last_seen is explicitly not live health.",
+  "derived_from": [
+    {
+      "path": "crates/memnoth-mcp/npm/README.md",
+      "scope": "cli",
+      "provides": "host registration commands, default local profile memory, read-only env, dual protocol compatibility"
+    },
+    {
+      "path": "src/mcp/clients.rs",
+      "scope": "cli",
+      "provides": "per-client config paths, containers, formats and pasteable snippets"
+    },
+    {
+      "path": "src/mcp/mod.rs",
+      "scope": "cli",
+      "provides": "host-native registration arguments for OpenCode and Claude"
+    },
+    {
+      "path": "crates/memnoth-capability/src/profile.rs",
+      "scope": "cli",
+      "provides": "TOOL_PROFILES membership: the 22 names of the memory profile"
+    },
+    {
+      "path": "crates/memnoth-mcp/src/lib.rs",
+      "scope": "cli",
+      "provides": "2025-11-25 and 2026-07-28 protocol constants and read_only_refusal"
+    },
+    {
+      "path": "crates/memnoth-mcp/src/tests/part_02.rs",
+      "scope": "cli",
+      "provides": "read-only denial expectation: mem_search allowed, mem_add_fact refused"
+    },
+    {
+      "path": "crates/memnoth-mcp/src/tests/part_04.rs",
+      "scope": "cli",
+      "provides": "OpenCode default legacy protocol expectation and npm onboarding assertions"
+    },
+    {
+      "path": "crates/memnoth-mcp/src/visible.rs",
+      "scope": "cli",
+      "provides": "tools/list is sorted by name, so the expected tool order is deterministic"
+    }
+  ],
+  "last_seen != live_health": true,
+  "health_semantics": {
+    "assertion": "last_seen records when an observation was made; it is not a live health probe. A stale last_seen does not prove failure and a fresh last_seen does not prove health.",
+    "live_health": null,
+    "source": "plans/22-context-platform.md P22-020"
+  },
+  "server": {
+    "name": "memnoth",
+    "protocol": {
+      "supported": [
+        "2025-11-25",
+        "2026-07-28"
+      ],
+      "modern_default": "2026-07-28",
+      "legacy_initialize": "2025-11-25",
+      "source": "crates/memnoth-mcp/src/lib.rs:151-162"
+    },
+    "profiles": {
+      "default_local": "memory",
+      "default_cloud": "full",
+      "tool_counts": {
+        "micro": 4,
+        "memory": 22,
+        "code": 20,
+        "coord": 14,
+        "full": 49,
+        "agent": 6
+      },
+      "memory_tools": [
+        "kg_changes",
+        "kg_coverage",
+        "kg_index",
+        "kg_search",
+        "kg_status",
+        "kg_unresolved",
+        "mem_add_fact",
+        "mem_duplicates",
+        "mem_find_facts",
+        "mem_forget",
+        "mem_ingest",
+        "mem_merge",
+        "mem_related",
+        "mem_search",
+        "mem_stats",
+        "mem_supersede",
+        "now",
+        "vault_asof",
+        "vault_contradictions",
+        "vault_history",
+        "vault_invariants",
+        "vault_top"
+      ],
+      "source": "crates/memnoth-capability/src/profile.rs:101-223; crates/memnoth-mcp/src/lib.rs:25-42; crates/memnoth-mcp/npm/README.md:232-239"
+    },
+    "probes": {
+      "safe_retrieval": {
+        "tool": "mem_search",
+        "arguments": {
+          "query": "memnoth"
+        },
+        "expect": "isError false; a read over the vault, allowed under MEMNOTH_MCP_READ_ONLY=1",
+        "source": "crates/memnoth-mcp/src/tests/part_02.rs:3-11; crates/memnoth-mcp/src/lib.rs:46"
+      },
+      "expected_denial": {
+        "tool": "mem_add_fact",
+        "precondition": "MEMNOTH_MCP_READ_ONLY=1",
+        "expect_is_error": true,
+        "expect_text_contains": [
+          "read-only",
+          "--allow-writes"
+        ],
+        "source": "crates/memnoth-mcp/src/tests/part_02.rs:3-11; crates/memnoth-mcp/src/lib.rs:2597-2610"
+      }
+    }
+  },
+  "clients": {
+    "opencode": {
+      "display_name": "OpenCode",
+      "status": "not-live-verified",
+      "config_path": "project opencode.json(c) -> mcp.servers.memnoth",
+      "config_format": "JSONC",
+      "registration_command": "opencode mcp add --env MEMNOTH_MCP_DB=<absolute-vault> --env MEMNOTH_MCP_PROFILE=memory --env MEMNOTH_MCP_READ_ONLY=1 memnoth -- npx -y @astrivya/mcp@latest",
+      "registration_source": "src/mcp/mod.rs:1368-1392; crates/memnoth-mcp/npm/README.md:91-111",
+      "cli_managed_command": "mn mcp add --local --clients opencode",
+      "profile": "memory",
+      "handshake_protocol_version": "2025-11-25",
+      "handshake_basis": "documented-legacy-initialize (expected, not observed)",
+      "handshake_source": "crates/memnoth-mcp/src/tests/part_04.rs:591-602; crates/memnoth-mcp/npm/README.md:210-217",
+      "discovered_tools": {
+        "expected_from_profile": "memory",
+        "expected_tool_count": 22,
+        "expected_tools_ref": "server.profiles.memory_tools",
+        "observed": null
+      },
+      "safe_retrieval": {
+        "tool": "mem_search",
+        "arguments": {
+          "query": "memnoth"
+        },
+        "observed": null
+      },
+      "expected_denial": {
+        "tool": "mem_add_fact",
+        "precondition": "MEMNOTH_MCP_READ_ONLY=1",
+        "expect_is_error": true,
+        "expect_text_contains": [
+          "read-only",
+          "--allow-writes"
+        ],
+        "observed": null
+      },
+      "verification": {
+        "status": "not-live-verified",
+        "client_version": null,
+        "server_version": null,
+        "transcript": null
+      },
+      "last_seen": null
+    },
+    "codex": {
+      "display_name": "Codex CLI",
+      "status": "not-live-verified",
+      "config_path": "~/.codex/config.toml -> [mcp_servers.memnoth]",
+      "config_format": "TOML",
+      "registration_command": "codex mcp add memnoth --env MEMNOTH_MCP_DB=<absolute-vault> --env MEMNOTH_MCP_PROFILE=memory --env MEMNOTH_MCP_READ_ONLY=1 -- npx -y @astrivya/mcp@latest",
+      "registration_source": "crates/memnoth-mcp/npm/README.md:113-134",
+      "cli_managed_command": "mn mcp add --local --clients codex",
+      "profile": "memory",
+      "handshake_protocol_version": null,
+      "handshake_basis": null,
+      "handshake_source": "crates/memnoth-mcp/npm/README.md:210-217",
+      "discovered_tools": {
+        "expected_from_profile": "memory",
+        "expected_tool_count": 22,
+        "expected_tools_ref": "server.profiles.memory_tools",
+        "observed": null
+      },
+      "safe_retrieval": {
+        "tool": "mem_search",
+        "arguments": {
+          "query": "memnoth"
+        },
+        "observed": null
+      },
+      "expected_denial": {
+        "tool": "mem_add_fact",
+        "precondition": "MEMNOTH_MCP_READ_ONLY=1",
+        "expect_is_error": true,
+        "expect_text_contains": [
+          "read-only",
+          "--allow-writes"
+        ],
+        "observed": null
+      },
+      "verification": {
+        "status": "not-live-verified",
+        "client_version": null,
+        "server_version": null,
+        "transcript": null
+      },
+      "last_seen": null
+    },
+    "claude": {
+      "display_name": "Claude Code",
+      "status": "not-live-verified",
+      "config_path": "~/.claude.json -> mcpServers.memnoth",
+      "config_format": "JSON",
+      "registration_command": "claude mcp add --transport stdio --env MEMNOTH_MCP_DB=<absolute-vault> --env MEMNOTH_MCP_PROFILE=memory --env MEMNOTH_MCP_READ_ONLY=1 memnoth -- npx -y @astrivya/mcp@latest",
+      "registration_source": "crates/memnoth-mcp/npm/README.md:136-144; src/mcp/mod.rs:1042-1046",
+      "cli_managed_command": "mn mcp add --local --clients claude",
+      "profile": "memory",
+      "handshake_protocol_version": null,
+      "handshake_basis": null,
+      "handshake_source": "crates/memnoth-mcp/npm/README.md:210-217",
+      "discovered_tools": {
+        "expected_from_profile": "memory",
+        "expected_tool_count": 22,
+        "expected_tools_ref": "server.profiles.memory_tools",
+        "observed": null
+      },
+      "safe_retrieval": {
+        "tool": "mem_search",
+        "arguments": {
+          "query": "memnoth"
+        },
+        "observed": null
+      },
+      "expected_denial": {
+        "tool": "mem_add_fact",
+        "precondition": "MEMNOTH_MCP_READ_ONLY=1",
+        "expect_is_error": true,
+        "expect_text_contains": [
+          "read-only",
+          "--allow-writes"
+        ],
+        "observed": null
+      },
+      "verification": {
+        "status": "not-live-verified",
+        "client_version": null,
+        "server_version": null,
+        "transcript": null
+      },
+      "last_seen": null
+    },
+    "cursor": {
+      "display_name": "Cursor",
+      "status": "not-live-verified",
+      "config_path": "~/.cursor/mcp.json -> mcpServers.memnoth",
+      "config_format": "JSON",
+      "registration_command": null,
+      "registration_source": "src/mcp/clients.rs:1100-1103; crates/memnoth-mcp/npm/README.md:199-202",
+      "cli_managed_command": "mn mcp add --local --clients cursor",
+      "profile": "memory",
+      "handshake_protocol_version": null,
+      "handshake_basis": null,
+      "handshake_source": "crates/memnoth-mcp/npm/README.md:210-217",
+      "discovered_tools": {
+        "expected_from_profile": "memory",
+        "expected_tool_count": 22,
+        "expected_tools_ref": "server.profiles.memory_tools",
+        "observed": null
+      },
+      "safe_retrieval": {
+        "tool": "mem_search",
+        "arguments": {
+          "query": "memnoth"
+        },
+        "observed": null
+      },
+      "expected_denial": {
+        "tool": "mem_add_fact",
+        "precondition": "MEMNOTH_MCP_READ_ONLY=1",
+        "expect_is_error": true,
+        "expect_text_contains": [
+          "read-only",
+          "--allow-writes"
+        ],
+        "observed": null
+      },
+      "verification": {
+        "status": "not-live-verified",
+        "client_version": null,
+        "server_version": null,
+        "transcript": null
+      },
+      "last_seen": null
+    },
+    "zed": {
+      "display_name": "Zed",
+      "status": "not-live-verified",
+      "config_path": "settings.json -> context_servers.memnoth",
+      "config_format": "JSONC",
+      "registration_command": "Zed Command Palette -> `agent: add context server` (JSONC snippet; no host CLI)",
+      "registration_source": "src/mcp/clients.rs:1137-1140; crates/memnoth-mcp/npm/README.md:146-162",
+      "cli_managed_command": "mn mcp add --local --clients zed",
+      "profile": "memory",
+      "handshake_protocol_version": null,
+      "handshake_basis": null,
+      "handshake_source": "crates/memnoth-mcp/npm/README.md:210-217",
+      "discovered_tools": {
+        "expected_from_profile": "memory",
+        "expected_tool_count": 22,
+        "expected_tools_ref": "server.profiles.memory_tools",
+        "observed": null
+      },
+      "safe_retrieval": {
+        "tool": "mem_search",
+        "arguments": {
+          "query": "memnoth"
+        },
+        "observed": null
+      },
+      "expected_denial": {
+        "tool": "mem_add_fact",
+        "precondition": "MEMNOTH_MCP_READ_ONLY=1",
+        "expect_is_error": true,
+        "expect_text_contains": [
+          "read-only",
+          "--allow-writes"
+        ],
+        "observed": null
+      },
+      "verification": {
+        "status": "not-live-verified",
+        "client_version": null,
+        "server_version": null,
+        "transcript": null
+      },
+      "last_seen": null
+    }
+  },
+  "unknowns": {
+    "health_semantics.live_health": "A live health probe is deliberately not part of this data file; by construction last_seen is an observation time, not a health verdict (P22-020).",
+    "clients.codex.handshake_protocol_version": "No Codex-specific initialize/server-discover transcript is recorded in CLI source or config. The stdio server supports both 2025-11-25 and 2026-07-28, but which one Codex negotiates is not documented here; P22-025 runtime transcript is open.",
+    "clients.codex": "No live Codex run is recorded for this build. Every `observed` field, the version fields and last_seen are null rather than inferred from documentation.",
+    "clients.opencode": "No live OpenCode run is recorded for this build. The 2025-11-25 value is a documented expectation from the npm README and the part_04 onboarding test, not an observed handshake; observed fields, versions and last_seen are null.",
+    "clients.claude.handshake_protocol_version": "No Claude Code specific handshake transcript is recorded in this repository; the server's generic dual-protocol note names no client mode.",
+    "clients.claude": "No live Claude Code run is recorded for this build. Observed fields, versions and last_seen are null; the registration command is documented, not executed.",
+    "clients.cursor.registration_command": "Cursor has no `mcp add` host CLI in this repository; its registration is a JSON edit of ~/.cursor/mcp.json, so there is no command to record (src/mcp/clients.rs:1100-1103).",
+    "clients.cursor.handshake_protocol_version": "No Cursor specific handshake transcript is recorded in this repository; the server's generic dual-protocol note names no client mode.",
+    "clients.cursor": "No live Cursor run is recorded for this build. Observed fields, versions and last_seen are null; P22-025 remains open for Cursor.",
+    "clients.zed.handshake_protocol_version": "No Zed specific handshake transcript is recorded in this repository; the server's generic dual-protocol note names no client mode.",
+    "clients.zed": "No live Zed run is recorded for this build. Zed settings are JSONC and the CLI prints a Command Palette snippet rather than rewriting the file; observed fields, versions and last_seen are null."
+  }
+}

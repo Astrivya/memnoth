@@ -1,7 +1,7 @@
 //! Prometheus metrics surface for the auth crate. The HTTP layer
 //! (`memnoth-mcp`'s `http.rs`) increments one counter per `verify`
-//! call and serves the exposition on `GET /metrics` (scraped by the
-//! in-network Prometheus; see `astrivya-deploy/prometheus.yml`).
+//! call and serves the exposition on `GET /metrics` for operators
+//! to scrape.
 //!
 //! ## Feature gate
 //! The `prometheus` feature is **opt-in**. Without it, the public
@@ -21,10 +21,9 @@
 //!   `tools/call` requests. It deliberately has no user, project, or tool-name
 //!   labels and records no arguments or results.
 //!
-//! These two are the metrics described in
-//! `D:\xclaw\memnoth-findings.md` §13 (T8 handoff). The Grafana
-//! dashboard (`astrivya-deploy` → `astrivya-memnoth.json`) queries
-//! `rate(memnoth_mcp_auth_total[5m])` by mode / reason.
+//! These names and label values are part of the observable surface:
+//! keep them stable so anything reading `GET /metrics` continues to
+//! line up across builds.
 
 use crate::{AuthFailureReason, AuthMode};
 

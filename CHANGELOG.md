@@ -16,14 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Support-widget availability probe.** `GET /api/support/chat` reports `available: true` or `available: false` with `code: "support_unavailable"`, without exposing a key value, so the widget can check availability before a visitor types anything.
 - **winget manifest auto-fill.** The release workflow writes a filled `dist/<tag>/winget.yaml` from the built Windows archive and fails if a placeholder survives templating. Publishing to winget-pkgs remains a human step.
 - **One-click MCP deep links.** The landing page requests freshly minted per-user links from `POST /api/mcp/install` for Cursor and VS Code instead of pasting a static config into the URL, and offers manual host links when a link cannot be prepared. The CLI's one-click client configs were corrected with registration tests.
-- **D33 dry-run rehearsal harness.** `deploy/rehearsal_d33.py` (11 tests) exercises paired-backup and purge replay offline. It is a dry run and explicitly does not close the live D33 gate.
+- **Offline replay verification.** A dry-run harness exercises paired-backup and purge replay offline. It is a dry run only: it ships no backup capability and does not close the live D33 gate.
 
 ### Changed
 
 - **Docs and AGENTS drift corrections.** CLI docs now align install and MCP setup commands with the published release, list every setup step, and regenerate the command surfaces with them. Workspace agent guidance and operational docs were corrected to describe the shipped install and signing surface.
 - **Symmetric production install routing.** Both `/install` and `/install.ps1` are routed from the host Caddy config to `/srv/memnoth-dist`, so they serve identical published bytes. The routes are versioned and validated, with URL smoke checks and a documented host-level override.
-- **Guest membership expiry.** Guest memberships now expire 30 days after invite acceptance.
-- **Service-account auth routing.** Service-account tokens are routed through the hashed API-key lookup instead of the ordinary session path.
+- **Guest invite expiry in client views.** Invite and membership responses carry guest `expires_at` timestamps, which the CLI surfaces so a caller can see when a guest's access ends.
+- **Service-account sign-in.** Service accounts authenticate with an API key rather than an interactive device-flow session; `mn auth` keeps reading that key from the OS credential store.
 
 ### Fixed
 
@@ -52,7 +52,7 @@ this release and carry the documented Gatekeeper/SmartScreen caveat.
 
 ### Changed
 
-- SCIM-provisioned users are joined to the configured org in one transaction and deprovisioning is a soft revoke with an audit record.
+- The billing entitlements response includes a `scim` flag alongside the other entitlement fields, so callers can see whether directory provisioning is available for the org.
 - `mn mcp add` preserves Zed JSONC comments and unrelated settings; `mn update --rollback` can select a sanctioned previous version; sync import refuses a decrypted vault that fails its invariants.
 
 ## [0.1.0-beta.13] - 2026-11-21

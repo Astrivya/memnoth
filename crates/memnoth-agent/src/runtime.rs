@@ -8,6 +8,9 @@
 
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
@@ -316,6 +319,419 @@ impl Default for RunRegistry {
     }
 }
 
+// ---------------------------------------------------------------------------
+// AgentRun: the seven-phase state machine, journaled outside the message list
+// ---------------------------------------------------------------------------
+
+/// The seven phases of a delegated run (Wave 5 §5.3 / F-03).
+///
+/// This is the user-visible lifecycle. It is deliberately a different type
+/// from [`RunStatus`]: the registry's four terminal labels are the row-level
+/// projection a Deck renders, while these phases are the state machine whose
+/// every edge is appended to a session journal. `waiting_approval` in
+/// particular is a *live* phase — a run waiting on a person is not failed and
+/// not idle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentPhase {
+    /// Admitted but not yet executing.
+    Queued,
+    /// Executing; tool boundaries are being crossed.
+    Running,
+    /// Paused on a permission or question answered at the root.
+    WaitingApproval,
+    /// Completed with a validated result.
+    Completed,
+    /// Failed with a typed reason.
+    Failed,
+    /// Cancelled by a person or by an approval denial.
+    Cancelled,
+    /// The recorded process identity could not be proven after a restart.
+    Orphaned,
+}
+
+impl AgentPhase {
+    /// The stable wire spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AgentPhase::Queued => "queued",
+            AgentPhase::Running => "running",
+            AgentPhase::WaitingApproval => "waiting_approval",
+            AgentPhase::Completed => "completed",
+            AgentPhase::Failed => "failed",
+            AgentPhase::Cancelled => "cancelled",
+            AgentPhase::Orphaned => "orphaned",
+        }
+    }
+
+    /// Parse a wire spelling, falling back to [`AgentPhase::Queued`].
+    pub fn from_label(label: &str) -> Self {
+        match label {
+            "running" => AgentPhase::Running,
+            "waiting_approval" => AgentPhase::WaitingApproval,
+            "completed" => AgentPhase::Completed,
+            "failed" => AgentPhase::Failed,
+            "cancelled" => AgentPhase::Cancelled,
+            "orphaned" => AgentPhase::Orphaned,
+            _ => AgentPhase::Queued,
+        }
+    }
+
+    /// Whether this phase is terminal. No edge leaves a terminal phase.
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            AgentPhase::Completed
+                | AgentPhase::Failed
+                | AgentPhase::Cancelled
+                | AgentPhase::Orphaned
+        )
+    }
+
+    /// Whether `next` is a legal edge from `self`.
+    ///
+    /// The table is the invariant: there is no back edge from a terminal
+    /// phase, approval only goes to `running` or `cancelled`, and any live
+    /// phase can be orphaned by reconciliation (S-DLG-4).
+    fn allows(self, next: Self) -> bool {
+        if self.is_terminal() {
+            return false;
+        }
+        match self {
+            AgentPhase::Queued => matches!(
+                next,
+                AgentPhase::Running | AgentPhase::Cancelled | AgentPhase::Orphaned
+            ),
+            AgentPhase::Running => matches!(
+                next,
+                AgentPhase::WaitingApproval
+                    | AgentPhase::Completed
+                    | AgentPhase::Failed
+                    | AgentPhase::Cancelled
+                    | AgentPhase::Orphaned
+            ),
+            AgentPhase::WaitingApproval => matches!(
+                next,
+                AgentPhase::Running | AgentPhase::Cancelled | AgentPhase::Orphaned
+            ),
+            AgentPhase::Completed
+            | AgentPhase::Failed
+            | AgentPhase::Cancelled
+            | AgentPhase::Orphaned => false,
+        }
+    }
+}
+
+/// One appended row in a session's run journal.
+///
+/// This is a *fact about a run*, not a session message. It lives in its own
+/// JSONL beside the session, so compaction of the message list cannot drop an
+/// in-flight run (F-05). The `detail` is a short reason or digest — never file
+/// content, model output, or a secret.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunTransition {
+    /// Schema version; `1` for every row this build writes.
+    pub v: u32,
+    /// Monotonically increasing row number within the session journal.
+    pub seq: u64,
+    /// Milliseconds since the Unix epoch.
+    pub ts_ms: i64,
+    /// The session the run belongs to, when one was named.
+    pub session: Option<String>,
+    /// The run this transition belongs to.
+    pub run: String,
+    /// The parent run, when this child was delegated.
+    pub parent: Option<String>,
+    /// The phase entered by this row.
+    pub phase: AgentPhase,
+    /// A short reason or digest, when the edge carries one.
+    pub detail: Option<String>,
+}
+
+/// Schema version written into every [`RunTransition`].
+pub const RUN_JOURNAL_VERSION: u32 = 1;
+
+/// An append-only journal of run transitions, stored outside the message list.
+///
+/// A journal is opened for a path (conventionally
+/// `.memnoth/sessions/<id>/runs.jsonl`). Opening resumes the sequence from the
+/// highest row already on disk, so a restart appends instead of reusing ids.
+#[derive(Debug)]
+pub struct RunJournal {
+    path: PathBuf,
+    seq: u64,
+}
+
+impl RunJournal {
+    /// Open (or create) the journal at `path`, resuming its sequence.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("cannot create run journal dir {}", parent.display()))?;
+        }
+        let seq = match fs::read_to_string(&path) {
+            Ok(text) => text
+                .lines()
+                .filter_map(|line| serde_json::from_str::<RunTransition>(line).ok())
+                .map(|row| row.seq)
+                .max()
+                .unwrap_or(0),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(error) => return Err(error).context("cannot read run journal"),
+        };
+        Ok(Self { path, seq })
+    }
+
+    /// The file this journal appends to.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The sequence number of the last appended row.
+    pub fn seq(&self) -> u64 {
+        self.seq
+    }
+
+    /// Append one transition and return it.
+    fn append(
+        &mut self,
+        run: &str,
+        session: Option<&str>,
+        parent: Option<&str>,
+        phase: AgentPhase,
+        detail: Option<&str>,
+    ) -> Result<RunTransition> {
+        self.seq += 1;
+        let row = RunTransition {
+            v: RUN_JOURNAL_VERSION,
+            seq: self.seq,
+            ts_ms: now_ms(),
+            session: session.map(str::to_string),
+            run: run.to_string(),
+            parent: parent.map(str::to_string),
+            phase,
+            detail: detail.map(str::to_string),
+        };
+        let line = serde_json::to_string(&row)?;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .with_context(|| format!("cannot open run journal {}", self.path.display()))?;
+        writeln!(file, "{line}")?;
+        Ok(row)
+    }
+}
+
+/// Read every valid row of a run journal, in append order.
+///
+/// A malformed trailing line is skipped, exactly as for child logs: a run may
+/// be appending while another reader looks on.
+pub fn replay_run_journal(path: impl AsRef<Path>) -> Result<Vec<RunTransition>> {
+    let path = path.as_ref();
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error).context("cannot read run journal"),
+    };
+    Ok(text
+        .lines()
+        .filter_map(|line| serde_json::from_str::<RunTransition>(line).ok())
+        .collect())
+}
+
+/// Rebuild each run's last phase from a journal.
+pub fn last_phases(path: impl AsRef<Path>) -> Result<BTreeMap<String, AgentPhase>> {
+    let mut phases = BTreeMap::new();
+    for row in replay_run_journal(path)? {
+        phases.insert(row.run, row.phase);
+    }
+    Ok(phases)
+}
+
+/// Run ids whose last recorded phase is live at the point of a restart.
+///
+/// These are the runs recovery must either adopt (identity proven) or mark
+/// orphaned (identity unproven). A run already orphaned is not a candidate.
+pub fn orphan_candidates(path: impl AsRef<Path>) -> Result<Vec<String>> {
+    Ok(last_phases(path)?
+        .into_iter()
+        .filter(|(_, phase)| !phase.is_terminal())
+        .map(|(run, _)| run)
+        .collect())
+}
+
+/// One run driven through the seven-phase state machine.
+///
+/// `AgentRun` owns its journal: every successful [`Self::start`],
+/// [`Self::wait_for_approval`], [`Self::complete`] and so on appends a row
+/// before returning, so a crash leaves a recoverable history rather than an
+/// ambiguous "maybe it finished".
+#[derive(Debug)]
+pub struct AgentRun {
+    /// Stable run id.
+    pub id: String,
+    /// The session that owns the run, when one was named.
+    pub session_id: Option<String>,
+    /// The parent run, when this run was delegated.
+    pub parent: Option<String>,
+    /// The agent spec name.
+    pub agent: String,
+    /// The current phase.
+    pub phase: AgentPhase,
+    /// When the current phase was entered.
+    pub entered_ms: i64,
+    /// The reason attached to the edge that entered this phase.
+    pub detail: Option<String>,
+    journal: RunJournal,
+}
+
+impl AgentRun {
+    /// Enqueue a new run: append the first `queued` row and return the run.
+    pub fn enqueue(
+        id: impl Into<String>,
+        session_id: Option<&str>,
+        parent: Option<&str>,
+        agent: &str,
+        journal_path: impl AsRef<Path>,
+    ) -> Result<Self> {
+        let id = id.into();
+        let mut journal = RunJournal::open(journal_path)?;
+        let row = journal.append(
+            &id,
+            session_id,
+            parent,
+            AgentPhase::Queued,
+            Some(&format!("agent {agent}")),
+        )?;
+        Ok(Self {
+            id,
+            session_id: session_id.map(str::to_string),
+            parent: parent.map(str::to_string),
+            agent: agent.to_string(),
+            phase: AgentPhase::Queued,
+            entered_ms: row.ts_ms,
+            detail: row.detail,
+            journal,
+        })
+    }
+
+    /// Reattach to an existing journal for `id`, resuming from its last phase.
+    ///
+    /// This is the restart entry point: the caller can then call
+    /// [`Self::orphan`] when reconciliation cannot prove the process identity.
+    pub fn attach(id: impl Into<String>, journal_path: impl AsRef<Path>) -> Result<Self> {
+        let id = id.into();
+        let journal = RunJournal::open(journal_path)?;
+        let phase = last_phases(journal.path())?
+            .get(&id)
+            .copied()
+            .unwrap_or(AgentPhase::Queued);
+        let detail = replay_run_journal(journal.path())?
+            .into_iter()
+            .rev()
+            .find(|row| row.run == id)
+            .and_then(|row| row.detail);
+        let (session, parent, agent) = replay_run_journal(journal.path())?
+            .into_iter()
+            .find(|row| row.run == id)
+            .map(|row| {
+                (
+                    row.session,
+                    row.parent,
+                    row.detail
+                        .and_then(|d| d.strip_prefix("agent ").map(str::to_string)),
+                )
+            })
+            .unwrap_or((None, None, None));
+        Ok(Self {
+            id,
+            session_id: session,
+            parent,
+            agent: agent.unwrap_or_default(),
+            phase,
+            entered_ms: now_ms(),
+            detail,
+            journal,
+        })
+    }
+
+    /// The sequence number of the last row this run appended.
+    pub fn seq(&self) -> u64 {
+        self.journal.seq()
+    }
+
+    /// The journal file this run appends to.
+    pub fn journal_path(&self) -> &Path {
+        self.journal.path()
+    }
+
+    fn move_to(&mut self, next: AgentPhase, detail: Option<&str>) -> Result<()> {
+        if !self.phase.allows(next) {
+            bail!(
+                "run {} cannot move from {} to {}",
+                self.id,
+                self.phase.as_str(),
+                next.as_str()
+            );
+        }
+        let row = self.journal.append(
+            &self.id,
+            self.session_id.as_deref(),
+            self.parent.as_deref(),
+            next,
+            detail,
+        )?;
+        self.phase = next;
+        self.entered_ms = row.ts_ms;
+        self.detail = row.detail;
+        Ok(())
+    }
+
+    /// `queued → running`.
+    pub fn start(&mut self) -> Result<()> {
+        self.move_to(AgentPhase::Running, None)
+    }
+
+    /// `running → waiting_approval`, naming what the person must answer.
+    pub fn wait_for_approval(&mut self, what: impl AsRef<str>) -> Result<()> {
+        self.move_to(AgentPhase::WaitingApproval, Some(what.as_ref()))
+    }
+
+    /// `waiting_approval → running`, after the person allowed the call.
+    pub fn approve(&mut self) -> Result<()> {
+        self.move_to(AgentPhase::Running, Some("approval granted"))
+    }
+
+    /// `waiting_approval → cancelled`, after a denial or a timeout.
+    pub fn deny(&mut self) -> Result<()> {
+        self.move_to(AgentPhase::Cancelled, Some("approval denied"))
+    }
+
+    /// `running → completed`.
+    pub fn complete(&mut self) -> Result<()> {
+        self.move_to(AgentPhase::Completed, None)
+    }
+
+    /// `running → failed`, with the reason.
+    pub fn fail(&mut self, reason: impl AsRef<str>) -> Result<()> {
+        self.move_to(AgentPhase::Failed, Some(reason.as_ref()))
+    }
+
+    /// Live phase → `cancelled`.
+    pub fn cancel(&mut self) -> Result<()> {
+        self.move_to(AgentPhase::Cancelled, None)
+    }
+
+    /// Any live phase → `orphaned`, with the reconciliation reason.
+    pub fn orphan(&mut self, reason: impl AsRef<str>) -> Result<()> {
+        self.move_to(AgentPhase::Orphaned, Some(reason.as_ref()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -424,5 +840,101 @@ mod tests {
         let _ = reg.register(make_run("newer"));
         let listed: Vec<String> = reg.list().into_iter().map(|e| e.run.id.clone()).collect();
         assert_eq!(listed, vec!["newer", "older"]);
+    }
+
+    fn journal(name: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "memnoth-agent-journal-{}-{name}.jsonl",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        path
+    }
+
+    #[test]
+    fn every_transition_appends_a_row_and_no_edge_leaves_a_terminal_phase() {
+        let path = journal("edges");
+        let mut run = AgentRun::enqueue("r1", Some("s1"), None, "scout", &path).unwrap();
+        assert_eq!(run.phase, AgentPhase::Queued);
+        run.start().unwrap();
+        run.wait_for_approval("write the file").unwrap();
+        assert_eq!(run.phase, AgentPhase::WaitingApproval);
+        run.approve().unwrap();
+        run.complete().unwrap();
+        assert_eq!(run.phase, AgentPhase::Completed);
+
+        // A terminal run is frozen: every further edge is refused.
+        assert!(run.start().is_err());
+        assert!(run.cancel().is_err());
+        assert!(run.orphan("late").is_err());
+
+        let rows = replay_run_journal(&path).unwrap();
+        let phases: Vec<AgentPhase> = rows.iter().map(|r| r.phase).collect();
+        assert_eq!(
+            phases,
+            vec![
+                AgentPhase::Queued,
+                AgentPhase::Running,
+                AgentPhase::WaitingApproval,
+                AgentPhase::Running,
+                AgentPhase::Completed,
+            ]
+        );
+        assert_eq!(
+            rows.iter().map(|r| r.seq).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 5]
+        );
+        assert!(
+            rows.iter()
+                .all(|r| r.v == RUN_JOURNAL_VERSION && r.run == "r1")
+        );
+        assert_eq!(
+            last_phases(&path).unwrap().get("r1"),
+            Some(&AgentPhase::Completed)
+        );
+    }
+
+    #[test]
+    fn restart_reports_only_live_runs_as_orphan_candidates() {
+        let path = journal("candidates");
+        let mut done = AgentRun::enqueue("done", None, None, "scout", &path).unwrap();
+        done.start().unwrap();
+        done.complete().unwrap();
+        let mut live = AgentRun::enqueue("live", None, None, "worker", &path).unwrap();
+        live.start().unwrap();
+        let mut waiting = AgentRun::enqueue("waiting", None, None, "plan", &path).unwrap();
+        waiting.start().unwrap();
+        waiting.wait_for_approval("a question").unwrap();
+
+        let candidates = orphan_candidates(&path).unwrap();
+        assert_eq!(candidates, vec!["live", "waiting"]);
+        assert!(!candidates.contains(&"done".to_string()));
+
+        let mut attached = AgentRun::attach("live", &path).unwrap();
+        assert_eq!(attached.phase, AgentPhase::Running);
+        attached
+            .orphan("process identity unproven at restart")
+            .unwrap();
+        assert_eq!(
+            orphan_candidates(&path).unwrap(),
+            vec!["waiting"],
+            "only the still-live run remains a candidate"
+        );
+        assert_eq!(
+            last_phases(&path).unwrap().get("live"),
+            Some(&AgentPhase::Orphaned)
+        );
+    }
+
+    #[test]
+    fn an_illegal_edge_is_refused_without_appending() {
+        let path = journal("illegal");
+        let mut run = AgentRun::enqueue("r", None, None, "scout", &path).unwrap();
+        assert!(run.complete().is_err(), "queued cannot jump to completed");
+        assert_eq!(run.seq(), 1, "a refused edge writes no row");
+        run.start().unwrap();
+        assert!(run.wait_for_approval("x").is_ok());
+        assert!(run.complete().is_err(), "approval must be resolved first");
+        assert_eq!(run.seq(), 3);
     }
 }

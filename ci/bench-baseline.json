@@ -1,0 +1,136 @@
+{
+  "binary": {
+    "path": "D:/memnoth-builds-cache/memnoth-target/debug/mn.exe",
+    "version": "memnoth 0.1.2"
+  },
+  "captured_at": "2026-11-21T18:10:35Z",
+  "classification": "derived diagnostic, not official score",
+  "commit": "b1c463a3283491b6d2e753606992205008bfba33",
+  "commit_dirty": true,
+  "complete": true,
+  "dataset_sha256": "0379291ca0bfb52abde9b10c1a11304c07ab385112d5a01b8c52f531c0fc5fa0",
+  "datasets": {
+    "ci/handoff-cases.json": "6ca4c390f49122c2d413aa5b4e53289625fef1b3adaa9888b14f0f8e82f0b62d",
+    "ci/kg-verify-cases.json": "4150e75b4bace5a4238260c0bd92f9b910508d004a4d152cc517f2e1d0f99ada",
+    "ci/lme-cases.json": "881fe79523d8c71b11f844ced9a0a93fcc6ae71ad880a4b6872a84a62644dba7",
+    "ci/repoqa-cases.json": "7409c3dbfb49a85c603d80c9320145b1ea6ae69f952152950c85a89a82caa3e8",
+    "ci/trs-cases.json": "3f67ebcbb2c053bcb2e453705018974b0d3414a3a7ebc42a274b45449da844ef"
+  },
+  "date": "2026-11-21",
+  "lanes": {
+    "handoff": {
+      "classification": "derived diagnostic, not official score",
+      "command": "mn bench handoff-verify --json",
+      "data": {
+        "cases": 14,
+        "failed": 0,
+        "fixture": "ci/handoff-cases.json",
+        "gate": "pass",
+        "passed": 14,
+        "schema": "mn-handoff-result/1"
+      },
+      "exit_code": 0,
+      "model_free": true,
+      "ok": true
+    },
+    "kg": {
+      "classification": "derived diagnostic, not official score",
+      "command": "mn bench kg-verify --json",
+      "data": {
+        "cases": 11,
+        "failed": 0,
+        "fixture": "ci/kg-verify-cases.json",
+        "gate": "pass",
+        "index_budget": {
+          "gate": "skipped",
+          "reason": "no --index-budget-root supplied"
+        },
+        "passed": 11,
+        "schema": "mn-kg-result/1"
+      },
+      "exit_code": 0,
+      "model_free": true,
+      "ok": true
+    },
+    "lme": {
+      "classification": "derived diagnostic, not official score",
+      "command": "mn bench lme-verify --json",
+      "data": {
+        "cases": 7,
+        "diagnostic": "derived",
+        "failed": 0,
+        "fixture": "ci/lme-cases.json",
+        "gate": "pass",
+        "note": "Derived diagnostic of the vault's temporal recall, not an official LongMemEval score and not comparable to vendor-reported results.",
+        "official": false,
+        "passed": 7,
+        "schema": "mn-lme-result/1"
+      },
+      "exit_code": 0,
+      "model_free": true,
+      "ok": true
+    },
+    "proof": {
+      "classification": "derived diagnostic, not official score",
+      "command": "mn bench proof --result <generated-result.json> --json",
+      "data": {
+        "validated": [
+          {
+            "commit": "b1c463a3283491b6d2e753606992205008bfba33",
+            "observed_at": "2026-11-21T18:10:32Z",
+            "raw_score": 1.0,
+            "source": "<generated-result.json>",
+            "status": "adapted"
+          }
+        ]
+      },
+      "exit_code": 0,
+      "model_free": true,
+      "ok": true
+    },
+    "repoqa": {
+      "classification": "derived diagnostic, not official score",
+      "command": "mn bench repo-qa-verify --json",
+      "data": {
+        "baseline": {
+          "min_mrr": 0.95,
+          "min_recall_at_10": 0.95
+        },
+        "disclaimer": "Derived, synthetic diagnostic on a fixed in-memory seed with hand-written ground truth. Not an official RepoQA score and not extrapolated to any full RepoQA suite or real repository.",
+        "fixture": "ci/repoqa-cases.json",
+        "gate": "pass",
+        "label": "RepoQA-derived diagnostic (NOT an official RepoQA score)",
+        "metrics": {
+          "mrr": 1.0,
+          "recall_at_10": 1.0,
+          "top_k": 10
+        },
+        "regressions": [],
+        "schema": "mn-repoqa-result/1",
+        "scope": "21 seeded symbols across 3 languages; 21 hand-written queries; local deterministic FTS rank only"
+      },
+      "exit_code": 0,
+      "model_free": true,
+      "ok": true
+    },
+    "trs": {
+      "classification": "derived diagnostic, not official score",
+      "command": "mn bench trs-verify --json",
+      "data": {
+        "cases": 7,
+        "failed": 0,
+        "fixture": "ci/trs-cases.json",
+        "gate": "pass",
+        "passed": 7,
+        "schema": "mn-trs-result/1"
+      },
+      "exit_code": 0,
+      "model_free": true,
+      "ok": true
+    }
+  },
+  "model_free": true,
+  "no_network": true,
+  "notes": "Deterministic verifier lanes only; no model and no network. Each lane is a derived diagnostic, not an official score. The proof lane validates a synthetic, self-consistent result because no committed scoreboard exists yet. Optional mts lane is recorded only when the CLI ships mts-verify.",
+  "schema": "mn-bench-baseline/1"
+}

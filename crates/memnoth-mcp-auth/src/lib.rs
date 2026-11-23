@@ -2,7 +2,7 @@
 //! transport. Three modes (static bearer, HS256 user JWT, ZITADEL RS256)
 //! behind one trait, all in-process, fail-closed.
 //!
-//! See `D:\xclaw\memnoth-findings.md` §12 for the design doc.
+//! See the project's internal design notes for the fail-closed verifier contract §12 for the design doc.
 //!
 //! ## Hot path
 //! `Authenticator::verify(&authorization_header) -> Result<AuthContext, AuthError>`

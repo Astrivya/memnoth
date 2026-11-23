@@ -112,8 +112,24 @@ pub enum BenchCommand {
     RepoQaVerify(crate::bench_repoqa::RepoQaVerifyArgs),
     /// Verify model-free LongMemEval-S-derived temporal cases.
     LmeVerify(crate::bench_lme::LmeVerifyArgs),
+    /// Verify deterministic MTS-60-derived mechanical cases with no model or network.
+    MtsVerify(crate::bench_mts::MtsVerifyArgs),
+    /// Validate official benchmark manifests and results (no model or network).
+    OfficialVerify(crate::bench_official::OfficialVerifyArgs),
+    /// Validate publishable LoCoMo raw-run artifacts and their scoreboard.
+    LocomoVerify(LocomoVerifyArgs),
     /// Validate committed benchmark results and the scoreboard before publication.
     Proof(ProofArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub struct LocomoVerifyArgs {
+    /// Publishable LoCoMo raw-run artifact JSON to validate (repeatable).
+    #[arg(long)]
+    pub artifact: Vec<std::path::PathBuf>,
+    /// Published scoreboard document to reproduce from the raw artifacts.
+    #[arg(long)]
+    pub scoreboard: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -219,8 +235,50 @@ pub fn run(_ctx: &AppContext, args: &BenchArgs) -> Result<Outcome> {
         BenchCommand::HandoffVerify(verify) => crate::bench_handoff::run(verify),
         BenchCommand::RepoQaVerify(verify) => crate::bench_repoqa::run(verify),
         BenchCommand::LmeVerify(verify) => crate::bench_lme::run(verify),
+        BenchCommand::MtsVerify(verify) => crate::bench_mts::run(verify),
+        BenchCommand::OfficialVerify(verify) => crate::bench_official::run(verify),
+        BenchCommand::LocomoVerify(verify) => validate_locomo_artifact(verify),
         BenchCommand::Proof(proof) => validate_proof(proof),
     }
+}
+
+/// Validate committed LoCoMo raw-run artifacts and the generated scoreboard.
+fn validate_locomo_artifact(args: &LocomoVerifyArgs) -> Result<Outcome> {
+    use serde_json::json;
+    if let Some(doc) = &args.scoreboard {
+        let check = crate::bench_locomo_artifact::validate_scoreboard_files(doc, &args.artifact)
+            .map_err(|v| {
+                anyhow::anyhow!("{}", crate::bench_locomo_artifact::format_violations(&v))
+            })?;
+        return Ok(Outcome::new(
+            "bench.locomo.verify",
+            format!("scoreboard reproduced from {} raw artifact(s)", check.rows),
+            json!({ "rows": check.rows, "sources": check.sources }),
+        ));
+    }
+    if args.artifact.is_empty() {
+        anyhow::bail!("bench locomo-verify: pass --artifact <file> or --scoreboard <file>");
+    }
+    let mut validated = Vec::new();
+    for path in &args.artifact {
+        let artifact = crate::bench_locomo_artifact::validate_artifact_file(path).map_err(|v| {
+            anyhow::anyhow!("{}", crate::bench_locomo_artifact::format_violations(&v))
+        })?;
+        validated.push(json!({
+            "source": path.display().to_string(),
+            "result_id": artifact.result_id,
+            "status": artifact.status.as_str(),
+            "score_kind": artifact.score_kind.as_str(),
+            "reported_score": artifact.reported_score,
+            "computed_score": artifact.computed_score,
+            "observed_at": artifact.observed_at,
+        }));
+    }
+    Ok(Outcome::new(
+        "bench.locomo.verify",
+        format!("{} LoCoMo raw artifact(s) validated", validated.len()),
+        json!({ "validated": validated }),
+    ))
 }
 
 /// Validate committed benchmark results and the generated scoreboard before

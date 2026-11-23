@@ -1,1 +1,1 @@
-{"jsonrpc":"2.0","method":"initialize","params":{}}
+{"id":1,"request":{"hello":{"min_version":1,"max_version":1,"client":"memnoth-cli"}}}

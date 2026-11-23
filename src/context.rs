@@ -32,8 +32,7 @@ pub const DEFAULT_MCP_URL: &str = "https://memnoth.astrivya.ai/mcp";
 
 /// Path prefix the console bundle is served under on the cloud origin.
 ///
-/// The console is an SPA mounted at `/app` (`nest_service("/app", …)` in
-/// `memnoth-cloud`, matching its Vite `base` and router `basepath`). The API
+/// The console is an SPA served at `/app` on the cloud origin. The API
 /// (`/api/v1/*`) and the MCP endpoint (`/mcp`) stay at the origin root, so this
 /// prefix belongs to console *pages* only.
 pub const CONSOLE_BASE_PATH: &str = "/app";

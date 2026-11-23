@@ -4305,6 +4305,60 @@ pub fn build_p0_registry() -> RegistryBuilder {
     // The hidden single-word session verbs: every Verb variant clap parses
     // needs a row, even the ones that stay out of the public surface.
     let hidden_verbs = vec![
+        // D28 — local-only team surface. Hidden from public help; these rows
+        // exist so the registry and the binary describe the same verbs. Every
+        // description says "on this machine" and no row claims an account, an
+        // organization, seats, or shared team memory.
+        cloud_spec(
+            "team",
+            &["team"],
+            "Local-only team surface on this machine",
+            vec![],
+            DangerLevel::Safe,
+            AuthLevel::None,
+            "team",
+            &["team.namespace"],
+        ),
+        cloud_spec(
+            "team.namespace",
+            &["team", "namespace"],
+            "Vault namespaces that exist on this machine",
+            vec![],
+            DangerLevel::Safe,
+            AuthLevel::None,
+            "team namespace",
+            &["team.inbox"],
+        ),
+        cloud_spec(
+            "team.inbox",
+            &["team", "inbox"],
+            "Local proposal review inbox on this machine",
+            vec![],
+            DangerLevel::Safe,
+            AuthLevel::None,
+            "team inbox",
+            &["team.attribution"],
+        ),
+        cloud_spec(
+            "team.attribution",
+            &["team", "attribution"],
+            "Attribution recorded on this machine",
+            vec![],
+            DangerLevel::Safe,
+            AuthLevel::None,
+            "team attribution",
+            &["team.memory"],
+        ),
+        cloud_spec(
+            "team.memory",
+            &["team", "memory"],
+            "Team memory status on this machine: not available",
+            vec![],
+            DangerLevel::Safe,
+            AuthLevel::None,
+            "team memory",
+            &["team"],
+        ),
         cloud_spec(
             "undo",
             &["undo"],

@@ -217,7 +217,12 @@ CREATE TABLE IF NOT EXISTS proposals (
     decided_at       INTEGER,
     decided_by       TEXT,
     decision_reason  TEXT,
-    observation_id   INTEGER REFERENCES observations(id)
+    observation_id   INTEGER REFERENCES observations(id),
+    -- MOAT-04 item 1: optional owner and effective time. Both are additive and
+    -- nullable/defaulted, so a vault written before them opens unchanged; the
+    -- lazy helper in proposals.rs adds them to an older proposals table too.
+    owner            TEXT    DEFAULT NULL,
+    effective_at     INTEGER DEFAULT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_proposals_open ON proposals(status, expires_at);
 "#;

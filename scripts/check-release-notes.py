@@ -188,6 +188,214 @@ def template_headings(text: str) -> tuple[bool, str]:
     return True, f"all {len(REQUIRED_HEADINGS)} headings in order"
 
 
+# --- Claim-fence helpers -------------------------------------------------
+
+# The shipping version is whichever version Cargo declares. Every claim below
+# is scoped to that version's block: an honest "Not team memory" note in an
+# older section is not a claim made by the shipping release.
+CLAIM_VERSION_FALLBACK = "0.1.2"
+
+# The forbidden phrases come from plans/positioning-2026-11.md §4 (claim fence):
+# no exclusivity, no signed/attested authenticity, no team memory before its
+# gates, no official-benchmark scores from derived diagnostics.
+FORBIDDEN_CLAIM_PATTERNS: dict[str, re.Pattern[str]] = {
+    "team memory": re.compile(r"\bteam\s+memory\b", re.IGNORECASE),
+    "signed": re.compile(r"\bsigned\b", re.IGNORECASE),
+    "attested": re.compile(r"\battested\b", re.IGNORECASE),
+    "official benchmark": re.compile(r"\bofficial\s+benchmarks?\b", re.IGNORECASE),
+    "nobody does this": re.compile(r"\bnobody\s+does\s+this\b", re.IGNORECASE),
+    "verified by cloud": re.compile(r"\bverified\s+by\s+(?:the\s+)?cloud\b", re.IGNORECASE),
+}
+
+# Truthful, named attestations are allowed. The fence targets unqualified
+# claims of authenticity ("signed by ...", "attested"), not the verifiable
+# "minisign-signed release" / "signed with the repository's minisign key".
+MINISIGN_SIGNED_RE = re.compile(r"minisign[- ]signed", re.IGNORECASE)
+SIGNED_WITH_KEY_RE = re.compile(
+    r"signed\s+with\s+(?:the\s+)?[^.;]{0,120}?\bminisign\b", re.IGNORECASE
+)
+
+NEGATION_RE = re.compile(
+    r"\b(?:not|no|never|nor|without|unsigned|unverified|conditional|caveat|"
+    r"diagnostic|dry[- ]run|does not|doesn't|isn't|aren't|cannot|can't|"
+    r"remains?|still|partial|open)\b",
+    re.IGNORECASE,
+)
+CLOSURE_VERB_RE = re.compile(
+    r"\b(?:fixed|resolved|closed|addressed|completed|shipped|done|"
+    r"no longer|now works?)\b",
+    re.IGNORECASE,
+)
+
+KNOWN_ISSUE_HEADING_RE = re.compile(r"^##\s+\d+\.\s+(.*?)\s*$", re.IGNORECASE)
+CLOSED_MARKER_RE = re.compile(
+    r"(?:\*\*\s*status\s*\*\*\s*:\s*(?:closed|resolved|fixed)\b)"
+    r"|(?:^\s*>\s*\*\*(?:closed|resolved|fixed)\b)",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+CLAIM_STOPWORDS = frozenset(
+    """the a an and or of to in on for with that this is are was were be been being
+    it its as at by from no not cannot will would shall should do does did have has had
+    which who whom whose when where how why but if then than so such more most other
+    another into out up down about above below under over again further once here there
+    all any some each few own same only very can may might must""".split()
+)
+
+
+def read_cargo_versions(path: Path) -> tuple[str | None, str | None]:
+    """Return (root [package] version, [workspace.package] version)."""
+    if not path.is_file():
+        return None, None
+    package: str | None = None
+    workspace: str | None = None
+    current: str | None = None
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            current = stripped
+            continue
+        match = re.match(r'^version\s*=\s*"([^"]+)"', stripped)
+        if match:
+            if current == "[package]" and package is None:
+                package = match.group(1)
+            elif current == "[workspace.package]" and workspace is None:
+                workspace = match.group(1)
+    return package, workspace
+
+
+def crate_versions(cli_root: Path) -> list[tuple[str, str]]:
+    """(crate name, version) for each explicit-version crate manifest."""
+    crates = cli_root / "crates"
+    if not crates.is_dir():
+        return []
+    found: list[tuple[str, str]] = []
+    for manifest in sorted(crates.glob("*/Cargo.toml")):
+        package, _ = read_cargo_versions(manifest)
+        if package is not None:
+            found.append((manifest.parent.name, package))
+    return found
+
+
+def version_block(text: str, version: str | None) -> str:
+    """The `## [...]` section for one version, up to the next `## ` heading."""
+    if not version or not text:
+        return ""
+    heading = re.compile(
+        r"^##\s+\[?" + re.escape(version) + r"\]?(?:\s|$|[-–—])",
+        re.IGNORECASE,
+    )
+    lines = text.splitlines()
+    start: int | None = None
+    for index, line in enumerate(lines):
+        if heading.match(line.strip()):
+            start = index + 1
+            break
+    if start is None:
+        return ""
+    end = len(lines)
+    for index in range(start, len(lines)):
+        if re.match(r"^##\s+", lines[index].strip()):
+            end = index
+            break
+    return "\n".join(lines[start:end])
+
+
+def flatten(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def forbidden_claims(block: str) -> list[str]:
+    """Forbidden claim phrases present as affirmative claims in a block."""
+    if not block:
+        return []
+    scrubbed = MINISIGN_SIGNED_RE.sub(" ", flatten(block))
+    scrubbed = SIGNED_WITH_KEY_RE.sub(" ", scrubbed)
+    hits: list[str] = []
+    for label, pattern in FORBIDDEN_CLAIM_PATTERNS.items():
+        for match in pattern.finditer(scrubbed):
+            window = scrubbed[max(0, match.start() - 90) : match.end() + 90]
+            if NEGATION_RE.search(window):
+                continue
+            hits.append(label)
+            break
+    return hits
+
+
+def open_known_issues(text: str) -> list[dict[str, str]]:
+    """Numbered known-issue entries that are not explicitly marked closed."""
+    entries: list[dict[str, str]] = []
+    current: dict[str, str] | None = None
+    for line in text.splitlines():
+        match = KNOWN_ISSUE_HEADING_RE.match(line.strip())
+        if match:
+            current = {"title": match.group(1).strip(), "body": ""}
+            entries.append(current)
+        elif current is not None:
+            current["body"] += line + "\n"
+    return [entry for entry in entries if not CLOSED_MARKER_RE.search(entry["body"])]
+
+
+def _distinctive_tokens(title: str) -> list[str]:
+    words = re.findall(r"[a-z0-9][a-z0-9._-]*", title.lower())
+    return [word for word in words if len(word) >= 3 and word not in CLAIM_STOPWORDS]
+
+
+def _closure_positions(flat: str) -> list[int]:
+    positions: list[int] = []
+    for match in CLOSURE_VERB_RE.finditer(flat):
+        window = flat[max(0, match.start() - 120) : match.end() + 120]
+        if NEGATION_RE.search(window):
+            continue
+        positions.append(match.start())
+    return positions
+
+
+def closure_claims(block: str, open_entries: list[dict[str, str]]) -> list[str]:
+    """Closure claims about open known issues found in a release-notes block."""
+    if not block or not open_entries:
+        return []
+    flat = flatten(block)
+    lower = flat.lower()
+    hits: list[str] = []
+
+    if re.search(r"\bno\s+known\s+issues?\b", flat, re.IGNORECASE):
+        hits.append("blanket 'no known issues' claim")
+
+    positions = _closure_positions(flat)
+    for position in positions:
+        window = flat[max(0, position - 160) : position + 160]
+        if re.search(r"\b(?:all|every)\s+known\s+issues?\b", window, re.IGNORECASE):
+            hits.append("blanket 'all known issues resolved' claim")
+            break
+    for position in positions:
+        window = flat[max(0, position - 160) : position + 160]
+        if re.search(
+            r"(?:known[- ]issues?\s*(?:section\s*)?[§#]?\s*\d+|issue\s*#?\d+|KI-\d+)\b",
+            window,
+            re.IGNORECASE,
+        ):
+            hits.append("numbered known-issue closure claim")
+            break
+    for entry in open_entries:
+        tokens = _distinctive_tokens(entry["title"])
+        if not tokens:
+            continue
+        for position in positions:
+            window = lower[max(0, position - 200) : position + 200]
+            if all(token in window for token in tokens):
+                hits.append(f"closure claim for open issue '{entry['title']}'")
+                break
+
+    seen: set[str] = set()
+    unique: list[str] = []
+    for hit in hits:
+        if hit not in seen:
+            seen.add(hit)
+            unique.append(hit)
+    return unique
+
+
 def run_checks(cfg: Config) -> list[Result]:
     """Run every check against a resolved Config. Shared with the self-test."""
     results: list[Result] = []
@@ -201,6 +409,12 @@ def run_checks(cfg: Config) -> list[Result]:
     )
     changelog_bytes = cfg.changelog.read_bytes() if changelog_ok else b""
     headings = changelog_headings(changelog_text) if changelog_ok else []
+    # Read the web copy once so the site check and the claim-fence checks agree.
+    site_text = (
+        cfg.site_copy.read_text(encoding="utf-8", errors="replace")
+        if cfg.site_copy.is_file()
+        else None
+    )
     labels = [label for label, _ in headings]
     version_labels = [label for label in labels if label.lower() != "unreleased"]
     has_unreleased = any(label.lower() == "unreleased" for label in labels)
@@ -289,8 +503,7 @@ def run_checks(cfg: Config) -> list[Result]:
         detail = "cannot check without a Cargo version"
         results.append(Result("site_copy", "Site changelog copy", FAIL, detail))
     else:
-        site_text = cfg.site_copy.read_text(encoding="utf-8", errors="replace")
-        if version in site_text:
+        if site_text is not None and version in site_text:
             detail = f"{short(cfg.site_copy, cfg.web_root)} mentions v{version}"
             results.append(Result("site_copy", "Site changelog copy", PASS, detail))
         else:
@@ -345,6 +558,136 @@ def run_checks(cfg: Config) -> list[Result]:
             Result("workspace_docs", "Workspace release docs", PASS, "release/known-issues/whats-next present")
         )
 
+    # 8. An open known issue must not be claimed closed in the shipping notes.
+    #    known-issues.md lives in the workspace docs tree, outside the CLI git
+    #    repo, so a CLI-only checkout WARNS instead of failing the gate.
+    claim_version = version or CLAIM_VERSION_FALLBACK
+    known_issues_path = cfg.root / "docs" / "operations" / "known-issues.md"
+    if not known_issues_path.is_file():
+        results.append(
+            Result(
+                "known_issues_open",
+                "Open known issues not claimed closed",
+                WARN,
+                f"{short(known_issues_path, cfg.root)} absent; open-issue claims not checked",
+            )
+        )
+    else:
+        open_entries = open_known_issues(
+            known_issues_path.read_text(encoding="utf-8", errors="replace")
+        )
+        sources = [
+            short(cfg.changelog, cfg.cli_root),
+            short(cfg.site_copy, cfg.web_root) if site_text is not None else "web copy absent",
+        ]
+        if not open_entries:
+            results.append(
+                Result(
+                    "known_issues_open",
+                    "Open known issues not claimed closed",
+                    PASS,
+                    "no open entries in known-issues.md",
+                )
+            )
+        else:
+            claims: list[str] = []
+            for label, text in (
+                ("changelog", changelog_text if changelog_ok else ""),
+                ("site copy", site_text or ""),
+            ):
+                for claim in closure_claims(version_block(text, claim_version), open_entries):
+                    claims.append(f"{label}: {claim}")
+            if claims:
+                results.append(
+                    Result(
+                        "known_issues_open",
+                        "Open known issues not claimed closed",
+                        FAIL,
+                        f"{len(open_entries)} open; false closure claims: " + "; ".join(claims),
+                    )
+                )
+            else:
+                results.append(
+                    Result(
+                        "known_issues_open",
+                        "Open known issues not claimed closed",
+                        PASS,
+                        f"{len(open_entries)} open entries; no closure claim in v{claim_version} "
+                        f"({', '.join(sources)})",
+                    )
+                )
+
+    # 9. Claim fence on the shipping version's notes: no forbidden phrases.
+    #    The web copy is optional; the CLI changelog is always checked.
+    fence_hits: list[str] = []
+    if changelog_ok:
+        for phrase in forbidden_claims(version_block(changelog_text, claim_version)):
+            fence_hits.append(f"changelog: '{phrase}'")
+    if site_text is not None:
+        for phrase in forbidden_claims(version_block(site_text, claim_version)):
+            fence_hits.append(f"site copy: '{phrase}'")
+    if fence_hits:
+        results.append(
+            Result(
+                "claim_fence",
+                "No forbidden claims in shipping notes",
+                FAIL,
+                "forbidden claims: " + "; ".join(fence_hits),
+            )
+        )
+    else:
+        detail = f"v{claim_version} block free of the six forbidden claim phrases"
+        if site_text is None:
+            detail += " (web copy absent; CLI changelog only)"
+        results.append(
+            Result("claim_fence", "No forbidden claims in shipping notes", PASS, detail)
+        )
+
+    # 10. Version surfaces: root package, workspace package, crate manifests
+    #     and the newest changelog heading must all state one version.
+    pkg_version, ws_version = read_cargo_versions(cfg.cargo)
+    version_problems: list[str] = []
+    if pkg_version is None:
+        version_problems.append("no [package] version in Cargo.toml")
+    elif ws_version is None:
+        version_problems.append("no [workspace.package] version in Cargo.toml")
+    elif pkg_version != ws_version:
+        version_problems.append(
+            f"[package] {pkg_version} != [workspace.package] {ws_version}"
+        )
+    crate_list = crate_versions(cfg.cli_root)
+    if crate_list and pkg_version is not None:
+        bad_crates = [(name, value) for name, value in crate_list if value != pkg_version]
+        if bad_crates:
+            sample = ", ".join(f"{name}={value}" for name, value in bad_crates[:3])
+            version_problems.append(
+                f"{len(bad_crates)} crate manifest(s) disagree with {pkg_version}: {sample}"
+            )
+    if version_labels and pkg_version is not None:
+        if version_labels[0] != pkg_version:
+            version_problems.append(
+                f"newest changelog heading {version_labels[0]} != Cargo {pkg_version}"
+            )
+    if version_problems:
+        results.append(
+            Result(
+                "version_surfaces",
+                "Version surfaces consistent",
+                FAIL,
+                "; ".join(version_problems),
+            )
+        )
+    else:
+        crate_note = f", {len(crate_list)} crates" if crate_list else ""
+        results.append(
+            Result(
+                "version_surfaces",
+                "Version surfaces consistent",
+                PASS,
+                f"package/workspace/newest heading all {pkg_version}{crate_note}",
+            )
+        )
+
     return results
 
 
@@ -367,7 +710,24 @@ def print_table(cfg: Config, results: list[Result]) -> None:
 
 # --- Self-test fixtures ---------------------------------------------------
 
-FIXTURE_CARGO = '[package]\nname = "demo"\nversion = "1.2.3"\n'
+FIXTURE_CARGO = (
+    '[package]\nname = "demo"\nversion = "1.2.3"\n'
+    '\n[workspace.package]\nversion = "1.2.3"\n'
+)
+FIXTURE_KNOWN_ISSUES = """# Known issues
+
+> Status: every entry below is open as of the status banner date.
+
+## 1. The published 0.1.1 manifest is unsigned; mn update will not apply an update
+
+- **Symptom:** `mn update` refuses an unsigned manifest.
+- **Tracked at:** Plan 22, P22-003.
+
+## 2. D33 paired backup and restore is not live
+
+- **Symptom:** cloud backups are disabled and no live restore has happened.
+- **Tracked at:** Plan 22, P22-005.
+"""
 FIXTURE_CHANGELOG = """# Changelog
 
 ## [Unreleased]
@@ -409,27 +769,52 @@ def make_fixture(
     stale: bool = False,
     diverge: bool = False,
     no_categories: bool = False,
+    known_issue_claim: bool = False,
+    forbidden_claim: bool = False,
+    version_drift: bool = False,
+    known_issues_missing: bool = False,
+    no_web: bool = False,
 ) -> Config:
     """Build a complete fake workspace; the flags inject one drift each."""
     root = base / name
     cli = root / "CLI"
     web = root / "web"
     (cli / ".github").mkdir(parents=True)
-    (web / "contract").mkdir(parents=True)
-    (web / "content" / "docs").mkdir(parents=True)
     (root / "docs" / "operations").mkdir(parents=True)
+    if not no_web:
+        (web / "contract").mkdir(parents=True)
+        (web / "content" / "docs").mkdir(parents=True)
 
-    (cli / "Cargo.toml").write_text(FIXTURE_CARGO, encoding="utf-8")
+    cargo_text = FIXTURE_CARGO
+    if version_drift:
+        cargo_text = cargo_text.replace(
+            '[workspace.package]\nversion = "1.2.3"',
+            '[workspace.package]\nversion = "9.8.7"',
+        )
+    (cli / "Cargo.toml").write_text(cargo_text, encoding="utf-8")
+
     changelog = FIXTURE_CHANGELOG.replace("[1.2.3]", "[9.9.9]") if stale else FIXTURE_CHANGELOG
+    if known_issue_claim:
+        # Appended inside the `## [1.2.3]` block (the last heading in the fixture).
+        changelog += "\nAll known issues are now resolved and closed.\n"
+    if forbidden_claim:
+        changelog += (
+            "\nTeam memory is now live. The release is signed and attested. "
+            "Our official benchmark proves nobody does this better, verified by cloud.\n"
+        )
     (cli / "CHANGELOG.md").write_text(changelog, encoding="utf-8")
-    contract = "DIVERGED - not the changelog\n" if diverge else changelog
-    (web / "contract" / "changelog.md").write_text(contract, encoding="utf-8")
-    (web / "content" / "docs" / "changelog.mdx").write_text(FIXTURE_SITE_COPY, encoding="utf-8")
+    if not no_web:
+        contract = "DIVERGED - not the changelog\n" if diverge else changelog
+        (web / "contract" / "changelog.md").write_text(contract, encoding="utf-8")
+        (web / "content" / "docs" / "changelog.mdx").write_text(FIXTURE_SITE_COPY, encoding="utf-8")
     release_cfg = FIXTURE_RELEASE_BAD if no_categories else FIXTURE_RELEASE_GOOD
     (cli / ".github" / "release.yml").write_text(release_cfg, encoding="utf-8")
     (cli / ".github" / "RELEASE_NOTES_TEMPLATE.md").write_text(FIXTURE_TEMPLATE, encoding="utf-8")
     for rel in WORKSPACE_DOCS:
-        (root / rel).write_text("Supporting documentation.\n", encoding="utf-8")
+        if rel.name == "known-issues.md" and known_issues_missing:
+            continue
+        content = FIXTURE_KNOWN_ISSUES if rel.name == "known-issues.md" else "Supporting documentation.\n"
+        (root / rel).write_text(content, encoding="utf-8")
 
     return Config(
         cli_root=cli,
@@ -445,12 +830,42 @@ def make_fixture(
 
 
 def self_test() -> int:
-    """Prove the four drift cases with inline fixtures; exit 0 only if all pass."""
+    """Prove every drift case with inline fixtures; exit 0 only if all pass."""
     cases: list[tuple[str, dict[str, bool], dict[str, str], str]] = [
         ("good fixture passes", {}, {}, "every check PASS"),
         ("stale changelog fails", {"stale": True}, {"changelog_heading": FAIL}, "wrong version heading FAILs"),
         ("divergent site copy fails", {"diverge": True}, {"contract_copy": FAIL}, "byte divergence FAILs"),
         ("missing categories fails", {"no_categories": True}, {"release_config": FAIL}, "no categories FAILs"),
+        (
+            "open issue claimed closed fails",
+            {"known_issue_claim": True},
+            {"known_issues_open": FAIL},
+            "false closure claim FAILs",
+        ),
+        (
+            "forbidden v-release claim fails",
+            {"forbidden_claim": True},
+            {"claim_fence": FAIL},
+            "claim-fence phrase FAILs",
+        ),
+        (
+            "version surface drift fails",
+            {"version_drift": True},
+            {"version_surfaces": FAIL},
+            "workspace/package mismatch FAILs",
+        ),
+        (
+            "missing known-issues doc only warns",
+            {"known_issues_missing": True},
+            {"known_issues_open": WARN},
+            "absent workspace doc WARNs, not FAILs",
+        ),
+        (
+            "CLI-only checkout warns but does not fail",
+            {"no_web": True},
+            {"contract_copy": WARN, "site_copy": WARN, "claim_fence": PASS, "version_surfaces": PASS},
+            "absent web checkout keeps CLI-only gates passing",
+        ),
     ]
     passed = 0
     with tempfile.TemporaryDirectory(prefix="check-release-notes-") as temp:

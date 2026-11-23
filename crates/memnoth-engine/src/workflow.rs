@@ -7,10 +7,11 @@
 //! - freebuff `buildAgentToolSet()`: subagents become tool definitions
 //!   (name + description + prompt) the orchestrator can offer to the model.
 //!
-//! Everything here is pure and deterministic (no IO, no threads, no RNG):
-//! the same DAG + journal always replays to the same report, which is what
-//! makes it a coordination TESTING simulator. Design: `KG-DESIGN` fail-open
-//! does not apply — these are explicit simulations, errors propagate.
+//! The coordination primitives are pure and deterministic (no IO, no threads,
+//! no RNG): the same DAG + journal always replays to the same report, which is
+//! what makes it a coordination TESTING simulator. `commit_slice` is the one
+//! explicit DB-facing seam where a parent promotes a child's proposals.
+//! Design: `KG-DESIGN` fail-open does not apply — errors propagate.
 //!
 //! ```rust,ignore
 //! use memnoth_engine::workflow::{Dag, WorkflowJournal};
@@ -20,6 +21,16 @@
 //! ```
 
 use serde::{Deserialize, Serialize};
+
+use crate::store::proposals::Proposal;
+
+/// Fixed provenance shape for every proposal on the shared memory bus.
+///
+/// The file lives at `src/provenance.rs`; the `#[path]` keeps `workflow` the
+/// single public door (the crate root already re-exports `workflow::Provenance`).
+#[path = "provenance.rs"]
+pub mod provenance;
+pub use provenance::{PROVENANCE_KEYS, Provenance, has_full_provenance};
 
 /// Max phases per workflow (grok `xai-workflow` `agent_budget` discipline).
 pub const MAX_PHASES: usize = 64;
@@ -419,54 +430,6 @@ impl Hooks {
 // later collects for acceptance (pure and deterministic, like the rest of
 // this module).
 
-/// Provenance of one proposed belief: the run, agent, turn, and source
-/// location that produced it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Provenance {
-    /// The run this belief was produced in.
-    pub run_id: String,
-    /// The agent that produced it.
-    pub agent: String,
-    /// The person the run acted for; a child never invents this.
-    pub user: String,
-    /// The turn within the run.
-    pub turn: u64,
-    /// The file the belief references or was recorded against.
-    pub file: String,
-    /// The line within the file.
-    pub line: usize,
-}
-
-impl Provenance {
-    /// Build provenance for a belief.
-    pub fn new(run_id: &str, agent: &str, turn: u64, file: &str, line: usize) -> Self {
-        Self {
-            run_id: run_id.to_string(),
-            agent: agent.to_string(),
-            // A run with no named person is the local user; the field is
-            // present so a shared vault can tell "me" from "a teammate".
-            user: "local".to_string(),
-            turn,
-            file: file.to_string(),
-            line,
-        }
-    }
-
-    /// Name the person this run acts for.
-    pub fn with_user(mut self, user: &str) -> Self {
-        let user = user.trim();
-        if !user.is_empty() {
-            self.user = user.to_string();
-        }
-        self
-    }
-
-    /// Render as the JSON string stored on a vault row.
-    pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_else(|_| "{}".to_string())
-    }
-}
-
 /// One belief a child proposed into its slice: not a vault row, not yet
 /// accepted, just a card waiting for a parent to decide.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -550,6 +513,249 @@ impl VaultSlice {
     pub fn proposals(&self) -> &[ProposedBelief] {
         &self.proposals
     }
+}
+
+// --------------------------------------------------------- parallel disagreement
+//
+// Two children running in parallel can read the same file and disagree. A
+// disagreement is surfaced as a contradiction that names BOTH sources (run id,
+// agent, file:line) and BOTH dates, so a reviewer never has to go back to two
+// separate transcripts to see who said what and when.
+
+/// One side of a disagreement between two children that ran in parallel.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DisagreementSide {
+    /// The entity both children were writing about.
+    pub entity: String,
+    /// The belief this child proposed.
+    pub content: String,
+    /// Run that produced the belief (the source id).
+    pub run_id: String,
+    /// Agent that produced the belief.
+    pub agent: String,
+    /// Stable source label: `agent@run_id file:line`.
+    pub source: String,
+    /// Full provenance JSON for this side (`{run_id,agent,user,turn,file,line}`).
+    pub provenance: String,
+    /// Effective date of the belief, or proposal time when none was claimed.
+    pub date: i64,
+    /// When the proposal itself was staged (ms since epoch).
+    pub proposed_at: i64,
+    /// Turn within the run.
+    pub turn: u64,
+    /// File the belief references.
+    pub file: String,
+    /// Line within the file.
+    pub line: usize,
+}
+
+impl DisagreementSide {
+    fn from_proposal(proposal: &Proposal) -> Self {
+        let prov: serde_json::Value =
+            serde_json::from_str(&proposal.provenance).unwrap_or_else(|_| serde_json::json!({}));
+        let text = |key: &str| -> String {
+            prov.get(key)
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
+        let number = |key: &str| -> u64 {
+            prov.get(key)
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0)
+        };
+        let run_id = text("run_id");
+        let agent = text("agent");
+        let file = text("file");
+        let line = number("line") as usize;
+        let source = if agent.is_empty() && run_id.is_empty() {
+            file.clone()
+        } else {
+            format!("{agent}@{run_id} {file}:{line}")
+        };
+        Self {
+            entity: proposal.entity_name.clone(),
+            content: proposal.content.clone(),
+            run_id,
+            agent,
+            source,
+            provenance: proposal.provenance.clone(),
+            date: proposal.effective_at.unwrap_or(proposal.proposed_at),
+            proposed_at: proposal.proposed_at,
+            turn: number("turn"),
+            file,
+            line,
+        }
+    }
+}
+
+/// A contradiction surfaced from parallel proposals on the same entity.
+///
+/// Both sides are always present: the whole point of the gate is that a query
+/// cannot show one child's finding and hide the other's.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Disagreement {
+    /// The name both children disagree about.
+    pub entity: String,
+    /// The earlier proposal.
+    pub left: DisagreementSide,
+    /// The later proposal.
+    pub right: DisagreementSide,
+    /// Explanation naming both sources, both contents and both dates.
+    pub reason: String,
+}
+
+impl Disagreement {
+    /// Render as the JSON row shape a `vault contradictions` consumer reads.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "entity": self.entity,
+            "left": {
+                "content": self.left.content,
+                "source": self.left.source,
+                "run_id": self.left.run_id,
+                "date": self.left.date,
+            },
+            "right": {
+                "content": self.right.content,
+                "source": self.right.source,
+                "run_id": self.right.run_id,
+                "date": self.right.date,
+            },
+            "reason": self.reason,
+        })
+    }
+}
+
+/// Surface parallel disagreement as contradictions with BOTH sources and dates.
+///
+/// `proposals` is the open queue from
+/// [`MemoryEngine::list_proposals`](crate::MemoryEngine::list_proposals).
+/// Two still-open proposals for the same entity with different content cannot
+/// both be true, so each such pair is reported with both children's run ids,
+/// source locations and proposal dates. Identical content is deduped by the
+/// vault before it gets here; ordering is deterministic (entity, then time/id).
+pub fn disagreements_from_proposals(proposals: &[Proposal]) -> Vec<Disagreement> {
+    use std::collections::BTreeMap;
+
+    let mut groups: BTreeMap<String, Vec<&Proposal>> = BTreeMap::new();
+    for proposal in proposals {
+        if proposal.status != "proposed" {
+            continue;
+        }
+        let key = proposal.entity_name.trim().to_ascii_lowercase();
+        groups.entry(key).or_default().push(proposal);
+    }
+
+    let mut out = Vec::new();
+    for mut items in groups.into_values() {
+        if items.len() < 2 {
+            continue;
+        }
+        items.sort_by_key(|proposal| (proposal.proposed_at, proposal.id));
+        for (i, left) in items.iter().enumerate() {
+            for right in items.iter().skip(i + 1) {
+                if left.content.trim() == right.content.trim() {
+                    continue;
+                }
+                let left_side = DisagreementSide::from_proposal(left);
+                let right_side = DisagreementSide::from_proposal(right);
+                let reason = format!(
+                    "parallel disagreement about `{}`: {} (source {}, {}) vs {} (source {}, {})",
+                    left_side.entity,
+                    left_side.content,
+                    left_side.source,
+                    left_side.date,
+                    right_side.content,
+                    right_side.source,
+                    right_side.date,
+                );
+                out.push(Disagreement {
+                    entity: left_side.entity.clone(),
+                    left: left_side,
+                    right: right_side,
+                    reason,
+                });
+            }
+        }
+    }
+    out
+}
+
+// ------------------------------------------------------------------- commit seam
+//
+// Everything above is pure data. This is the single DB-facing bridge: the
+// parent hands a child's slice here, and every staged belief becomes a proposal
+// (never an observation). One call opens and closes exactly one episode, so an
+// episode belongs to a RUN, not to a belief.
+
+/// What the parent's commit of one child slice produced.
+#[derive(Debug, Clone)]
+pub struct CommitReport {
+    /// The single episode that covers this run.
+    pub episode_id: i64,
+    /// `(proposal_id, created)` per staged belief. `created == false` means a
+    /// sibling had already staged the same belief and this card was joined.
+    pub proposal_ids: Vec<(i64, bool)>,
+    /// Contradictions visible after the commit, each naming both sources.
+    pub disagreements: Vec<Disagreement>,
+}
+
+/// Commit one child's scoped slice into the vault from the parent side.
+///
+/// Children never call this — they only have a [`VaultSlice`] and can `propose`
+/// into it. This bridge is the only path from a slice to the database, and it
+/// writes proposals (`status = 'proposed'`), so nothing a child staged becomes
+/// a belief until a person accepts it. `actor` is recorded as the owner
+/// accountable for that decision; a proposal with incomplete provenance is
+/// refused rather than staged as an unattributable card.
+pub fn commit_slice(
+    engine: &crate::MemoryEngine,
+    slice: &VaultSlice,
+    actor: &str,
+    at: i64,
+) -> anyhow::Result<CommitReport> {
+    let mut proposal_ids = Vec::with_capacity(slice.proposals().len());
+    for belief in slice.proposals() {
+        let json = belief.provenance.to_json();
+        if !has_full_provenance(&json) {
+            anyhow::bail!(
+                "refusing unattributable proposal from {}: incomplete provenance",
+                slice.agent
+            );
+        }
+        // The committing parent owns the decision: the child proposed, but a
+        // person is accountable for whether this card is ever accepted.
+        let (id, created) = engine.propose_belief_with(
+            &belief.entity,
+            crate::EntityKind::Concept,
+            &belief.content,
+            &belief.kind,
+            belief.confidence,
+            &json,
+            at,
+            Some(actor),
+            None,
+        )?;
+        proposal_ids.push((id, created));
+    }
+
+    let summary = format!(
+        "run {} ({}) staged {} belief(s)",
+        slice.run_id,
+        slice.agent,
+        slice.proposals().len()
+    );
+    let episode_id = engine.append_episode("delegate", Some(&slice.agent), Some(&summary), at)?;
+    engine.close_episode(episode_id, at)?;
+
+    let open = engine.list_proposals(Some("proposed"), at)?;
+    let disagreements = disagreements_from_proposals(&open);
+    Ok(CommitReport {
+        episode_id,
+        proposal_ids,
+        disagreements,
+    })
 }
 
 #[cfg(test)]
@@ -750,5 +956,27 @@ mod tests {
             Some(HookPoint::SubagentStop)
         );
         assert_eq!(HookPoint::parse("unknown"), None);
+    }
+
+    #[test]
+    fn agent_tool_set_names_the_children_that_get_slices() {
+        // The delegation runtime builds its child tool list with this function;
+        // each tool becomes a child run with its own scoped slice.
+        let defs = build_agent_tool_set(&[
+            ("reviewer", "reviews diffs", "You review diffs."),
+            ("planner", "plans work", "You plan."),
+        ])
+        .unwrap();
+        let slices: Vec<VaultSlice> = defs
+            .iter()
+            .enumerate()
+            .map(|(i, def)| VaultSlice::spawn(&format!("run-{i}"), &def.name, 0))
+            .collect();
+        assert_eq!(slices[0].agent, "agent_reviewer");
+        assert_eq!(slices[1].agent, "agent_planner");
+        for (i, slice) in slices.iter().enumerate() {
+            assert_eq!(slice.run_id, format!("run-{i}"));
+            assert!(slice.proposals().is_empty(), "a fresh child stages nothing");
+        }
     }
 }

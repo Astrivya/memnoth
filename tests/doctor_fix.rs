@@ -62,6 +62,7 @@ impl Sandbox {
             // make `--fix` fail on a file this test never created.
             .env("USERPROFILE", self.home())
             .env("HOME", self.home())
+            .env("MEMNOTH_COMPLETION_HOME", self.home())
             .env_remove("MEMNOTH_VAULT")
             .env_remove("MEMNOTH_GRAPH")
             .env_remove("MEMNOTH_MCP_BIN")
