@@ -25,11 +25,12 @@ use crate::tui::theme::{Tokens, tokens};
 
 const FILTERS: [WorkFilter; 3] = [WorkFilter::All, WorkFilter::Runs, WorkFilter::Commands];
 
-/// A selected row must stay distinguishable when every token is Reset (NO_COLOR
-/// / TERM=dumb). Reverse video carries the meaning without asking for colour.
+/// A selected row is ink, not a fill: accent foreground plus bold, so no orange
+/// band covers the text. The literal `›` pointer stays its own cue; under
+/// NO_COLOR reverse video carries the meaning without asking for colour.
 fn selection(t: Tokens) -> Style {
     if t.colored() {
-        Style::default().fg(t.selected_fg).bg(t.selected_bg)
+        Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
     } else {
         Style::default().add_modifier(Modifier::REVERSED)
     }
@@ -699,8 +700,17 @@ mod tests {
 
         let t = Tokens::for_palette(Palette::Dark);
         let themed = selection(t);
-        assert_eq!(themed.fg, Some(t.selected_fg));
-        assert_eq!(themed.bg, Some(t.selected_bg));
+        // Ink-only: accent foreground + bold, never a selected_bg band.
+        assert_eq!(
+            themed.fg,
+            Some(t.accent),
+            "selection is accent ink, not near-black selected_fg"
+        );
+        assert_eq!(themed.bg, None, "a selected row must have no fill");
+        assert!(
+            themed.add_modifier.contains(Modifier::BOLD),
+            "bold carries the selection in ink"
+        );
     }
 
     #[test]

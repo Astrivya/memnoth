@@ -248,7 +248,15 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
     // every surface then shares one audited set of tokens instead of choosing
     // colours independently. NO_COLOR / TERM=dumb are already folded into
     // app.theme above, so this cannot reintroduce colour they disabled.
-    crate::tui::theme::init_palette(crate::tui::theme::Palette::from_env(app.theme));
+    let palette = ctx
+        .config
+        .ui
+        .as_ref()
+        .and_then(|ui| ui.theme.as_deref())
+        .and_then(crate::tui::theme::Palette::parse_id)
+        .filter(|_| crate::tui::theme::theme_from_env().is_none())
+        .unwrap_or_else(|| crate::tui::theme::Palette::from_env(app.theme));
+    crate::tui::theme::init_palette(palette);
     app.set_paths(display_path(&ctx.root), display_path(&ctx.vault_path));
     app.seed(&session);
     // The brief is what a launch shows, over whatever the file held. Splitting
@@ -635,19 +643,34 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
                         MouseEventKind::ScrollDown => app.wheel(WHEEL_LINES, false),
                         MouseEventKind::Down(MouseButton::Left) => {
                             app.mouse_row = Some(mouse.row);
-                            if let Some(row) = app.rail_selection_line_at(mouse.column, mouse.row) {
-                                app.rail_selection_anchor = Some(row);
-                                app.rail_selection = None;
-                                app.selection_anchor = None;
-                                app.selection = None;
+                            // A click on a follow-up button fills the composer
+                            // with that prompt as an editable draft and focuses
+                            // it. Nothing is sent, and `scroll`/`follow` are not
+                            // touched — the view stays exactly where it was.
+                            if let Some(prompt) = app
+                                .follow_up_rows
+                                .iter()
+                                .find(|(row, _)| *row == mouse.row)
+                                .map(|(_, prompt)| prompt.clone())
+                            {
+                                app.fill_follow_up(prompt);
                             } else {
-                                app.rail_selection_anchor = None;
-                                app.rail_selection = None;
-                                app.selection = None;
-                            }
-                            if app.rail_selection_anchor.is_none() && mouse.row > 0 {
-                                let line = app.scroll.saturating_add(mouse.row as usize - 1);
-                                app.selection_anchor = Some(line);
+                                if let Some(row) =
+                                    app.rail_selection_line_at(mouse.column, mouse.row)
+                                {
+                                    app.rail_selection_anchor = Some(row);
+                                    app.rail_selection = None;
+                                    app.selection_anchor = None;
+                                    app.selection = None;
+                                } else {
+                                    app.rail_selection_anchor = None;
+                                    app.rail_selection = None;
+                                    app.selection = None;
+                                }
+                                if app.rail_selection_anchor.is_none() && mouse.row > 0 {
+                                    let line = app.scroll.saturating_add(mouse.row as usize - 1);
+                                    app.selection_anchor = Some(line);
+                                }
                             }
                         }
                         MouseEventKind::Drag(MouseButton::Left) => {
@@ -1176,6 +1199,52 @@ fn handle_key(app: &mut App, key: KeyEvent, workspace_root: &Path) {
         return;
     }
 
+    // Follow-up buttons under the newest answer own a few keys, but only in
+    // the least invasive state: the composer is empty, no completion list or
+    // picker is open, nothing is busy and no prompt/approval is waiting. In
+    // every other state these keys mean what they always meant — typing 1 in
+    // a draft is a character, and Tab still completes a path first.
+    //
+    // Number keys 1–4 put the exact prompt in the composer as an editable
+    // draft. They never send it: the person presses Enter when ready. Up/Down
+    // walk the buttons when the transcript is focused, and Enter fills from
+    // the focused one. Tab is deliberately NOT used here — path completion
+    // and pane navigation keep it.
+    if app.follow_ups_visible()
+        && app.active_pane == 0
+        && !key.modifiers.contains(KeyModifiers::ALT)
+    {
+        match key.code {
+            KeyCode::Char(ch @ '1'..='4') if !ctrl => {
+                let index = ch.to_digit(10).unwrap_or(1) as usize - 1;
+                if let Some(prompt) = app
+                    .follow_ups
+                    .first()
+                    .and_then(|(_, items)| items.get(index))
+                    .map(|item| item.prompt.clone())
+                {
+                    app.fill_follow_up(prompt);
+                }
+                return;
+            }
+            KeyCode::Down => {
+                app.focus_follow_up_relative(1);
+                return;
+            }
+            KeyCode::Up => {
+                app.focus_follow_up_relative(-1);
+                return;
+            }
+            KeyCode::Enter => {
+                if let Some(prompt) = app.focused_follow_up() {
+                    app.fill_follow_up(prompt);
+                }
+                return;
+            }
+            _ => {}
+        }
+    }
+
     // Down on an empty composer is the global live-work switcher, including
     // the first-run brief (where `home_showing()` remains true until the first
     // turn). The home brief keeps its numbered quick picks below.
@@ -1524,6 +1593,13 @@ fn handle_key(app: &mut App, key: KeyEvent, workspace_root: &Path) {
             // as the way out.
             if app.esc_cancels_signin() {
                 stop_signin(app);
+                return;
+            }
+            // The @ mention picker owns esc first: dismiss it and keep the
+            // typed line, just like the slash dropdown. A second esc clears
+            // the prompt.
+            if app.mentions.active {
+                app.mentions.active = false;
                 return;
             }
             app.cancel_completion();
@@ -2293,6 +2369,10 @@ fn submit(
             open_overlay(app, crate::tui::overlays::OverlayKind::Mcps);
             None
         }
+        Parsed::ThemePicker => {
+            open_overlay(app, crate::tui::overlays::OverlayKind::ThemePicker);
+            None
+        }
         Parsed::Tasks(command) => {
             run_tasks(app, ctx, command);
             None
@@ -2572,6 +2652,18 @@ fn run_verb(app: &mut App, ctx: &AppContext, prompt: &str, verb: Verb) {
     match &verb {
         Verb::SetTheme(theme) => {
             app.theme = *theme;
+            // Make the switch visible now, not on the next launch: every
+            // renderer reads the process-wide palette via tokens(). The legacy
+            // Theme enum maps onto the palette set; detailed themes are picked
+            // in the palette picker and stored directly in [ui] theme.
+            let palette = match theme {
+                crate::tui::app::Theme::NoColor => crate::tui::theme::Palette::NoColor,
+                crate::tui::app::Theme::HighContrast => crate::tui::theme::Palette::HighContrast,
+                crate::tui::app::Theme::Default => {
+                    crate::tui::theme::Palette::from_env(crate::tui::app::Theme::Default)
+                }
+            };
+            crate::tui::theme::init_palette(palette);
             // The preference outlives the session: a theme chosen in the TUI is
             // the same `[ui] theme` a plain `mn` start reads. A read-only config
             // leaves the choice in force for this session and says so.
@@ -2641,6 +2733,9 @@ fn run_verb(app: &mut App, ctx: &AppContext, prompt: &str, verb: Verb) {
 /// Show a verb's answer, and file it against the line that asked for it.
 fn finish_verb(app: &mut App, store: &SessionStore, session: &mut Session, done: VerbDone) {
     app.running_verb = None;
+    // A verb answer is not an agent turn; any offers on screen belong to an
+    // older answer and must not survive this one.
+    app.clear_follow_ups();
     // Progress belongs to the operation, not to history: collapse it and let
     // the single final answer carry the outcome.
     app.progress_lines.clear();
@@ -2815,6 +2910,9 @@ fn start_turn(
     settings: provider::Settings,
 ) -> Option<Busy> {
     app.push(EntryRole::User, prompt);
+    // A new turn invalidates the offers under the previous answer: a late
+    // result must never land on a question the person asked afterwards.
+    app.clear_follow_ups();
     // Taken before the worker starts: the turn owns these bytes, and a second
     // turn must not silently resend what the first already carried.
     let attachments = std::mem::take(&mut app.attachments);
@@ -2936,6 +3034,31 @@ fn settle(
 ) {
     match result {
         Ok((answer, writes, approvals)) => {
+            // Collect the turn's real facts BEFORE the receipts are moved into
+            // the session. Nothing here calls a model, writes a file, or leaves
+            // the app: it is a deterministic read of what the turn actually did.
+            let mut facts = crate::tui::app::TurnFacts::default();
+            for entry in app
+                .entries
+                .iter()
+                .filter(|entry| entry.at_ms >= app.turn_started_ms && entry.tool_call_id.is_some())
+            {
+                let failed = matches!(
+                    entry.role,
+                    EntryRole::ToolFailed | EntryRole::ToolInterrupted
+                );
+                let name = entry
+                    .text
+                    .split(" · ")
+                    .next()
+                    .unwrap_or(&entry.text)
+                    .trim()
+                    .to_string();
+                facts.tools.push((name, failed));
+            }
+            for write in &writes {
+                facts.writes.push(write.path.clone());
+            }
             let (input, output) = answer.usage();
             let elapsed = crate::session::now_ms() - app.turn_started_ms;
             let cost = busy
@@ -2943,38 +3066,60 @@ fn settle(
                 .map(|pricing| pricing.cost_micros(input, output));
             let stats = crate::tui::app::turn_stats(elapsed, input, output, cost, tools);
             // What was read is what was streamed: the finished turn replaces
-            // the first segment's text with the authoritative answer, so the
-            // screen and the session file hold the same words. Later segments
-            // — the text that arrived after the tool rows — fold back into
-            // that first block: one answer, read as one answer, with the pace
-            // line under it, instead of the same words in two places.
-            if let Some(first) = app.stream_answer_first
-                && let Some(entry) = app.entries.get_mut(first)
+            // the LAST answer segment with the authoritative answer. Tool and
+            // thinking rows stay above it, so the transcript reads in the order
+            // it happened. Anchoring on the FIRST segment used to promote the
+            // answer above every tool call once the turn had used tools.
+            let keeper = app
+                .stream_answer
+                .filter(|index| *index < app.entries.len())
+                .or(app.stream_answer_first);
+            let answer_index: Option<usize>;
+            if let Some(keeper) = keeper
+                && let Some(entry) = app.entries.get_mut(keeper)
             {
                 entry.text = answer.text.clone();
                 entry.stats = stats;
                 let turn_start = app.turn_started_ms;
+                // Remove the EARLIER answer segments from this turn, leaving the
+                // final one (below the tool rows) as the single answer block.
                 let extra: Vec<usize> = app
                     .entries
                     .iter()
                     .enumerate()
                     .filter(|(index, entry)| {
-                        *index > first
+                        *index < keeper
                             && entry.role == crate::tui::app::EntryRole::Answer
                             && entry.at_ms >= turn_start
                     })
                     .map(|(index, _)| index)
                     .collect();
+                let removed = extra.len();
                 for index in extra.into_iter().rev() {
                     app.entries.remove(index);
                 }
+                // Every removed row was above the keeper, so its slot moves up.
+                answer_index = keeper.checked_sub(removed);
             } else {
                 app.push(EntryRole::Answer, answer.text.clone());
                 if let Some(entry) = app.entries.last_mut() {
                     entry.stats = stats;
                 }
+                answer_index = Some(app.entries.len() - 1);
             }
             app.finish_stream();
+            // Offer concrete next steps only for a successful, substantive
+            // answer. Plan mode is a read-only turn, so no "run"/"commit" offer
+            // belongs on it; a failed or empty answer gets none either.
+            if !app.plan_mode
+                && !answer.text.trim().is_empty()
+                && answer.text.trim().chars().count() >= 80
+            {
+                let offers = crate::tui::app::derive_followups(&facts);
+                app.set_follow_ups(answer_index, offers);
+            } else {
+                app.clear_follow_ups();
+            }
             // The file records the model that actually answered, so a resumed
             // session does not claim a model that never ran.
             session.model = busy.model.clone();
@@ -3064,6 +3209,7 @@ fn settle(
         }
         Err(error) => {
             app.push(EntryRole::Error, format!("{error:#}"));
+            app.clear_follow_ups();
             // The question is kept and the answer is empty: a failed turn has to
             // be visible on resume, not silently dropped.
             persist(app, store, session, &busy.prompt, "");
@@ -3080,6 +3226,7 @@ fn local_search(
     words: &[String],
 ) {
     app.push(EntryRole::User, prompt);
+    app.clear_follow_ups();
 
     let vault = crate::commands::execute(
         ctx,
@@ -4073,6 +4220,70 @@ mod tests {
             body: "change a line".into(),
         };
         assert!(!provider::Approver::approve(&mut DeclineWrites, &request));
+    }
+
+    #[test]
+    fn a_number_key_fills_the_composer_without_sending() {
+        let mut app = App::new("s", false);
+        app.push(EntryRole::Answer, "a substantive answer with real content");
+        let items = crate::tui::app::derive_followups(&crate::tui::app::TurnFacts {
+            tools: vec![("cargo test".into(), true)],
+            writes: vec!["/ws/src/main.rs".into()],
+        });
+        let expected = items[0].prompt.clone();
+        app.set_follow_ups(Some(0), items);
+        let root = tempfile::tempdir().unwrap();
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE),
+            root.path(),
+        );
+        assert_eq!(app.input, expected);
+        assert!(!app.pending_submit, "selection alone never starts a task");
+    }
+
+    #[test]
+    fn a_number_key_in_a_draft_is_just_a_character() {
+        let mut app = App::new("s", false);
+        app.push(EntryRole::Answer, "a substantive answer with real content");
+        app.set_follow_ups(
+            Some(0),
+            crate::tui::app::derive_followups(&crate::tui::app::TurnFacts {
+                writes: vec!["/ws/src/main.rs".into()],
+                ..crate::tui::app::TurnFacts::default()
+            }),
+        );
+        app.input = "draft".into();
+        app.cursor = 5;
+        let root = tempfile::tempdir().unwrap();
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE),
+            root.path(),
+        );
+        assert_eq!(app.input, "draft1", "normal typing is never stolen");
+    }
+
+    #[test]
+    fn enter_from_a_focused_followup_fills_the_draft() {
+        let mut app = App::new("s", false);
+        app.push(EntryRole::Answer, "a substantive answer with real content");
+        let items = crate::tui::app::derive_followups(&crate::tui::app::TurnFacts {
+            writes: vec!["/ws/src/main.rs".into()],
+            ..crate::tui::app::TurnFacts::default()
+        });
+        let expected = items[0].prompt.clone();
+        app.set_follow_ups(Some(0), items);
+        app.focus_follow_up_relative(1);
+        assert_eq!(app.follow_up_focus, Some(0));
+        let root = tempfile::tempdir().unwrap();
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            root.path(),
+        );
+        assert_eq!(app.input, expected);
+        assert!(!app.pending_submit);
     }
 
     #[test]

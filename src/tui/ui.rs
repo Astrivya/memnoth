@@ -14,7 +14,7 @@ use ratatui::widgets::{
 };
 
 use crate::output::ellipsize;
-use crate::tui::app::{App, EntryRole, Home};
+use crate::tui::app::{App, EntryRole, Home, MentionRow};
 use crate::tui::slash::Row;
 use crate::tui::theme::tokens;
 
@@ -59,6 +59,10 @@ fn footer_hint(app: &App) -> String {
         } else {
             "↑↓ move · enter open/run · tab complete · esc close".to_string()
         }
+    } else if app.mentions.is_open() {
+        // The mention picker owns the same keys as the `/` list, but Enter
+        // inserts a token rather than running a command — say so here.
+        "↑↓/tab mention · enter insert · esc close".to_string()
     } else if app.login_busy {
         // A device grant can wait ten minutes on a browser. Counting the wait is
         // what separates "waiting" from "hung", and the key that ends it is not
@@ -814,7 +818,15 @@ fn draw_completions(
     prompt: Rect,
     app: &App,
 ) -> Option<(usize, usize)> {
-    if !app.slash.is_open() || area.width < 24 || area.height < 6 {
+    if area.width < 24 || area.height < 6 {
+        return None;
+    }
+    // The `@` picker and the `/` list are both prompt-local. Only one is open
+    // at a time: a line starting with `/` cannot open mentions.
+    if app.mentions.is_open() {
+        return draw_mention_completions(frame, area, prompt, app);
+    }
+    if !app.slash.is_open() {
         return None;
     }
     // The list grows upward from the prompt, so the line being typed never
@@ -899,6 +911,135 @@ fn draw_completions(
     (rows.len() > 1 && highlight_drawn).then(|| (selected + 1, rows.len()))
 }
 
+/// The unified `@` picker: skills, agents and files in one list above the
+/// prompt. It uses the same geometry and the same ink-only selection as the
+/// `/` list; the only extra is a literal category word on every row, which
+/// keeps the groups distinguishable when `NO_COLOR` strips every palette.
+fn draw_mention_completions(
+    frame: &mut Frame,
+    area: Rect,
+    prompt: Rect,
+    app: &App,
+) -> Option<(usize, usize)> {
+    let room = prompt.y.saturating_sub(area.y);
+    if room == 0 {
+        return None;
+    }
+    let width = area.width as usize;
+    let rows = &app.mentions.rows;
+    if rows.is_empty() {
+        return None;
+    }
+    let selected = app.mentions.selected_index().min(rows.len() - 1);
+    let t = tokens();
+
+    let mut start = selected.saturating_sub(MAX_ROWS - 1);
+    while rows.len().saturating_sub(start) > MAX_ROWS {
+        start += 1;
+    }
+    let start = start.min(selected);
+    let mut lines: Vec<Line> = Vec::new();
+    for (index, row) in rows.iter().enumerate().skip(start) {
+        if index >= start + MAX_ROWS || lines.len() >= room as usize {
+            break;
+        }
+        lines.extend(mention_row_lines(row, index == selected, width, t));
+    }
+    if lines.is_empty() {
+        return None;
+    }
+
+    let height = lines.len() as u16;
+    let rect = Rect::new(area.x, prompt.y - height, area.width, height);
+    frame.render_widget(Clear, rect);
+    frame.render_widget(Paragraph::new(lines), rect);
+    (rows.len() > 1).then_some((selected + 1, rows.len()))
+}
+
+/// Clip a row to the frame without ever spending a background fill.
+fn truncate_spans(spans: &mut Vec<Span<'static>>, width: usize) {
+    let mut used = 0usize;
+    let mut kept = Vec::with_capacity(spans.len());
+    for span in spans.drain(..) {
+        let len = span.content.chars().count();
+        if used + len <= width {
+            used += len;
+            kept.push(span);
+            continue;
+        }
+        let room = width.saturating_sub(used);
+        if room > 0 {
+            let text: String = span.content.chars().take(room - 1).collect();
+            let mut text = text;
+            text.push('…');
+            kept.push(Span::styled(text, span.style));
+        }
+        break;
+    }
+    *spans = kept;
+}
+
+/// One mention row: `›`, a literal `[skill]`/`[agent]`/`[file]` tag, the token
+/// with its matched letters picked out, and the source as muted ink.
+fn mention_row_lines(
+    row: &MentionRow,
+    selected: bool,
+    width: usize,
+    t: crate::tui::theme::Tokens,
+) -> Vec<Line<'static>> {
+    let plain = if selected {
+        Style::default().fg(t.text).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(t.muted)
+    };
+    let matched = if selected {
+        Style::default()
+            .fg(t.accent)
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+    } else {
+        Style::default().fg(t.accent)
+    };
+    let mut spans = vec![Span::styled(
+        if selected { "› " } else { "  " },
+        if selected {
+            Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        },
+    )];
+    // A word, not a colour: this is what separates the three groups in a
+    // terminal where every colour token resolves to Reset.
+    spans.push(Span::styled(
+        format!("[{}] ", row.kind.label()),
+        Style::default().fg(t.muted).add_modifier(Modifier::BOLD),
+    ));
+
+    let mut run = String::new();
+    let mut run_matched = false;
+    for (index, ch) in row.name.chars().enumerate() {
+        let hit = row.hits.contains(&index);
+        if !run.is_empty() && hit != run_matched {
+            spans.push(Span::styled(
+                std::mem::take(&mut run),
+                if run_matched { matched } else { plain },
+            ));
+        }
+        run_matched = hit;
+        run.push(ch);
+    }
+    if !run.is_empty() {
+        spans.push(Span::styled(run, if run_matched { matched } else { plain }));
+    }
+    if !row.description.is_empty() {
+        spans.push(Span::styled(
+            format!("  {}", row.description),
+            Style::default().fg(t.muted),
+        ));
+    }
+    truncate_spans(&mut spans, width);
+    vec![Line::from(spans)]
+}
+
 /// One row: the marker, the command with its matched letters picked out, and
 /// the description beside it — wrapped, not cut, so the row says what the
 /// command is actually for instead of trailing off in the middle of it.
@@ -912,27 +1053,24 @@ fn row_lines(
     width: usize,
     t: crate::tui::theme::Tokens,
 ) -> Vec<Line<'static>> {
-    // A selected row must paint its fill. selected_fg/selected_bg are an
-    // intentional contrast pair (near-black on orange in the dark palette);
-    // using selected_fg alone leaves near-black text on a near-black canvas —
-    // the command name vanishes while its description survives in t.text.
-    let fill = if selected {
-        Style::default().bg(t.selected_bg)
-    } else {
-        Style::default()
-    };
+    // Selection is carried by ink and weight, never by a fill. The old
+    // selected_bg block painted a bright orange rectangle across the name and
+    // description — loud, and in NO_COLOR it flattened every row to the same
+    // default ink. Here the selected name steps up to `t.text` + BOLD, matched
+    // letters keep `t.accent` (+ UNDERLINED), and the `›` marker and description
+    // stay put. Every foreground is a real contrast against the canvas:
+    // `selected_fg` is near-black on dark and would vanish with no fill, so it
+    // is deliberately not used. Under NO_COLOR all tokens are Reset, so the
+    // marker glyph and the BOLD modifier — which survive colour stripping —
+    // are what name the selection.
     let plain = if selected {
-        fill.fg(t.selected_fg).add_modifier(Modifier::BOLD)
+        Style::default().fg(t.text).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(t.muted)
     };
-    // Matched letters stay the accent, but inside the selection fill they need
-    // a contrasting ink: the accent step is the same lightness as the fill in
-    // every palette, so accent-on-fill would also disappear. Use selected_fg
-    // plus bold for matched letters on a selected row; keep the accent for the
-    // unselected rows where there is no fill to hide it.
     let matched = if selected {
-        fill.fg(t.selected_fg)
+        Style::default()
+            .fg(t.accent)
             .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
     } else {
         Style::default().fg(t.accent)
@@ -940,7 +1078,7 @@ fn row_lines(
     let mut spans = vec![Span::styled(
         if selected { "› " } else { "  " },
         if selected {
-            fill.fg(t.selected_fg).add_modifier(Modifier::BOLD)
+            Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
         } else {
             Style::default()
         },
@@ -965,13 +1103,10 @@ fn row_lines(
         spans.push(Span::styled(run, if run_matched { matched } else { plain }));
     }
 
-    // The description shares the row's fill; without it the text sits on the
-    // same canvas as the name and the two halves look unrelated.
-    let description_style = if selected {
-        fill.fg(t.selected_fg)
-    } else {
-        Style::default().fg(t.muted)
-    };
+    // The description keeps its muted ink in both states: selection is already
+    // named by the marker and the bold, accented name, so repainting the whole
+    // row would only shout.
+    let description_style = Style::default().fg(t.muted);
 
     // Beside the name while there is a column's worth of room for it, and under
     // the name when there is not: a three-word-per-line column is not a
@@ -1049,6 +1184,26 @@ fn draw_home(frame: &mut Frame, area: Rect, home: &Home, app: &mut App) {
     }
 }
 
+/// One follow-up button as ink only: no background fill, ever.
+///
+/// Hover, keyboard focus and drag selection all ask for the same treatment —
+/// accent plus BOLD — so a prompt never wears the orange band the selection
+/// fill would paint. When tokens carry no colour (NO_COLOR), the `[N]` and
+/// `›`/`[ ]` glyphs in `line` and the BOLD modifier are the whole cue.
+fn followup_line(line: &Line<'_>, active: bool, t: crate::tui::theme::Tokens) -> Line<'static> {
+    let ink = if active {
+        Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(t.muted)
+    };
+    Line::from(
+        line.spans
+            .iter()
+            .map(|span| Span::styled(span.content.as_ref().to_string(), ink))
+            .collect::<Vec<_>>(),
+    )
+}
+
 fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
     // No border and no `transcript` title: the transcript is the screen, and a
     // box drawn around the whole of it is a rule per column that says only "the
@@ -1100,27 +1255,41 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
         }
         None
     });
-    let latest_detail = visual
-        .iter()
-        .enumerate()
-        .rev()
-        .find_map(|(index, (role, _, header))| {
-            (*header
-                && matches!(
-                    role,
-                    EntryRole::Thinking
-                        | EntryRole::Tool
-                        | EntryRole::ToolDone
-                        | EntryRole::ToolFailed
-                        | EntryRole::ToolInterrupted
-                ))
-            .then_some(index)
-        });
+    let latest_detail =
+        visual
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, (role, _, header, _))| {
+                (*header
+                    && matches!(
+                        role,
+                        EntryRole::Thinking
+                            | EntryRole::Tool
+                            | EntryRole::ToolDone
+                            | EntryRole::ToolFailed
+                            | EntryRole::ToolInterrupted
+                    ))
+                .then_some(index)
+            });
     let t = tokens();
     let lines: Vec<Line> = visual[start..end]
         .iter()
         .enumerate()
-        .map(|(offset, (role, line, header))| {
+        .map(|(offset, (role, line, header, follow_index))| {
+            // A follow-up button is ink only: accent + BOLD when hovered,
+            // keyboard-focused or drag-selected, muted otherwise. There is no
+            // background fill at any point — an orange band under a prompt is
+            // the exact thing this surface avoids. Under NO_COLOR the `›`/`[ ]`
+            // glyphs and BOLD carry the cue, not ink.
+            if let Some(button) = follow_index {
+                let active = app.follow_up_focus == Some(*button)
+                    || hovered == Some(start + offset)
+                    || app
+                        .selection
+                        .is_some_and(|(first, last)| (first..=last).contains(&(start + offset)));
+                return followup_line(line, active, t);
+            }
             let (style, glyph) = style_for(*role);
             let selected = app
                 .selection
@@ -1186,6 +1355,26 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
             drawn
         })
         .collect();
+    // Record where each button landed so a click can be mapped back to its
+    // prompt without guessing from text. The fourth tuple field is set only on
+    // follow-up rows by `visual_lines`, so this can never capture a normal row.
+    let mut follow_rows = Vec::new();
+    let mut follow_line_indices = Vec::new();
+    for (offset, (_, _, _, follow_index)) in visual[start..end].iter().enumerate() {
+        if let Some(button) = follow_index {
+            if let Some(prompt) = app
+                .follow_ups
+                .first()
+                .and_then(|(_, items)| items.get(*button))
+                .map(|item| item.prompt.clone())
+            {
+                follow_rows.push((inner.y + offset as u16, prompt));
+            }
+            follow_line_indices.push((start + offset, *button));
+        }
+    }
+    app.follow_up_rows = follow_rows;
+    app.follow_up_line_indices = follow_line_indices;
     // Lines are already wrapped to the pane, so they are drawn verbatim. The
     // wrapper used to guard against a measured/render width mismatch, but it
     // re-wraps to the render width: a line the widget measured one column wider
@@ -1458,7 +1647,7 @@ fn style_for(role: EntryRole) -> (Style, &'static str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::app::{App, Fact, HomeState};
+    use crate::tui::app::{App, Fact, HomeState, MentionKind};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::style::Color;
@@ -2162,7 +2351,7 @@ mod tests {
     }
 
     #[test]
-    fn completion_rows_use_the_selected_and_accent_tokens() {
+    fn selected_completion_rows_change_ink_not_fill() {
         let t = tokens();
         let row = Row {
             name: "/vault".into(),
@@ -2172,30 +2361,50 @@ mod tests {
         let selected = row_lines(&row, 20, true, 80, t);
         let spans = &selected[0].spans;
         assert_eq!(spans[0].content.as_ref(), "› ");
-        // The selected row paints its fill; every span must carry it, or the
-        // near-black selected_fg lands on a near-black canvas and disappears.
-        assert_eq!(spans[0].style.bg, Some(t.selected_bg));
-        assert_eq!(spans[0].style.fg, Some(t.selected_fg));
+        // No loud paint: every span of the selected row leaves the background
+        // alone. The old selected_bg block covered the name and description
+        // with a bright orange rectangle — the complaint this change fixes.
+        for span in spans {
+            assert_eq!(span.style.bg, None, "selected rows carry no fill: {span:?}");
+            assert_ne!(
+                span.style.bg,
+                Some(t.selected_bg),
+                "the bright selection fill came back: {span:?}"
+            );
+        }
+        // The marker names the selection in ink that survives every palette.
+        assert_eq!(spans[0].style.fg, Some(t.accent));
+        assert!(spans[0].style.add_modifier.contains(Modifier::BOLD));
+
         let prefix = spans
             .iter()
             .find(|span| span.content.as_ref() == "/")
             .expect("the unmatched prefix");
-        assert_eq!(prefix.style.fg, Some(t.selected_fg));
-        assert_eq!(prefix.style.bg, Some(t.selected_bg));
+        assert_eq!(
+            prefix.style.fg,
+            Some(t.text),
+            "the selected name must contrast with the canvas"
+        );
+        assert_ne!(prefix.style.fg, Some(t.selected_fg));
+        assert!(prefix.style.add_modifier.contains(Modifier::BOLD));
+
         let hit = spans
             .iter()
             .find(|span| span.content.as_ref() == "v")
             .expect("the matched letter");
-        assert_eq!(
-            hit.style.fg,
-            Some(t.selected_fg),
-            "matched ink must contrast with the fill"
-        );
-        assert_eq!(hit.style.bg, Some(t.selected_bg));
+        assert_eq!(hit.style.fg, Some(t.accent));
         assert!(
-            hit.style.add_modifier.contains(Modifier::BOLD),
-            "matched letters stay distinct inside the fill"
+            hit.style
+                .add_modifier
+                .contains(Modifier::BOLD | Modifier::UNDERLINED)
         );
+
+        // The description stays muted, not repainted with the loud fill.
+        let desc = spans
+            .iter()
+            .find(|span| span.content.as_ref() == "search the vault")
+            .expect("the description");
+        assert_eq!(desc.style.fg, Some(t.muted));
 
         let plain = row_lines(&row, 20, false, 80, t);
         let prefix = plain[0]
@@ -2204,6 +2413,31 @@ mod tests {
             .find(|span| span.content.as_ref() == "/")
             .expect("the unmatched prefix");
         assert_eq!(prefix.style.fg, Some(t.muted));
+    }
+
+    #[test]
+    fn no_color_dropdown_keeps_the_marker_and_weight_as_selection() {
+        // NO_COLOR makes every token Reset, so colour cannot mark the selected
+        // row. The `›` glyph and the BOLD modifier survive colour stripping and
+        // still carry the selection; no raw colour ever reaches a background.
+        let t = crate::tui::theme::Tokens::for_palette(crate::tui::theme::Palette::NoColor);
+        let row = Row {
+            name: "/vault".into(),
+            description: "search the vault".into(),
+            hits: vec![1],
+        };
+        let selected = row_lines(&row, 20, true, 80, t);
+        let spans = &selected[0].spans;
+        assert_eq!(spans[0].content.as_ref(), "› ");
+        assert!(spans[0].style.add_modifier.contains(Modifier::BOLD));
+        let name = spans
+            .iter()
+            .find(|span| span.content.as_ref() == "/")
+            .expect("the selected name");
+        assert!(name.style.add_modifier.contains(Modifier::BOLD));
+        for span in spans {
+            assert_eq!(span.style.bg, None, "no fill spends raw colour: {span:?}");
+        }
     }
 
     #[test]
@@ -2260,5 +2494,179 @@ mod tests {
                 "a colour outside the token set reached the frame: {cell:?}"
             );
         }
+    }
+
+    fn sample_mentions() -> Vec<MentionRow> {
+        vec![
+            MentionRow {
+                kind: MentionKind::Skill,
+                name: "@skill:agent-reach".into(),
+                token: "@skill:agent-reach".into(),
+                description: String::new(),
+                hits: vec![8],
+                enabled: true,
+            },
+            MentionRow {
+                kind: MentionKind::Agent,
+                name: "@agent:explore".into(),
+                token: "@agent:explore".into(),
+                description: "Explore the codebase and report findings".into(),
+                hits: vec![9],
+                enabled: true,
+            },
+            MentionRow {
+                kind: MentionKind::File,
+                name: "@src/tui/app.rs".into(),
+                token: "@src/tui/app.rs".into(),
+                description: String::new(),
+                hits: vec![1],
+                enabled: true,
+            },
+        ]
+    }
+
+    #[test]
+    fn mention_rows_name_their_category_without_a_background_fill() {
+        let t = tokens();
+        let selected = mention_row_lines(&sample_mentions()[0], true, 80, t);
+        let spans = &selected[0].spans;
+        assert_eq!(spans[0].content.as_ref(), "› ");
+        assert_eq!(spans[0].style.fg, Some(t.accent));
+        assert!(spans[0].style.add_modifier.contains(Modifier::BOLD));
+        assert!(
+            spans.iter().any(|span| span.content.as_ref() == "[skill] "),
+            "the category is a word, not a colour: {spans:?}"
+        );
+        for span in spans {
+            assert_eq!(span.style.bg, None, "mention rows carry no fill: {span:?}");
+            assert_ne!(span.style.bg, Some(t.selected_bg));
+        }
+
+        let plain = mention_row_lines(&sample_mentions()[2], false, 80, t);
+        assert!(
+            plain[0]
+                .spans
+                .iter()
+                .any(|span| span.content.as_ref() == "[file] ")
+        );
+    }
+
+    #[test]
+    fn no_color_mention_rows_keep_the_cue_and_the_marker() {
+        let t = crate::tui::theme::Tokens::for_palette(crate::tui::theme::Palette::NoColor);
+        let lines = mention_row_lines(&sample_mentions()[1], true, 80, t);
+        let spans = &lines[0].spans;
+        assert_eq!(spans[0].content.as_ref(), "› ");
+        assert!(spans[0].style.add_modifier.contains(Modifier::BOLD));
+        assert!(
+            spans.iter().any(|span| span.content.as_ref() == "[agent] "),
+            "NO_COLOR strips ink, not words: {spans:?}"
+        );
+        for span in spans {
+            assert_eq!(span.style.bg, None, "no fill spends raw colour: {span:?}");
+        }
+    }
+
+    #[test]
+    fn the_picker_draws_all_three_groups_above_the_prompt() {
+        let mut app = App::new("s", false);
+        app.input = "@".into();
+        app.cursor = 1;
+        app.mentions.active = true;
+        app.mentions.prefix = "@".into();
+        app.mentions.rows = sample_mentions();
+
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| draw(frame, &mut app))
+            .expect("draw must not fail");
+        let buffer = terminal.backend().buffer();
+        let text: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
+        for cue in [
+            "[skill] @skill:agent-reach",
+            "[agent] @agent:explore",
+            "[file] @src/tui/app.rs",
+        ] {
+            assert!(text.contains(cue), "the picker did not draw {cue:?}");
+        }
+        assert!(footer_hint(&app).contains("enter insert"));
+    }
+
+    fn sample_followups() -> Vec<crate::tui::app::FollowUp> {
+        vec![
+            crate::tui::app::FollowUp {
+                label: "verify: rerun cargo test".into(),
+                prompt: "Rerun cargo test and report the failing cases.".into(),
+            },
+            crate::tui::app::FollowUp {
+                label: "explain: why main.rs changed".into(),
+                prompt: "Explain what changed in /ws/src/main.rs and why.".into(),
+            },
+        ]
+    }
+
+    #[test]
+    fn followup_buttons_draw_their_exact_labels_in_the_transcript_flow() {
+        let mut app = App::new("s", false);
+        app.push(EntryRole::User, "fix it");
+        app.push(EntryRole::Answer, "a substantive answer with real content");
+        app.set_follow_ups(Some(1), sample_followups());
+        let text = screen(&mut app, 100, 30);
+        for label in [
+            "[1] verify: rerun cargo test",
+            "[2] explain: why main.rs changed",
+        ] {
+            assert!(
+                text.contains(label),
+                "button missing from transcript: {label}\n{text}"
+            );
+        }
+        // They sit in the flow, below the answer, not in a floating modal.
+        let answer = text.find("a substantive answer").unwrap();
+        let first_button = text.find("[1] verify").unwrap();
+        assert!(
+            first_button > answer,
+            "buttons must follow the answer: {text}"
+        );
+        assert!(!text.contains("follow-ups"), "no modal wrapper: {text}");
+    }
+
+    #[test]
+    fn a_focused_followup_uses_accent_and_bold_with_no_fill() {
+        let t = tokens();
+        let base = Line::from("› [1] verify: rerun cargo test");
+        let active = followup_line(&base, true, t);
+        for span in &active.spans {
+            assert_eq!(span.style.bg, None, "no background fill: {span:?}");
+            assert_ne!(span.style.bg, Some(t.selected_bg));
+            assert_eq!(span.style.fg, Some(t.accent));
+            assert!(span.style.add_modifier.contains(Modifier::BOLD));
+        }
+        let plain = followup_line(&base, false, t);
+        for span in &plain.spans {
+            assert_eq!(span.style.fg, Some(t.muted));
+            assert_eq!(span.style.bg, None);
+        }
+    }
+
+    #[test]
+    fn no_color_followups_keep_the_glyph_and_bold_as_the_cue() {
+        let t = crate::tui::theme::Tokens::for_palette(crate::tui::theme::Palette::NoColor);
+        let base = Line::from("› [1] verify: rerun cargo test");
+        let active = followup_line(&base, true, t);
+        // The marker and the number are literal text, so colour stripping cannot
+        // take them away; BOLD survives the strip and carries the selection.
+        assert_eq!(
+            active.spans[0].content.as_ref(),
+            "› [1] verify: rerun cargo test"
+        );
+        assert!(active.spans[0].style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(active.spans[0].style.bg, None);
+        assert_eq!(
+            active.spans[0].style.fg,
+            Some(Color::Reset),
+            "NO_COLOR spends no ink"
+        );
     }
 }

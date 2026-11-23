@@ -183,8 +183,11 @@ fn yes_never_starts_auth_or_configures_a_provider() {
 
     let auth = step(&report, "auth");
     if auth["completed"].as_bool() == Some(true) {
-        // A token was already cached; setup only observed it, it did not sign in.
-        assert_eq!(auth["reason"], "completed");
+        // A token was already cached; setup only observed it, it did not sign
+        // in. `reason()` is a note for *incomplete* steps, so a completed step
+        // has no note ("not attempted") — assert the completion, not a note
+        // string that intentionally never exists in that state.
+        assert_eq!(auth["skipped"], false);
     } else {
         assert!(
             auth["reason"]

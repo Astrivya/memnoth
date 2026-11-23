@@ -23,7 +23,7 @@ use ratatui::widgets::Paragraph;
 
 use crate::output::ellipsize;
 use crate::tui::app::{Fact, Home, HomeState, Step, wrap_text};
-use crate::tui::theme::tokens;
+use crate::tui::theme::{Tokens, tokens};
 
 /// Width of the label column in the brief's facts.
 const FACT_LABEL: usize = 12;
@@ -308,6 +308,30 @@ fn stacked_fact(fact: &Fact, width: usize) -> Vec<Line<'static>> {
     rows
 }
 
+/// Ink for the selected action on the brief.
+///
+/// The theme's `selection()` paints a whole bright band, which is right for a
+/// list where an entire row must read as one block. On the brief a single
+/// action with an orange block behind it is a glare, so selection is carried
+/// by the ink instead: the command takes the accent in bold, the detail stays
+/// muted, and there is deliberately **no background fill**. The literal `▸`
+/// marker and the bold weight both survive `strip_colors`, so the cue holds
+/// under `Palette::NoColor` where every token is `Color::Reset`.
+struct StepStyle {
+    marker: Style,
+    command: Style,
+    detail: Style,
+}
+
+fn step_styles(t: Tokens) -> StepStyle {
+    StepStyle {
+        // A contrasting ink token plus BOLD, never `selected_bg` as a fill.
+        marker: Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+        command: Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+        detail: Style::default().fg(t.muted),
+    }
+}
+
 /// `next`, with the description beside the command when there is room for a
 /// clause and under it when there is not.
 fn step_rows(
@@ -325,17 +349,14 @@ fn step_rows(
         Line::from(Span::styled("next", Style::default().fg(t.text))),
     ];
     let inline = width >= INLINE_MIN_WIDTH;
+    let chosen = step_styles(t);
     for (index, step) in steps.iter().enumerate() {
         let selected = index == cursor && step.runnable;
-        // The row the cursor is on is a selection, not an accent: the `▸`
-        // marker says which one Enter runs even when every colour is stripped.
-        // The whole row shares one style so the highlight is continuous.
+        // Selection changes ink, not fill: the `▸` marker and bold weight name
+        // the row Enter runs, and both survive every colour being stripped.
+        // No span here paints a background block behind the text.
         let (marker_style, command_style, description_style) = if selected {
-            let row = Style::default()
-                .fg(t.selected_fg)
-                .bg(t.selected_bg)
-                .add_modifier(Modifier::BOLD);
-            (row, row, row)
+            (chosen.marker, chosen.command, chosen.detail)
         } else {
             (
                 Style::default().fg(t.muted),
@@ -444,6 +465,7 @@ fn finish(frame: &mut Frame, area: Rect, mut lines: Vec<Line<'static>>, height: 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::theme::Palette;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::style::Color;
@@ -619,7 +641,7 @@ mod tests {
     }
 
     #[test]
-    fn the_selected_step_uses_the_selection_tokens() {
+    fn the_selected_step_changes_ink_not_fill() {
         let t = tokens();
         let steps = &home().steps;
         let selected = step_rows(steps, 80, 0, None)
@@ -627,8 +649,22 @@ mod tests {
             .find(|line| line.to_string().contains("/vault init"))
             .expect("the first action is on a row");
         assert_eq!(selected.spans[0].content.as_ref(), "▸ ");
-        assert_eq!(selected.spans[0].style.fg, Some(t.selected_fg));
-        assert_eq!(selected.spans[0].style.bg, Some(t.selected_bg));
+        // No span on the selected row paints a band behind the text.
+        for span in &selected.spans {
+            assert_eq!(span.style.bg, None, "no selected-bg fill: {span:?}");
+        }
+        // The command — the row's name — uses a contrasting ink token, never
+        // the selection fill, and is bold so the cue survives NO_COLOR.
+        assert_eq!(selected.spans[1].style.fg, Some(t.accent));
+        assert!(
+            selected.spans[1]
+                .style
+                .add_modifier
+                .contains(Modifier::BOLD)
+        );
+        // The detail stays muted: readable, but quieter than the command.
+        assert_eq!(selected.spans[2].style.fg, Some(t.muted));
+        assert_eq!(selected.spans[2].style.bg, None);
 
         let other = step_rows(steps, 80, 1, None)
             .into_iter()
@@ -636,6 +672,47 @@ mod tests {
             .expect("the other action is on a row");
         assert_eq!(other.spans[0].content.as_ref(), "  ");
         assert_eq!(other.spans[0].style.fg, Some(t.muted));
+        assert_eq!(other.spans[1].style.fg, Some(t.text));
+    }
+
+    #[test]
+    fn no_color_selection_is_carried_by_the_marker_and_bold() {
+        let no_color = Tokens::for_palette(Palette::NoColor);
+        assert_eq!(no_color.accent, Color::Reset);
+        assert_eq!(no_color.text, Color::Reset);
+        let chosen = step_styles(no_color);
+        // Under NoColor every token is Reset: no raw colour may carry the cue.
+        assert_eq!(chosen.marker.fg, Some(Color::Reset));
+        assert_eq!(chosen.command.fg, Some(Color::Reset));
+        assert_eq!(chosen.marker.bg, None);
+        assert_eq!(chosen.command.bg, None);
+        assert_eq!(chosen.detail.bg, None);
+        // BOLD survives strip_colors, so it is the ink-side cue; the literal
+        // marker is the other half, and neither depends on the palette.
+        assert!(chosen.marker.add_modifier.contains(Modifier::BOLD));
+        assert!(chosen.command.add_modifier.contains(Modifier::BOLD));
+        let selected = step_rows(&home().steps, 80, 0, None)
+            .into_iter()
+            .find(|line| line.to_string().contains("/vault init"))
+            .expect("the first action is on a row");
+        assert_eq!(selected.spans[0].content.as_ref(), "▸ ");
+    }
+
+    #[test]
+    fn no_cell_on_the_brief_is_filled_with_the_selection_background() {
+        let t = tokens();
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let brief = home();
+        terminal
+            .draw(|frame| draw(frame, Rect::new(0, 0, 100, 30), &brief, 0))
+            .expect("draw must not fail");
+        for cell in terminal.backend().buffer().content() {
+            assert_ne!(
+                cell.bg, t.selected_bg,
+                "selection must change ink, not paint a band: {cell:?}"
+            );
+        }
     }
 
     #[test]

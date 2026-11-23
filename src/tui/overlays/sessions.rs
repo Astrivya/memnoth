@@ -25,12 +25,13 @@ use crate::tui::app::{App, SessionSwitch};
 use crate::tui::overlays::{Overlay, OverlayAction, OverlayKind};
 use crate::tui::theme::{Tokens, tokens};
 
-/// Selection has to survive NO_COLOR, where every token is Reset. Reverse
-/// video is the non-colour cue the old theme used for this exact case; keeping
-/// it here means a screen reader and a plain terminal still see the cursor.
+/// A selected row is ink, not a fill: accent foreground plus bold, so no orange
+/// band covers the text. The literal `›` pointer stays its own cue. Under
+/// NO_COLOR reverse video remains the non-colour cue, so a screen reader and a
+/// plain terminal still see the cursor.
 fn selection(t: Tokens) -> Style {
     if t.colored() {
-        Style::default().fg(t.selected_fg).bg(t.selected_bg)
+        Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
     } else {
         Style::default().add_modifier(Modifier::REVERSED)
     }
@@ -1030,8 +1031,17 @@ mod tests {
 
         let themed_tokens = Tokens::for_palette(crate::tui::theme::Palette::Dark);
         let themed = selection(themed_tokens);
-        assert_eq!(themed.fg, Some(themed_tokens.selected_fg));
-        assert_eq!(themed.bg, Some(themed_tokens.selected_bg));
+        // Ink-only: accent foreground + bold, never a selected_bg band.
+        assert_eq!(
+            themed.fg,
+            Some(themed_tokens.accent),
+            "selection is accent ink, not near-black selected_fg"
+        );
+        assert_eq!(themed.bg, None, "a selected row must have no fill");
+        assert!(
+            themed.add_modifier.contains(Modifier::BOLD),
+            "bold carries the selection in ink"
+        );
     }
 
     #[test]

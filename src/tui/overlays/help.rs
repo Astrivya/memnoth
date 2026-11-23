@@ -26,15 +26,15 @@ fn keycap(key: &str, active: bool, t: Tokens) -> Span<'static> {
     )
 }
 
-/// The row style for a binding list: selected rows take the selection pair,
-/// the rest take primary text. Descriptions and group names override only the
-/// foreground with muted, so the selection background still shows through.
+/// The row style for a binding list: selected rows take accent ink and BOLD,
+/// the rest take primary text. There is no background fill — ratatui stacks
+/// `highlight_style` on top of a row's own style, so a `bg` here would paint
+/// the whole band. Descriptions and group names override only the foreground
+/// with muted, and the leading `›` marker plus BOLD carry the selection even
+/// under NO_COLOR.
 fn binding_style(selected: bool, t: Tokens) -> Style {
     if selected {
-        Style::default()
-            .bg(t.selected_bg)
-            .fg(t.selected_fg)
-            .add_modifier(Modifier::BOLD)
+        Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(t.text)
     }
@@ -536,7 +536,8 @@ impl HelpOverlay {
                     .borders(Borders::ALL)
                     .title(" Global Keybindings "),
             )
-            .highlight_style(Style::default().bg(t.selected_bg).fg(t.selected_fg));
+            .highlight_style(Style::default().fg(t.accent).add_modifier(Modifier::BOLD))
+            .highlight_symbol("› ");
         frame.render_stateful_widget(list, area, &mut self.list_state);
     }
 
@@ -596,7 +597,8 @@ impl HelpOverlay {
                     .borders(Borders::ALL)
                     .title(" Overlay Keybindings "),
             )
-            .highlight_style(Style::default().bg(t.selected_bg).fg(t.selected_fg));
+            .highlight_style(Style::default().fg(t.accent).add_modifier(Modifier::BOLD))
+            .highlight_symbol("› ");
         frame.render_stateful_widget(list, area, &mut self.list_state);
     }
 
@@ -656,7 +658,8 @@ impl HelpOverlay {
                     .borders(Borders::ALL)
                     .title(" Slash Commands "),
             )
-            .highlight_style(Style::default().bg(t.selected_bg).fg(t.selected_fg));
+            .highlight_style(Style::default().fg(t.accent).add_modifier(Modifier::BOLD))
+            .highlight_symbol("› ");
         frame.render_stateful_widget(list, area, &mut self.list_state);
     }
 
@@ -712,7 +715,8 @@ impl HelpOverlay {
 
         let list = List::new(items)
             .block(Block::default().borders(Borders::ALL).title(" Shortcuts "))
-            .highlight_style(Style::default().bg(t.selected_bg).fg(t.selected_fg));
+            .highlight_style(Style::default().fg(t.accent).add_modifier(Modifier::BOLD))
+            .highlight_symbol("› ");
         frame.render_stateful_widget(list, area, &mut self.list_state);
     }
 
@@ -787,7 +791,8 @@ impl HelpOverlay {
                     .borders(Borders::ALL)
                     .title(" Search Results "),
             )
-            .highlight_style(Style::default().bg(t.selected_bg).fg(t.selected_fg));
+            .highlight_style(Style::default().fg(t.accent).add_modifier(Modifier::BOLD))
+            .highlight_symbol("› ");
         frame.render_stateful_widget(list, area, &mut self.list_state);
     }
 }
@@ -1060,11 +1065,7 @@ impl Overlay for HelpOverlay {
             .block(Block::default().borders(Borders::ALL).title(" Help "))
             .select(self.active_tab)
             .style(Style::default().fg(t.muted))
-            .highlight_style(
-                Style::default()
-                    .fg(t.selected_bg)
-                    .add_modifier(Modifier::BOLD),
-            );
+            .highlight_style(Style::default().fg(t.accent).add_modifier(Modifier::BOLD));
         frame.render_widget(tabs, chunks[0]);
 
         // Content is always the third chunk. The search bar is chunks[1] and
@@ -1216,9 +1217,11 @@ mod tests {
         assert_eq!(active.style.fg, Some(t.accent));
 
         let selected = binding_style(true, t);
-        assert_eq!(selected.bg, Some(t.selected_bg));
-        assert_eq!(selected.fg, Some(t.selected_fg));
+        assert_eq!(selected.bg, None, "a selected row must not paint a fill");
+        assert_eq!(selected.fg, Some(t.accent));
+        assert!(selected.add_modifier.contains(Modifier::BOLD));
         let idle_row = binding_style(false, t);
+        assert_eq!(idle_row.bg, None);
         assert_eq!(idle_row.fg, Some(t.text));
     }
 

@@ -19,8 +19,10 @@
 //! colour of its own would fight that; the caller patches the role's colour onto
 //! every span that does not name one.
 
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
+
+use crate::tui::theme::tokens;
 
 /// One run of text with the emphasis it was written in.
 #[derive(Debug, Clone)]
@@ -45,6 +47,7 @@ impl Run {
 /// input, so a caller can index it without a guard.
 pub fn lines(text: &str, width: usize) -> Vec<Line<'static>> {
     let width = width.max(8);
+    let t = tokens();
     let mut out = Vec::new();
     let mut fence: Option<()> = None;
     let mut blank = false;
@@ -136,7 +139,7 @@ pub fn lines(text: &str, width: usize) -> Vec<Line<'static>> {
         }
 
         if let Some(rest) = bullet(body) {
-            let marker = Span::styled("• ", Style::default().fg(Color::Cyan));
+            let marker = Span::styled("• ", Style::default().fg(t.muted));
             out.extend(wrap_runs(
                 inline(rest),
                 width,
@@ -148,7 +151,7 @@ pub fn lines(text: &str, width: usize) -> Vec<Line<'static>> {
         }
 
         if let Some((marker, rest)) = numbered(body) {
-            let marker_span = Span::styled(marker.clone(), Style::default().fg(Color::Cyan));
+            let marker_span = Span::styled(marker.clone(), Style::default().fg(t.muted));
             let indent = marker.chars().count();
             out.extend(wrap_runs(
                 inline(rest),
@@ -161,7 +164,7 @@ pub fn lines(text: &str, width: usize) -> Vec<Line<'static>> {
         }
 
         if let Some(rest) = body.strip_prefix("> ") {
-            let marker = Span::styled("│ ", Style::default().fg(Color::DarkGray));
+            let marker = Span::styled("│ ", Style::default().fg(t.muted));
             let style = Style::default().add_modifier(Modifier::ITALIC | Modifier::DIM);
             out.extend(wrap_runs(inline(rest), width, 2, Some(marker), style));
             continue;
@@ -172,7 +175,7 @@ pub fn lines(text: &str, width: usize) -> Vec<Line<'static>> {
         if body.trim_matches('-').is_empty() && body.trim().len() >= 3 {
             out.push(Line::from(Span::styled(
                 "─".repeat(width),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(t.border),
             )));
             continue;
         }
@@ -246,6 +249,7 @@ fn is_separator(line: &str) -> bool {
 /// the table off the right edge where the terminal clips it unreadably.
 /// Cells wrap instead of overflowing, so every cell's words survive.
 fn table_lines(header: &[String], rows: &[Vec<String>], width: usize) -> Vec<Line<'static>> {
+    let t = tokens();
     let cols = header
         .len()
         .max(rows.iter().map(Vec::len).max().unwrap_or(0))
@@ -272,7 +276,7 @@ fn table_lines(header: &[String], rows: &[Vec<String>], width: usize) -> Vec<Lin
         col_w[index] -= 1;
     }
 
-    let rule = Style::default().fg(Color::DarkGray);
+    let rule = Style::default().fg(t.border);
     let border = |left: &str, mid: &str, right: &str, widths: &[usize]| -> Line<'static> {
         let mut text = String::from(left);
         for (index, &w) in widths.iter().enumerate() {
@@ -373,8 +377,10 @@ fn is_word(ch: char) -> bool {
     ch.is_alphanumeric() || ch == '_'
 }
 
+/// Inline and fenced code is emphasis: one accent ink, never a fixed colour.
 fn code_style() -> Style {
-    Style::default().fg(Color::Yellow)
+    let t = tokens();
+    Style::default().fg(t.accent)
 }
 
 fn block_runs(
@@ -425,7 +431,7 @@ fn inline(text: &str) -> Vec<Run> {
             let code: String = chars[i + 1..i + 1 + end].iter().collect();
             runs.push(Run {
                 text: code,
-                style: Style::default().fg(Color::Yellow),
+                style: code_style(),
             });
             i += end + 2;
             continue;
@@ -602,6 +608,7 @@ fn wrap_runs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::style::Color;
 
     fn plain(lines: &[Line<'_>]) -> Vec<String> {
         lines
@@ -642,6 +649,7 @@ mod tests {
     /// text. A reader must not see `**` or a backtick.
     #[test]
     fn markers_are_rendered_not_printed() {
+        let t = tokens();
         let rendered = lines("**Temporal vault** and `kg_impact`", 60);
         let text = plain(&rendered).join("");
         assert!(!text.contains('*'), "{text}");
@@ -661,8 +669,8 @@ mod tests {
         assert!(
             spans
                 .iter()
-                .any(|(text, style)| text == "kg_impact" && style.fg == Some(Color::Yellow)),
-            "code is picked out"
+                .any(|(text, style)| text == "kg_impact" && style.fg == Some(t.accent)),
+            "code is picked out with the accent token"
         );
     }
 
@@ -769,5 +777,78 @@ mod tests {
                 .sum::<usize>()
                 <= 10
         }));
+    }
+
+    #[test]
+    fn no_raw_colours_in_production_render_code() {
+        let source = include_str!("markdown.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap_or(source);
+        assert!(
+            !production.contains("Color::"),
+            "production render code must use semantic tokens, not raw Color::"
+        );
+    }
+
+    #[test]
+    fn structural_markers_use_tokens_and_keep_their_glyphs() {
+        let t = tokens();
+        let rendered = lines("- item\n1. step\n> quote\n---\n|c|\n|-|", 40);
+        let styles = styles(&rendered);
+        // The glyph is the meaning; the token only reinforces it.
+        assert!(
+            styles
+                .iter()
+                .any(|(s, st)| s == "• " && st.fg == Some(t.muted))
+        );
+        assert!(
+            styles
+                .iter()
+                .any(|(s, st)| s == "1. " && st.fg == Some(t.muted))
+        );
+        assert!(
+            styles
+                .iter()
+                .any(|(s, st)| s == "│ " && st.fg == Some(t.muted))
+        );
+        assert!(
+            styles
+                .iter()
+                .any(|(s, st)| s.starts_with('─') && st.fg == Some(t.border))
+        );
+        assert!(
+            styles
+                .iter()
+                .any(|(s, st)| s.starts_with('┌') && st.fg == Some(t.border))
+        );
+        assert_eq!(code_style().fg, Some(t.accent));
+    }
+
+    #[test]
+    fn every_rendered_colour_comes_from_the_tokens() {
+        let t = tokens();
+        let allowed = [
+            t.canvas,
+            t.surface,
+            t.text,
+            t.muted,
+            t.border,
+            t.accent,
+            t.success,
+            t.warning,
+            t.error,
+            t.selected_bg,
+            t.selected_fg,
+            Color::Reset,
+        ];
+        let rendered = lines(
+            "`code` and **bold**\n- bullet\n| a |\n|---|\n| b |\n```\nraw\n```",
+            40,
+        );
+        for (_, style) in styles(&rendered) {
+            assert!(
+                style.fg.is_none_or(|fg| allowed.contains(&fg)),
+                "a colour outside the token set reached markdown: {style:?}"
+            );
+        }
     }
 }

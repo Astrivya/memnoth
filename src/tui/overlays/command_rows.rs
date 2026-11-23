@@ -312,6 +312,17 @@ fn build_projection() -> Projection {
             continue;
         }
         let command = format!("/{line}");
+        // `/sessions` (the picker) is the one surface for conversations. The
+        // bare `/session` alias duplicates it in the palette and splits one
+        // action across two rows; keep the parser compatible for scripts but
+        // do not offer both.
+        if command.eq_ignore_ascii_case("/session") {
+            skipped.push(Skipped {
+                id,
+                reason: "superseded by /sessions in the palette",
+            });
+            continue;
+        }
         if !runnable(&command) {
             skipped.push(Skipped {
                 id,

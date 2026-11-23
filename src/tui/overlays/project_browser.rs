@@ -94,10 +94,7 @@ fn pointer_style(selected: bool, t: Tokens) -> Style {
 
 fn name_style(selected: bool, t: Tokens) -> Style {
     if selected {
-        Style::default()
-            .bg(t.selected_bg)
-            .fg(t.selected_fg)
-            .add_modifier(Modifier::BOLD)
+        Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(t.muted)
     }
@@ -671,8 +668,22 @@ mod tests {
         assert_eq!(pointer_style(true, colored).fg, Some(colored.accent));
         assert_eq!(pointer_style(false, colored).fg, Some(colored.muted));
         let selected = name_style(true, colored);
-        assert_eq!(selected.bg, Some(colored.selected_bg));
-        assert_eq!(selected.fg, Some(colored.selected_fg));
+        assert_eq!(selected.bg, None, "selection is ink, not a fill");
+        assert_ne!(
+            selected.bg,
+            Some(colored.selected_bg),
+            "the orange band came back"
+        );
+        assert_eq!(selected.fg, Some(colored.accent));
+        assert_ne!(
+            selected.fg,
+            Some(colored.selected_fg),
+            "near-black ink would vanish"
+        );
+        assert!(
+            selected.add_modifier.contains(Modifier::BOLD),
+            "BOLD survives NO_COLOR"
+        );
         assert_eq!(name_style(false, colored).fg, Some(colored.muted));
 
         // Under NO_COLOR the colour disappears but the glyph does not.

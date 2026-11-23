@@ -364,8 +364,16 @@ pub fn verify(fixture_path: &Path) -> Result<Value> {
         });
     }
 
+    // Honest provenance: this is a deterministic fixture with hand-written
+    // ground truth, so it is a derived diagnostic and never an official score.
+    // No wall-clock timestamp is captured here — the indexed line numbers and
+    // case timestamps are fixture data, not the time this suite ran — so
+    // `observed_at` is omitted rather than fabricated.
     Ok(json!({
         "schema": "mn-kg-result/1",
+        "diagnostic": "derived",
+        "official": false,
+        "note": "Derived diagnostic of the code graph's query correctness, not an official Code Graph Suite score and not comparable to vendor-reported results.",
         "fixture": fixture_path.to_string_lossy(),
         "cases": fixture.cases.len(),
         "passed": fixture.cases.len() - failures,
@@ -496,5 +504,27 @@ mod tests {
         assert_eq!(report["gate"], "fail");
         assert_eq!(report["failed"], 1);
         assert_eq!(report["results"][0]["observed"]["line"], 10);
+        // The honest stamps hold even when the gate fails.
+        assert_eq!(report["diagnostic"], "derived");
+        assert_eq!(report["official"], false);
+    }
+
+    #[test]
+    fn the_report_is_stamped_as_a_derived_non_official_diagnostic() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("ci/kg-verify-cases.json");
+        let report = verify(&path).expect("verify committed fixture");
+        assert_eq!(report["diagnostic"], "derived");
+        assert_eq!(report["official"], false);
+        assert_eq!(report["gate"], "pass");
+        let note = report["note"].as_str().expect("note");
+        assert!(note.starts_with("Derived diagnostic of"), "note: {note}");
+        assert!(note.contains("not an official"), "note: {note}");
+        assert!(
+            note.contains("not comparable to vendor-reported results"),
+            "note: {note}"
+        );
+        // There is no wall-clock timestamp source in this lane: do not invent
+        // an observation date out of the fixture's seeded data.
+        assert!(report.get("observed_at").is_none());
     }
 }

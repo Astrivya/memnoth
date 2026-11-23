@@ -228,6 +228,18 @@ fn last_row(rows: &[PopoverRow]) -> usize {
     rows.iter().rposition(|row| !row.header).unwrap_or(0)
 }
 
+/// Selection and enabled-button ink: accent foreground and weight, no fill.
+///
+/// The `›` marker glyph and the BOLD/UNDERLINED modifiers are the cue that
+/// survives NO_COLOR, when every token resolves to `Color::Reset`. A whole-row
+/// background is never needed to say "this one".
+fn selected_ink() -> Style {
+    Style::default()
+        .fg(tokens().accent)
+        .add_modifier(Modifier::BOLD)
+        .add_modifier(Modifier::UNDERLINED)
+}
+
 /// The window.
 #[derive(Debug)]
 pub struct PopoverOverlay {
@@ -316,10 +328,7 @@ impl PopoverOverlay {
             Span::styled(
                 format!(" {text} "),
                 if enabled {
-                    Style::default()
-                        .fg(t.selected_fg)
-                        .bg(t.selected_bg)
-                        .add_modifier(Modifier::BOLD)
+                    selected_ink()
                 } else {
                     Style::default().fg(t.muted).add_modifier(Modifier::DIM)
                 },
@@ -573,11 +582,13 @@ impl Overlay for PopoverOverlay {
             }
 
             let selected = index == self.selected;
+            // The glyph plus BOLD/UNDERLINED ink is the selection cue; no
+            // background band is painted behind the row.
             let marker = if selected { "› " } else { "  " };
             let mut spans = vec![Span::styled(
                 marker.to_string(),
                 if selected {
-                    Style::default().fg(t.accent)
+                    selected_ink()
                 } else {
                     Style::default()
                 },
@@ -585,7 +596,7 @@ impl Overlay for PopoverOverlay {
             spans.push(Span::styled(
                 row.title.clone(),
                 if selected {
-                    Style::default().fg(t.text).add_modifier(Modifier::BOLD)
+                    selected_ink()
                 } else {
                     Style::default().fg(t.muted)
                 },
@@ -610,18 +621,7 @@ impl Overlay for PopoverOverlay {
                 spans.push(Span::raw("  "));
                 spans.push(Span::styled(detail, Style::default().fg(t.muted)));
             }
-            if selected {
-                let fill = width.saturating_sub(
-                    spans
-                        .iter()
-                        .map(|span| span.content.chars().count())
-                        .sum::<usize>(),
-                );
-                spans.push(Span::raw(" ".repeat(fill)));
-                lines.push(Line::from(spans).style(Style::default().bg(t.selected_bg)));
-            } else {
-                lines.push(Line::from(spans));
-            }
+            lines.push(Line::from(spans));
         }
 
         if lines.is_empty() {
@@ -1706,19 +1706,46 @@ mod tests {
         assert_eq!(cell_colors(buffer, "│").map(|(fg, _)| fg), Some(t.border));
         let (marker_fg, marker_bg) = cell_colors(buffer, "›").expect("focused row marker");
         assert_eq!(marker_fg, t.accent);
-        assert_eq!(marker_bg, t.selected_bg);
+        assert_eq!(
+            marker_bg,
+            Color::Reset,
+            "the marker carries no selection fill"
+        );
+
+        // No orange band anywhere in the frame, and the glyph's modifiers are
+        // the cue that still reads when colour is stripped (NO_COLOR).
+        let mut marker_modifier = Modifier::empty();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                let cell = &buffer[(x, y)];
+                assert_ne!(cell.bg, t.selected_bg, "no fill at ({x},{y})");
+                if cell.symbol() == "›" {
+                    marker_modifier = cell.modifier;
+                }
+            }
+        }
+        assert!(
+            marker_modifier.contains(Modifier::BOLD | Modifier::UNDERLINED),
+            "bold + underlined marker survives NO_COLOR"
+        );
     }
 
     #[test]
-    fn footer_chips_use_the_selection_pair_or_muted_when_disabled() {
+    fn footer_chips_use_accent_ink_or_muted_when_disabled() {
         let t = tokens();
         let mut overlay =
             PopoverOverlay::new(PopoverOverlay::for_answer("teams.list", &teams_answer()).unwrap());
         overlay.show();
         let footer = overlay.footer();
         let run = &footer.spans[0];
-        assert_eq!(run.style.fg, Some(t.selected_fg));
-        assert_eq!(run.style.bg, Some(t.selected_bg));
+        assert_eq!(run.style.fg, Some(t.accent));
+        assert_eq!(run.style.bg, None, "an enabled chip carries no fill");
+        assert!(
+            run.style
+                .add_modifier
+                .contains(Modifier::BOLD | Modifier::UNDERLINED),
+            "the chip reads when colour is stripped"
+        );
         assert!(run.content.contains("enter run"), "{}", run.content);
 
         // A row with no action draws a disabled, muted chip instead.

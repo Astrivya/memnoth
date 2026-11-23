@@ -26,6 +26,19 @@ fn command_keycap(command: &str, active: bool, t: Tokens) -> Span<'static> {
     )
 }
 
+/// Row ink for the palette list. The selected row takes accent ink and BOLD,
+/// never a background fill: ratatui stacks `highlight_style` on top of a row's
+/// own style, so any `bg` here would paint the whole band. The leading
+/// highlight marker plus BOLD are the selection cue, both of which survive
+/// `NO_COLOR` where every token resolves to Reset.
+fn row_style(selected: bool, t: Tokens) -> Style {
+    if selected {
+        Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(t.text)
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct PaletteOverlay {
     visible: bool,
@@ -375,14 +388,7 @@ impl Overlay for PaletteOverlay {
             .enumerate()
             .map(|(i, item)| {
                 let is_selected = i == self.palette.selected_index();
-                let style = if is_selected {
-                    Style::default()
-                        .fg(t.selected_fg)
-                        .bg(t.selected_bg)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(t.text)
-                };
+                let style = row_style(is_selected, t);
                 ListItem::new(Line::from(vec![
                     command_keycap(&item.command, is_selected, t),
                     Span::styled(item.description.as_str(), Style::default().fg(t.muted)),
@@ -392,8 +398,8 @@ impl Overlay for PaletteOverlay {
             .collect();
 
         let list = List::new(list_items)
-            .highlight_style(Style::default().bg(t.selected_bg).fg(t.selected_fg))
-            .highlight_symbol("> ");
+            .highlight_style(Style::default().fg(t.accent).add_modifier(Modifier::BOLD))
+            .highlight_symbol("› ");
         frame.render_stateful_widget(list, list_area, &mut self.list_state);
 
         // Footer hint
@@ -546,6 +552,21 @@ mod tests {
         assert!(active.content.contains("/help"));
         assert_eq!(active.style.bg, Some(t.surface));
         assert_eq!(active.style.fg, Some(t.accent));
+    }
+
+    /// The selected row is ink, not a fill: no `bg`, accent ink, BOLD. The
+    /// leading `›` highlight marker is plain text, so the cue survives NO_COLOR.
+    #[test]
+    fn selected_rows_use_ink_only_and_no_background_fill() {
+        let t = tokens();
+        let selected = row_style(true, t);
+        assert_eq!(selected.bg, None, "a selected row must not paint a fill");
+        assert_eq!(selected.fg, Some(t.accent));
+        assert!(selected.add_modifier.contains(Modifier::BOLD));
+
+        let idle = row_style(false, t);
+        assert_eq!(idle.bg, None);
+        assert_eq!(idle.fg, Some(t.text));
     }
 
     /// The palette keeps no second list of verbs: its items are the one command

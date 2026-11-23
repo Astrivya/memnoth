@@ -807,7 +807,7 @@ fn history_label(days: Option<i64>) -> String {
 }
 
 /// Run the `mn auth whoami` command.
-pub fn whoami(ctx: &AppContext, _args: &WhoamiArgs) -> Result<Outcome> {
+pub fn whoami(_ctx: &AppContext, _args: &WhoamiArgs) -> Result<Outcome> {
     let store = create_credential_store()?;
     let whoami: Option<StoredWhoami> = store
         .get_sync("whoami")?
@@ -821,40 +821,44 @@ pub fn whoami(ctx: &AppContext, _args: &WhoamiArgs) -> Result<Outcome> {
     let (expires_at, expired) = expiry_state(token.as_ref());
     let expires = expiry_text(token.as_ref());
 
-    let data = if let Some(w) = whoami {
-        if !ctx.json {
-            println!("{} ({})", w.email, w.account_id);
-            println!("expires {expires}");
-        }
-        serde_json::json!({
-            "account_id": w.account_id,
-            "email": w.email,
-            "name": w.name,
-            "org_id": w.org_id,
-            "org_name": w.org_name,
-            "role": w.role,
-            "expires_at": expires_at,
-            "expired": expired,
-            "expires": expires,
-        })
+    // The answer travels in Outcome.text, never a direct println: the TUI owns
+    // the terminal, and raw stdout lines interleave with its frames and land on
+    // top of the composer. The CLI door prints Outcome.text normally.
+    let (data, text) = if let Some(w) = whoami {
+        let text = format!("{} ({})\nexpires {expires}", w.email, w.account_id);
+        (
+            serde_json::json!({
+                "account_id": w.account_id,
+                "email": w.email,
+                "name": w.name,
+                "org_id": w.org_id,
+                "org_name": w.org_name,
+                "role": w.role,
+                "expires_at": expires_at,
+                "expired": expired,
+                "expires": expires,
+            }),
+            text,
+        )
     } else {
-        if !ctx.json {
-            println!("not authenticated");
-        }
-        serde_json::json!({
-            "account_id": null,
-            "email": null,
-            "name": null,
-            "org_id": null,
-            "org_name": null,
-            "role": null,
-            "expires_at": null,
-            "expired": false,
-            "expires": null,
-        })
+        let text = "not authenticated".to_string();
+        (
+            serde_json::json!({
+                "account_id": null,
+                "email": null,
+                "name": null,
+                "org_id": null,
+                "org_name": null,
+                "role": null,
+                "expires_at": null,
+                "expired": false,
+                "expires": null,
+            }),
+            text,
+        )
     };
 
-    Ok(Outcome::new("auth.whoami", String::new(), data))
+    Ok(Outcome::new("auth.whoami", text, data))
 }
 /// Get stored API token from credential store.
 pub fn get_stored_token(_ctx: &AppContext) -> Result<Option<String>> {

@@ -827,3 +827,53 @@ jobs:
         env:
           MEMNOTH_BIN: ./target/debug/memnoth
         run: ./target/debug/memnoth bench run --suite kg --n 3 --fail-below 0.0 --json -o ci/kg-result.json
+
+  # Fast, model-free benchmark smoke gate. These four lanes are DERIVED
+  # DIAGNOSTICS, not official benchmark scores: they run the deterministic
+  # verifiers against committed fixtures with no model, no provider key, no
+  # network and no 100k-file index probe. This job inherits the workflow's
+  # push / PR / workflow_dispatch triggers (it adds no trigger gate), so it runs
+  # on every push and pull request. The provider-keyed lanes (MTS-60, the
+  # model-backed TRS runs, pinned-model CI) remain separately gated in `bench`
+  # and `pinned-model-ci` above. Every lane must exit 0 and report a passing
+  # gate, or this job fails.
+  bench-smoke:
+    name: bench smoke (model-free verifier lanes)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins the workspace toolchain to 1.98.0; @stable
+      # honours that pin, matching the existing `bench` job above.
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-workspace-crates: "true"
+
+      # Build the CLI once; every lane reuses this single binary.
+      - name: Build memnoth
+        run: cargo build --locked --bin memnoth
+
+      # One wrapper runs all four lanes with `--json`, captures each stdout as
+      # an artifact, and fails on non-zero exit, malformed JSON, ok != true,
+      # gate != pass, or any failed case/regression. Nothing is swallowed: a red
+      # lane is a red job. `kg-verify` is invoked with no index-budget-root
+      # option, so the 100k-file index probe stays out of scope.
+      - name: Run model-free bench lanes
+        env:
+          MN_BIN: ./target/debug/memnoth
+          BENCH_SMOKE_OUT: bench-smoke-results
+        run: bash scripts/bench-smoke.sh
+
+      # Upload even when a lane fails so the captured JSON is available for
+      # debugging; the run step above still fails the job.
+      - name: Upload bench-smoke outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-smoke-results
+          path: bench-smoke-results/
+          if-no-files-found: error
+          retention-days: 7

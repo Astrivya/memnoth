@@ -85,25 +85,35 @@ struct Activity {
     summary: String,
 }
 
-/// Every list selects the same way: one token pair for the row, and captions
-/// that keep the foreground on a selected row instead of falling back to a raw
-/// colour.
+/// Every list selects the same way: accent ink plus bold on the row, and
+/// captions that keep a foreground on a selected row instead of falling back to
+/// a raw colour. No `selected_bg` band is painted. These rows have no pointer
+/// glyph, so reverse video is the NO_COLOR cue and stays confined to that
+/// branch rather than becoming the general style.
 fn row_styles(selected: bool, t: Tokens) -> (Style, Style) {
     if selected {
-        (
-            Style::default()
-                .bg(t.selected_bg)
-                .fg(t.selected_fg)
-                .add_modifier(Modifier::BOLD),
-            Style::default().bg(t.selected_bg).fg(t.selected_fg),
-        )
+        if t.colored() {
+            (
+                Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+                Style::default().fg(t.accent),
+            )
+        } else {
+            (
+                Style::default().add_modifier(Modifier::REVERSED),
+                Style::default().add_modifier(Modifier::REVERSED),
+            )
+        }
     } else {
         (Style::default(), Style::default().fg(t.muted))
     }
 }
 
 fn selection_style(t: Tokens) -> Style {
-    Style::default().bg(t.selected_bg).fg(t.selected_fg)
+    if t.colored() {
+        Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().add_modifier(Modifier::REVERSED)
+    }
 }
 
 /// The word says whether a version is active or closed; the colour only
@@ -865,14 +875,29 @@ mod tests {
         let plain = Tokens::for_palette(Palette::NoColor);
 
         let (selected, caption) = row_styles(true, colored);
-        assert_eq!(selected.bg, Some(colored.selected_bg));
-        assert_eq!(selected.fg, Some(colored.selected_fg));
-        assert_eq!(caption.fg, Some(colored.selected_fg));
+        // Ink-only: accent foreground + bold, never a selected_bg band.
+        assert_eq!(selected.fg, Some(colored.accent));
+        assert_eq!(selected.bg, None, "a selected row must have no fill");
+        assert!(selected.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(caption.fg, Some(colored.accent));
+        assert_eq!(caption.bg, None);
         let (unselected, caption) = row_styles(false, colored);
         assert_eq!(unselected.bg, None);
         assert_eq!(caption.fg, Some(colored.muted));
-        let (selected, _) = row_styles(true, plain);
-        assert_eq!(selected.fg, Some(Color::Reset));
+        let (selected, caption) = row_styles(true, plain);
+        // No pointer glyph on these rows, so reverse video is the NO_COLOR cue,
+        // kept only in the no-colour branch.
+        assert_eq!(selected.fg, None, "no ink is set when every token is Reset");
+        assert_eq!(selected.bg, None);
+        assert!(selected.add_modifier.contains(Modifier::REVERSED));
+        assert!(caption.add_modifier.contains(Modifier::REVERSED));
+        let highlight = selection_style(plain);
+        assert_eq!(highlight.fg, None);
+        assert_eq!(highlight.bg, None);
+        assert!(highlight.add_modifier.contains(Modifier::REVERSED));
+        let themed_highlight = selection_style(colored);
+        assert_eq!(themed_highlight.fg, Some(colored.accent));
+        assert_eq!(themed_highlight.bg, None);
 
         assert_eq!(
             activity_state_style("active", colored).fg,

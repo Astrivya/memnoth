@@ -6,9 +6,11 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
+
+use crate::tui::theme::tokens;
 
 /// The eight surfaces of the session shell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -169,21 +171,89 @@ impl SurfaceShell {
 
     /// Render the surface title bar at the top of the screen.
     pub fn render_title(&self, frame: &mut Frame, area: Rect) {
+        let t = tokens();
         let title = Line::from(vec![
             Span::styled(
                 format!(" {} ", self.surface.title()),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
             ),
             Span::raw(" · "),
             Span::styled(
                 format!("focus: {}", self.focus.label()),
-                Style::default().fg(Color::Gray),
+                Style::default().fg(t.muted),
             ),
         ]);
         let block = Block::default().borders(Borders::ALL);
         frame.render_widget(block, area);
         frame.render_widget(Paragraph::new(title), area);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::style::Color;
+
+    #[test]
+    fn no_raw_colours_in_production_render_code() {
+        let source = include_str!("surface.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap_or(source);
+        assert!(
+            !production.contains("Color::"),
+            "production render code must use semantic tokens, not raw Color::"
+        );
+    }
+
+    #[test]
+    fn title_is_accent_and_focus_label_is_muted() {
+        let t = tokens();
+        let shell = SurfaceShell::new();
+        let backend = TestBackend::new(40, 3);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| shell.render_title(frame, Rect::new(0, 0, 40, 3)))
+            .expect("draw must not fail");
+        let buffer = terminal.backend().buffer();
+        assert!(
+            buffer.content().iter().any(|cell| cell.fg == t.accent),
+            "the surface title uses the accent token"
+        );
+        assert!(
+            buffer.content().iter().any(|cell| cell.fg == t.muted),
+            "the focus label uses the muted token"
+        );
+    }
+
+    #[test]
+    fn every_colour_in_the_title_bar_comes_from_the_tokens() {
+        let t = tokens();
+        let allowed = [
+            t.canvas,
+            t.surface,
+            t.text,
+            t.muted,
+            t.border,
+            t.accent,
+            t.success,
+            t.warning,
+            t.error,
+            t.selected_bg,
+            t.selected_fg,
+            Color::Reset,
+        ];
+        let shell = SurfaceShell::new();
+        let backend = TestBackend::new(40, 3);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| shell.render_title(frame, Rect::new(0, 0, 40, 3)))
+            .expect("draw must not fail");
+        for cell in terminal.backend().buffer().content() {
+            assert!(
+                allowed.contains(&cell.fg) && allowed.contains(&cell.bg),
+                "a colour outside the token set reached the title bar: {cell:?}"
+            );
+        }
     }
 }

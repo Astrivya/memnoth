@@ -79,6 +79,8 @@ pub enum OverlayKind {
     Plan,
     /// `/evidence`: the five-page mn-evidence/1 chain on the memory surface.
     Evidence,
+    /// Palette browser with live preview and a saved choice.
+    ThemePicker,
 }
 
 /// Trait for all overlays.
@@ -301,6 +303,7 @@ pub fn create_overlay(kind: OverlayKind) -> Box<dyn Overlay> {
         OverlayKind::Goal => Box::new(crate::tui::agents::goal::GoalOverlay::new()),
         OverlayKind::Plan => Box::new(crate::tui::agents::plan::PlanOverlay::new()),
         OverlayKind::Evidence => Box::new(EvidenceOverlay::new()),
+        OverlayKind::ThemePicker => Box::new(theme_picker::ThemePickerOverlay::new()),
     }
 }
 
@@ -365,6 +368,7 @@ mod rewind;
 mod search;
 mod sessions;
 mod teams;
+mod theme_picker;
 
 pub use cloud_form::{InviteOverlay, KeyCreateOverlay};
 pub use commands::CommandsOverlay;
@@ -418,6 +422,7 @@ mod reachability {
         OverlayKind::Goal,
         OverlayKind::Plan,
         OverlayKind::Evidence,
+        OverlayKind::ThemePicker,
     ];
 
     #[test]

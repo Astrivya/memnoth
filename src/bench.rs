@@ -116,6 +116,8 @@ pub enum BenchCommand {
     MtsVerify(crate::bench_mts::MtsVerifyArgs),
     /// Validate official benchmark manifests and results (no model or network).
     OfficialVerify(crate::bench_official::OfficialVerifyArgs),
+    /// Verify the local MCP stdio wire with no model or network (derived diagnostic).
+    McpVerify(crate::bench_mcp::McpVerifyArgs),
     /// Validate publishable LoCoMo raw-run artifacts and their scoreboard.
     LocomoVerify(LocomoVerifyArgs),
     /// Validate committed benchmark results and the scoreboard before publication.
@@ -237,6 +239,7 @@ pub fn run(_ctx: &AppContext, args: &BenchArgs) -> Result<Outcome> {
         BenchCommand::LmeVerify(verify) => crate::bench_lme::run(verify),
         BenchCommand::MtsVerify(verify) => crate::bench_mts::run(verify),
         BenchCommand::OfficialVerify(verify) => crate::bench_official::run(verify),
+        BenchCommand::McpVerify(verify) => crate::bench_mcp::run(_ctx, verify),
         BenchCommand::LocomoVerify(verify) => validate_locomo_artifact(verify),
         BenchCommand::Proof(proof) => validate_proof(proof),
     }

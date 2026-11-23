@@ -38,6 +38,7 @@ pub mod bench_handoff;
 pub mod bench_kg;
 pub mod bench_lme;
 pub mod bench_locomo_artifact;
+pub mod bench_mcp;
 pub mod bench_mts;
 pub mod bench_official;
 pub mod bench_proof;

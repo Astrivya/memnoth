@@ -967,21 +967,29 @@ fn format_price(price: Option<f64>) -> String {
     }
 }
 
+/// Selected-row ink: accent foreground and weight, never a background fill.
+///
+/// The `▸` highlight symbol and the BOLD/UNDERLINED modifiers carry the
+/// selection when NO_COLOR resets every token, so no orange band is needed.
+fn selected_ink() -> Style {
+    Style::default()
+        .fg(tokens().accent)
+        .add_modifier(Modifier::BOLD)
+        .add_modifier(Modifier::UNDERLINED)
+}
+
 /// The `live` marker on a row that came from the provider's own `/models`.
 ///
 /// The word stays in the text even when colour is stripped: a green dot alone
 /// would become an unexplained glyph under `NO_COLOR`. The success token is the
-/// meaning at a glance; the word is the meaning that survives. On a filled
-/// selection row the row's own `selected_fg`/`selected_bg` pair takes over —
-/// success green on the accent fill is hard to read — but the word remains.
-fn live_marker(filled: bool) -> Span<'static> {
+/// meaning at a glance; the word is the meaning that survives. Selection is ink
+/// only now, so the word keeps its success green on every row.
+fn live_marker() -> Span<'static> {
     let t = tokens();
-    let style = if filled {
-        Style::default()
-    } else {
-        Style::default().fg(t.success).add_modifier(Modifier::BOLD)
-    };
-    Span::styled(" live", style)
+    Span::styled(
+        " live",
+        Style::default().fg(t.success).add_modifier(Modifier::BOLD),
+    )
 }
 
 impl Overlay for ModelsOverlay {
@@ -1265,7 +1273,7 @@ impl Overlay for ModelsOverlay {
         // border token. The hint row and the bold highlight say the same thing
         // when both resolve to Reset under NO_COLOR.
         let tabs_border = if self.focus == FocusZone::Tabs {
-            Style::default().fg(t.selected_bg)
+            Style::default().fg(t.accent)
         } else {
             Style::default().fg(t.border)
         };
@@ -1278,11 +1286,7 @@ impl Overlay for ModelsOverlay {
             )
             .select(active)
             .style(Style::default().fg(t.muted))
-            .highlight_style(
-                Style::default()
-                    .fg(t.selected_bg)
-                    .add_modifier(Modifier::BOLD),
-            );
+            .highlight_style(Style::default().fg(t.accent).add_modifier(Modifier::BOLD));
         self.tabs_area = chunks[0];
         frame.render_widget(tabs, chunks[0]);
 
@@ -1351,14 +1355,14 @@ impl Overlay for ModelsOverlay {
             }
             let mut name_spans = vec![Span::raw(name)];
             if row.live {
-                name_spans.push(live_marker(selected && self.focus == FocusZone::Table));
+                name_spans.push(live_marker());
             }
 
-            // The selection fill belongs to the table zone. With the tab bar
-            // focused the selected row is only a marker, so the eye can tell
-            // which zone the arrows answer to without reading the hint.
+            // Selection is ink, not a fill: accent + BOLD/UNDERLINED on the
+            // table zone. With the tab bar focused the row keeps only the bold
+            // marker, so the eye can tell which zone the arrows answer to.
             let style = if selected && self.focus == FocusZone::Table {
-                Style::default().bg(t.selected_bg).fg(t.selected_fg)
+                selected_ink()
             } else if selected {
                 Style::default().add_modifier(Modifier::BOLD)
             } else {
@@ -1408,8 +1412,8 @@ impl Overlay for ModelsOverlay {
                 .title(format!(" {} models ", self.filtered.len()))
                 .border_style(Style::default().fg(t.border)),
         )
-        .row_highlight_style(Style::default().bg(t.selected_bg).fg(t.selected_fg))
-        .highlight_symbol(" ");
+        .row_highlight_style(Style::default().add_modifier(Modifier::BOLD))
+        .highlight_symbol("▸");
 
         self.table_area = chunks[2];
         // The reasoning column's x range, for click-to-cycle: one border plus
@@ -1805,15 +1809,10 @@ mod tests {
     #[test]
     fn the_live_marker_keeps_its_word_and_uses_success() {
         let t = tokens();
-        let plain = live_marker(false);
-        assert_eq!(plain.content, " live");
-        assert_eq!(plain.style.fg, Some(t.success));
-
-        // On a filled selection the row's selected_fg/selected_bg pair wins —
-        // success green on the accent fill is hard to read — but the word stays.
-        let filled = live_marker(true);
-        assert_eq!(filled.content, " live");
-        assert_eq!(filled.style.fg, None);
+        let marker = live_marker();
+        assert_eq!(marker.content, " live");
+        assert_eq!(marker.style.fg, Some(t.success));
+        assert!(marker.style.add_modifier.contains(Modifier::BOLD));
     }
 
     /// A provider answer keeps the live row on screen and the note line below
@@ -1845,6 +1844,42 @@ mod tests {
         assert!(
             text.contains(" live"),
             "the live marker must be a word under NO_COLOR: {text}"
+        );
+    }
+
+    /// The selected row is ink, not an orange band: the ▸ symbol and its
+    /// modifiers are the cue that still reads when colour is stripped.
+    #[test]
+    fn selection_is_ink_with_no_fill_and_a_glyph_cue() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let t = tokens();
+        let mut overlay = opened_overlay();
+        let app = App::new("s", false);
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| overlay.render(frame, frame.area(), &app))
+            .expect("draw must not fail");
+        let buffer = terminal.backend().buffer();
+
+        let mut saw_glyph = false;
+        let mut glyph_modifier = Modifier::empty();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                let cell = &buffer[(x, y)];
+                assert_ne!(cell.bg, t.selected_bg, "no selection fill at ({x},{y})");
+                if cell.symbol() == "▸" {
+                    saw_glyph = true;
+                    glyph_modifier = cell.modifier;
+                }
+            }
+        }
+        assert!(saw_glyph, "the highlight symbol is a visible glyph");
+        assert!(
+            glyph_modifier.contains(Modifier::BOLD),
+            "the glyph reads when colour is stripped"
         );
     }
 }

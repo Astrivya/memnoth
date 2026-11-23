@@ -128,6 +128,139 @@ pub struct CompletionState {
     /// Workspace root for finding matches.
     pub workspace_root: PathBuf,
 }
+
+/// Which family a mention row belongs to.
+///
+/// The label is drawn literally in the picker (`[skill]`, `[agent]`, `[file]`):
+/// it has to survive `NO_COLOR`, where every semantic colour is Reset, so the
+/// category is carried by a word rather than by ink alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MentionKind {
+    Skill,
+    Agent,
+    File,
+}
+
+impl MentionKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Skill => "skill",
+            Self::Agent => "agent",
+            Self::File => "file",
+        }
+    }
+}
+
+/// One row of the unified `@` picker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MentionRow {
+    pub kind: MentionKind,
+    /// The text the row shows, including its `@` prefix.
+    pub name: String,
+    /// The token inserted on accept. Equal to `name` for real rows.
+    pub token: String,
+    /// Where the name came from, in plain words. Empty for a bare path.
+    pub description: String,
+    /// Character indices of the fuzzy-matched letters in `name`.
+    pub hits: Vec<usize>,
+    /// False for "nothing here" placeholders: they explain an empty category
+    /// but cannot be inserted.
+    pub enabled: bool,
+}
+
+impl MentionRow {
+    fn new(kind: MentionKind, name: String, description: String, hits: Vec<usize>) -> Self {
+        Self {
+            kind,
+            token: name.clone(),
+            name,
+            description,
+            hits,
+            enabled: true,
+        }
+    }
+
+    fn empty(kind: MentionKind, message: &str) -> Self {
+        Self {
+            kind,
+            name: message.to_string(),
+            token: String::new(),
+            description: String::new(),
+            hits: Vec::new(),
+            enabled: false,
+        }
+    }
+}
+
+/// State of the `@` picker.
+///
+/// This is derived from the prompt on every edit: there is no separate mode
+/// that can disagree with what the line says. `prefix` is the slice from `@` to
+/// the cursor, so a mention typed in the middle of a line keeps the words on
+/// either side when it is accepted.
+#[derive(Debug, Default)]
+pub struct MentionState {
+    pub active: bool,
+    pub prefix: String,
+    /// Character index of the `@` that opened the picker.
+    pub start: usize,
+    /// Character index of the cursor when that prefix was captured.
+    pub end: usize,
+    pub rows: Vec<MentionRow>,
+    pub selected: usize,
+    /// The prefix that was just inserted. While the line still starts with it
+    /// the picker stays shut, so accepting a mention does not immediately
+    /// re-open the list on the mention it just wrote.
+    pub suppressed: Option<String>,
+    /// Whether Tab has already moved the highlight once.
+    pub cycled: bool,
+}
+
+impl MentionState {
+    pub fn is_open(&self) -> bool {
+        self.active && !self.rows.is_empty()
+    }
+
+    /// Only real rows are selectable; placeholders explain an empty category.
+    pub fn selectable_rows(&self) -> Vec<usize> {
+        self.rows
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row)| row.enabled.then_some(index))
+            .collect()
+    }
+
+    pub fn selected_index(&self) -> usize {
+        let rows = self.selectable_rows();
+        if rows.is_empty() {
+            return 0;
+        }
+        rows.iter()
+            .copied()
+            .find(|index| *index >= self.selected)
+            .unwrap_or_else(|| rows[0])
+    }
+
+    pub fn select_relative(&mut self, delta: isize) {
+        let rows = self.selectable_rows();
+        if rows.is_empty() {
+            return;
+        }
+        let at = self.selected_index().min(rows[rows.len() - 1]);
+        let position = rows.iter().position(|index| *index == at).unwrap_or(0);
+        let next = (position as isize + delta).rem_euclid(rows.len() as isize) as usize;
+        self.selected = rows[next];
+        self.cycled = true;
+    }
+
+    pub fn close(&mut self) {
+        self.active = false;
+        self.rows.clear();
+        self.selected = 0;
+        self.cycled = false;
+    }
+}
+
 /// A shell command (`!cmd`) pending sandbox policy decision.
 #[derive(Debug, Clone)]
 pub struct PendingShell {
@@ -222,6 +355,8 @@ pub enum Parsed {
     ModelsOverlay,
     /// `/mcps`: browse recommended MCPs and Memnoth's host registrations.
     McpsOverlay,
+    /// `/theme` with no argument: live preview picker for every palette.
+    ThemePicker,
     /// `/tasks`: the background-task rail and the jobs behind it.
     Tasks(TasksCommand),
     /// `/connect`: open provider connections overlay.
@@ -384,6 +519,154 @@ pub struct Home {
     pub hidden_turns: usize,
 }
 
+/// One concrete follow-up prompt offered under a finished answer.
+///
+/// The label is what the button prints (`[1] verify: rerun cargo test`); the
+/// prompt is the exact draft placed in the composer when the button is used.
+/// Both are built from the turn's own data and are never persisted: a resumed
+/// session reads as the conversation that was had, not as a menu of maybes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FollowUp {
+    /// Short, sanitized label naming a real verb or path from the turn.
+    pub label: String,
+    /// The exact text copied into the composer as an editable draft.
+    pub prompt: String,
+}
+
+/// The facts a finished turn actually produced, used only to derive follow-ups.
+///
+/// A tool name, a failed call, a write receipt's path — all observed by this
+/// turn. Building this costs no network call, writes no file, and carries no
+/// privileged payload out of the app.
+#[derive(Debug, Default)]
+pub struct TurnFacts {
+    /// Tool names this turn used, paired with whether that call ended in failure.
+    pub tools: Vec<(String, bool)>,
+    /// Paths this turn wrote, in the order the receipts recorded them.
+    pub writes: Vec<String>,
+}
+
+/// Control characters (ANSI escapes included) have no place on a button row.
+fn clean_followup_text(raw: &str) -> String {
+    raw.chars()
+        .filter(|ch| !ch.is_control())
+        .take(160)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+fn is_test_tool(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if lower == "test" || lower == "tests" {
+        return true;
+    }
+    if !lower.contains("test") {
+        return false;
+    }
+    [
+        "cargo", "nextest", "npm", "pnpm", "yarn", "pytest", "jest", "vitest", "go test", "gradle",
+        "mvn", "rspec", "dotnet",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+fn short_path(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string())
+}
+
+fn add_followup(
+    out: &mut Vec<FollowUp>,
+    seen: &mut std::collections::BTreeSet<String>,
+    label: String,
+    prompt: String,
+) {
+    let label = clean_followup_text(&label);
+    let prompt = clean_followup_text(&prompt);
+    if label.is_empty() || prompt.is_empty() || !seen.insert(label.clone()) {
+        return;
+    }
+    out.push(FollowUp { label, prompt });
+}
+
+/// At most four follow-ups, derived deterministically from one finished turn.
+///
+/// A suggestion is an offer, not a promise: every label names a verb or path
+/// the turn actually touched and asks the person to decide. What is absent
+/// matters as much as what is present — no "tell me more", no re-offering a
+/// test that just passed, and no action the turn already completed.
+pub fn derive_followups(facts: &TurnFacts) -> Vec<FollowUp> {
+    let mut out: Vec<FollowUp> = Vec::new();
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+
+    // A failed test is the one verification worth offering. Re-running a suite
+    // that just passed would invent work the turn already did.
+    for (tool, failed) in &facts.tools {
+        let tool = clean_followup_text(tool);
+        if tool.is_empty() || !*failed || !is_test_tool(&tool) {
+            continue;
+        }
+        add_followup(
+            &mut out,
+            &mut seen,
+            format!("verify: rerun {tool}"),
+            format!("Rerun {tool} and report the failing cases."),
+        );
+        break;
+    }
+
+    let mut paths: Vec<String> = Vec::new();
+    for raw in &facts.writes {
+        let path = clean_followup_text(raw);
+        if path.is_empty() || paths.contains(&path) {
+            continue;
+        }
+        paths.push(path);
+    }
+    for path in paths.iter().take(2) {
+        add_followup(
+            &mut out,
+            &mut seen,
+            format!("explain: why {} changed", short_path(path)),
+            format!("Explain what changed in {path} and why."),
+        );
+    }
+
+    if let Some(source) = paths.iter().find(|path| {
+        let lower = path.to_ascii_lowercase();
+        !lower.contains("test") && !lower.ends_with(".md")
+    }) {
+        add_followup(
+            &mut out,
+            &mut seen,
+            format!("extend: test {}", short_path(source)),
+            format!("Add a test covering the change in {source}."),
+        );
+    }
+
+    // Land is only an offer when there is something real to stage and the turn
+    // did not already commit it.
+    let committed = facts
+        .tools
+        .iter()
+        .any(|(name, _)| name.to_ascii_lowercase().contains("commit"));
+    if !committed && let Some(path) = paths.first() {
+        add_followup(
+            &mut out,
+            &mut seen,
+            format!("commit: stage {}", short_path(path)),
+            format!("Stage {path} for commit."),
+        );
+    }
+
+    out.truncate(4);
+    out
+}
+
 /// One entry in the transcript. Wrapped lines still belong to one entry.
 #[derive(Debug, Clone)]
 pub struct Entry {
@@ -411,6 +694,10 @@ pub struct Entry {
     pub tool_call_id: Option<String>,
     /// Sanitized, bounded result detail; hidden until the call row is expanded.
     pub tool_detail: Option<String>,
+    /// Concrete follow-up prompts for a finished answer, rendered directly
+    /// under it. Empty for every other role and for streaming/live answers.
+    /// Never persisted: they belong to this screen, not to the session file.
+    pub follow_ups: Vec<FollowUp>,
 }
 
 /// Compact turn summary: elapsed time, tools used, and output throughput.
@@ -522,6 +809,19 @@ pub struct App {
     /// transcript has: the `ctrl-r` hint on the latest expandable header
     /// appears only while the pointer rests on it.
     pub mouse_row: Option<u16>,
+    /// Follow-up buttons currently on screen, paired with the entry they hang
+    /// under. Ephemeral: cleared when a new turn starts or the context changes,
+    /// so a late result can never offer an action on a newer answer.
+    pub follow_ups: Vec<(usize, Vec<FollowUp>)>,
+    /// Which follow-up button has keyboard focus, when the transcript owns it.
+    pub follow_up_focus: Option<usize>,
+    /// Screen row each visible follow-up button was drawn on, absolute. Filled
+    /// by the drawer so a click can be mapped back to a concrete prompt.
+    pub follow_up_rows: Vec<(u16, String)>,
+    /// Visual-line indices (into the last `visual_lines` result) that are
+    /// follow-up buttons, paired with their flat button index. Refreshed on
+    /// every `visual_lines` call so the drawer and the hit-test agree.
+    pub follow_up_line_indices: Vec<(usize, usize)>,
     /// Short-lived footer status, such as a clipboard confirmation.
     pub notification: Option<(String, std::time::Instant)>,
     /// Visual transcript lines being selected by a mouse drag.
@@ -603,6 +903,8 @@ pub struct App {
     pub cancel_turn: bool,
     /// Fuzzy path completion state for @file references.
     pub completion: CompletionState,
+    /// The unified `@` picker: skills, agents and file paths in one list.
+    pub mentions: MentionState,
     /// Commands typed while a turn is in flight (queued instead of rejected).
     pub command_queue: VecDeque<String>,
     /// Pending shell command (`!cmd`) awaiting sandbox policy confirmation.
@@ -849,6 +1151,10 @@ impl App {
             scroll: 0,
             follow: true,
             mouse_row: None,
+            follow_ups: Vec::new(),
+            follow_up_focus: None,
+            follow_up_rows: Vec::new(),
+            follow_up_line_indices: Vec::new(),
             notification: None,
             selection_anchor: None,
             selection: None,
@@ -895,6 +1201,7 @@ impl App {
             ctrl_c_armed: false,
             cancel_turn: false,
             completion: CompletionState::default(),
+            mentions: MentionState::default(),
             command_queue: VecDeque::new(),
             pending_shell: None,
             sandbox_notice_shown: false,
@@ -950,6 +1257,7 @@ impl App {
     /// front of the person. Nothing is re-read later, so the transcript and the
     /// file cannot disagree about what was said.
     pub fn seed(&mut self, session: &Session) {
+        self.clear_follow_ups();
         for message in &session.messages {
             let role = match message.role {
                 Role::User => EntryRole::User,
@@ -965,6 +1273,7 @@ impl App {
                 stats: None,
                 tool_call_id: None,
                 tool_detail: None,
+                follow_ups: Vec::new(),
             });
         }
         self.follow = true;
@@ -1011,6 +1320,7 @@ impl App {
             stats: None,
             tool_call_id: None,
             tool_detail: None,
+            follow_ups: Vec::new(),
         });
         self.home_visible = false;
         self.home_cursor = 0;
@@ -1034,6 +1344,7 @@ impl App {
                     stats: None,
                     tool_call_id: None,
                     tool_detail: None,
+                    follow_ups: Vec::new(),
                 });
                 let index = self.entries.len() - 1;
                 self.stream_answer = Some(index);
@@ -1071,6 +1382,7 @@ impl App {
                     stats: None,
                     tool_call_id: None,
                     tool_detail: None,
+                    follow_ups: Vec::new(),
                 };
                 // If reasoning arrives after its answer delta, put it before
                 // that phase's answer. Before the first tool this is the first
@@ -1147,6 +1459,82 @@ impl App {
         self.stream_answer_first = None;
         self.stream_think = None;
         self.stream_reasoning_boundary = None;
+    }
+
+    /// Attach concrete follow-ups to a finished answer, stamped to this entry.
+    ///
+    /// `None` clears them: a new turn, a session switch, an error or a `/clear`
+    /// all make the previous offers stale. The stamp is the entry index, so a
+    /// late result can only land on the answer it was derived from — if that
+    /// entry moved or was removed, the buttons are gone.
+    pub fn set_follow_ups(&mut self, entry: Option<usize>, items: Vec<FollowUp>) {
+        self.follow_ups = match entry.filter(|index| *index < self.entries.len()) {
+            Some(index) if !items.is_empty() => vec![(index, items)],
+            _ => Vec::new(),
+        };
+        self.follow_up_focus = None;
+    }
+
+    /// Drop all follow-ups. Called whenever the answer they belonged to stops
+    /// being the current answer, so nothing stale survives a context change.
+    pub fn clear_follow_ups(&mut self) {
+        self.follow_ups.clear();
+        self.follow_up_focus = None;
+        self.follow_up_rows.clear();
+    }
+
+    /// True while a new turn is being composed: any draft is kept, but offers
+    /// from the previous answer must not hijack a line the person started.
+    pub fn follow_ups_visible(&self) -> bool {
+        !self.follow_ups.is_empty()
+            && !self.busy
+            && self.input.is_empty()
+            && !self.slash.is_open()
+            && !self.mentions.is_open()
+            && self.approval.is_none()
+            && self.pending_shell.is_none()
+    }
+
+    /// Fill the composer with a follow-up prompt as an editable draft.
+    ///
+    /// No submit: the person presses Enter when they are ready. Reaching here
+    /// by click or key never sends on their behalf. The draft is recorded in
+    /// history so Up still walks exactly what was offered, and the buttons are
+    /// dismissed because the question they answer is now on the line.
+    pub fn fill_follow_up(&mut self, prompt: String) {
+        self.input = prompt;
+        self.cursor = self.input.chars().count();
+        self.clear_follow_ups();
+        self.sync_slash();
+    }
+
+    /// Copy the prompt of the follow-up currently focused by the keyboard.
+    pub fn focused_follow_up(&self) -> Option<String> {
+        let index = self.follow_up_focus?;
+        self.follow_ups
+            .first()
+            .and_then(|(_, items)| items.get(index))
+            .map(|item| item.prompt.clone())
+    }
+
+    /// Move the keyboard focus among visible follow-up buttons.
+    pub fn focus_follow_up_relative(&mut self, delta: isize) {
+        let len = self
+            .follow_ups
+            .first()
+            .map(|(_, items)| items.len())
+            .unwrap_or(0);
+        if len == 0 {
+            return;
+        }
+        // With no focus yet, Down enters at the first button and Up wraps to
+        // the last. Both are reversible with the opposite key.
+        let current = self
+            .follow_up_focus
+            .map(|i| i as isize)
+            .unwrap_or(if delta > 0 { -1 } else { 0 });
+        let next = (current + delta).rem_euclid(len as isize) as usize;
+        self.follow_up_focus = Some(next);
     }
 
     /// Append a child's card to the parent timeline: the delegation row a person
@@ -1262,6 +1650,7 @@ impl App {
         self.follow = true;
         self.home_visible = false;
         self.home_cursor = 0;
+        self.clear_follow_ups();
     }
 
     /// Whether the brief owns the transcript area: on an empty session, or
@@ -1438,7 +1827,16 @@ impl App {
 
     /// Take the submitted line: trims it, resets the editor and history
     /// navigation, and leaves the transcript untouched.
+    ///
+    /// Enter while the `@` picker is open accepts the highlight instead of
+    /// sending the half-written mention. The composer sets `pending_submit`
+    /// directly, so this is the single point where that key can be redirected
+    /// without a second key map.
     pub fn take_input(&mut self) -> String {
+        if self.mentions.is_open() {
+            self.accept_mention();
+            return String::new();
+        }
         let line = self.input.trim().to_string();
         self.input.clear();
         self.cursor = 0;
@@ -1459,8 +1857,16 @@ impl App {
         self.history_pos = None;
     }
 
-    /// Up: the previous submitted line, or stay at the oldest.
+    /// Up: walk the open `@` picker, else the previous submitted line.
+    ///
+    /// The composer's key handler calls `cancel_completion()` before history;
+    /// that method deliberately leaves the picker alone, so this is the point
+    /// where Up becomes a mention-row key instead of a history key.
     pub fn history_prev(&mut self) {
+        if self.mentions.is_open() {
+            self.mentions.select_relative(-1);
+            return;
+        }
         if self.history.is_empty() {
             return;
         }
@@ -1478,8 +1884,12 @@ impl App {
         }
     }
 
-    /// Down: toward the line being drafted, then back to it.
+    /// Down: walk the open `@` picker, else toward the drafted line.
     pub fn history_next(&mut self) {
+        if self.mentions.is_open() {
+            self.mentions.select_relative(1);
+            return;
+        }
         let Some(index) = self.history_pos else {
             return;
         };
@@ -1498,6 +1908,11 @@ impl App {
         let byte = self.cursor_byte();
         self.input.insert(byte, ch);
         self.cursor += 1;
+        // Typing is the person taking over: the offers from the last answer no
+        // longer describe the line being written, so they leave the screen.
+        if !self.input.is_empty() && !self.follow_ups.is_empty() {
+            self.clear_follow_ups();
+        }
     }
 
     /// Delete the character before the cursor.
@@ -1594,7 +2009,7 @@ impl App {
             .iter()
             .skip(first)
             .take(last.saturating_sub(first) + 1)
-            .map(|(_, line, _)| {
+            .map(|(_, line, _, _)| {
                 line.spans
                     .iter()
                     .map(|span| span.content.as_ref())
@@ -1746,7 +2161,7 @@ impl App {
     pub fn visual_lines(
         &self,
         width: usize,
-    ) -> Vec<(EntryRole, ratatui::text::Line<'static>, bool)> {
+    ) -> Vec<(EntryRole, ratatui::text::Line<'static>, bool, Option<usize>)> {
         // Every row is drawn after a [`GUTTER`]-wide glyph, so the text may only
         // use what is left of the pane. Wrapping to the full width let the
         // terminal re-wrap the last word onto a line of its own.
@@ -1762,7 +2177,7 @@ impl App {
             // glyph. The blank never carries one either — a `›` on an empty
             // row reads as a second prompt.
             if entry.role == EntryRole::User && index > 0 {
-                out.push((EntryRole::User, ratatui::text::Line::from(""), false));
+                out.push((EntryRole::User, ratatui::text::Line::from(""), false, None));
             }
             // Correlated calls retain their own status and evidence row. The
             // legacy note-only rows below may still use the compact burst view.
@@ -1771,12 +2186,13 @@ impl App {
                     entry.role,
                     ratatui::text::Line::from(entry.text.clone()),
                     true,
+                    None,
                 ));
                 if entry.expanded
                     && let Some(detail) = &entry.tool_detail
                 {
                     for line in crate::tui::markdown::lines(detail, width.saturating_sub(2)) {
-                        out.push((entry.role, line, false));
+                        out.push((entry.role, line, false, None));
                     }
                 }
                 continue;
@@ -1800,6 +2216,7 @@ impl App {
                     },
                     ratatui::text::Line::from(summary),
                     true,
+                    None,
                 ));
                 // A whole burst of calls is one transcript event. The trace
                 // overlay remains the place for individual calls and details.
@@ -1817,7 +2234,7 @@ impl App {
                 // eye re-reads every frame, and the expand hint lives under
                 // the pointer (see `ui::draw_transcript`), not in the text.
                 let header = ratatui::text::Line::from(format!("{marker} thinking"));
-                out.push((EntryRole::Thinking, header, true));
+                out.push((EntryRole::Thinking, header, true, None));
                 if !entry.text.trim().is_empty() {
                     // The body indents two columns deeper than the rail, so
                     // the wrap budget comes off the same two: nested reasoning
@@ -1835,7 +2252,7 @@ impl App {
                         &[][..]
                     };
                     for line in shown {
-                        out.push((EntryRole::Thinking, line.clone(), false));
+                        out.push((EntryRole::Thinking, line.clone(), false, None));
                     }
                 }
                 continue;
@@ -1867,13 +2284,39 @@ impl App {
                         ratatui::style::Style::default(),
                     ));
                 }
-                out.push((entry.role, line, position == 0));
+                out.push((entry.role, line, position == 0, None));
             }
             // The pace line belongs to the answer, not to the session: one
             // dim row under it, and the next user's blank line reclaims the
             // spacing. It is the only post-answer row the design keeps.
             if is_answer && let Some(stats) = stats {
-                out.push((EntryRole::Info, ratatui::text::Line::from(stats), false));
+                out.push((
+                    EntryRole::Info,
+                    ratatui::text::Line::from(stats),
+                    false,
+                    None,
+                ));
+            }
+            // Concrete follow-ups live in the transcript flow, directly under
+            // the answer they belong to. They are data, not widgets: one row
+            // per button, so scrolling and mouse hit-testing stay exact.
+            if is_answer
+                && let Some((_owner, items)) =
+                    self.follow_ups.iter().find(|(owner, _)| *owner == index)
+            {
+                for (position, item) in items.iter().enumerate() {
+                    let focused = self.follow_up_focus == Some(position);
+                    let marker = if focused { "›" } else { " " };
+                    let text = ratatui::text::Line::from(format!(
+                        "{marker} [{}] {}",
+                        position + 1,
+                        item.label
+                    ));
+                    // Info carries the row's muted glyph; the fourth field marks
+                    // it as a button so the drawer can give it ink-only focus
+                    // and the hit-test can map a click to this prompt.
+                    out.push((EntryRole::Info, text, false, Some(position)));
+                }
             }
         }
         out
@@ -1887,63 +2330,133 @@ impl App {
             .unwrap_or(self.input.len())
     }
 
-    /// Start or continue @file fuzzy completion.
-    pub fn complete_path(&mut self, workspace_root: &Path) {
-        if !self.completion.active {
-            // Find the @ prefix at or before cursor
-            let input_chars: Vec<char> = self.input.chars().collect();
-            let mut at_pos = None;
-            for i in (0..self.cursor.min(input_chars.len())).rev() {
-                if input_chars[i] == '@' {
-                    at_pos = Some(i);
-                    break;
-                }
-            }
-            let Some(start) = at_pos else { return };
-
-            self.completion.prefix = self.input[start..self.cursor].to_string();
-            self.completion.cursor_at_start = self.cursor;
-            self.completion.workspace_root = workspace_root.to_path_buf();
-
-            // Find matches
-            let query = &self.completion.prefix[1..]; // skip @
-            self.completion.matches = fuzzy_find_paths(workspace_root, query);
-            if self.completion.matches.is_empty() {
-                self.completion.active = false;
-                return;
-            }
-            self.completion.index = 0;
-            self.completion.active = true;
-        } else {
-            // Cycle to next match
-            if !self.completion.matches.is_empty() {
-                self.completion.index = (self.completion.index + 1) % self.completion.matches.len();
-            }
+    /// The `@…` slice before the cursor, with character indices.
+    ///
+    /// A `/` command owns the dropdown, so an `@` inside one is not a mention.
+    /// Whitespace inside the token ends it: `@foo bar@` has no live mention at
+    /// the cursor, and treating the second `@` as one would swallow the prose.
+    fn mention_prefix(&self) -> Option<(usize, String, usize)> {
+        let chars: Vec<char> = self.input.chars().collect();
+        let end = self.cursor.min(chars.len());
+        if chars.first() == Some(&'/') {
+            return None;
         }
-
-        // Apply the current match
-        self.apply_completion();
+        let start = (0..end).rev().find(|index| chars[*index] == '@')?;
+        let prefix: String = chars[start..end].iter().collect();
+        if prefix.chars().skip(1).any(char::is_whitespace) {
+            return None;
+        }
+        Some((start, prefix, end))
     }
 
-    /// Apply the current completion match to the input.
-    fn apply_completion(&mut self) {
-        if !self.completion.active || self.completion.matches.is_empty() {
+    fn sync_completion_flags(&mut self) {
+        self.completion.active = self.mentions.is_open();
+        if !self.completion.active {
+            self.completion.matches.clear();
+            self.completion.index = 0;
+        }
+    }
+
+    /// Re-derive the unified `@` picker from the prompt and the cursor.
+    ///
+    /// Called from `sync_slash`, which the composer runs after every edit, so
+    /// typing `@` opens the list and each further character filters all three
+    /// groups. An unchanged prefix keeps the current highlight: typing a letter
+    /// is not a request to jump back to the first row of a filtered list.
+    pub fn sync_mentions(&mut self, workspace_root: &Path) {
+        let Some((start, prefix, end)) = self.mention_prefix() else {
+            self.mentions.close();
+            self.mentions.suppressed = None;
+            self.sync_completion_flags();
+            return;
+        };
+
+        // Once a mention has been inserted, keep the list shut until the person
+        // starts a genuinely new token. Otherwise accepting `@ski` would leave
+        // `@skill:agent-reach` on the line and re-open the picker over it.
+        if let Some(accepted) = self.mentions.suppressed.clone() {
+            if prefix.starts_with(&accepted) {
+                self.mentions.active = false;
+                self.mentions.rows.clear();
+                self.sync_completion_flags();
+                return;
+            }
+            self.mentions.suppressed = None;
+        }
+
+        let root_changed = self.completion.workspace_root != workspace_root;
+        if self.mentions.active
+            && self.mentions.prefix == prefix
+            && self.mentions.end == end
+            && !root_changed
+        {
+            self.sync_completion_flags();
             return;
         }
-        let input_chars: Vec<char> = self.input.chars().collect();
-        let start = self.completion.cursor_at_start - self.completion.prefix.chars().count();
-        let end = self.completion.cursor_at_start;
 
-        let match_path = &self.completion.matches[self.completion.index];
-        let replacement = match_path.to_string_lossy().to_string();
+        let query = prefix.strip_prefix('@').unwrap_or(&prefix);
+        let rows = build_mention_rows(self, workspace_root, query);
+        self.mentions.active = true;
+        self.mentions.prefix = prefix.clone();
+        self.mentions.start = start;
+        self.mentions.end = end;
+        self.mentions.rows = rows;
+        self.mentions.selected = 0;
+        self.mentions.cycled = false;
 
-        let mut new_input: String = input_chars[..start].iter().collect();
-        new_input.push('@');
-        new_input.push_str(&replacement);
-        new_input.push_str(&input_chars[end..].iter().collect::<String>());
+        // The older path-completion state stays a truthful projection of the
+        // file rows, so callers that still read it see the same matches.
+        self.completion.prefix = prefix;
+        self.completion.cursor_at_start = end;
+        self.completion.workspace_root = workspace_root.to_path_buf();
+        self.completion.matches = self
+            .mentions
+            .rows
+            .iter()
+            .filter(|row| row.enabled && row.kind == MentionKind::File)
+            .filter_map(|row| row.name.strip_prefix('@').map(PathBuf::from))
+            .collect();
+        self.sync_completion_flags();
+    }
 
-        self.input = new_input;
-        self.cursor = start + 1 + replacement.chars().count();
+    /// Tab on an `@` prefix walks the picker. The picked token goes in on
+    /// Enter (or `take_input`), never on the completion key itself.
+    pub fn complete_path(&mut self, workspace_root: &Path) {
+        self.completion.workspace_root = workspace_root.to_path_buf();
+        self.sync_mentions(workspace_root);
+        if self.mentions.is_open() {
+            self.mentions.select_relative(1);
+        }
+    }
+
+    /// Insert the highlighted mention, preserving the text on both sides of
+    /// the `@` and leaving the cursor just past the inserted token.
+    pub fn accept_mention(&mut self) -> Option<String> {
+        if !self.mentions.is_open() {
+            return None;
+        }
+        let row = self
+            .mentions
+            .rows
+            .get(self.mentions.selected_index())?
+            .clone();
+        if !row.enabled {
+            return None;
+        }
+        let (start, end) = (self.mentions.start, self.mentions.end);
+        let chars: Vec<char> = self.input.chars().collect();
+        if start > end || end > chars.len() {
+            return None;
+        }
+        let mut next: String = chars[..start].iter().collect();
+        next.push_str(&row.token);
+        next.extend(chars[end..].iter());
+        self.input = next;
+        self.cursor = start + row.token.chars().count();
+        self.mentions.suppressed = Some(self.mentions.prefix.clone());
+        self.mentions.close();
+        self.sync_completion_flags();
+        Some(row.token)
     }
 
     /// Cancel completion (e.g., on Esc or other key).
@@ -1965,28 +2478,40 @@ impl App {
 
     pub fn cancel_completion(&mut self) {
         if self.completion.active {
-            // Restore original input
+            // The picker never edits the line while it is open, so this only
+            // rewrites the prefix the person already typed. Keep the workspace
+            // root: the next `sync_slash` still needs it to find files.
             let input_chars: Vec<char> = self.input.chars().collect();
             let start = self.completion.cursor_at_start - self.completion.prefix.chars().count();
             let end = self.completion.cursor_at_start;
-
-            let mut new_input: String = input_chars[..start].iter().collect();
-            new_input.push_str(&self.completion.prefix);
-            new_input.push_str(&input_chars[end..].iter().collect::<String>());
-
-            self.input = new_input;
-            self.cursor = self.completion.cursor_at_start;
-            self.completion = CompletionState::default();
+            if start <= end && end <= input_chars.len() {
+                let mut new_input: String = input_chars[..start].iter().collect();
+                new_input.push_str(&self.completion.prefix);
+                new_input.extend(input_chars[end..].iter());
+                self.input = new_input;
+                self.cursor = self.completion.cursor_at_start;
+            }
+            self.completion.active = false;
+            self.completion.matches.clear();
+            self.completion.index = 0;
         }
+        // The @ picker is deliberately not closed here. The composer calls this
+        // before Up/Down (which move its highlight) and before backspace/cursor
+        // moves (where the next `sync_slash` re-derives it from the new line).
     }
 
-    /// Re-derive the `/` dropdown from the line being edited.
+    /// Re-derive the `/` dropdown and the `@` picker from the line being edited.
     ///
-    /// The dropdown is a function of the prompt, not a separate mode: every
-    /// edit recomputes it, so there is no state that can disagree with what is
-    /// on screen.
+    /// Both are functions of the prompt, not separate modes: every edit
+    /// recomputes them, so no state can disagree with what is on screen.
     pub fn sync_slash(&mut self) {
         self.slash.sync(&self.input, self.cursor);
+        let root = if self.completion.workspace_root.as_os_str().is_empty() {
+            std::env::current_dir().unwrap_or_default()
+        } else {
+            self.completion.workspace_root.clone()
+        };
+        self.sync_mentions(&root);
     }
 
     /// Queue a command for later execution (when not busy).
@@ -2439,7 +2964,13 @@ fn parse_line_inner(raw: &str, suggest: bool) -> Parsed {
         "memory" => Parsed::Memory,
         "theme" | "set-theme" => {
             if args.is_empty() {
-                Parsed::Usage("usage: /theme <default|high-contrast|no-color>".to_string())
+                // Bare /theme opens the live preview picker; explicit names still
+                // work for scripts and for the legacy three-theme surface.
+                Parsed::ThemePicker
+            } else if crate::tui::theme::Palette::parse_id(&args[0]).is_some() {
+                // A concrete palette id (e.g. /theme nord) sets it directly: the
+                // picker commits by writing the same id to [ui] theme.
+                Parsed::ThemePicker
             } else {
                 match args[0].as_str() {
                     "default" => Parsed::Run(Verb::SetTheme(crate::tui::app::Theme::Default)),
@@ -4638,6 +5169,161 @@ fn split_flags(args: &[String]) -> (BTreeMap<String, String>, Vec<String>) {
     (flags, positional)
 }
 
+/// Character indices of `query` as a case-insensitive subsequence of `text`.
+///
+/// The digits name positions in the string the picker draws, so the matched
+/// letters can be accented without re-colouring the whole token.
+fn fuzzy_hits(query: &str, text: &str) -> Option<Vec<usize>> {
+    let needle: Vec<char> = query.chars().flat_map(char::to_lowercase).collect();
+    if needle.is_empty() {
+        return Some(Vec::new());
+    }
+    let mut next = 0usize;
+    let mut hits = Vec::new();
+    for (index, ch) in text.chars().enumerate() {
+        if next < needle.len() && ch.to_lowercase().next() == Some(needle[next]) {
+            hits.push(index);
+            next += 1;
+        }
+    }
+    (next == needle.len()).then_some(hits)
+}
+
+/// A bounded, stable sample of real workspace files for a bare `@`.
+///
+/// There is no time-stamped "recent" list in the prompt state, so calling these
+/// files recent would be a lie. The first files in tree order are nearby and
+/// deterministic; the query narrows them with the same fuzzy matcher as ever.
+fn nearby_files(workspace_root: &Path, limit: usize) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for entry in WalkDir::new(workspace_root)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        if let Ok(relative) = entry.path().strip_prefix(workspace_root) {
+            files.push(relative.to_path_buf());
+        }
+        if files.len() >= limit {
+            break;
+        }
+    }
+    files.sort();
+    files
+}
+
+/// Build all three groups of the unified picker from their real sources.
+///
+/// Skills come from the skill registry and agent roles from the compiled-in
+/// agent specs plus the live child roster. Nothing here invents a name: an
+/// empty group earns a plain-language placeholder row that cannot be inserted.
+fn build_mention_rows(app: &App, workspace_root: &Path, query: &str) -> Vec<MentionRow> {
+    const SKILL_PREFIX: &str = "@skill:";
+    const AGENT_PREFIX: &str = "@agent:";
+    // Match on `/` paths on every platform: Windows renders the same relative
+    // path with `\`, and a person typing `@src/` should still find it.
+    let match_query = query.replace('\\', "/");
+    let path_like = match_query.contains('/');
+    let offset = |prefix: &str| prefix.chars().count();
+
+    let skill_names = memnoth_skills::commands::skill_names();
+    let mut skills: Vec<MentionRow> = skill_names
+        .iter()
+        .filter_map(|name| {
+            let hits = fuzzy_hits(&match_query, name)?;
+            Some(MentionRow::new(
+                MentionKind::Skill,
+                format!("{SKILL_PREFIX}{name}"),
+                String::new(),
+                hits.into_iter()
+                    .map(|index| index + offset(SKILL_PREFIX))
+                    .collect(),
+            ))
+        })
+        .collect();
+    if skills.is_empty() {
+        let why = if skill_names.is_empty() {
+            "no skills installed"
+        } else {
+            "no matching skill"
+        };
+        skills.push(MentionRow::empty(MentionKind::Skill, why));
+    }
+
+    let mut agents: Vec<MentionRow> = memnoth_agent::builtin::builtin_specs()
+        .into_iter()
+        .filter_map(|spec| {
+            let hits = fuzzy_hits(&match_query, &spec.name)?;
+            Some(MentionRow::new(
+                MentionKind::Agent,
+                format!("{AGENT_PREFIX}{}", spec.name),
+                spec.description,
+                hits.into_iter()
+                    .map(|index| index + offset(AGENT_PREFIX))
+                    .collect(),
+            ))
+        })
+        .collect();
+    for child in crate::tui::agents::roster(app) {
+        let Some(hits) = fuzzy_hits(&match_query, &child.role) else {
+            continue;
+        };
+        let name = format!("{AGENT_PREFIX}{}", child.role);
+        if agents.iter().any(|row| row.name == name) {
+            continue;
+        }
+        agents.push(MentionRow::new(
+            MentionKind::Agent,
+            name,
+            format!("child run {}", child.agent_id),
+            hits.into_iter()
+                .map(|index| index + offset(AGENT_PREFIX))
+                .collect(),
+        ));
+    }
+    if agents.is_empty() {
+        agents.push(MentionRow::empty(MentionKind::Agent, "no matching agent"));
+    }
+
+    let paths = if query.is_empty() {
+        nearby_files(workspace_root, 8)
+    } else {
+        fuzzy_find_paths(workspace_root, query)
+    };
+    let mut files: Vec<MentionRow> = paths
+        .into_iter()
+        .filter_map(|path| {
+            let plain = path.to_string_lossy().to_string();
+            let hits = fuzzy_hits(&match_query, &plain.replace('\\', "/"))?;
+            Some(MentionRow::new(
+                MentionKind::File,
+                format!("@{plain}"),
+                String::new(),
+                hits.into_iter().map(|index| index + 1).collect(),
+            ))
+        })
+        .collect();
+    if files.is_empty() {
+        let why = if query.is_empty() {
+            "no files in workspace"
+        } else {
+            "no matching file"
+        };
+        files.push(MentionRow::empty(MentionKind::File, why));
+    }
+
+    // A path-like query is a request for a file: put that group first. For a
+    // bare `@` the category order is the one the footer names — skills,
+    // agents, files — so every group is visible without scrolling.
+    if path_like {
+        files.into_iter().chain(skills).chain(agents).collect()
+    } else {
+        skills.into_iter().chain(agents).chain(files).collect()
+    }
+}
+
 /// Fuzzy find paths relative to workspace root.
 ///
 /// Matches files whose path contains all query characters in order (subsequence match).
@@ -4648,7 +5334,9 @@ fn fuzzy_find_paths(workspace_root: &Path, query: &str) -> Vec<PathBuf> {
         return Vec::new();
     }
 
-    let query_lower = query.to_lowercase();
+    // Paths are compared with `/` on every platform. On Windows the same
+    // relative path renders with `\`, which made `@src/` find nothing.
+    let query_lower = query.replace('\\', "/").to_lowercase();
     let mut matches = Vec::new();
 
     // Walk the workspace directory
@@ -4663,7 +5351,7 @@ fn fuzzy_find_paths(workspace_root: &Path, query: &str) -> Vec<PathBuf> {
             let path = entry.path();
             // Get relative path from workspace root
             if let Ok(rel_path) = path.strip_prefix(workspace_root) {
-                let path_str = rel_path.to_string_lossy().to_lowercase();
+                let path_str = rel_path.to_string_lossy().replace('\\', "/").to_lowercase();
                 if is_subsequence(&query_lower, &path_str) {
                     matches.push(rel_path.to_path_buf());
                 }
@@ -4823,6 +5511,122 @@ pub fn display_path(path: &std::path::Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn followups_are_derived_from_real_tool_and_write_facts() {
+        let facts = TurnFacts {
+            tools: vec![("cargo test".into(), true), ("read file".into(), false)],
+            writes: vec!["/ws/src/main.rs".into()],
+        };
+        let items = derive_followups(&facts);
+        assert!(!items.is_empty());
+        assert!(items.len() <= 4);
+        assert!(
+            items
+                .iter()
+                .any(|item| item.label.contains("rerun cargo test")),
+            "a failed test is re-offered: {items:?}"
+        );
+        assert!(
+            items.iter().any(|item| item.label.contains("main.rs")),
+            "the written path is named: {items:?}"
+        );
+        for item in &items {
+            assert!(item.label.chars().count() <= 160);
+            assert!(item.prompt.len() <= 160);
+        }
+    }
+
+    #[test]
+    fn no_followups_without_a_substantive_successful_turn() {
+        // An empty answer, an error and a turn with no facts all show nothing.
+        assert!(derive_followups(&TurnFacts::default()).is_empty());
+        let mut app = App::new("s", false);
+        app.push(EntryRole::Error, "the turn failed");
+        app.set_follow_ups(None, derive_followups(&TurnFacts::default()));
+        assert!(app.follow_ups.is_empty());
+        app.set_follow_ups(Some(0), Vec::new());
+        assert!(app.follow_ups.is_empty());
+    }
+
+    #[test]
+    fn a_passing_test_is_never_reoffered() {
+        let facts = TurnFacts {
+            tools: vec![("cargo test".into(), false)],
+            writes: Vec::new(),
+        };
+        let labels: Vec<String> = derive_followups(&facts)
+            .into_iter()
+            .map(|item| item.label)
+            .collect();
+        assert!(
+            !labels.iter().any(|label| label.contains("rerun")),
+            "re-running a suite that just passed is invented work: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn followups_are_sanitized_and_deduplicated() {
+        let facts = TurnFacts {
+            tools: Vec::new(),
+            writes: vec!["/ws/a\u{1b}[31m.rs".into(), "/ws/a.rs".into()],
+        };
+        let items = derive_followups(&facts);
+        for item in &items {
+            assert!(
+                !item.label.chars().any(char::is_control),
+                "{:?}",
+                item.label
+            );
+            assert!(
+                !item.prompt.chars().any(char::is_control),
+                "{:?}",
+                item.prompt
+            );
+        }
+        let mut labels: Vec<String> = items.iter().map(|item| item.label.clone()).collect();
+        labels.sort();
+        labels.dedup();
+        assert_eq!(labels.len(), items.len(), "duplicate labels: {items:?}");
+    }
+
+    #[test]
+    fn filling_a_followup_is_an_editable_draft_that_dismisses_the_buttons() {
+        let mut app = App::new("s", false);
+        app.push(EntryRole::User, "fix it");
+        app.push(EntryRole::Answer, "a substantive answer with real content");
+        let items = derive_followups(&TurnFacts {
+            tools: vec![("cargo test".into(), true)],
+            writes: vec!["/ws/src/main.rs".into()],
+        });
+        let prompt = items[0].prompt.clone();
+        app.set_follow_ups(Some(1), items);
+        assert!(app.follow_ups_visible());
+        app.fill_follow_up(prompt.clone());
+        assert_eq!(app.input, prompt, "the exact prompt reaches the composer");
+        assert!(app.follow_ups.is_empty(), "buttons vanish once used");
+        assert!(
+            !app.pending_submit,
+            "filling never submits on the person's behalf"
+        );
+    }
+
+    #[test]
+    fn typing_dismisses_followups_but_never_steals_the_character() {
+        let mut app = App::new("s", false);
+        app.push(EntryRole::Answer, "a substantive answer with real content");
+        app.set_follow_ups(
+            Some(0),
+            derive_followups(&TurnFacts {
+                writes: vec!["/ws/src/main.rs".into()],
+                ..TurnFacts::default()
+            }),
+        );
+        assert!(!app.follow_ups.is_empty());
+        app.insert_char('h');
+        assert_eq!(app.input, "h");
+        assert!(app.follow_ups.is_empty());
+    }
 
     /// The palette is a promise: anything it lists as runnable must resolve.
     /// Rows that still need an argument are skipped because the promise there
@@ -5158,8 +5962,8 @@ mod tests {
         let visual = app.visual_lines(96);
         let body: Vec<String> = visual
             .iter()
-            .filter(|(role, _, header)| *role == EntryRole::Thinking && !*header)
-            .map(|(_, line, _)| {
+            .filter(|(role, _, header, _)| *role == EntryRole::Thinking && !*header)
+            .map(|(_, line, _, _)| {
                 line.spans
                     .iter()
                     .map(|span| span.content.as_ref())
@@ -5187,7 +5991,7 @@ mod tests {
         let visual = app.visual_lines(72);
         let headers: Vec<_> = visual
             .iter()
-            .filter(|(role, _, header)| *role == EntryRole::Thinking && *header)
+            .filter(|(role, _, header, _)| *role == EntryRole::Thinking && *header)
             .collect();
         assert_eq!(headers.len(), 1);
     }
@@ -5203,8 +6007,8 @@ mod tests {
         let visual = app.visual_lines(96);
         let body: Vec<String> = visual
             .iter()
-            .filter(|(role, _, header)| *role == EntryRole::Thinking && !*header)
-            .map(|(_, line, _)| {
+            .filter(|(role, _, header, _)| *role == EntryRole::Thinking && !*header)
+            .map(|(_, line, _, _)| {
                 line.spans
                     .iter()
                     .map(|span| span.content.as_ref())
@@ -5219,8 +6023,8 @@ mod tests {
         let visual = app.visual_lines(96);
         let body: Vec<String> = visual
             .iter()
-            .filter(|(role, _, header)| *role == EntryRole::Thinking && !*header)
-            .map(|(_, line, _)| {
+            .filter(|(role, _, header, _)| *role == EntryRole::Thinking && !*header)
+            .map(|(_, line, _, _)| {
                 line.spans
                     .iter()
                     .map(|span| span.content.as_ref())
@@ -5235,8 +6039,8 @@ mod tests {
         let visual = app.visual_lines(96);
         let body: Vec<String> = visual
             .iter()
-            .filter(|(role, _, header)| *role == EntryRole::Thinking && !*header)
-            .map(|(_, line, _)| {
+            .filter(|(role, _, header, _)| *role == EntryRole::Thinking && !*header)
+            .map(|(_, line, _, _)| {
                 line.spans
                     .iter()
                     .map(|span| span.content.as_ref())
@@ -5368,7 +6172,7 @@ mod tests {
         let visual = app.visual_lines(96);
         let texts: Vec<String> = visual
             .iter()
-            .map(|(_, line, _)| {
+            .map(|(_, line, _, _)| {
                 line.spans
                     .iter()
                     .map(|span| span.content.as_ref())
@@ -5389,7 +6193,7 @@ mod tests {
         let visual = app.visual_lines(72);
         let text: String = visual
             .iter()
-            .map(|(_, line, _)| {
+            .map(|(_, line, _, _)| {
                 line.spans
                     .iter()
                     .map(|span| span.content.as_ref())
@@ -5402,7 +6206,7 @@ mod tests {
         let visual = app.visual_lines(72);
         let text: String = visual
             .iter()
-            .map(|(_, line, _)| {
+            .map(|(_, line, _, _)| {
                 line.spans
                     .iter()
                     .map(|span| span.content.as_ref())
@@ -5422,7 +6226,7 @@ mod tests {
         let active = app.visual_lines(96);
         let active_text = active
             .iter()
-            .map(|(_, line, _)| line.to_string())
+            .map(|(_, line, _, _)| line.to_string())
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
@@ -5441,7 +6245,7 @@ mod tests {
         );
         assert!(
             done.iter()
-                .all(|(_, line, _)| line.to_string().contains("result not observed"))
+                .all(|(_, line, _, _)| line.to_string().contains("result not observed"))
         );
     }
 
@@ -5793,6 +6597,230 @@ mod tests {
         );
         assert!(answer.contains("kg index"));
         assert!(answer.contains("vault remember"));
+    }
+
+    fn mention_workspace() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("temp workspace");
+        for path in ["src/lib.rs", "src/tui/app.rs", "docs/readme.md"] {
+            let full = dir.path().join(path);
+            std::fs::create_dir_all(full.parent().expect("parent")).expect("mkdir");
+            std::fs::write(&full, "fn main() {}").expect("write fixture");
+        }
+        dir
+    }
+
+    fn open_at(app: &mut App, text: &str, root: &Path) {
+        // The composer calls `sync_slash` after every character: that is the
+        // real "typing @" opens the picker" path, not a test-only entry point.
+        app.completion.workspace_root = root.to_path_buf();
+        app.input = text.to_string();
+        app.cursor = text.chars().count();
+        app.sync_slash();
+    }
+
+    #[test]
+    fn at_opens_all_three_groups_with_real_or_empty_rows() {
+        let dir = mention_workspace();
+        let mut app = App::new("s", false);
+        open_at(&mut app, "@", dir.path());
+
+        assert!(app.mentions.is_open(), "a bare @ opens the picker");
+        for kind in [MentionKind::Skill, MentionKind::Agent, MentionKind::File] {
+            assert!(
+                app.mentions.rows.iter().any(|row| row.kind == kind),
+                "{kind:?} must have a row or a truthful empty line: {:?}",
+                app.mentions.rows
+            );
+        }
+        assert!(
+            app.mentions
+                .rows
+                .iter()
+                .any(|row| row.kind == MentionKind::File && row.enabled),
+            "the fixture workspace has files"
+        );
+        // Skills and agents are never invented: every real row must name a
+        // skill from the registry or a compiled-in agent role.
+        let skill_names = memnoth_skills::commands::skill_names();
+        for row in app
+            .mentions
+            .rows
+            .iter()
+            .filter(|row| row.kind == MentionKind::Skill && row.enabled)
+        {
+            let name = row.name.strip_prefix("@skill:").expect("skill token");
+            assert!(
+                skill_names.iter().any(|real| real == name),
+                "invented skill {name}"
+            );
+        }
+        let roles: Vec<String> = memnoth_agent::builtin::builtin_specs()
+            .into_iter()
+            .map(|spec| spec.name)
+            .collect();
+        for row in app
+            .mentions
+            .rows
+            .iter()
+            .filter(|row| row.kind == MentionKind::Agent && row.enabled)
+        {
+            let name = row.name.strip_prefix("@agent:").expect("agent token");
+            assert!(
+                roles.iter().any(|real| real == name),
+                "invented agent {name}"
+            );
+        }
+        // A category with nothing to offer says so instead of shipping a fake.
+        if skill_names.is_empty() {
+            assert!(
+                app.mentions
+                    .rows
+                    .iter()
+                    .any(|row| !row.enabled && row.name.contains("no skills"))
+            );
+        }
+    }
+
+    #[test]
+    fn a_query_filters_across_all_groups() {
+        let dir = mention_workspace();
+        let mut app = App::new("s", false);
+        open_at(&mut app, "@lib", dir.path());
+
+        assert!(app.mentions.is_open());
+        for row in app.mentions.rows.iter().filter(|row| row.enabled) {
+            assert!(
+                fuzzy_hits("lib", row.name.strip_prefix('@').unwrap_or(&row.name)).is_some(),
+                "{:?} does not match the query",
+                row.name
+            );
+        }
+        assert!(
+            app.mentions
+                .rows
+                .iter()
+                .any(|row| row.kind == MentionKind::File && row.enabled),
+            "src/lib.rs matches"
+        );
+    }
+
+    #[test]
+    fn an_empty_category_says_so_instead_of_inventing_an_entry() {
+        let dir = mention_workspace();
+        let mut app = App::new("s", false);
+        open_at(&mut app, "@zzqz", dir.path());
+
+        for kind in [MentionKind::Skill, MentionKind::Agent, MentionKind::File] {
+            let rows: Vec<&MentionRow> = app
+                .mentions
+                .rows
+                .iter()
+                .filter(|row| row.kind == kind)
+                .collect();
+            assert!(!rows.is_empty(), "{kind:?} has a row");
+            assert!(
+                rows.iter().all(|row| !row.enabled),
+                "{kind:?} has no invented match: {rows:?}"
+            );
+            assert!(
+                rows.iter().any(|row| row.name.starts_with("no ")),
+                "{kind:?} explains the miss: {rows:?}"
+            );
+        }
+        assert!(app.mentions.selectable_rows().is_empty());
+    }
+
+    #[test]
+    fn a_path_like_query_puts_files_first() {
+        let dir = mention_workspace();
+        let mut app = App::new("s", false);
+        open_at(&mut app, "@src/", dir.path());
+
+        let first = app
+            .mentions
+            .rows
+            .iter()
+            .find(|row| row.enabled)
+            .expect("a selectable row");
+        assert_eq!(
+            first.kind,
+            MentionKind::File,
+            "files win for path-like queries"
+        );
+        assert!(
+            first.name.replace('\\', "/").starts_with("@src/"),
+            "unexpected file row: {:?}",
+            first.name
+        );
+        assert_eq!(app.mentions.selected_index(), 0);
+    }
+
+    #[test]
+    fn tab_cycles_without_editing_the_line() {
+        let dir = mention_workspace();
+        let mut app = App::new("s", false);
+        open_at(&mut app, "@", dir.path());
+        let before = app.input.clone();
+        let first = app.mentions.selected_index();
+        let count = app.mentions.selectable_rows().len();
+
+        app.complete_path(dir.path());
+        assert_ne!(app.mentions.selected_index(), first);
+        assert_eq!(app.input, before, "a completion key never edits the prompt");
+        for _ in 1..count {
+            app.complete_path(dir.path());
+        }
+        assert_eq!(app.mentions.selected_index(), first, "cycling wraps");
+    }
+
+    #[test]
+    fn enter_inserts_the_token_and_keeps_both_sides_of_the_line() {
+        let dir = mention_workspace();
+        let mut app = App::new("s", false);
+        app.completion.workspace_root = dir.path().to_path_buf();
+        app.input = "tell @rev about it".to_string();
+        app.cursor = "tell @rev".chars().count(); // just past the mention
+        app.sync_slash();
+        assert!(app.mentions.is_open(), "the mention ends at the cursor");
+        let agent = app
+            .mentions
+            .rows
+            .iter()
+            .position(|row| row.enabled && row.kind == MentionKind::Agent)
+            .expect("a built-in agent role");
+        app.mentions.selected = agent;
+        let token = app.mentions.rows[agent].token.clone();
+
+        // The composer sets `pending_submit` on Enter; the run loop then takes
+        // the line, which is where an open picker redirects the key.
+        assert!(
+            app.take_input().is_empty(),
+            "a mention is not sent as a turn"
+        );
+        assert_eq!(app.input, format!("tell {token} about it"));
+        assert_eq!(app.cursor, "tell ".chars().count() + token.chars().count());
+        assert_eq!(app.input.matches('@').count(), 1, "no duplicate @");
+        assert!(!app.mentions.is_open(), "the picker closes after insertion");
+    }
+
+    #[test]
+    fn esc_closes_the_picker_without_leaving_a_stale_token() {
+        let dir = mention_workspace();
+        let mut app = App::new("s", false);
+        open_at(&mut app, "@src", dir.path());
+        assert!(app.mentions.is_open());
+        // This is the composer's Esc sequence: cancel, then the cleared line
+        // is re-synced. `cancel_completion` alone must not eat the highlight,
+        // because the same call precedes Up/Down.
+        app.cancel_completion();
+        assert!(
+            app.mentions.is_open(),
+            "the arrow keys still own the picker"
+        );
+        app.input.clear();
+        app.cursor = 0;
+        app.sync_slash();
+        assert!(!app.mentions.is_open());
     }
 }
 

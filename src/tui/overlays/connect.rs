@@ -827,15 +827,19 @@ impl Overlay for ConnectOverlay {
         for row in &self.rows {
             let (status, color) = row.status();
             let selected = self.selected == Some(row.name);
+            // Selection is carried by ink and weight, never a fill: the old
+            // selected_bg painted a bright orange band across the whole row.
+            // `selected_fg` is near-black on Dark and would vanish without that
+            // fill, so it is deliberately not used; the `★` marker and BOLD
+            // still name the selection when NO_COLOR strips every token.
             let style = if selected {
-                Style::default().bg(t.selected_bg).fg(t.selected_fg)
+                Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
             };
-            // On the highlighted row every cell uses the selection pair,
-            // including the status: a coloured dot on the selection background
-            // is unreadable, and a row whose colours disagree looks like two rows.
-            let status_style = Style::default().fg(if selected { t.selected_fg } else { color });
+            // With no fill the status dot stays legible, so it keeps its
+            // semantic colour (ready/failed/testing) on every row.
+            let status_style = Style::default().fg(color);
             rows.push(
                 Row::new(vec![
                     Cell::from(format!("{} {}", row.marker(), row.display)),
@@ -873,7 +877,13 @@ impl Overlay for ConnectOverlay {
                 .borders(Borders::ALL)
                 .title(format!(" {} providers ", self.rows.len())),
         )
-        .row_highlight_style(Style::default().bg(t.selected_bg).fg(t.selected_fg));
+        // Ratatui layers this over the row style, so it must carry no fill
+        // either — one bg here would repaint the whole orange band. The `›`
+        // glyph names the cursor row even when NO_COLOR turns every token
+        // Reset; BOLD survives colour stripping. The `★` in the name column
+        // marks the *active* provider, which is not always the selected row.
+        .row_highlight_style(Style::default().fg(t.accent).add_modifier(Modifier::BOLD))
+        .highlight_symbol("›");
 
         let mut state = self.table.clone();
         state.select(if self.rows.is_empty() {
@@ -1184,11 +1194,15 @@ mod tests {
         text.lines().map(str::to_string).collect()
     }
 
-    fn cell_bg(buffer: &ratatui::buffer::Buffer, symbol: &str) -> Option<Color> {
+    fn cell_style(
+        buffer: &ratatui::buffer::Buffer,
+        symbol: &str,
+    ) -> Option<(Color, Color, Modifier)> {
         for y in 0..buffer.area.height {
             for x in 0..buffer.area.width {
                 if buffer[(x, y)].symbol() == symbol {
-                    return Some(buffer[(x, y)].bg);
+                    let cell = &buffer[(x, y)];
+                    return Some((cell.fg, cell.bg, cell.modifier));
                 }
             }
         }
@@ -1246,7 +1260,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_row_highlight_uses_the_selection_pair() {
+    fn selected_row_is_ink_only_with_no_orange_fill() {
         let t = tokens();
         let app = App::new("t", false);
         let mut overlay = sample();
@@ -1256,8 +1270,31 @@ mod tests {
             .draw(|frame| overlay.render(frame, frame.area(), &app))
             .unwrap();
         let buffer = terminal.backend().buffer();
-        // `★` renders only on the active/selected row.
-        assert_eq!(cell_bg(buffer, "★"), Some(t.selected_bg));
+        // No cell anywhere may carry the bright selection fill. `Color::Reset`
+        // is ratatui's "no background" for a buffer cell.
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                assert_ne!(
+                    buffer[(x, y)].bg,
+                    t.selected_bg,
+                    "a row still has the orange band"
+                );
+            }
+        }
+        // `›` is the dedicated highlight-symbol column: it tracks the cursor
+        // row even when selection moves off the active (`★`) provider, so it is
+        // the glyph cue that survives NO_COLOR.
+        assert!(
+            cell_style(buffer, "›").is_some(),
+            "no selection glyph rendered"
+        );
+        // `★` renders only on the active provider; its cell carries accent ink
+        // and weight with no fill.
+        let (fg, bg, modifier) = cell_style(buffer, "★").expect("the active provider's marker");
+        assert_eq!(bg, Color::Reset, "selection is ink, not a fill");
+        assert_eq!(fg, t.accent, "selection uses accent ink");
+        assert_ne!(fg, t.selected_fg, "near-black ink would vanish");
+        assert!(modifier.contains(Modifier::BOLD), "BOLD survives NO_COLOR");
     }
 
     #[test]

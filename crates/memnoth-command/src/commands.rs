@@ -2403,7 +2403,10 @@ pub fn build_p0_registry() -> RegistryBuilder {
             cli_path: vec!["auth".into(), "whoami".into()],
             slash: SlashSpec {
                 name: "whoami".into(),
-                palette: None,
+                // The session parser accepts `/whoami`, not `/auth whoami`.
+                // Without this line the registry row is skipped from the slash
+                // dropdown even though the command works when typed.
+                palette: Some("whoami".into()),
                 description: "Print identity one-liner".into(),
                 long_description: None,
                 params: vec![],
