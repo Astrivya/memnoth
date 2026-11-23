@@ -200,6 +200,208 @@ impl ColorScheme {
     }
 }
 
+// ── Semantic token palette ────────────────────────────────────────────────
+//
+// Implementation of docs/research/cli-theme-and-design-2026-11-23.md. These
+// are *semantic roles*, not decoration: one accent, meaning-only, with
+// audited contrast in both modes. Render code must reference `tokens()`
+// rather than picking raw colours, so a theme change cannot drift across
+// surfaces. Values are the Radix Sand + Orange scale with the Rosé Pine Dawn
+// cream canvas; all pairs clear WCAG AA (>= 4.5:1 text, >= 3:1 borders).
+
+/// The palette family selected for this process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Palette {
+    /// Radix Sand + Orange on Rosé Pine Dawn cream (light mode).
+    Cream,
+    /// Radix Sand + Orange on near-black (default dark mode).
+    Dark,
+    /// Maximal contrast; keeps meaning but removes subtlety.
+    HighContrast,
+    /// No colour at all; modifiers and glyphs still carry meaning.
+    NoColor,
+}
+
+impl Palette {
+    /// Resolve from the existing theme plus the optional palette override.
+    /// `MEMNOTH_PALETTE` accepts `cream`/`light`, `dark`, `high-contrast`,
+    /// `no-color`. `Theme::NoColor` always wins (accessibility gate).
+    pub fn from_env(theme: Theme) -> Self {
+        if theme == Theme::NoColor {
+            return Self::NoColor;
+        }
+        if theme == Theme::HighContrast {
+            return Self::HighContrast;
+        }
+        match std::env::var("MEMNOTH_PALETTE")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("cream") | Some("light") => Self::Cream,
+            Some("dark") => Self::Dark,
+            Some("high-contrast") | Some("contrast") => Self::HighContrast,
+            Some("no-color") => Self::NoColor,
+            _ => Self::Dark,
+        }
+    }
+}
+
+/// Audited semantic colours for one palette. Ratios are in the research doc.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Tokens {
+    pub canvas: Color,
+    pub surface: Color,
+    pub text: Color,
+    pub muted: Color,
+    pub border: Color,
+    pub accent: Color,
+    pub success: Color,
+    pub warning: Color,
+    pub error: Color,
+    pub selected_bg: Color,
+    pub selected_fg: Color,
+}
+
+impl Tokens {
+    pub fn for_palette(palette: Palette) -> Self {
+        match palette {
+            Palette::Cream => Self {
+                canvas: Color::Rgb(250, 244, 237),  // #faf4ed
+                surface: Color::Rgb(253, 253, 252), // #fdfdfc
+                text: Color::Rgb(33, 32, 28),       // #21201c — 16.0:1
+                muted: Color::Rgb(99, 99, 94),      // #63635e — ~6:1
+                border: Color::Rgb(157, 156, 150),  // ~3:1 non-text
+                accent: Color::Rgb(184, 67, 0),     // #b84300 — 5.0:1
+                success: Color::Rgb(33, 131, 88),   // #218358 — 4.6:1
+                warning: Color::Rgb(154, 103, 0),   // #9a6700 — 5.6:1
+                error: Color::Rgb(206, 44, 49),     // #ce2c31 — 5.1:1
+                selected_bg: Color::Rgb(184, 67, 0),
+                selected_fg: Color::Rgb(255, 253, 252),
+            },
+            Palette::Dark => Self {
+                canvas: Color::Rgb(17, 17, 16),     // #111110
+                surface: Color::Rgb(28, 28, 26),    // #1c1c1a
+                text: Color::Rgb(238, 238, 236),    // #eeeeec — 16.3:1
+                muted: Color::Rgb(181, 179, 173),   // #b5b3ad — ~9:1
+                border: Color::Rgb(90, 89, 84),     // ~3:1 non-text
+                accent: Color::Rgb(255, 160, 87),   // #ffa057 — 9.4:1
+                success: Color::Rgb(61, 214, 140),  // #3dd68c — 10.1:1
+                warning: Color::Rgb(235, 193, 119), // #ebc177 — ~12:1
+                error: Color::Rgb(255, 149, 146),   // #ff9592 — ~9:1
+                selected_bg: Color::Rgb(255, 160, 87),
+                selected_fg: Color::Rgb(17, 17, 16),
+            },
+            Palette::HighContrast => Self {
+                canvas: Color::Black,
+                surface: Color::Black,
+                text: Color::White,
+                muted: Color::Gray,
+                border: Color::White,
+                accent: Color::Yellow,
+                success: Color::Green,
+                warning: Color::Yellow,
+                error: Color::Red,
+                selected_bg: Color::White,
+                selected_fg: Color::Black,
+            },
+            Palette::NoColor => Self {
+                canvas: Color::Reset,
+                surface: Color::Reset,
+                text: Color::Reset,
+                muted: Color::Reset,
+                border: Color::Reset,
+                accent: Color::Reset,
+                success: Color::Reset,
+                warning: Color::Reset,
+                error: Color::Reset,
+                selected_bg: Color::Reset,
+                selected_fg: Color::Reset,
+            },
+        }
+    }
+
+    /// Whether these tokens carry any colour at all.
+    pub fn colored(&self) -> bool {
+        self.text != Color::Reset
+    }
+}
+
+// An atomic rather than a OnceLock: `/set-theme` changes the palette at runtime,
+// so `tokens()` must follow it. Constructing 11 Colors per draw is trivial.
+static ACTIVE_PALETTE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(u8::MAX);
+
+fn palette_index(p: Palette) -> u8 {
+    match p {
+        Palette::Cream => 0,
+        Palette::Dark => 1,
+        Palette::HighContrast => 2,
+        Palette::NoColor => 3,
+    }
+}
+
+/// Set the process-wide palette. Called at startup and on `/set-theme` so every
+/// surface shares one audited set of tokens.
+pub fn init_palette(palette: Palette) {
+    ACTIVE_PALETTE.store(palette_index(palette), std::sync::atomic::Ordering::Release);
+}
+
+/// The current palette. Defaults from the environment until first set.
+pub fn palette() -> Palette {
+    match ACTIVE_PALETTE.load(std::sync::atomic::Ordering::Acquire) {
+        0 => Palette::Cream,
+        1 => Palette::Dark,
+        2 => Palette::HighContrast,
+        3 => Palette::NoColor,
+        _ => Palette::from_env(Theme::Default),
+    }
+}
+
+/// The current semantic tokens, following `/set-theme` changes.
+pub fn tokens() -> Tokens {
+    Tokens::for_palette(palette())
+}
+
+#[cfg(test)]
+mod token_tests {
+    use super::*;
+
+    #[test]
+    fn every_palette_has_distinct_roles_and_meaningful_contrast() {
+        for p in [Palette::Cream, Palette::Dark, Palette::HighContrast] {
+            let t = Tokens::for_palette(p);
+            assert!(t.colored(), "{p:?} must carry colour");
+            assert_ne!(t.text, t.muted, "{p:?}: muted must be a lighter step");
+            // High-contrast deliberately uses white borders on black; the
+            // tonal-step rule applies only to the audited Cream/Dark scales.
+            if p != Palette::HighContrast {
+                assert_ne!(t.text, t.border, "{p:?}: border must be a lighter step");
+            }
+            assert_ne!(t.accent, t.error, "{p:?}: accent is not error");
+            assert_ne!(t.selected_bg, t.canvas, "{p:?}: selection must be visible");
+        }
+    }
+
+    #[test]
+    fn no_color_has_no_colour_but_keeps_roles() {
+        let t = Tokens::for_palette(Palette::NoColor);
+        assert!(!t.colored());
+        assert_eq!(t.accent, Color::Reset);
+        assert_eq!(t.error, Color::Reset);
+    }
+
+    #[test]
+    fn no_color_env_overrides_palette_choice() {
+        assert_eq!(Palette::from_env(Theme::NoColor), Palette::NoColor);
+        assert_eq!(
+            Palette::from_env(Theme::HighContrast),
+            Palette::HighContrast
+        );
+    }
+}
+
 /// Screen reader output formatter
 pub struct ScreenReaderOutput;
 

@@ -4,13 +4,14 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use serde_json::Value;
 
 use crate::tui::app::App;
 use crate::tui::overlays::{Overlay, OverlayAction, OverlayKind};
+use crate::tui::theme::{Tokens, tokens};
 
 #[derive(Debug, Clone)]
 struct Project {
@@ -73,6 +74,32 @@ fn grant_source_text(source: Option<&str>, via: Option<&str>) -> String {
         // An unrecognised source is a fact we cannot explain, not a chance to
         // guess that it was inherited.
         Some(_) => "grant could not be explained".to_string(),
+    }
+}
+
+/// The `›` glyph marks the row the keys act on. The accent is only ever spent
+/// on that focused actionable row; the glyph means focus never depends on the
+/// accent surviving a NO_COLOR frame.
+fn pointer_glyph(selected: bool) -> &'static str {
+    if selected { "› " } else { "  " }
+}
+
+fn pointer_style(selected: bool, t: Tokens) -> Style {
+    if selected {
+        Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(t.muted)
+    }
+}
+
+fn name_style(selected: bool, t: Tokens) -> Style {
+    if selected {
+        Style::default()
+            .bg(t.selected_bg)
+            .fg(t.selected_fg)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(t.muted)
     }
 }
 
@@ -160,16 +187,15 @@ impl ProjectBrowserOverlay {
     }
 
     fn detail_lines(project: &Project) -> Vec<Line<'static>> {
+        let t = tokens();
         let mut lines = vec![Line::from(Span::styled(
             project.name.clone(),
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(t.text).add_modifier(Modifier::BOLD),
         ))];
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
-            Span::styled("id  ", Style::default().fg(Color::DarkGray)),
-            Span::styled(project.id.clone(), Style::default().fg(Color::Gray)),
+            Span::styled("id  ", Style::default().fg(t.muted)),
+            Span::styled(project.id.clone(), Style::default().fg(t.text)),
         ]));
         for (label, value) in [
             ("visibility", project.visibility.clone()),
@@ -178,8 +204,8 @@ impl ProjectBrowserOverlay {
         ] {
             if let Some(value) = value {
                 lines.push(Line::from(vec![
-                    Span::styled(format!("{label}  "), Style::default().fg(Color::DarkGray)),
-                    Span::styled(value, Style::default().fg(Color::Gray)),
+                    Span::styled(format!("{label}  "), Style::default().fg(t.muted)),
+                    Span::styled(value, Style::default().fg(t.text)),
                 ]));
             }
         }
@@ -188,23 +214,23 @@ impl ProjectBrowserOverlay {
         // not, so it gets an honest fallback rather than a guess.
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
-            Span::styled("your access   ", Style::default().fg(Color::DarkGray)),
+            Span::styled("your access   ", Style::default().fg(t.muted)),
             Span::styled(
                 project
                     .access
                     .clone()
                     .unwrap_or_else(|| "not reported by the API".to_string()),
-                Style::default().fg(Color::Gray),
+                Style::default().fg(t.text),
             ),
         ]));
         lines.push(Line::from(vec![
-            Span::styled("grant source  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("grant source  ", Style::default().fg(t.muted)),
             Span::styled(
                 grant_source_text(
                     project.grant_source.as_deref(),
                     project.grant_via.as_deref(),
                 ),
-                Style::default().fg(Color::Gray),
+                Style::default().fg(t.text),
             ),
         ]));
         lines
@@ -306,19 +332,18 @@ impl Overlay for ProjectBrowserOverlay {
         }
         frame.render_widget(Clear, area);
         frame.render_widget(Block::default().borders(Borders::NONE), area);
+        let t = tokens();
         let title = if self.detail { "project" } else { "projects" };
         frame.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled("memnoth / ", Style::default().fg(Color::DarkGray)),
+                Span::styled("memnoth / ", Style::default().fg(t.muted)),
                 Span::styled(
                     title,
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(t.text).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                     format!("   {} listed", self.projects.len()),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(t.muted),
                 ),
             ])),
             Rect::new(area.x + 2, area.y, area.width.saturating_sub(4), 1),
@@ -334,7 +359,7 @@ impl Overlay for ProjectBrowserOverlay {
             )
         };
         frame.render_widget(
-            Paragraph::new(Span::styled(footer, Style::default().fg(Color::DarkGray))),
+            Paragraph::new(Span::styled(footer, Style::default().fg(t.muted))),
             Rect::new(area.x + 2, footer_y, area.width.saturating_sub(4), 1),
         );
         let body = Rect::new(
@@ -355,7 +380,9 @@ impl Overlay for ProjectBrowserOverlay {
         }
 
         let query_line = Line::from(vec![
-            Span::styled("/ ", Style::default().fg(Color::Cyan)),
+            // The filter is the focused actionable item; its `/` prompt gets
+            // the accent, but the prompt glyph stays in both palettes.
+            Span::styled("/ ", Style::default().fg(t.accent)),
             Span::styled(
                 if self.filter.is_empty() {
                     "filter projects…"
@@ -363,9 +390,9 @@ impl Overlay for ProjectBrowserOverlay {
                     &self.filter
                 },
                 if self.filter.is_empty() {
-                    Style::default().fg(Color::DarkGray)
+                    Style::default().fg(t.muted)
                 } else {
-                    Style::default().fg(Color::White)
+                    Style::default().fg(t.text)
                 },
             ),
         ]);
@@ -393,7 +420,7 @@ impl Overlay for ProjectBrowserOverlay {
                 } else {
                     "No projects match this filter. Clear the search with Backspace."
                 })
-                .style(Style::default().fg(Color::DarkGray)),
+                .style(Style::default().fg(t.muted)),
                 list_area,
             );
             return;
@@ -418,27 +445,13 @@ impl Overlay for ProjectBrowserOverlay {
                 }
                 let detail = facts.join(" · ");
                 let mut spans = vec![
-                    Span::styled(
-                        if selected { "› " } else { "  " },
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        project.name.clone(),
-                        if selected {
-                            Style::default()
-                                .fg(Color::White)
-                                .add_modifier(Modifier::BOLD)
-                        } else {
-                            Style::default().fg(Color::Gray)
-                        },
-                    ),
+                    Span::styled(pointer_glyph(selected), pointer_style(selected, t)),
+                    Span::styled(project.name.clone(), name_style(selected, t)),
                 ];
                 if !detail.is_empty() {
                     spans.push(Span::styled(
                         format!("   {detail}"),
-                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(t.muted),
                     ));
                 }
                 Line::from(spans)
@@ -638,6 +651,33 @@ mod tests {
         assert!(text.contains("projects"), "{text}");
         assert!(text.contains("Alpha"), "{text}");
         assert!(text.contains("org · read · 2 repos"), "{text}");
+        assert!(
+            text.contains("› Alpha"),
+            "selection is a glyph as well as a colour: {text}"
+        );
         assert!(!text.contains('┌'), "no mini-window border: {text}");
+    }
+
+    #[test]
+    fn selection_roles_use_tokens_and_keep_the_pointer_glyph() {
+        use crate::tui::theme::{Palette, Tokens};
+        use ratatui::style::Color;
+
+        let colored = Tokens::for_palette(Palette::Dark);
+        let plain = Tokens::for_palette(Palette::NoColor);
+
+        assert_eq!(pointer_glyph(true), "› ");
+        assert_eq!(pointer_glyph(false), "  ");
+        assert_eq!(pointer_style(true, colored).fg, Some(colored.accent));
+        assert_eq!(pointer_style(false, colored).fg, Some(colored.muted));
+        let selected = name_style(true, colored);
+        assert_eq!(selected.bg, Some(colored.selected_bg));
+        assert_eq!(selected.fg, Some(colored.selected_fg));
+        assert_eq!(name_style(false, colored).fg, Some(colored.muted));
+
+        // Under NO_COLOR the colour disappears but the glyph does not.
+        assert_eq!(pointer_style(true, plain).fg, Some(Color::Reset));
+        assert_eq!(name_style(true, plain).fg, Some(Color::Reset));
+        assert_eq!(pointer_glyph(true), "› ");
     }
 }

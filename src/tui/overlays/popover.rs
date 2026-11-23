@@ -19,13 +19,14 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use serde_json::Value;
 
 use crate::tui::app::App;
 use crate::tui::overlays::{Overlay, OverlayAction, OverlayKind};
+use crate::tui::theme::tokens;
 
 /// What a key in the window does.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -309,19 +310,18 @@ impl PopoverOverlay {
 
     /// The footer, as chips.
     fn footer(&self) -> Line<'static> {
+        let t = tokens();
         let mut spans: Vec<Span<'static>> = Vec::new();
         let chip = |text: String, enabled: bool| {
             Span::styled(
                 format!(" {text} "),
                 if enabled {
                     Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Cyan)
+                        .fg(t.selected_fg)
+                        .bg(t.selected_bg)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default()
-                        .fg(Color::DarkGray)
-                        .add_modifier(Modifier::DIM)
+                    Style::default().fg(t.muted).add_modifier(Modifier::DIM)
                 },
             )
         };
@@ -481,6 +481,7 @@ impl Overlay for PopoverOverlay {
     }
 
     fn render(&mut self, frame: &mut Frame, area: Rect, _app: &App) {
+        let t = tokens();
         // A window, not a full screen: the session behind it stays readable, so
         // closing it is a choice rather than an escape.
         let width = area.width.saturating_sub(6).clamp(24, 96);
@@ -495,12 +496,10 @@ impl Overlay for PopoverOverlay {
         let title = format!(" {} ", self.spec.title);
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan))
+            .border_style(Style::default().fg(t.border))
             .title(Span::styled(
                 title,
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(t.text).add_modifier(Modifier::BOLD),
             ))
             .title_alignment(Alignment::Left);
         let inner = block.inner(window);
@@ -516,13 +515,13 @@ impl Overlay for PopoverOverlay {
         if let Some(note) = &self.spec.note {
             footer.push(Line::from(Span::styled(
                 note.clone(),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(t.muted),
             )));
         }
         if let Some(status) = &self.status {
             footer.push(Line::from(Span::styled(
                 status.clone(),
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(t.warning),
             )));
         }
         footer.push(self.footer());
@@ -552,7 +551,7 @@ impl Overlay for PopoverOverlay {
         if !self.spec.subtitle.is_empty() {
             lines.push(Line::from(Span::styled(
                 self.spec.subtitle.clone(),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(t.muted),
             )));
         }
 
@@ -568,9 +567,7 @@ impl Overlay for PopoverOverlay {
             if row.header {
                 lines.push(Line::from(Span::styled(
                     format!(" {}", row.title.to_uppercase()),
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(t.muted).add_modifier(Modifier::BOLD),
                 )));
                 continue;
             }
@@ -580,7 +577,7 @@ impl Overlay for PopoverOverlay {
             let mut spans = vec![Span::styled(
                 marker.to_string(),
                 if selected {
-                    Style::default().fg(Color::Cyan)
+                    Style::default().fg(t.accent)
                 } else {
                     Style::default()
                 },
@@ -588,21 +585,19 @@ impl Overlay for PopoverOverlay {
             spans.push(Span::styled(
                 row.title.clone(),
                 if selected {
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD)
+                    Style::default().fg(t.text).add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(Color::Gray)
+                    Style::default().fg(t.muted)
                 },
             ));
             if let Some(tag) = &row.tag {
                 spans.push(Span::raw(" "));
                 spans.push(Span::styled(
                     format!(" {tag} "),
-                    Style::default().fg(Color::Black).bg(if tag == "call" {
-                        Color::Green
+                    Style::default().fg(t.selected_fg).bg(if tag == "call" {
+                        t.success
                     } else {
-                        Color::DarkGray
+                        t.muted
                     }),
                 ));
             }
@@ -613,14 +608,7 @@ impl Overlay for PopoverOverlay {
             if !row.detail.is_empty() && room > 8 {
                 let detail: String = row.detail.chars().take(room).collect();
                 spans.push(Span::raw("  "));
-                spans.push(Span::styled(
-                    detail,
-                    Style::default().fg(if selected {
-                        Color::Gray
-                    } else {
-                        Color::DarkGray
-                    }),
-                ));
+                spans.push(Span::styled(detail, Style::default().fg(t.muted)));
             }
             if selected {
                 let fill = width.saturating_sub(
@@ -630,7 +618,7 @@ impl Overlay for PopoverOverlay {
                         .sum::<usize>(),
                 );
                 spans.push(Span::raw(" ".repeat(fill)));
-                lines.push(Line::from(spans).style(Style::default().bg(Color::Indexed(236))));
+                lines.push(Line::from(spans).style(Style::default().bg(t.selected_bg)));
             } else {
                 lines.push(Line::from(spans));
             }
@@ -639,7 +627,7 @@ impl Overlay for PopoverOverlay {
         if lines.is_empty() {
             lines.push(Line::from(Span::styled(
                 "nothing to show",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(t.muted),
             )));
         }
 
@@ -1496,6 +1484,19 @@ fn dead_code(data: &Value) -> PopoverSpec {
 mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent};
+    use ratatui::backend::TestBackend;
+    use ratatui::style::Color;
+
+    fn cell_colors(buffer: &ratatui::buffer::Buffer, symbol: &str) -> Option<(Color, Color)> {
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                if buffer[(x, y)].symbol() == symbol {
+                    return Some((buffer[(x, y)].fg, buffer[(x, y)].bg));
+                }
+            }
+        }
+        None
+    }
 
     fn app() -> App {
         App::new("s", false)
@@ -1686,5 +1687,84 @@ mod tests {
             .map(|row| format!("{} {}", row.title, row.detail))
             .collect::<String>();
         assert!(!drawn.contains("token"), "{drawn}");
+    }
+
+    #[test]
+    fn window_border_marker_and_selected_row_use_semantic_tokens() {
+        let t = tokens();
+        let app = app();
+        let mut overlay =
+            PopoverOverlay::new(PopoverOverlay::for_answer("teams.list", &teams_answer()).unwrap());
+        overlay.show();
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| overlay.render(frame, frame.area(), &app))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+
+        assert_eq!(cell_colors(buffer, "│").map(|(fg, _)| fg), Some(t.border));
+        let (marker_fg, marker_bg) = cell_colors(buffer, "›").expect("focused row marker");
+        assert_eq!(marker_fg, t.accent);
+        assert_eq!(marker_bg, t.selected_bg);
+    }
+
+    #[test]
+    fn footer_chips_use_the_selection_pair_or_muted_when_disabled() {
+        let t = tokens();
+        let mut overlay =
+            PopoverOverlay::new(PopoverOverlay::for_answer("teams.list", &teams_answer()).unwrap());
+        overlay.show();
+        let footer = overlay.footer();
+        let run = &footer.spans[0];
+        assert_eq!(run.style.fg, Some(t.selected_fg));
+        assert_eq!(run.style.bg, Some(t.selected_bg));
+        assert!(run.content.contains("enter run"), "{}", run.content);
+
+        // A row with no action draws a disabled, muted chip instead.
+        let spec = PopoverSpec::new("t", "s").rows(vec![PopoverRow::new("row", "detail")]);
+        let mut no_action = PopoverOverlay::new(spec);
+        no_action.show();
+        let disabled = &no_action.footer().spans[0];
+        assert_eq!(disabled.style.fg, Some(t.muted));
+        assert_eq!(disabled.style.bg, None);
+    }
+
+    #[test]
+    fn tag_chips_use_success_for_call_and_muted_for_mentions() {
+        let t = tokens();
+        let data = serde_json::json!({
+            "symbol": "sync",
+            "references": [
+                { "path": "src/a.rs", "line": 4, "kind": "call", "call_shaped": true },
+                { "path": "src/b.rs", "line": 9, "kind": "reference", "call_shaped": false }
+            ]
+        });
+        let mut overlay =
+            PopoverOverlay::new(PopoverOverlay::for_answer("kg.refs", &data).unwrap());
+        overlay.show();
+        let app = app();
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| overlay.render(frame, frame.area(), &app))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+
+        let mut call_fg = None;
+        let mut mention_fg = None;
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                let cell = &buffer[(x, y)];
+                if cell.bg == t.success {
+                    call_fg = Some(cell.fg);
+                }
+                if cell.bg == t.muted {
+                    mention_fg = Some(cell.fg);
+                }
+            }
+        }
+        assert_eq!(call_fg, Some(t.selected_fg));
+        assert_eq!(mention_fg, Some(t.selected_fg));
     }
 }

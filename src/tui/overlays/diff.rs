@@ -3,12 +3,13 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
 use crate::tui::app::App;
 use crate::tui::overlays::{Overlay, OverlayAction, OverlayKind};
+use crate::tui::theme::{Tokens, tokens};
 use memnoth_ui::diff::{DiffAction, DiffConfig, DiffLine, DiffViewer, parse_unified_diff};
 
 // Declared here (not in overlays/mod.rs) so the pure model stays owned by this
@@ -83,12 +84,28 @@ impl DiffOverlay {
             Line::from("  Esc/q        - Close overlay"),
         ];
 
+        let t = tokens();
         let help = Paragraph::new(help_text)
-            .style(Style::default().fg(Color::White))
-            .block(Block::default().borders(Borders::ALL).title(" Help "))
+            .style(Style::default().fg(t.text))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(t.border))
+                    .title(" Help "),
+            )
             .wrap(Wrap { trim: true });
         frame.render_widget(help, area);
     }
+}
+
+/// The `+N -M` counts keep their signs. Colour reinforces them but never
+/// replaces them: under NO_COLOR every token is Reset and the signs are still
+/// the only thing that says which way the hunk goes.
+fn hunk_count_spans(added: usize, removed: usize, t: Tokens) -> Vec<Span<'static>> {
+    vec![
+        Span::styled(format!("+{added}"), Style::default().fg(t.success)),
+        Span::styled(format!(" -{removed}"), Style::default().fg(t.error)),
+    ]
 }
 
 impl Overlay for DiffOverlay {
@@ -285,35 +302,35 @@ impl Overlay for DiffOverlay {
             }
         }
         let hunk_idx = hunk_index.map(|index| index + 1).unwrap_or(0);
+        let t = tokens();
         let hunk_info = if hunk_count > 0 {
-            format!(
-                "Hunk {}/{}  (+{} -{})",
-                hunk_idx, hunk_count, added, removed
-            )
+            let mut spans = vec![Span::styled(
+                format!("Hunk {hunk_idx}/{hunk_count}  ("),
+                Style::default().fg(t.muted),
+            )];
+            spans.extend(hunk_count_spans(added, removed, t));
+            spans.push(Span::styled(")", Style::default().fg(t.muted)));
+            spans
         } else {
-            "No hunks".to_string()
+            vec![Span::styled("No hunks", Style::default().fg(t.muted))]
         };
         let header = Paragraph::new(vec![
             Line::from(vec![
-                Span::styled("Diff: ", Style::default().fg(Color::Cyan)),
+                Span::styled("Diff: ", Style::default().fg(t.text)),
                 Span::styled(
                     header_text,
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(t.text).add_modifier(Modifier::BOLD),
                 ),
             ]),
-            Line::from(vec![Span::styled(
-                &hunk_info,
-                Style::default().fg(Color::Gray),
-            )]),
+            Line::from(hunk_info),
         ])
         .block(
             Block::default()
                 .borders(Borders::ALL)
+                .border_style(Style::default().fg(t.border))
                 .title(" Diff Viewer "),
         )
-        .style(Style::default().fg(Color::White));
+        .style(Style::default().fg(t.text));
         frame.render_widget(header, chunks[0]);
 
         // Diff viewer
@@ -323,8 +340,12 @@ impl Overlay for DiffOverlay {
         // Help footer
         let help_text = "↑↓: hunk · ←→: scroll · a: accept · r: reject · A: accept all · R: reject all · n/N: conflict · s: side-by-side · w: whitespace · l: line nums · ?: help · esc: close";
         let help = Paragraph::new(help_text)
-            .style(Style::default().fg(Color::DarkGray))
-            .block(Block::default().borders(Borders::ALL));
+            .style(Style::default().fg(t.muted))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(t.border)),
+            );
         frame.render_widget(help, chunks[2]);
     }
 
@@ -438,6 +459,7 @@ impl StagedDiffOverlay {
     }
 
     fn render_help(&self, frame: &mut Frame, area: Rect) {
+        let t = tokens();
         let help = Paragraph::new(vec![
             Line::from("Staged Diff Review Help"),
             Line::from(""),
@@ -454,14 +476,46 @@ impl StagedDiffOverlay {
             Line::from("Nothing in this overlay writes to disk. Accepted hunks become"),
             Line::from("edit requests only; reject leaves workspace bytes untouched."),
         ])
-        .style(Style::default().fg(Color::White))
+        .style(Style::default().fg(t.text))
         .block(
             Block::default()
                 .borders(Borders::ALL)
+                .border_style(Style::default().fg(t.border))
                 .title(" Staged Diff Help "),
         )
         .wrap(Wrap { trim: true });
         frame.render_widget(help, area);
+    }
+}
+
+/// The decision is stated by the literal mark as well as the colour. A NO_COLOR
+/// frame still reads `[ACCEPT]`, `[REJECT]` or `[PENDING]`.
+#[cfg(test)]
+fn staged_mark(decision: HunkDecision, t: Tokens) -> (&'static str, Style) {
+    match decision {
+        HunkDecision::Accept => (
+            "[ACCEPT]",
+            Style::default().fg(t.success).add_modifier(Modifier::BOLD),
+        ),
+        HunkDecision::Reject => (
+            "[REJECT]",
+            Style::default().fg(t.error).add_modifier(Modifier::BOLD),
+        ),
+        HunkDecision::Pending => (
+            "[PENDING]",
+            Style::default().fg(t.warning).add_modifier(Modifier::BOLD),
+        ),
+    }
+}
+
+/// The sign is part of the meaning: `+` and `-` stay even when the tokens
+/// collapse to Reset, so a removed line is never distinguishable by hue alone.
+#[cfg(test)]
+fn staged_line_style(line: &staged_diff::StagedLine, t: Tokens) -> (&'static str, Style) {
+    match line {
+        staged_diff::StagedLine::Context(_) => ("  ", Style::default().fg(t.muted)),
+        staged_diff::StagedLine::Removed(_) => ("- ", Style::default().fg(t.error)),
+        staged_diff::StagedLine::Added(_) => ("+ ", Style::default().fg(t.success)),
     }
 }
 
@@ -578,35 +632,50 @@ impl Overlay for StagedDiffOverlay {
             ])
             .split(area);
 
+        let t = tokens();
         let accepted = self.staged.count_decided(HunkDecision::Accept);
         let rejected = self.staged.count_decided(HunkDecision::Reject);
         let pending = self.staged.count_decided(HunkDecision::Pending);
+        // The words are the state; the colours only reinforce them.
+        let summary = vec![
+            Span::styled(
+                format!(
+                    "{} file(s) · {} hunk(s) · ",
+                    self.staged.files.len(),
+                    self.staged.hunk_count()
+                ),
+                Style::default().fg(t.muted),
+            ),
+            Span::styled(
+                format!("accepted {accepted}"),
+                Style::default().fg(t.success),
+            ),
+            Span::styled(" · ", Style::default().fg(t.muted)),
+            Span::styled(format!("rejected {rejected}"), Style::default().fg(t.error)),
+            Span::styled(" · ", Style::default().fg(t.muted)),
+            Span::styled(format!("pending {pending}"), Style::default().fg(t.warning)),
+        ];
         let header = Paragraph::new(vec![
             Line::from(vec![
-                Span::styled("Staged Diff ", Style::default().fg(Color::Cyan)),
+                Span::styled("Staged Diff ", Style::default().fg(t.text)),
                 Span::styled(
                     "NOT APPLIED",
-                    Style::default()
-                        .fg(Color::Red)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(t.error).add_modifier(Modifier::BOLD),
                 ),
             ]),
-            Line::from(format!(
-                "{} file(s) · {} hunk(s) · accepted {accepted} · rejected {rejected} · pending {pending}",
-                self.staged.files.len(),
-                self.staged.hunk_count()
-            )),
+            Line::from(summary),
             Line::from(Span::styled(
                 "Reject leaves bytes untouched. No write path; a real apply must revalidate the base first.",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(t.muted),
             )),
         ])
         .block(
             Block::default()
                 .borders(Borders::ALL)
+                .border_style(Style::default().fg(t.border))
                 .title(" Staged Diff (pre-write) "),
         )
-        .style(Style::default().fg(Color::White));
+        .style(Style::default().fg(t.text));
         frame.render_widget(header, chunks[0]);
 
         let mut body: Vec<Line> = Vec::new();
@@ -614,66 +683,67 @@ impl Overlay for StagedDiffOverlay {
         if refs.is_empty() {
             body.push(Line::from(Span::styled(
                 "No staged hunks",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(t.muted),
             )));
         }
         for (flat, &(fi, hi)) in refs.iter().enumerate() {
             let file = &self.staged.files[fi];
             let hunk = &file.hunks[hi];
-            let (mark, color) = match hunk.decision {
-                HunkDecision::Accept => ("[ACCEPT]", Color::Green),
-                HunkDecision::Reject => ("[REJECT]", Color::Red),
-                HunkDecision::Pending => ("[PENDING]", Color::Yellow),
+            let (mark, mark_style) = staged_mark(hunk.decision, t);
+            let focused = flat == self.cursor;
+            let pointer = if focused { "▸ " } else { "  " };
+            // The caret glyph marks the hunk the keys act on; the accent is only
+            // ever spent on that focused actionable row.
+            let pointer_style = if focused {
+                Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(t.muted)
             };
-            let pointer = if flat == self.cursor { "▸ " } else { "  " };
             body.push(Line::from(vec![
-                Span::styled(
-                    format!("{pointer}{}. ", flat + 1),
-                    Style::default().fg(Color::Gray),
-                ),
-                Span::styled(
-                    mark,
-                    Style::default().fg(color).add_modifier(Modifier::BOLD),
-                ),
+                Span::styled(pointer, pointer_style),
+                Span::styled(format!("{}. ", flat + 1), Style::default().fg(t.muted)),
+                Span::styled(mark, mark_style),
                 Span::styled(
                     format!(" {} · {}", file.path, hunk.header),
-                    Style::default().fg(Color::White),
+                    Style::default().fg(t.text),
                 ),
             ]));
             body.push(Line::from(vec![
-                Span::styled("    keys: ", Style::default().fg(Color::DarkGray)),
-                Span::styled("a", Style::default().fg(Color::Green)),
-                Span::styled(" accept  ", Style::default().fg(Color::DarkGray)),
-                Span::styled("r", Style::default().fg(Color::Red)),
-                Span::styled(" reject  ", Style::default().fg(Color::DarkGray)),
-                Span::styled("p", Style::default().fg(Color::Yellow)),
-                Span::styled(" pending", Style::default().fg(Color::DarkGray)),
+                Span::styled("    keys: ", Style::default().fg(t.muted)),
+                Span::styled("a", Style::default().fg(t.success)),
+                Span::styled(" accept  ", Style::default().fg(t.muted)),
+                Span::styled("r", Style::default().fg(t.error)),
+                Span::styled(" reject  ", Style::default().fg(t.muted)),
+                Span::styled("p", Style::default().fg(t.warning)),
+                Span::styled(" pending", Style::default().fg(t.muted)),
             ]));
             for line in &hunk.lines {
-                let (prefix, line_color) = match line {
-                    staged_diff::StagedLine::Context(_) => ("  ", Color::DarkGray),
-                    staged_diff::StagedLine::Removed(_) => ("- ", Color::Red),
-                    staged_diff::StagedLine::Added(_) => ("+ ", Color::Green),
-                };
+                let (prefix, line_style) = staged_line_style(line, t);
                 body.push(Line::from(vec![
-                    Span::styled(
-                        format!("    {prefix}"),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                    Span::styled(line.text().to_string(), Style::default().fg(line_color)),
+                    Span::styled(format!("    {prefix}"), Style::default().fg(t.muted)),
+                    Span::styled(line.text().to_string(), line_style),
                 ]));
             }
         }
         let list = Paragraph::new(body)
-            .block(Block::default().borders(Borders::ALL).title(" Hunks "))
-            .style(Style::default().fg(Color::White));
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(t.border))
+                    .title(" Hunks "),
+            )
+            .style(Style::default().fg(t.text));
         frame.render_widget(list, chunks[1]);
 
         let footer = Paragraph::new(
             "↑↓: hunk · a: accept · r: reject · p: pending · A/R: all pending · n/N: next/prev · ?: help · esc: close — NOT APPLIED",
         )
-        .style(Style::default().fg(Color::DarkGray))
-        .block(Block::default().borders(Borders::ALL));
+        .style(Style::default().fg(t.muted))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(t.border)),
+        );
         frame.render_widget(footer, chunks[2]);
     }
 
@@ -804,5 +874,59 @@ mod staged_tests {
             let _ = overlay.handle_key(key(code), &mut app);
         }
         assert!(overlay.staged().to_edits().is_empty());
+    }
+
+    #[test]
+    fn state_signs_and_marks_survive_a_no_color_palette() {
+        use crate::tui::theme::{Palette, Tokens};
+        use ratatui::style::Color;
+
+        let colored = Tokens::for_palette(Palette::Dark);
+        let plain = Tokens::for_palette(Palette::NoColor);
+
+        // The header counts keep + and - in the text, with success/error only
+        // reinforcing what the sign already says.
+        let counts = hunk_count_spans(3, 1, colored);
+        let text: String = counts.iter().map(|span| span.content.as_ref()).collect();
+        assert_eq!(text, "+3 -1");
+        assert_eq!(counts[0].style.fg, Some(colored.success));
+        assert_eq!(counts[1].style.fg, Some(colored.error));
+        let plain_counts = hunk_count_spans(3, 1, plain);
+        let plain_text: String = plain_counts
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(plain_text, "+3 -1");
+        assert!(
+            plain_counts
+                .iter()
+                .all(|span| span.style.fg == Some(Color::Reset))
+        );
+
+        for (decision, mark, role) in [
+            (HunkDecision::Accept, "[ACCEPT]", colored.success),
+            (HunkDecision::Reject, "[REJECT]", colored.error),
+            (HunkDecision::Pending, "[PENDING]", colored.warning),
+        ] {
+            let (shown, style) = staged_mark(decision, colored);
+            assert_eq!(shown, mark);
+            assert_eq!(style.fg, Some(role));
+            let (shown, style) = staged_mark(decision, plain);
+            assert_eq!(shown, mark, "the state word is not themed away");
+            assert_eq!(style.fg, Some(Color::Reset));
+        }
+
+        for (line, prefix, role) in [
+            (StagedLine::Added("A".into()), "+ ", colored.success),
+            (StagedLine::Removed("a".into()), "- ", colored.error),
+            (StagedLine::Context("c".into()), "  ", colored.muted),
+        ] {
+            let (shown, style) = staged_line_style(&line, colored);
+            assert_eq!(shown, prefix);
+            assert_eq!(style.fg, Some(role));
+            let (shown, style) = staged_line_style(&line, plain);
+            assert_eq!(shown, prefix, "the diff sign is not themed away");
+            assert_eq!(style.fg, Some(Color::Reset));
+        }
     }
 }

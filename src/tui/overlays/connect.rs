@@ -31,6 +31,7 @@ use crate::output::ellipsize;
 use crate::provider::{Kind, Settings};
 use crate::tui::app::{App, ModelsLoaded, ProviderTestResult};
 use crate::tui::overlays::{Overlay, OverlayAction, OverlayKind};
+use crate::tui::theme::tokens;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
@@ -50,7 +51,7 @@ enum Mode {
     Key,
 }
 
-/// What the status line is saying, and therefore what colour it is.
+/// What the status line is saying, and therefore what semantic role it uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tone {
     Info,
@@ -68,10 +69,11 @@ impl Tone {
     }
 
     fn color(self) -> Color {
+        let t = tokens();
         match self {
-            Tone::Info => Color::Cyan,
-            Tone::Good => Color::Green,
-            Tone::Bad => Color::Red,
+            Tone::Info => t.muted,
+            Tone::Good => t.success,
+            Tone::Bad => t.error,
         }
     }
 }
@@ -97,21 +99,24 @@ struct ProviderRow {
 }
 
 impl ProviderRow {
+    /// The label is a literal contract (key-source wording included); only the
+    /// semantic role behind it changes with the palette.
     fn status(&self) -> (&'static str, Color) {
+        let t = tokens();
         if self.testing {
-            ("◐ testing", Color::Cyan)
+            ("◐ testing", t.muted)
         } else if let Some((ok, _)) = &self.last {
             if *ok {
-                ("● ready", Color::Green)
+                ("● ready", t.success)
             } else {
-                ("✗ failed", Color::Red)
+                ("✗ failed", t.error)
             }
         } else if self.active {
-            ("● active", Color::Green)
+            ("● active", t.success)
         } else if self.has_key {
-            ("● key set", Color::Green)
+            ("● key set", t.success)
         } else {
-            ("○ no key", Color::Yellow)
+            ("○ no key", t.warning)
         }
     }
 
@@ -562,32 +567,28 @@ impl ConnectOverlay {
     fn header(&self) -> Line<'static> {
         let ready = self.rows.iter().filter(|row| row.has_key).count();
         let total = self.rows.len();
+        let t = tokens();
         let mut spans = Vec::new();
         match self.rows.iter().find(|row| row.active) {
             Some(active) => {
-                spans.push(Span::styled(
-                    "active ",
-                    Style::default().fg(Color::DarkGray),
-                ));
+                spans.push(Span::styled("active ", Style::default().fg(t.muted)));
                 spans.push(Span::styled(
                     active.display,
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(t.text).add_modifier(Modifier::BOLD),
                 ));
                 spans.push(Span::styled(
                     format!(" · {ready} of {total} providers have a key"),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(t.muted),
                 ));
             }
             None => {
                 spans.push(Span::styled(
                     "no provider active",
-                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(t.warning),
                 ));
                 spans.push(Span::styled(
                     format!(" · {ready} of {total} have a key · enter uses one"),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(t.muted),
                 ));
             }
         }
@@ -618,24 +619,22 @@ impl ConnectOverlay {
 
     /// The status line under the table. Always drawn, so nothing moves.
     fn status(&self, width: u16) -> Line<'static> {
+        let t = tokens();
         if self.mode == Mode::Key {
             let mut spans = vec![Span::styled(
                 self.key_field_prefix(),
-                Style::default().fg(Color::Cyan),
+                Style::default().fg(t.accent),
             )];
             if self.buffer.is_empty() {
-                spans.push(Span::styled(
-                    "paste the key",
-                    Style::default().fg(Color::DarkGray),
-                ));
+                spans.push(Span::styled("paste the key", Style::default().fg(t.muted)));
             } else {
                 spans.push(Span::styled(
                     "•".repeat(self.buffer.chars().count()),
-                    Style::default().fg(Color::White),
+                    Style::default().fg(t.text),
                 ));
                 spans.push(Span::styled(
                     format!("  {} chars", self.buffer.chars().count()),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(t.muted),
                 ));
             }
             return Line::from(spans);
@@ -803,6 +802,7 @@ impl Overlay for ConnectOverlay {
             return;
         }
         frame.render_widget(Clear, area);
+        let t = tokens();
 
         // Four bands, and the bottom two exist even when empty: a status line
         // that appears and disappears moves everything above it, including the
@@ -828,14 +828,14 @@ impl Overlay for ConnectOverlay {
             let (status, color) = row.status();
             let selected = self.selected == Some(row.name);
             let style = if selected {
-                Style::default().bg(Color::Cyan).fg(Color::Black)
+                Style::default().bg(t.selected_bg).fg(t.selected_fg)
             } else {
                 Style::default()
             };
-            // On the highlighted row every cell is black-on-cyan, including the
-            // status: a green dot on cyan is unreadable, and a row whose colours
-            // disagree looks like two rows.
-            let status_style = Style::default().fg(if selected { Color::Black } else { color });
+            // On the highlighted row every cell uses the selection pair,
+            // including the status: a coloured dot on the selection background
+            // is unreadable, and a row whose colours disagree looks like two rows.
+            let status_style = Style::default().fg(if selected { t.selected_fg } else { color });
             rows.push(
                 Row::new(vec![
                     Cell::from(format!("{} {}", row.marker(), row.display)),
@@ -853,11 +853,7 @@ impl Overlay for ConnectOverlay {
             Cell::from("key"),
             Cell::from("last test"),
         ])
-        .style(
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        );
+        .style(Style::default().fg(t.muted).add_modifier(Modifier::BOLD));
 
         // The provider column is the widest thing on the row, and the last test
         // gets what is left: no column is cut mid-word by a fixed width that was
@@ -877,7 +873,7 @@ impl Overlay for ConnectOverlay {
                 .borders(Borders::ALL)
                 .title(format!(" {} providers ", self.rows.len())),
         )
-        .row_highlight_style(Style::default().bg(Color::Cyan).fg(Color::Black));
+        .row_highlight_style(Style::default().bg(t.selected_bg).fg(t.selected_fg));
 
         let mut state = self.table.clone();
         state.select(if self.rows.is_empty() {
@@ -891,7 +887,7 @@ impl Overlay for ConnectOverlay {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 ellipsize(self.hints(), chunks[3].width as usize),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(t.muted),
             ))),
             chunks[3],
         );
@@ -931,6 +927,7 @@ impl Overlay for ConnectOverlay {
 
 impl ConnectOverlay {
     fn render_info(&self, frame: &mut Frame, area: Rect, row: &ProviderRow) {
+        let t = tokens();
         let width = ((area.width as u32 * 2 / 3) as u16).clamp(52, area.width);
         let height = 15.min(area.height);
         let popup = Rect::new(
@@ -970,7 +967,7 @@ impl ConnectOverlay {
                 Block::default()
                     .borders(Borders::ALL)
                     .title(format!(" {} ", row.display))
-                    .border_style(Style::default().fg(Color::Cyan)),
+                    .border_style(Style::default().fg(t.border)),
             ),
             popup,
         );
@@ -1185,5 +1182,104 @@ mod tests {
 
     fn lines_of(text: &str) -> Vec<String> {
         text.lines().map(str::to_string).collect()
+    }
+
+    fn cell_bg(buffer: &ratatui::buffer::Buffer, symbol: &str) -> Option<Color> {
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                if buffer[(x, y)].symbol() == symbol {
+                    return Some(buffer[(x, y)].bg);
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn status_labels_stay_literal_and_use_semantic_roles() {
+        let t = tokens();
+        let mut overlay = sample();
+
+        // The labels are a contract; only the role behind them is themed.
+        assert_eq!(overlay.rows[0].status(), ("● ready", t.success));
+        assert_eq!(overlay.rows[1].status(), ("○ no key", t.warning));
+
+        overlay.rows[1].testing = true;
+        assert_eq!(overlay.rows[1].status(), ("◐ testing", t.muted));
+        overlay.rows[1].testing = false;
+        overlay.rows[1].last = Some((false, "boom".to_string()));
+        assert_eq!(overlay.rows[1].status(), ("✗ failed", t.error));
+        overlay.rows[1].last = None;
+        overlay.rows[1].has_key = true;
+        assert_eq!(overlay.rows[1].status(), ("● key set", t.success));
+        overlay.rows[1].active = true;
+        assert_eq!(overlay.rows[1].status(), ("● active", t.success));
+    }
+
+    #[test]
+    fn tone_markers_keep_their_meaning_and_use_semantic_roles() {
+        let t = tokens();
+        assert_eq!(Tone::Info.marker(), "›");
+        assert_eq!(Tone::Good.marker(), "✓");
+        assert_eq!(Tone::Bad.marker(), "✗");
+        assert_eq!(Tone::Info.color(), t.muted);
+        assert_eq!(Tone::Good.color(), t.success);
+        assert_eq!(Tone::Bad.color(), t.error);
+    }
+
+    #[test]
+    fn key_field_prefix_is_the_focused_accent_marker() {
+        let t = tokens();
+        let mut overlay = sample();
+        overlay.mode = Mode::Key;
+
+        let line = overlay.status(80);
+        assert_eq!(line.spans[0].content, overlay.key_field_prefix());
+        assert_eq!(line.spans[0].style.fg, Some(t.accent));
+        assert_eq!(line.spans[1].content, "paste the key");
+        assert_eq!(line.spans[1].style.fg, Some(t.muted));
+
+        overlay.buffer = "secret".to_string();
+        let line = overlay.status(80);
+        assert_eq!(line.spans[1].style.fg, Some(t.text)); // masked secret
+        assert_eq!(line.spans[2].style.fg, Some(t.muted)); // char count
+    }
+
+    #[test]
+    fn selected_row_highlight_uses_the_selection_pair() {
+        let t = tokens();
+        let app = App::new("t", false);
+        let mut overlay = sample();
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| overlay.render(frame, frame.area(), &app))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        // `★` renders only on the active/selected row.
+        assert_eq!(cell_bg(buffer, "★"), Some(t.selected_bg));
+    }
+
+    #[test]
+    fn info_keeps_the_key_source_and_credential_store_wording_literal() {
+        let app = App::new("t", false);
+        let mut overlay = sample();
+        overlay.info = Some("kilo");
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| overlay.render(frame, frame.area(), &app))
+            .unwrap();
+        let text = frame_text(&terminal);
+        assert!(text.contains("key           stored"), "{text}");
+        assert!(
+            text.contains("keys live in the credential store (keyring, then file),"),
+            "{text}"
+        );
+        assert!(text.contains("never in config.toml"), "{text}");
+        assert!(
+            !text.contains("no key"),
+            "a keyed provider is never called keyless: {text}"
+        );
     }
 }

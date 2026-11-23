@@ -17,12 +17,13 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::output::ellipsize;
 use crate::tui::app::{Fact, Home, HomeState, Step, wrap_text};
+use crate::tui::theme::tokens;
 
 /// Width of the label column in the brief's facts.
 const FACT_LABEL: usize = 12;
@@ -144,6 +145,7 @@ fn strip(frame: &mut Frame, area: Rect, home: &Home, cursor: usize) {
 
 /// One row: the workspace, then the two states that need a person.
 fn status_row(home: &Home, width: usize) -> Line<'static> {
+    let t = tokens();
     let share = (width / 4).max(12);
     let mut spans: Vec<Span<'static>> = Vec::new();
     for label in ["workspace", "graph", "vault", "sandbox"] {
@@ -151,13 +153,10 @@ fn status_row(home: &Home, width: usize) -> Line<'static> {
             continue;
         };
         if !spans.is_empty() {
-            spans.push(Span::styled(" · ", Style::default().fg(Color::DarkGray)));
+            spans.push(Span::styled(" · ", Style::default().fg(t.muted)));
         }
-        if let Some((mark, colour)) = badge(fact) {
-            spans.push(Span::styled(
-                format!("{mark} "),
-                Style::default().fg(colour),
-            ));
+        if let Some((mark, style)) = badge(fact) {
+            spans.push(Span::styled(format!("{mark} "), style));
         }
         spans.push(Span::styled(
             ellipsize(&fact.value, share),
@@ -172,16 +171,17 @@ fn status_row(home: &Home, width: usize) -> Line<'static> {
 fn masthead(_width: usize) -> Vec<Line<'static>> {
     // The release is a fact about this build, so it belongs next to the name
     // rather than behind a `/version` the person has to know to ask for.
+    // The name is a heading; the version is a caption about that build, so it
+    // stays muted and never competes with the facts below it.
+    let t = tokens();
     vec![Line::from(vec![
         Span::styled(
             "memnoth",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(t.text).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!(" v{}", env!("CARGO_PKG_VERSION")),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(t.muted),
         ),
     ])]
 }
@@ -190,24 +190,26 @@ fn identity_rows(home: &Home, width: usize) -> Vec<Line<'static>> {
     // The identity is the one string this screen may cut: it is a caption, and
     // its full form is one `/whoami` away. A fact is a measurement and a step is
     // an instruction, so neither of those is allowed to end in `…`.
+    let t = tokens();
     let mut rows = vec![Line::from(Span::styled(
         ellipsize(&home.identity, width),
-        Style::default().fg(Color::Gray),
+        Style::default().fg(t.muted),
     ))];
     if home.hidden_turns > 0 {
         let turns = format!("{} turns · esc history", home.hidden_turns);
         rows.push(Line::from(Span::styled(
             ellipsize(&turns, width),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(t.muted),
         )));
     }
     rows
 }
 
 fn value_style(fact: &Fact) -> Style {
+    let t = tokens();
     match fact.state {
-        HomeState::Ready => Style::default().fg(Color::White),
-        HomeState::Missing | HomeState::Stale => Style::default().fg(Color::Yellow),
+        HomeState::Ready => Style::default().fg(t.text),
+        HomeState::Missing | HomeState::Stale => Style::default().fg(t.warning),
     }
 }
 
@@ -215,12 +217,15 @@ fn value_style(fact: &Fact) -> Style {
 ///
 /// `workspace`, `sessions` and `spend` are facts, not states: a green dot beside
 /// `no turns yet` would congratulate the person for a session that has not run.
-fn badge(fact: &Fact) -> Option<(char, Color)> {
+/// The glyph carries the meaning; colour only emphasises it, so `NO_COLOR`
+/// loses nothing a reader needs.
+fn badge(fact: &Fact) -> Option<(char, Style)> {
+    let t = tokens();
     match fact.label {
         "graph" | "vault" | "model" | "sandbox" => Some(match fact.state {
-            HomeState::Ready => ('●', Color::Green),
-            HomeState::Stale => ('!', Color::Yellow),
-            HomeState::Missing => ('○', Color::Yellow),
+            HomeState::Ready => ('●', Style::default().fg(t.success)),
+            HomeState::Stale => ('!', Style::default().fg(t.warning)),
+            HomeState::Missing => ('○', Style::default().fg(t.warning)),
         }),
         _ => None,
     }
@@ -254,6 +259,7 @@ fn visible_fact(fact: &Fact) -> bool {
 }
 
 fn inline_fact(fact: &Fact, width: usize) -> Vec<Line<'static>> {
+    let t = tokens();
     let glyph = badge(fact);
     let reserved = if glyph.is_some() { BADGE_WIDTH + 1 } else { 0 };
     let room = width.saturating_sub(FACT_LABEL + reserved).max(8);
@@ -263,18 +269,18 @@ fn inline_fact(fact: &Fact, width: usize) -> Vec<Line<'static>> {
         if index == 0 {
             spans.push(Span::styled(
                 format!("{:<FACT_LABEL$}", fact.label),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(t.muted),
             ));
         } else {
             spans.push(Span::raw(" ".repeat(FACT_LABEL)));
         }
         spans.push(Span::styled(chunk.clone(), value_style(fact)));
         if index == 0
-            && let Some((mark, colour)) = glyph
+            && let Some((mark, style)) = glyph
         {
             let used = FACT_LABEL + chunk.chars().count();
             spans.push(Span::raw(" ".repeat(width.saturating_sub(used + 1))));
-            spans.push(Span::styled(mark.to_string(), Style::default().fg(colour)));
+            spans.push(Span::styled(mark.to_string(), style));
         }
         rows.push(Line::from(spans));
     }
@@ -282,19 +288,17 @@ fn inline_fact(fact: &Fact, width: usize) -> Vec<Line<'static>> {
 }
 
 fn stacked_fact(fact: &Fact, width: usize) -> Vec<Line<'static>> {
+    let t = tokens();
     let glyph = badge(fact);
     let room = width.saturating_sub(6).max(8);
     let mut rows = vec![Line::from(Span::styled(
         fact.label.to_string(),
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(t.muted),
     ))];
     for (index, chunk) in wrap_text(&fact.value, room).iter().enumerate() {
         let mut spans = vec![Span::raw("  ")];
         match (index, glyph) {
-            (0, Some((mark, colour))) => spans.push(Span::styled(
-                format!("{mark} "),
-                Style::default().fg(colour),
-            )),
+            (0, Some((mark, style))) => spans.push(Span::styled(format!("{mark} "), style)),
             (_, Some(_)) => spans.push(Span::raw("  ")),
             _ => {}
         }
@@ -315,31 +319,29 @@ fn step_rows(
     if steps.is_empty() && invitation.is_none() {
         return Vec::new();
     }
+    let t = tokens();
     let mut rows = vec![
         Line::from(""),
-        Line::from(Span::styled("next", Style::default().fg(Color::White))),
+        Line::from(Span::styled("next", Style::default().fg(t.text))),
     ];
     let inline = width >= INLINE_MIN_WIDTH;
     for (index, step) in steps.iter().enumerate() {
         let selected = index == cursor && step.runnable;
-        let marker_style = if selected {
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
+        // The row the cursor is on is a selection, not an accent: the `▸`
+        // marker says which one Enter runs even when every colour is stripped.
+        // The whole row shares one style so the highlight is continuous.
+        let (marker_style, command_style, description_style) = if selected {
+            let row = Style::default()
+                .fg(t.selected_fg)
+                .bg(t.selected_bg)
+                .add_modifier(Modifier::BOLD);
+            (row, row, row)
         } else {
-            Style::default().fg(Color::DarkGray)
-        };
-        let command_style = if selected {
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::Gray)
-        };
-        let description_style = if selected {
-            Style::default().fg(Color::White)
-        } else {
-            Style::default().fg(Color::DarkGray)
+            (
+                Style::default().fg(t.muted),
+                Style::default().fg(t.text),
+                Style::default().fg(t.muted),
+            )
         };
         let marker = if selected { "▸ " } else { "  " };
 
@@ -386,25 +388,25 @@ fn step_rows(
                 Span::raw("  "),
                 Span::styled(
                     format!("{:<STEP_COLUMN$}", "ask anything"),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(t.muted),
                 ),
-                Span::styled(first, Style::default().fg(Color::DarkGray)),
+                Span::styled(first, Style::default().fg(t.muted)),
             ]));
             for chunk in wrapped.drain(1..) {
                 rows.push(Line::from(Span::styled(
                     format!("{}{chunk}", " ".repeat(2 + STEP_COLUMN)),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(t.muted),
                 )));
             }
         } else {
             rows.push(Line::from(vec![
                 Span::raw("  "),
-                Span::styled("ask anything", Style::default().fg(Color::DarkGray)),
+                Span::styled("ask anything", Style::default().fg(t.muted)),
             ]));
             for chunk in wrap_text(invitation, width.saturating_sub(4).max(8)) {
                 rows.push(Line::from(Span::styled(
                     format!("    {chunk}"),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(t.muted),
                 )));
             }
         }
@@ -442,6 +444,9 @@ fn finish(frame: &mut Frame, area: Rect, mut lines: Vec<Line<'static>>, height: 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::style::Color;
 
     fn home() -> Home {
         Home {
@@ -580,6 +585,87 @@ mod tests {
             let groups = inline_groups(&home().facts, width);
             let rendered = text(&groups.concat());
             assert!(!rendered.contains('…'), "at {width}: {rendered}");
+        }
+    }
+
+    #[test]
+    fn masthead_keeps_the_version_as_a_muted_span() {
+        let t = tokens();
+        let line = &masthead(80)[0];
+        assert_eq!(line.spans.len(), 2, "{line:?}");
+        assert_eq!(line.spans[0].content.as_ref(), "memnoth");
+        assert_eq!(line.spans[0].style.fg, Some(t.text));
+        assert_eq!(
+            line.spans[1].content.as_ref(),
+            format!(" v{}", env!("CARGO_PKG_VERSION"))
+        );
+        assert_eq!(line.spans[1].style.fg, Some(t.muted));
+    }
+
+    #[test]
+    fn fact_roles_use_the_semantic_tokens() {
+        let t = tokens();
+        let facts = &home().facts;
+        // A healthy value is primary text; a gap is a warning, not an error.
+        assert_eq!(value_style(&facts[0]).fg, Some(t.text));
+        assert_eq!(value_style(&facts[1]).fg, Some(t.warning));
+        // `workspace` is a fact, not a health check; `graph` and `vault` are.
+        assert!(badge(&facts[0]).is_none());
+        assert_eq!(badge(&facts[2]).unwrap().1.fg, Some(t.success));
+        assert_eq!(badge(&facts[1]).unwrap().1.fg, Some(t.warning));
+        // The glyph is the meaning: it survives every colour being stripped.
+        assert_eq!(badge(&facts[2]).unwrap().0, '●');
+        assert_eq!(badge(&facts[1]).unwrap().0, '○');
+    }
+
+    #[test]
+    fn the_selected_step_uses_the_selection_tokens() {
+        let t = tokens();
+        let steps = &home().steps;
+        let selected = step_rows(steps, 80, 0, None)
+            .into_iter()
+            .find(|line| line.to_string().contains("/vault init"))
+            .expect("the first action is on a row");
+        assert_eq!(selected.spans[0].content.as_ref(), "▸ ");
+        assert_eq!(selected.spans[0].style.fg, Some(t.selected_fg));
+        assert_eq!(selected.spans[0].style.bg, Some(t.selected_bg));
+
+        let other = step_rows(steps, 80, 1, None)
+            .into_iter()
+            .find(|line| line.to_string().contains("/vault init"))
+            .expect("the other action is on a row");
+        assert_eq!(other.spans[0].content.as_ref(), "  ");
+        assert_eq!(other.spans[0].style.fg, Some(t.muted));
+    }
+
+    #[test]
+    fn every_colour_on_the_brief_comes_from_the_tokens() {
+        let t = tokens();
+        let allowed = [
+            t.canvas,
+            t.surface,
+            t.text,
+            t.muted,
+            t.border,
+            t.accent,
+            t.success,
+            t.warning,
+            t.error,
+            t.selected_bg,
+            t.selected_fg,
+            Color::Reset,
+        ];
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let brief = home();
+        terminal
+            .draw(|frame| draw(frame, Rect::new(0, 0, 100, 30), &brief, 0))
+            .expect("draw must not fail");
+        for cell in terminal.backend().buffer().content() {
+            assert!(
+                allowed.contains(&cell.fg) && allowed.contains(&cell.bg),
+                "a colour outside the token set reached the brief: {cell:?}"
+            );
         }
     }
 }

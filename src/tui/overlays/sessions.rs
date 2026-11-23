@@ -23,6 +23,27 @@ use crate::output::{ellipsize, human_age};
 use crate::session::{SessionStore, SessionSummary, now_ms};
 use crate::tui::app::{App, SessionSwitch};
 use crate::tui::overlays::{Overlay, OverlayAction, OverlayKind};
+use crate::tui::theme::{Tokens, tokens};
+
+/// Selection has to survive NO_COLOR, where every token is Reset. Reverse
+/// video is the non-colour cue the old theme used for this exact case; keeping
+/// it here means a screen reader and a plain terminal still see the cursor.
+fn selection(t: Tokens) -> Style {
+    if t.colored() {
+        Style::default().fg(t.selected_fg).bg(t.selected_bg)
+    } else {
+        Style::default().add_modifier(Modifier::REVERSED)
+    }
+}
+
+/// The speaker label is text, not decoration: it is what tells a reader who
+/// said the line after colour is stripped.
+fn role_color(role: &str, t: Tokens) -> Color {
+    match role {
+        "tool" | "system" => t.muted,
+        _ => t.text,
+    }
+}
 
 /// How many messages of the selected conversation the preview shows.
 ///
@@ -583,27 +604,25 @@ impl Overlay for SessionsOverlay {
         OverlayAction::None
     }
 
-    fn render(&mut self, frame: &mut Frame, area: Rect, app: &App) {
+    fn render(&mut self, frame: &mut Frame, area: Rect, _app: &App) {
         if !self.visible {
             return;
         }
         frame.render_widget(Clear, area);
 
+        let t = tokens();
         let total = self.rows.len();
         let title = if self.shown.len() == total {
             format!(" sessions · {total} ")
         } else {
             format!(" sessions · {} of {total} ", self.shown.len())
         };
-        let scheme = crate::tui::theme::ColorScheme::for_theme(app.theme);
         let outer = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(scheme.border))
+            .border_style(Style::default().fg(t.border))
             .title(Span::styled(
                 title,
-                Style::default()
-                    .fg(scheme.accent)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(t.text).add_modifier(Modifier::BOLD),
             ));
         let inner = outer.inner(area);
         frame.render_widget(outer, area);
@@ -626,13 +645,13 @@ impl Overlay for SessionsOverlay {
         let (filter_text, filter_style) = if self.filter.is_empty() && !self.filtering {
             (
                 "/  search titles, session names, models".to_string(),
-                Style::default().fg(scheme.dim),
+                Style::default().fg(t.muted),
             )
         } else {
             let caret = if self.filtering { "▌" } else { "" };
             (
                 format!("/  {}{caret}  ·  {} matches", self.filter, self.shown.len()),
-                Style::default().fg(scheme.foreground),
+                Style::default().fg(t.text),
             )
         };
         frame.render_widget(
@@ -648,7 +667,7 @@ impl Overlay for SessionsOverlay {
                     format!("nothing matches \"{}\"", self.filter)
                 }
             }))
-            .style(Style::default().fg(Color::Gray))
+            .style(Style::default().fg(t.muted))
             .wrap(Wrap { trim: true });
             frame.render_widget(empty, body);
         } else if body.width >= SIDE_BY_SIDE {
@@ -656,8 +675,8 @@ impl Overlay for SessionsOverlay {
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(56), Constraint::Percentage(44)])
                 .split(body);
-            self.render_list(frame, split[0], app.theme);
-            self.render_preview(frame, split[1], false, app.theme);
+            self.render_list(frame, split[0]);
+            self.render_preview(frame, split[1], false);
         } else if body.height >= COMPACT_PREVIEW_MIN_HEIGHT {
             // The split is even: the list keeps enough rows to choose from, and
             // the bottom half answers "which of these is it" without opening
@@ -667,15 +686,15 @@ impl Overlay for SessionsOverlay {
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .split(body);
-            self.render_list(frame, split[0], app.theme);
-            self.render_preview(frame, split[1], true, app.theme);
+            self.render_list(frame, split[0]);
+            self.render_preview(frame, split[1], true);
         } else {
-            self.render_list(frame, body, app.theme);
+            self.render_list(frame, body);
         }
 
         frame.render_widget(
             Paragraph::new(ellipsize(&self.keys(), footer.width as usize))
-                .style(Style::default().fg(scheme.dim)),
+                .style(Style::default().fg(t.muted)),
             footer,
         );
     }
@@ -696,18 +715,10 @@ impl Overlay for SessionsOverlay {
 
 impl SessionsOverlay {
     /// The list half: one line per conversation, title left and facts right.
-    fn render_list(&mut self, frame: &mut Frame, area: Rect, theme: crate::tui::app::Theme) {
+    fn render_list(&mut self, frame: &mut Frame, area: Rect) {
+        let t = tokens();
         let width = area.width as usize;
-        let selected_style = match theme {
-            crate::tui::app::Theme::Default => {
-                Style::default().fg(Color::White).bg(Color::Rgb(24, 48, 50))
-            }
-            crate::tui::app::Theme::HighContrast => {
-                Style::default().fg(Color::Black).bg(Color::White)
-            }
-            crate::tui::app::Theme::NoColor => Style::default().add_modifier(Modifier::REVERSED),
-        };
-        let accent = crate::tui::theme::ColorScheme::for_theme(theme).accent;
+        let selected_style = selection(t);
         let items: Vec<ListItem> = self
             .shown
             .iter()
@@ -720,12 +731,22 @@ impl SessionsOverlay {
                 } else {
                     Style::default()
                 };
+                // `›` is the row Enter acts on; `●` marks the conversation
+                // being recorded. Both are the current actionable marker, the
+                // one thing accent is reserved for.
                 let marker = if selected {
                     "› "
                 } else if row.is_current {
                     "● "
                 } else {
                     "  "
+                };
+                let marker_style = if selected {
+                    selected_style.fg(t.accent)
+                } else if row.is_current {
+                    Style::default().fg(t.accent)
+                } else {
+                    Style::default().fg(t.muted)
                 };
                 // The tail is the first thing to go in a narrow window: a title
                 // cut to three characters so a timestamp can keep its column is
@@ -741,29 +762,22 @@ impl SessionsOverlay {
                     .saturating_sub(2 + label.chars().count() + tail.chars().count())
                     .max(1);
                 let line = Line::from(vec![
-                    Span::styled(
-                        marker,
-                        Style::default().fg(if row.is_current {
-                            accent
-                        } else {
-                            Color::DarkGray
-                        }),
-                    ),
+                    Span::styled(marker, marker_style),
                     Span::styled(
                         label,
                         if selected {
                             selected_style.add_modifier(Modifier::BOLD)
                         } else {
-                            Style::default().fg(Color::White)
+                            Style::default().fg(t.text)
                         },
                     ),
                     Span::raw(" ".repeat(pad)),
                     Span::styled(
                         tail,
                         if selected {
-                            selected_style.add_modifier(Modifier::DIM)
+                            selected_style
                         } else {
-                            Style::default().fg(Color::DarkGray)
+                            Style::default().fg(t.muted)
                         },
                     ),
                 ]);
@@ -780,13 +794,8 @@ impl SessionsOverlay {
     /// `stacked` is the narrow frame, where the pane sits under the list and a
     /// top border is the divider. The title names the conversation, so the
     /// preview cannot be read against the wrong row.
-    fn render_preview(
-        &self,
-        frame: &mut Frame,
-        area: Rect,
-        stacked: bool,
-        theme: crate::tui::app::Theme,
-    ) {
+    fn render_preview(&self, frame: &mut Frame, area: Rect, stacked: bool) {
+        let t = tokens();
         let title = match self.current() {
             Some(row) => format!(
                 " preview · {} ",
@@ -795,7 +804,6 @@ impl SessionsOverlay {
             None => " preview ".to_string(),
         };
         let borders = if stacked { Borders::TOP } else { Borders::LEFT };
-        let scheme = crate::tui::theme::ColorScheme::for_theme(theme);
         let lines: Vec<Line> = self
             .preview
             .lines()
@@ -805,29 +813,22 @@ impl SessionsOverlay {
                     return Line::from("");
                 }
                 if let Some((role, body)) = text.split_once(": ") {
-                    let colour = match role {
-                        "you" => scheme.user,
-                        "memnoth" => scheme.assistant,
-                        "tool" => scheme.tool,
-                        "system" => scheme.dim,
-                        _ => scheme.foreground,
-                    };
                     return Line::from(vec![
                         Span::styled(
                             format!("{role}: "),
-                            Style::default().fg(colour).add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(role_color(role, t))
+                                .add_modifier(Modifier::BOLD),
                         ),
-                        Span::styled(body.to_string(), Style::default().fg(scheme.foreground)),
+                        Span::styled(body.to_string(), Style::default().fg(t.text)),
                     ]);
                 }
                 let style = if index == 0 {
-                    Style::default()
-                        .fg(scheme.foreground)
-                        .add_modifier(Modifier::BOLD)
+                    Style::default().fg(t.text).add_modifier(Modifier::BOLD)
                 } else if text.starts_with("opened ") || text.starts_with("… ") {
-                    Style::default().fg(scheme.dim)
+                    Style::default().fg(t.muted)
                 } else {
-                    Style::default().fg(scheme.foreground)
+                    Style::default().fg(t.text)
                 };
                 Line::from(Span::styled(text.to_string(), style))
             })
@@ -837,7 +838,7 @@ impl SessionsOverlay {
                 Block::default()
                     .borders(borders)
                     .title(title)
-                    .border_style(Style::default().fg(scheme.border)),
+                    .border_style(Style::default().fg(t.border)),
             )
             .wrap(Wrap { trim: true });
         frame.render_widget(preview, area);
@@ -1015,5 +1016,60 @@ mod tests {
         assert!(fuzzy("fix the login guard", ""));
         assert!(!fuzzy("fix the login guard", "gl"));
         assert!(!fuzzy("", "a"));
+    }
+
+    #[test]
+    fn selection_stays_visible_without_colour() {
+        let plain = selection(Tokens::for_palette(crate::tui::theme::Palette::NoColor));
+        assert_eq!(plain.fg, None);
+        assert_eq!(plain.bg, None);
+        assert!(
+            plain.add_modifier.contains(Modifier::REVERSED),
+            "the cursor must be marked by reverse video when colour is gone"
+        );
+
+        let themed_tokens = Tokens::for_palette(crate::tui::theme::Palette::Dark);
+        let themed = selection(themed_tokens);
+        assert_eq!(themed.fg, Some(themed_tokens.selected_fg));
+        assert_eq!(themed.bg, Some(themed_tokens.selected_bg));
+    }
+
+    #[test]
+    fn speaker_labels_are_text_and_survive_no_color() {
+        let plain = Tokens::for_palette(crate::tui::theme::Palette::NoColor);
+        for role in ["you", "memnoth", "tool", "system"] {
+            assert_eq!(
+                role_color(role, plain),
+                Color::Reset,
+                "{role} has no colour"
+            );
+        }
+        let t = Tokens::for_palette(crate::tui::theme::Palette::Dark);
+        assert_eq!(role_color("you", t), t.text);
+        assert_eq!(role_color("memnoth", t), t.text);
+        assert_eq!(role_color("tool", t), t.muted);
+        assert_eq!(role_color("system", t), t.muted);
+    }
+
+    /// The rows carry their meaning in words — `current`, message counts and
+    /// ages — so a NO_COLOR reader is not asked to decode a colour to choose a
+    /// conversation.
+    #[test]
+    fn the_row_tail_states_its_facts_in_words() {
+        let current = SessionEntry {
+            name: "n".into(),
+            title: "t".into(),
+            model: "m".into(),
+            messages: 3,
+            age: "2h ago".into(),
+            is_current: true,
+        };
+        assert_eq!(current.tail(), "current · 3 msgs");
+        let recent = SessionEntry {
+            is_current: false,
+            ..current
+        };
+        assert!(recent.tail().contains("3 msgs"));
+        assert!(recent.tail().contains("2h ago"));
     }
 }

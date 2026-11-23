@@ -3,13 +3,42 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs};
 
 use crate::tui::app::App;
 use crate::tui::overlays::{Overlay, OverlayAction, OverlayKind};
+use crate::tui::theme::{Tokens, tokens};
 use memnoth_ui::keybindings::{KeyBinding, KeyBindingGroup, KeyBindingHelp, default_memnoth_help};
+
+/// A keycap: the key name on a raised surface. The active row's key takes the
+/// accent role; every other key uses muted. The key text is always printed, so
+/// the legend survives `NO_COLOR` where every token resolves to Reset.
+fn keycap(key: &str, active: bool, t: Tokens) -> Span<'static> {
+    let fg = if active { t.accent } else { t.muted };
+    Span::styled(
+        format!("{}  ", key),
+        Style::default()
+            .bg(t.surface)
+            .fg(fg)
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
+/// The row style for a binding list: selected rows take the selection pair,
+/// the rest take primary text. Descriptions and group names override only the
+/// foreground with muted, so the selection background still shows through.
+fn binding_style(selected: bool, t: Tokens) -> Style {
+    if selected {
+        Style::default()
+            .bg(t.selected_bg)
+            .fg(t.selected_fg)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(t.text)
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct HelpOverlay {
@@ -448,6 +477,7 @@ impl HelpOverlay {
     }
 
     fn render_global_help(&mut self, frame: &mut Frame, area: Rect) {
+        let t = tokens();
         let mut all_bindings = Vec::new();
         for group in &self.global_help.groups {
             for binding in &group.bindings {
@@ -460,27 +490,13 @@ impl HelpOverlay {
             .enumerate()
             .map(|(i, (group_name, binding))| {
                 let selected = i == self.selected;
-                let style = if selected {
-                    Style::default()
-                        .bg(Color::Blue)
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                };
+                let style = binding_style(selected, t);
 
-                let key = Span::styled(
-                    format!("{}  ", binding.key),
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                );
+                let key = keycap(&binding.key, selected, t);
                 let action = Span::styled(binding.action.clone(), style);
-                let description = Span::styled(
-                    format!("  — {}", binding.description),
-                    style.fg(Color::Gray),
-                );
-                let group = Span::styled(format!("  [{}]", group_name), style.fg(Color::DarkGray));
+                let description =
+                    Span::styled(format!("  — {}", binding.description), style.fg(t.muted));
+                let group = Span::styled(format!("  [{}]", group_name), style.fg(t.muted));
                 // One row per binding only when the terminal can show the
                 // description whole. A `List` clips, so at 80 columns the tail of
                 // every long binding used to vanish mid-word; the second line
@@ -520,12 +536,13 @@ impl HelpOverlay {
                     .borders(Borders::ALL)
                     .title(" Global Keybindings "),
             )
-            .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
+            .highlight_style(Style::default().bg(t.selected_bg).fg(t.selected_fg));
         frame.render_stateful_widget(list, area, &mut self.list_state);
     }
 
     fn render_overlay_help(&mut self, frame: &mut Frame, area: Rect) {
         let overlay_help = Self::build_overlay_help();
+        let t = tokens();
         let mut all_bindings = Vec::new();
         for group in &overlay_help.groups {
             for binding in &group.bindings {
@@ -538,27 +555,13 @@ impl HelpOverlay {
             .enumerate()
             .map(|(i, (group_name, binding))| {
                 let selected = i == self.selected;
-                let style = if selected {
-                    Style::default()
-                        .bg(Color::Blue)
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                };
+                let style = binding_style(selected, t);
 
-                let key = Span::styled(
-                    format!("{}  ", binding.key),
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                );
+                let key = keycap(&binding.key, selected, t);
                 let action = Span::styled(binding.action.clone(), style);
-                let description = Span::styled(
-                    format!("  — {}", binding.description),
-                    style.fg(Color::Gray),
-                );
-                let group = Span::styled(format!("  [{}]", group_name), style.fg(Color::DarkGray));
+                let description =
+                    Span::styled(format!("  — {}", binding.description), style.fg(t.muted));
+                let group = Span::styled(format!("  [{}]", group_name), style.fg(t.muted));
                 // One row per binding only when the terminal can show the
                 // description whole. A `List` clips, so at 80 columns the tail of
                 // every long binding used to vanish mid-word; the second line
@@ -593,12 +596,13 @@ impl HelpOverlay {
                     .borders(Borders::ALL)
                     .title(" Overlay Keybindings "),
             )
-            .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
+            .highlight_style(Style::default().bg(t.selected_bg).fg(t.selected_fg));
         frame.render_stateful_widget(list, area, &mut self.list_state);
     }
 
     fn render_command_help(&mut self, frame: &mut Frame, area: Rect) {
         let command_help = Self::build_command_help();
+        let t = tokens();
         let mut all_bindings = Vec::new();
         for group in &command_help.groups {
             for binding in &group.bindings {
@@ -611,27 +615,13 @@ impl HelpOverlay {
             .enumerate()
             .map(|(i, (group_name, binding))| {
                 let selected = i == self.selected;
-                let style = if selected {
-                    Style::default()
-                        .bg(Color::Blue)
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                };
+                let style = binding_style(selected, t);
 
-                let key = Span::styled(
-                    format!("{}  ", binding.key),
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                );
+                let key = keycap(&binding.key, selected, t);
                 let action = Span::styled(binding.action.clone(), style);
-                let description = Span::styled(
-                    format!("  — {}", binding.description),
-                    style.fg(Color::Gray),
-                );
-                let group = Span::styled(format!("  [{}]", group_name), style.fg(Color::DarkGray));
+                let description =
+                    Span::styled(format!("  — {}", binding.description), style.fg(t.muted));
+                let group = Span::styled(format!("  [{}]", group_name), style.fg(t.muted));
                 // One row per binding only when the terminal can show the
                 // description whole. A `List` clips, so at 80 columns the tail of
                 // every long binding used to vanish mid-word; the second line
@@ -666,12 +656,13 @@ impl HelpOverlay {
                     .borders(Borders::ALL)
                     .title(" Slash Commands "),
             )
-            .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
+            .highlight_style(Style::default().bg(t.selected_bg).fg(t.selected_fg));
         frame.render_stateful_widget(list, area, &mut self.list_state);
     }
 
     fn render_shortcut_help(&mut self, frame: &mut Frame, area: Rect) {
         let shortcut_help = Self::build_shortcut_help();
+        let t = tokens();
         let mut all_bindings = Vec::new();
         for group in &shortcut_help.groups {
             for binding in &group.bindings {
@@ -684,27 +675,13 @@ impl HelpOverlay {
             .enumerate()
             .map(|(i, (group_name, binding))| {
                 let selected = i == self.selected;
-                let style = if selected {
-                    Style::default()
-                        .bg(Color::Blue)
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                };
+                let style = binding_style(selected, t);
 
-                let key = Span::styled(
-                    format!("{}  ", binding.key),
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                );
+                let key = keycap(&binding.key, selected, t);
                 let action = Span::styled(binding.action.clone(), style);
-                let description = Span::styled(
-                    format!("  — {}", binding.description),
-                    style.fg(Color::Gray),
-                );
-                let group = Span::styled(format!("  [{}]", group_name), style.fg(Color::DarkGray));
+                let description =
+                    Span::styled(format!("  — {}", binding.description), style.fg(t.muted));
+                let group = Span::styled(format!("  [{}]", group_name), style.fg(t.muted));
                 // One row per binding only when the terminal can show the
                 // description whole. A `List` clips, so at 80 columns the tail of
                 // every long binding used to vanish mid-word; the second line
@@ -735,14 +712,15 @@ impl HelpOverlay {
 
         let list = List::new(items)
             .block(Block::default().borders(Borders::ALL).title(" Shortcuts "))
-            .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
+            .highlight_style(Style::default().bg(t.selected_bg).fg(t.selected_fg));
         frame.render_stateful_widget(list, area, &mut self.list_state);
     }
 
     fn render_search_results(&mut self, frame: &mut Frame, area: Rect) {
+        let t = tokens();
         if self.filtered_bindings.is_empty() {
             let empty = Paragraph::new("No matches found")
-                .style(Style::default().fg(Color::DarkGray))
+                .style(Style::default().fg(t.muted))
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
@@ -758,14 +736,7 @@ impl HelpOverlay {
             .enumerate()
             .map(|(i, (gi, _bi, binding))| {
                 let selected = i == self.selected;
-                let style = if selected {
-                    Style::default()
-                        .bg(Color::Blue)
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                };
+                let style = binding_style(selected, t);
 
                 let group_name = if *gi < 100 {
                     "Global"
@@ -777,18 +748,11 @@ impl HelpOverlay {
                     "Shortcuts"
                 };
 
-                let key = Span::styled(
-                    format!("{}  ", binding.key),
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                );
+                let key = keycap(&binding.key, selected, t);
                 let action = Span::styled(binding.action.clone(), style);
-                let description = Span::styled(
-                    format!("  — {}", binding.description),
-                    style.fg(Color::Gray),
-                );
-                let group = Span::styled(format!("  [{}]", group_name), style.fg(Color::DarkGray));
+                let description =
+                    Span::styled(format!("  — {}", binding.description), style.fg(t.muted));
+                let group = Span::styled(format!("  [{}]", group_name), style.fg(t.muted));
                 // One row per binding only when the terminal can show the
                 // description whole. A `List` clips, so at 80 columns the tail of
                 // every long binding used to vanish mid-word; the second line
@@ -823,7 +787,7 @@ impl HelpOverlay {
                     .borders(Borders::ALL)
                     .title(" Search Results "),
             )
-            .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
+            .highlight_style(Style::default().bg(t.selected_bg).fg(t.selected_fg));
         frame.render_stateful_widget(list, area, &mut self.list_state);
     }
 }
@@ -1067,6 +1031,7 @@ impl Overlay for HelpOverlay {
         if !self.visible {
             return;
         }
+        let t = tokens();
 
         frame.render_widget(Clear, area);
 
@@ -1084,7 +1049,7 @@ impl Overlay for HelpOverlay {
         let tab_titles: Vec<&str> = self
             .tabs
             .iter()
-            .map(|t| match t {
+            .map(|tab| match tab {
                 HelpTab::Global => "Global",
                 HelpTab::Overlays => "Overlays",
                 HelpTab::Commands => "Commands",
@@ -1094,10 +1059,10 @@ impl Overlay for HelpOverlay {
         let tabs = Tabs::new(tab_titles)
             .block(Block::default().borders(Borders::ALL).title(" Help "))
             .select(self.active_tab)
-            .style(Style::default().fg(Color::Gray))
+            .style(Style::default().fg(t.muted))
             .highlight_style(
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(t.selected_bg)
                     .add_modifier(Modifier::BOLD),
             );
         frame.render_widget(tabs, chunks[0]);
@@ -1111,7 +1076,7 @@ impl Overlay for HelpOverlay {
         if self.search_mode {
             let search_text = format!("/{}_", self.search_query);
             let search = Paragraph::new(search_text)
-                .style(Style::default().fg(Color::Yellow))
+                .style(Style::default().fg(t.accent))
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
@@ -1145,7 +1110,7 @@ impl Overlay for HelpOverlay {
             "↑↓: navigate · pgup/pgdn: page · home/end: top/bottom · /: search · tab: next tab · c: copy · esc: close"
         };
         let help = Paragraph::new(help_text)
-            .style(Style::default().fg(Color::DarkGray))
+            .style(Style::default().fg(t.muted))
             .block(Block::default().borders(Borders::ALL));
         frame.render_widget(help, chunks[chunks.len() - 1]);
     }
@@ -1233,5 +1198,41 @@ mod tests {
             &mut App::new("s", false),
         );
         assert!(matches!(action, OverlayAction::Close));
+    }
+
+    /// Keycaps take surface/muted, the active row's key takes accent, and the
+    /// legend itself is plain text so it survives NO_COLOR.
+    #[test]
+    fn keycaps_use_surface_and_muted_with_accent_for_the_active_row() {
+        let t = tokens();
+        let idle = keycap("Enter", false, t);
+        assert_eq!(idle.content, "Enter  ");
+        assert_eq!(idle.style.bg, Some(t.surface));
+        assert_eq!(idle.style.fg, Some(t.muted));
+
+        let active = keycap("Enter", true, t);
+        assert_eq!(active.content, "Enter  ");
+        assert_eq!(active.style.bg, Some(t.surface));
+        assert_eq!(active.style.fg, Some(t.accent));
+
+        let selected = binding_style(true, t);
+        assert_eq!(selected.bg, Some(t.selected_bg));
+        assert_eq!(selected.fg, Some(t.selected_fg));
+        let idle_row = binding_style(false, t);
+        assert_eq!(idle_row.fg, Some(t.text));
+    }
+
+    /// The Commands tab is a projection of the one command registry, not a
+    /// second hand-maintained list of verbs.
+    #[test]
+    fn command_legends_are_the_registry_rows() {
+        let rows = crate::tui::overlays::command_rows::rows();
+        let help = HelpOverlay::build_command_help();
+        assert_eq!(help.groups.len(), 1);
+        let group = &help.groups[0];
+        assert_eq!(group.bindings.len(), rows.len());
+        for (binding, row) in group.bindings.iter().zip(rows.iter()) {
+            assert_eq!(binding.key, row.command);
+        }
     }
 }

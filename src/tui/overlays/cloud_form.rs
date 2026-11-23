@@ -24,7 +24,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use memnoth_cloud_client::CreateKeyRequest;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
@@ -32,6 +32,7 @@ use crate::context::AppContext;
 use crate::output::ellipsize;
 use crate::tui::app::{App, EntryRole};
 use crate::tui::overlays::{Overlay, OverlayAction, OverlayKind};
+use crate::tui::theme::{Tokens, tokens};
 
 /// Where a form is: being filled in, waiting on the server, or holding an answer
 /// that must not be written down.
@@ -40,6 +41,51 @@ enum Stage {
     Form,
     Working,
     Done,
+}
+
+/// Only the field under the caret gets the accent. The caret is drawn as an
+/// actual cursor position too, so focus is never carried by colour alone.
+fn field_label_style(focused: bool, t: Tokens) -> Style {
+    if focused {
+        Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(t.muted)
+    }
+}
+
+/// A validation refusal or the server's answer under the fields. The leading
+/// `!` carries the meaning; the colour only reinforces it.
+fn note_style(t: Tokens) -> Style {
+    Style::default().fg(t.error)
+}
+
+/// Delivery is reported, never assumed. The words say which state it is, the
+/// colour only reinforces them.
+fn delivery_style(sent: bool, t: Tokens) -> Style {
+    if sent {
+        Style::default().fg(t.success)
+    } else {
+        Style::default().fg(t.warning)
+    }
+}
+
+/// The local-only claim on the key screen, kept as an exact string so a styling
+/// change cannot quietly soften it.
+fn key_explanation(done: bool) -> &'static str {
+    if done {
+        "The response that carries the secret is in this box, and nowhere else."
+    } else {
+        "Only what you type is sent; an empty field means the server's default."
+    }
+}
+
+/// The same claim for the invite's link and code.
+fn invite_explanation(done: bool) -> &'static str {
+    if done {
+        "The link and the code are in this box, and nowhere else."
+    } else {
+        "One invite per address; the role is the org role it carries."
+    }
 }
 
 /// The labels and the visual fields, shared by both screens.
@@ -134,9 +180,10 @@ impl Form {
             .unwrap_or(0)
     }
 
-    /// The fields, with the focused label in cyan and an empty one showing what
+    /// The fields, with the focused label accented and an empty one showing what
     /// belongs there instead of an empty gap.
     fn lines(&self) -> Vec<Line<'static>> {
+        let t = tokens();
         let width = self.label_width();
         self.labels
             .iter()
@@ -151,18 +198,12 @@ impl Form {
                             .copied()
                             .unwrap_or("")
                             .to_string(),
-                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(t.muted),
                     )
                 } else {
-                    (value.to_string(), Style::default().fg(Color::White))
+                    (value.to_string(), Style::default().fg(t.text))
                 };
-                let label_style = if focused {
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::DarkGray)
-                };
+                let label_style = field_label_style(focused, t);
                 Line::from(vec![
                     Span::styled(format!("{label:<width$}  "), label_style),
                     Span::styled(shown, value_style),
@@ -342,6 +383,7 @@ impl KeyCreateOverlay {
         let Some(done) = &self.done else {
             return Vec::new();
         };
+        let t = tokens();
         let name = if done.name.trim().is_empty() {
             done.id.clone()
         } else {
@@ -357,24 +399,24 @@ impl KeyCreateOverlay {
             .unwrap_or_else(|| "never".to_string());
         vec![
             Line::from(vec![
-                Span::styled("minted   ", Style::default().fg(Color::DarkGray)),
-                Span::styled(name, Style::default().fg(Color::White)),
+                Span::styled("minted   ", Style::default().fg(t.muted)),
+                Span::styled(name, Style::default().fg(t.text)),
             ]),
             Line::from(vec![
-                Span::styled("prefix   ", Style::default().fg(Color::DarkGray)),
-                Span::styled(done.prefix.clone(), Style::default().fg(Color::White)),
+                Span::styled("prefix   ", Style::default().fg(t.muted)),
+                Span::styled(done.prefix.clone(), Style::default().fg(t.text)),
             ]),
             Line::from(vec![
-                Span::styled("scope    ", Style::default().fg(Color::DarkGray)),
-                Span::styled(done.scope.clone(), Style::default().fg(Color::White)),
+                Span::styled("scope    ", Style::default().fg(t.muted)),
+                Span::styled(done.scope.clone(), Style::default().fg(t.text)),
             ]),
             Line::from(vec![
-                Span::styled("project  ", Style::default().fg(Color::DarkGray)),
-                Span::styled(project, Style::default().fg(Color::White)),
+                Span::styled("project  ", Style::default().fg(t.muted)),
+                Span::styled(project, Style::default().fg(t.text)),
             ]),
             Line::from(vec![
-                Span::styled("expires  ", Style::default().fg(Color::DarkGray)),
-                Span::styled(expires, Style::default().fg(Color::White)),
+                Span::styled("expires  ", Style::default().fg(t.muted)),
+                Span::styled(expires, Style::default().fg(t.text)),
             ]),
         ]
     }
@@ -384,7 +426,7 @@ impl KeyCreateOverlay {
             Some(done) => vec![Line::from(Span::styled(
                 done.token.clone(),
                 Style::default()
-                    .fg(Color::White)
+                    .fg(tokens().text)
                     .add_modifier(Modifier::BOLD),
             ))],
             None => Vec::new(),
@@ -547,38 +589,35 @@ impl InviteOverlay {
         let Some(done) = &self.done else {
             return Vec::new();
         };
+        let t = tokens();
         let mut lines = vec![
             Line::from(vec![
-                Span::styled("invited  ", Style::default().fg(Color::DarkGray)),
-                Span::styled(done.email.clone(), Style::default().fg(Color::White)),
+                Span::styled("invited  ", Style::default().fg(t.muted)),
+                Span::styled(done.email.clone(), Style::default().fg(t.text)),
             ]),
             Line::from(vec![
-                Span::styled("role     ", Style::default().fg(Color::DarkGray)),
-                Span::styled(done.role.clone(), Style::default().fg(Color::White)),
+                Span::styled("role     ", Style::default().fg(t.muted)),
+                Span::styled(done.role.clone(), Style::default().fg(t.text)),
             ]),
             Line::from(vec![
-                Span::styled("expires  ", Style::default().fg(Color::DarkGray)),
-                Span::styled(done.expires_at.clone(), Style::default().fg(Color::White)),
+                Span::styled("expires  ", Style::default().fg(t.muted)),
+                Span::styled(done.expires_at.clone(), Style::default().fg(t.text)),
             ]),
         ];
 
         // Delivery is reported, never assumed: "sent" when it was not is the one
         // failure that leaves someone waiting for a mail that never comes.
-        if done.email_sent {
-            lines.push(Line::from(Span::styled(
-                "the invite email was sent",
-                Style::default().fg(Color::Green),
-            )));
-        } else {
-            let reason = match done.email_error.as_deref() {
-                Some(reason) => format!("the invite email was NOT sent: {reason}"),
-                None => "the invite email was NOT sent".to_string(),
-            };
-            lines.push(Line::from(Span::styled(
-                reason,
-                Style::default().fg(Color::Yellow),
-            )));
-        }
+        lines.push(Line::from(Span::styled(
+            if done.email_sent {
+                "the invite email was sent".to_string()
+            } else {
+                match done.email_error.as_deref() {
+                    Some(reason) => format!("the invite email was NOT sent: {reason}"),
+                    None => "the invite email was NOT sent".to_string(),
+                }
+            },
+            delivery_style(done.email_sent, t),
+        )));
 
         lines
     }
@@ -588,26 +627,25 @@ impl InviteOverlay {
         let Some(done) = &self.done else {
             return Vec::new();
         };
+        let t = tokens();
         let mut lines = Vec::new();
         match &done.link {
             Some(link) => lines.push(Line::from(Span::styled(
                 link.clone(),
-                Style::default().fg(Color::White),
+                Style::default().fg(t.text),
             ))),
             // A deployment with no public URL cannot build a join link. Saying so
             // in words points at the code, which still works.
             None => lines.push(Line::from(Span::styled(
                 "no link — this deployment has no public URL; give them the code",
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(t.warning),
             ))),
         }
         lines.push(Line::from(vec![
-            Span::styled("code  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("code  ", Style::default().fg(t.muted)),
             Span::styled(
                 done.code.clone(),
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(t.text).add_modifier(Modifier::BOLD),
             ),
         ]));
         lines
@@ -722,19 +760,20 @@ fn draw_shell(
     note: Option<&str>,
     footer: &str,
 ) {
+    let t = tokens();
     frame.render_widget(Clear, popup);
     frame.render_widget(
         Block::default()
             .borders(Borders::ALL)
             .title(format!(" {title} "))
-            .border_style(Style::default().fg(Color::Cyan)),
+            .border_style(Style::default().fg(t.border)),
         popup,
     );
 
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             ellipsize(explanation, rows[0].width as usize),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(t.muted),
         ))),
         rows[0],
     );
@@ -744,7 +783,7 @@ fn draw_shell(
         let lines = vec![
             Line::from(Span::styled(
                 ellipsize(&format!("! {note}"), rows[rows.len() - 2].width as usize),
-                Style::default().fg(Color::Yellow),
+                note_style(t),
             )),
             Line::from(""),
         ];
@@ -754,7 +793,7 @@ fn draw_shell(
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             ellipsize(footer, rows[rows.len() - 1].width as usize),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(t.muted),
         ))),
         rows[rows.len() - 1],
     );
@@ -868,13 +907,10 @@ impl Overlay for KeyCreateOverlay {
         if !self.visible {
             return;
         }
+        let t = tokens();
         let done = self.stage == Stage::Done;
         let (popup, rows) = frame_for(area, self.form.labels.len() as u16, done);
-        let explanation = if done {
-            "The response that carries the secret is in this box, and nowhere else."
-        } else {
-            "Only what you type is sent; an empty field means the server's default."
-        };
+        let explanation = key_explanation(done);
         let footer = match self.stage {
             Stage::Form => "tab next · shift-tab back · enter mint · esc cancel",
             Stage::Working => "minting… esc closes this screen",
@@ -899,14 +935,14 @@ impl Overlay for KeyCreateOverlay {
                         Block::default()
                             .borders(Borders::ALL)
                             .title(" the secret — shown once ")
-                            .border_style(Style::default().fg(Color::Yellow)),
+                            .border_style(Style::default().fg(t.warning)),
                     ),
                 rows[2],
             );
             frame.render_widget(
                 Paragraph::new(self.outcome_note())
                     .wrap(Wrap { trim: false })
-                    .style(Style::default().fg(Color::DarkGray)),
+                    .style(Style::default().fg(t.muted)),
                 rows[3],
             );
             return;
@@ -923,7 +959,7 @@ impl Overlay for KeyCreateOverlay {
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
                     "asking the control plane…",
-                    Style::default().fg(Color::Cyan),
+                    Style::default().fg(t.muted),
                 ))),
                 Rect::new(rows[2].x, rows[2].y, rows[2].width, rows[2].height.min(1)),
             );
@@ -1027,13 +1063,10 @@ impl Overlay for InviteOverlay {
         if !self.visible {
             return;
         }
+        let t = tokens();
         let done = self.stage == Stage::Done;
         let (popup, rows) = frame_for(area, self.form.labels.len() as u16, done);
-        let explanation = if done {
-            "The link and the code are in this box, and nowhere else."
-        } else {
-            "One invite per address; the role is the org role it carries."
-        };
+        let explanation = invite_explanation(done);
         let footer = match self.stage {
             Stage::Form => "tab next · shift-tab back · enter invite · esc cancel",
             Stage::Working => "inviting… esc closes this screen",
@@ -1058,14 +1091,14 @@ impl Overlay for InviteOverlay {
                         Block::default()
                             .borders(Borders::ALL)
                             .title(" the link and code — shown once ")
-                            .border_style(Style::default().fg(Color::Yellow)),
+                            .border_style(Style::default().fg(t.warning)),
                     ),
                 rows[2],
             );
             frame.render_widget(
                 Paragraph::new(self.outcome_note())
                     .wrap(Wrap { trim: false })
-                    .style(Style::default().fg(Color::DarkGray)),
+                    .style(Style::default().fg(t.muted)),
                 rows[3],
             );
             return;
@@ -1082,7 +1115,7 @@ impl Overlay for InviteOverlay {
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
                     "asking the control plane…",
-                    Style::default().fg(Color::Cyan),
+                    Style::default().fg(t.muted),
                 ))),
                 Rect::new(rows[2].x, rows[2].y, rows[2].width, rows[2].height.min(1)),
             );
@@ -1306,5 +1339,47 @@ mod tests {
             secret.contains("no link"),
             "a missing link is stated, not left blank: {secret}"
         );
+    }
+
+    #[test]
+    fn state_roles_use_tokens_and_fall_back_to_reset() {
+        use crate::tui::theme::{Palette, Tokens};
+        use ratatui::style::Color;
+
+        let colored = Tokens::for_palette(Palette::Dark);
+        let plain = Tokens::for_palette(Palette::NoColor);
+
+        assert_eq!(field_label_style(true, colored).fg, Some(colored.accent));
+        assert_eq!(field_label_style(false, colored).fg, Some(colored.muted));
+        assert_eq!(field_label_style(true, plain).fg, Some(Color::Reset));
+
+        assert_eq!(note_style(colored).fg, Some(colored.error));
+        assert_eq!(note_style(plain).fg, Some(Color::Reset));
+
+        assert_eq!(delivery_style(true, colored).fg, Some(colored.success));
+        assert_eq!(delivery_style(false, colored).fg, Some(colored.warning));
+        assert_eq!(delivery_style(false, plain).fg, Some(Color::Reset));
+    }
+
+    #[test]
+    fn local_only_and_no_secret_claims_stay_literal_in_both_states() {
+        assert_eq!(
+            key_explanation(false),
+            "Only what you type is sent; an empty field means the server's default."
+        );
+        assert_eq!(
+            key_explanation(true),
+            "The response that carries the secret is in this box, and nowhere else."
+        );
+        assert_eq!(
+            invite_explanation(true),
+            "The link and the code are in this box, and nowhere else."
+        );
+
+        for note in [key_form().outcome_note(), invite_form().outcome_note()] {
+            assert!(note.contains("not written to the transcript"), "{note}");
+            assert!(note.contains("Shown once"), "{note}");
+            assert!(note.contains("esc"), "{note}");
+        }
     }
 }

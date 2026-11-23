@@ -18,7 +18,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap};
 
@@ -27,6 +27,7 @@ use crate::output::ErrorOutcome;
 use crate::provider;
 use crate::tui::app::App;
 use crate::tui::overlays::{Overlay, OverlayAction, OverlayKind};
+use crate::tui::theme::{Tokens, tokens};
 
 /// How many entities and events one open reads. The overlay is a glance, not an
 /// export: `memnoth vault asof --limit` is where a longer list comes from.
@@ -82,6 +83,37 @@ struct Activity {
     /// `active` or `closed`, as the timeline reports it.
     state: &'static str,
     summary: String,
+}
+
+/// Every list selects the same way: one token pair for the row, and captions
+/// that keep the foreground on a selected row instead of falling back to a raw
+/// colour.
+fn row_styles(selected: bool, t: Tokens) -> (Style, Style) {
+    if selected {
+        (
+            Style::default()
+                .bg(t.selected_bg)
+                .fg(t.selected_fg)
+                .add_modifier(Modifier::BOLD),
+            Style::default().bg(t.selected_bg).fg(t.selected_fg),
+        )
+    } else {
+        (Style::default(), Style::default().fg(t.muted))
+    }
+}
+
+fn selection_style(t: Tokens) -> Style {
+    Style::default().bg(t.selected_bg).fg(t.selected_fg)
+}
+
+/// The word says whether a version is active or closed; the colour only
+/// reinforces it, so a NO_COLOR frame still carries the state.
+fn activity_state_style(state: &str, t: Tokens) -> Style {
+    if state == "active" {
+        Style::default().fg(t.success)
+    } else {
+        Style::default().fg(t.muted)
+    }
 }
 
 impl ContextOverlay {
@@ -227,20 +259,13 @@ impl ContextOverlay {
     }
 
     fn render_beliefs(&mut self, frame: &mut Frame, area: Rect) {
+        let t = tokens();
         let items: Vec<ListItem> = self
             .beliefs
             .iter()
             .enumerate()
             .map(|(i, b)| {
-                let selected = i == self.selected;
-                let style = if selected {
-                    Style::default()
-                        .bg(Color::Blue)
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                };
+                let (style, caption_style) = row_styles(i == self.selected, t);
                 let summary = if b.summary.trim().is_empty() {
                     b.facts
                         .first()
@@ -252,14 +277,14 @@ impl ContextOverlay {
                 };
                 let lines = vec![
                     Line::from(vec![
-                        Span::styled(format!("[{}] ", b.kind), Style::default().fg(Color::Cyan)),
+                        Span::styled(format!("[{}] ", b.kind), caption_style),
                         Span::styled(&b.name, style),
-                        Span::styled(format!("  {:.2}", b.confidence), style.fg(Color::DarkGray)),
+                        Span::styled(format!("  {:.2}", b.confidence), caption_style),
                     ]),
                     Line::from(vec![
-                        Span::styled("    ", Style::default()),
-                        Span::styled(ellipsize(&summary, 120), style.fg(Color::Gray)),
-                        Span::styled(format!("  ({})", b.updated), style.fg(Color::DarkGray)),
+                        Span::styled("    ", style),
+                        Span::styled(ellipsize(&summary, 120), caption_style),
+                        Span::styled(format!("  ({})", b.updated), caption_style),
                     ]),
                 ];
                 ListItem::new(lines).style(style)
@@ -270,45 +295,32 @@ impl ContextOverlay {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
+                    .border_style(Style::default().fg(t.border))
                     .title(format!(" Vault Beliefs ({}) ", self.beliefs.len())),
             )
-            .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
+            .highlight_style(selection_style(t));
         frame.render_stateful_widget(list, area, &mut self.list_state);
     }
 
     fn render_activity(&mut self, frame: &mut Frame, area: Rect) {
+        let t = tokens();
         let items: Vec<ListItem> = self
             .activity
             .iter()
             .enumerate()
             .map(|(i, row)| {
-                let selected = i == self.selected;
-                let style = if selected {
-                    Style::default()
-                        .bg(Color::Blue)
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                };
-                let state_color = if row.state == "active" {
-                    Color::Green
-                } else {
-                    Color::DarkGray
-                };
+                let (style, caption_style) = row_styles(i == self.selected, t);
+                let state_style = activity_state_style(row.state, t);
                 let lines = vec![
                     Line::from(vec![
-                        Span::styled(row.at.clone(), Style::default().fg(Color::DarkGray)),
+                        Span::styled(row.at.clone(), caption_style),
                         Span::styled(format!("  {}", row.name), style),
-                        Span::styled(
-                            format!("  [{}]", row.kind),
-                            Style::default().fg(Color::Cyan),
-                        ),
-                        Span::styled(format!("  {}", row.state), style.fg(state_color)),
+                        Span::styled(format!("  [{}]", row.kind), caption_style),
+                        Span::styled(format!("  {}", row.state), state_style),
                     ]),
                     Line::from(vec![
-                        Span::styled("    ", Style::default()),
-                        Span::styled(ellipsize(&row.summary, 120), style.fg(Color::Gray)),
+                        Span::styled("    ", style),
+                        Span::styled(ellipsize(&row.summary, 120), caption_style),
                     ]),
                 ];
                 ListItem::new(lines).style(style)
@@ -319,9 +331,10 @@ impl ContextOverlay {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
+                    .border_style(Style::default().fg(t.border))
                     .title(format!(" Recent Versions ({}) ", self.activity.len())),
             )
-            .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
+            .highlight_style(selection_style(t));
         frame.render_stateful_widget(list, area, &mut self.list_state);
     }
 }
@@ -447,6 +460,7 @@ impl Overlay for ContextOverlay {
 
         frame.render_widget(Clear, area);
 
+        let t = tokens();
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -466,28 +480,35 @@ impl Overlay for ContextOverlay {
             })
             .collect();
         let tabs = Tabs::new(tab_titles)
-            .block(Block::default().borders(Borders::ALL).title(" Context "))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(t.border))
+                    .title(" Context "),
+            )
             .select(self.active_tab)
-            .style(Style::default().fg(Color::Gray))
-            .highlight_style(
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            );
+            .style(Style::default().fg(t.muted))
+            .highlight_style(Style::default().fg(t.accent).add_modifier(Modifier::BOLD));
         frame.render_widget(tabs, chunks[0]);
 
         if self.detail_view {
             let detail = Paragraph::new(self.detail_content.clone())
-                .style(Style::default().fg(Color::White))
-                .block(Block::default().borders(Borders::ALL).title(" Detail "))
+                .style(Style::default().fg(t.text))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(t.border))
+                        .title(" Detail "),
+                )
                 .wrap(Wrap { trim: false });
             frame.render_widget(detail, chunks[1]);
         } else if self.rows() == 0 {
             let note = Paragraph::new(self.state_text())
-                .style(Style::default().fg(Color::Gray))
+                .style(Style::default().fg(t.muted))
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
+                        .border_style(Style::default().fg(t.border))
                         .title(match self.tab() {
                             ContextTab::Beliefs => " Vault Beliefs ",
                             ContextTab::Activity => " Recent Versions ",
@@ -510,8 +531,12 @@ impl Overlay for ContextOverlay {
             "↑↓: move · enter: detail · tab: next tab · r: reread the vault · esc: close"
         };
         let help = Paragraph::new(help_text)
-            .style(Style::default().fg(Color::DarkGray))
-            .block(Block::default().borders(Borders::ALL));
+            .style(Style::default().fg(t.muted))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(t.border)),
+            );
         frame.render_widget(help, chunks[2]);
     }
 
@@ -692,21 +717,15 @@ fn prompt_rows(ctx: &AppContext) -> Vec<(String, String)> {
 }
 
 fn render_prompt(overlay: &mut ContextOverlay, frame: &mut Frame, area: Rect) {
+    let t = tokens();
     let items: Vec<ListItem> = overlay
         .prompt
         .iter()
         .enumerate()
         .map(|(index, (name, value))| {
-            let style = if index == overlay.selected {
-                Style::default()
-                    .bg(Color::Blue)
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
+            let (style, caption_style) = row_styles(index == overlay.selected, t);
             ListItem::new(Line::from(vec![
-                Span::styled(format!("{name:<16}"), Style::default().fg(Color::Cyan)),
+                Span::styled(format!("{name:<16}"), caption_style),
                 Span::styled(value.clone(), style),
             ]))
             .style(style)
@@ -717,9 +736,10 @@ fn render_prompt(overlay: &mut ContextOverlay, frame: &mut Frame, area: Rect) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
+                .border_style(Style::default().fg(t.border))
                 .title(format!(" Prompt ({}) ", overlay.prompt.len())),
         )
-        .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
+        .highlight_style(selection_style(t));
     frame.render_stateful_widget(list, area, &mut overlay.list_state);
 }
 
@@ -825,6 +845,46 @@ mod tests {
 
     #[test]
     fn activity_marks_a_closed_version_as_closed() {
+        let data = serde_json::json!({
+            "facts": [
+                { "name": "a", "kind": "fact", "valid_from": 0, "valid_to": null },
+                { "name": "b", "kind": "fact", "valid_from": 0, "valid_to": 10 }
+            ]
+        });
+        let rows = activity_from(&data);
+        assert_eq!(rows[0].state, "active");
+        assert_eq!(rows[1].state, "closed");
+    }
+
+    #[test]
+    fn selection_and_state_styles_use_tokens_and_keep_the_state_words() {
+        use crate::tui::theme::{Palette, Tokens};
+        use ratatui::style::Color;
+
+        let colored = Tokens::for_palette(Palette::Dark);
+        let plain = Tokens::for_palette(Palette::NoColor);
+
+        let (selected, caption) = row_styles(true, colored);
+        assert_eq!(selected.bg, Some(colored.selected_bg));
+        assert_eq!(selected.fg, Some(colored.selected_fg));
+        assert_eq!(caption.fg, Some(colored.selected_fg));
+        let (unselected, caption) = row_styles(false, colored);
+        assert_eq!(unselected.bg, None);
+        assert_eq!(caption.fg, Some(colored.muted));
+        let (selected, _) = row_styles(true, plain);
+        assert_eq!(selected.fg, Some(Color::Reset));
+
+        assert_eq!(
+            activity_state_style("active", colored).fg,
+            Some(colored.success)
+        );
+        assert_eq!(
+            activity_state_style("closed", colored).fg,
+            Some(colored.muted)
+        );
+        assert_eq!(activity_state_style("active", plain).fg, Some(Color::Reset));
+
+        // NO_COLOR may not theme away the word that carries the state.
         let data = serde_json::json!({
             "facts": [
                 { "name": "a", "kind": "fact", "valid_from": 0, "valid_to": null },

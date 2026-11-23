@@ -21,6 +21,28 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 use crate::session::SessionStore;
 use crate::tui::app::{App, EntryRole};
 use crate::tui::overlays::{Overlay, OverlayAction, OverlayKind};
+use crate::tui::theme::{Tokens, tokens};
+
+/// Selection must remain readable with NO_COLOR, where every token is Reset.
+/// Reverse video is the non-colour cue, so the cursor is never only a fill.
+fn selection(t: Tokens) -> Style {
+    if t.colored() {
+        Style::default().fg(t.selected_fg).bg(t.selected_bg)
+    } else {
+        Style::default().add_modifier(Modifier::REVERSED)
+    }
+}
+
+/// The turn's role word is drawn literally (`error`, `tool failed`, …), so
+/// colour is a redundant cue that may disappear entirely under NO_COLOR.
+fn role_color(role: &str, t: Tokens) -> Color {
+    match role {
+        "error" | "tool failed" => t.error,
+        "tool done" => t.success,
+        "you" | "answer" => t.text,
+        _ => t.muted,
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct RewindOverlay {
@@ -214,33 +236,36 @@ impl RewindOverlay {
     }
 
     fn render_sessions(&mut self, frame: &mut Frame, area: Rect) {
+        let t = tokens();
         let items: Vec<ListItem> = self
             .sessions
             .iter()
             .enumerate()
             .map(|(i, s)| {
                 let selected = i == self.selected;
-                let style = if selected {
-                    Style::default()
-                        .bg(Color::Blue)
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD)
+                let row = if selected {
+                    selection(t)
                 } else {
                     Style::default()
+                };
+                // `● here` names the session this process is recording. It is
+                // the current actionable marker, the one thing accent colours.
+                let mark_style = if s.is_current { row.fg(t.accent) } else { row };
+                let muted_style = if selected {
+                    row
+                } else {
+                    Style::default().fg(t.muted)
                 };
 
                 let current_mark = if s.is_current { " ● here" } else { "" };
                 let lines = vec![
                     Line::from(vec![
-                        Span::styled(&s.name, style),
-                        Span::styled(current_mark, style.fg(Color::Green)),
-                        Span::styled(
-                            format!("  ({} msgs)", s.message_count),
-                            style.fg(Color::DarkGray),
-                        ),
+                        Span::styled(&s.name, row),
+                        Span::styled(current_mark, mark_style),
+                        Span::styled(format!("  ({} msgs)", s.message_count), muted_style),
                     ]),
                     Line::from(vec![
-                        Span::styled("    ", Style::default()),
+                        Span::raw("    "),
                         Span::styled(
                             format!(
                                 "{}  {}",
@@ -251,11 +276,11 @@ impl RewindOverlay {
                                     s.model.as_str()
                                 }
                             ),
-                            style.fg(Color::Gray),
+                            muted_style,
                         ),
                     ]),
                 ];
-                ListItem::new(lines).style(style)
+                ListItem::new(lines).style(row)
             })
             .collect();
 
@@ -263,49 +288,53 @@ impl RewindOverlay {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
+                    .border_style(Style::default().fg(t.border))
                     .title(format!(" Sessions ({}) ", self.sessions.len())),
             )
-            .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
+            .highlight_style(selection(t).add_modifier(Modifier::BOLD));
         frame.render_stateful_widget(list, area, &mut self.list_state);
     }
 
     fn render_turns(&mut self, frame: &mut Frame, area: Rect) {
+        let t = tokens();
         let items: Vec<ListItem> = self
             .turns
             .iter()
             .enumerate()
-            .map(|(i, t)| {
+            .map(|(i, turn)| {
                 let selected = i == self.selected;
-                let style = if selected {
-                    Style::default()
-                        .bg(Color::Blue)
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD)
+                let row = if selected {
+                    selection(t)
                 } else {
                     Style::default()
                 };
-
-                let role_color = match t.role {
-                    "you" => Color::Cyan,
-                    "answer" => Color::Green,
-                    "error" => Color::Red,
-                    _ => Color::Gray,
-                };
+                let role_color = role_color(turn.role, t);
 
                 // One drawn row per entry: a wrapped line would make the
                 // selection highlight meaningless.
                 let lines = vec![Line::from(vec![
                     Span::styled(
-                        format!("#{} ", t.index),
-                        Style::default().fg(Color::DarkGray),
+                        format!("#{} ", turn.index),
+                        if selected {
+                            row
+                        } else {
+                            Style::default().fg(t.muted)
+                        },
                     ),
                     Span::styled(
-                        format!("[{}] ", t.role),
-                        Style::default().fg(role_color).add_modifier(Modifier::BOLD),
+                        format!("[{}] ", turn.role),
+                        row.patch(Style::default().fg(role_color).add_modifier(Modifier::BOLD)),
                     ),
-                    Span::styled(ellipsize(&t.text, 100), style.fg(Color::Gray)),
+                    Span::styled(
+                        ellipsize(&turn.text, 100),
+                        if selected {
+                            row
+                        } else {
+                            Style::default().fg(t.text)
+                        },
+                    ),
                 ])];
-                ListItem::new(lines).style(style)
+                ListItem::new(lines).style(row)
             })
             .collect();
 
@@ -313,9 +342,10 @@ impl RewindOverlay {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
+                    .border_style(Style::default().fg(t.border))
                     .title(format!(" This Session's Turns ({}) ", self.turns.len())),
             )
-            .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
+            .highlight_style(selection(t).add_modifier(Modifier::BOLD));
         frame.render_stateful_widget(list, area, &mut self.list_state);
     }
 }
@@ -430,6 +460,7 @@ impl Overlay for RewindOverlay {
         }
 
         frame.render_widget(Clear, area);
+        let t = tokens();
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -443,34 +474,41 @@ impl Overlay for RewindOverlay {
         let tab_titles: Vec<&str> = self
             .tabs
             .iter()
-            .map(|t| match t {
+            .map(|tab| match tab {
                 RewindTab::Sessions => "Sessions",
                 RewindTab::Turns => "Turns",
             })
             .collect();
         let tabs = Tabs::new(tab_titles)
-            .block(Block::default().borders(Borders::ALL).title(" Rewind "))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(t.border))
+                    .title(" Rewind "),
+            )
             .select(self.active_tab)
-            .style(Style::default().fg(Color::Gray))
-            .highlight_style(
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            );
+            .style(Style::default().fg(t.muted))
+            .highlight_style(selection(t).add_modifier(Modifier::BOLD));
         frame.render_widget(tabs, chunks[0]);
 
         if self.detail_view {
             let detail = Paragraph::new(self.detail_content.clone())
-                .style(Style::default().fg(Color::White))
-                .block(Block::default().borders(Borders::ALL).title(" Detail "))
+                .style(Style::default().fg(t.text))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(t.border))
+                        .title(" Detail "),
+                )
                 .wrap(Wrap { trim: false });
             frame.render_widget(detail, chunks[1]);
         } else if self.rows() == 0 {
             let note = Paragraph::new(self.state_text())
-                .style(Style::default().fg(Color::Gray))
+                .style(Style::default().fg(t.muted))
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
+                        .border_style(Style::default().fg(t.border))
                         .title(match self.tab() {
                             RewindTab::Sessions => " Sessions ",
                             RewindTab::Turns => " This Session's Turns ",
@@ -491,8 +529,12 @@ impl Overlay for RewindOverlay {
             "↑↓: move · enter: detail · tab: next tab · r: reread · esc: close"
         };
         let help = Paragraph::new(help_text)
-            .style(Style::default().fg(Color::DarkGray))
-            .block(Block::default().borders(Borders::ALL));
+            .style(Style::default().fg(t.muted))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(t.border)),
+            );
         frame.render_widget(help, chunks[2]);
     }
 
@@ -587,5 +629,97 @@ mod tests {
     fn a_title_with_a_newline_still_draws_one_row() {
         assert_eq!(ellipsize("first line\nsecond", 40), "first line");
         assert_eq!(ellipsize("abcdef", 4), "abc…");
+    }
+
+    #[test]
+    fn selection_stays_visible_without_colour() {
+        let plain = selection(Tokens::for_palette(crate::tui::theme::Palette::NoColor));
+        assert_eq!(plain.fg, None);
+        assert_eq!(plain.bg, None);
+        assert!(
+            plain.add_modifier.contains(Modifier::REVERSED),
+            "reverse video is the only thing marking the row when colour is gone"
+        );
+
+        let t = Tokens::for_palette(crate::tui::theme::Palette::Dark);
+        let themed = selection(t);
+        assert_eq!(themed.fg, Some(t.selected_fg));
+        assert_eq!(themed.bg, Some(t.selected_bg));
+    }
+
+    #[test]
+    fn turn_roles_are_semantic_and_never_the_only_signal() {
+        let plain = Tokens::for_palette(crate::tui::theme::Palette::NoColor);
+        for role in ["you", "answer", "error", "tool", "tool done", "tool failed"] {
+            assert_eq!(
+                role_color(role, plain),
+                Color::Reset,
+                "{role} must have no colour under NO_COLOR"
+            );
+        }
+
+        let t = Tokens::for_palette(crate::tui::theme::Palette::Dark);
+        assert_eq!(role_color("error", t), t.error);
+        assert_eq!(role_color("tool failed", t), t.error);
+        assert_eq!(role_color("tool done", t), t.success);
+        assert_eq!(role_color("you", t), t.text);
+        assert_eq!(role_color("answer", t), t.text);
+        assert_eq!(role_color("tool", t), t.muted);
+    }
+
+    fn draw(overlay: &mut RewindOverlay, width: u16, height: u16) -> String {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        let app = App::new("s", false);
+        terminal
+            .draw(|frame| overlay.render(frame, frame.area(), &app))
+            .expect("draw must not fail");
+        let buffer = terminal.backend().buffer();
+        let mut out = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                out.push_str(buffer[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    /// Failure and completion are written out, not encoded in a colour, so a
+    /// reader with every token Reset still knows what each turn was.
+    #[test]
+    fn turn_roles_are_written_out_in_the_rendered_frame() {
+        let mut overlay = on_turns(vec![
+            turn(0, "error", "the model refused"),
+            turn(1, "tool failed", "exit code 1"),
+            turn(2, "tool done", "ok"),
+        ]);
+        overlay.visible = true;
+        let text = draw(&mut overlay, 90, 20);
+        assert!(text.contains("[error]"), "{text}");
+        assert!(text.contains("[tool failed]"), "{text}");
+        assert!(text.contains("[tool done]"), "{text}");
+        assert!(text.contains("the model refused"), "{text}");
+    }
+
+    #[test]
+    fn session_rows_keep_their_facts_in_words() {
+        let mut overlay = RewindOverlay::new();
+        overlay.visible = true;
+        overlay.sessions.push(SessionEntry {
+            name: "demo".into(),
+            model: String::new(),
+            created: "2026-11-23 10:00 UTC".into(),
+            message_count: 2,
+            path: "/tmp/demo.json".into(),
+            is_current: true,
+        });
+        overlay.clamp();
+        let text = draw(&mut overlay, 90, 20);
+        assert!(text.contains("demo"), "{text}");
+        assert!(text.contains("here"), "{text}");
+        assert!(text.contains("2 msgs"), "{text}");
+        assert!(text.contains("unreadable"), "{text}");
+        assert!(text.contains("2026-11-23 10:00 UTC"), "{text}");
     }
 }

@@ -16,7 +16,7 @@
 
 use anyhow::Result;
 use chrono::{DateTime, NaiveDate, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 /// What a verb produced.
@@ -158,6 +158,119 @@ impl ExitCode {
     }
 }
 
+/// Schema version of the machine-readable JSON error envelope. Bump only with
+/// a coordinated change to every caller that branches on the envelope.
+pub const ERROR_ENVELOPE_SCHEMA_VERSION: u8 = 1;
+
+/// The one registry of stable error codes.
+///
+/// Callers match on [`ErrorCode::as_str`] (or the typed enum), never on message
+/// prose. The `as_str` values are part of the contract: changing one is a
+/// breaking change to every script that reads a failure envelope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ErrorCode {
+    Runtime,
+    Usage,
+    Auth,
+    NotFound,
+    Conflict,
+    Transient,
+    RateLimited,
+    Unsupported,
+    Cancelled,
+}
+
+impl ErrorCode {
+    /// The stable string a caller branches on.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Runtime => "RUNTIME",
+            Self::Usage => "USAGE",
+            Self::Auth => "AUTH",
+            Self::NotFound => "NOT_FOUND",
+            Self::Conflict => "CONFLICT",
+            Self::Transient => "TRANSIENT",
+            Self::RateLimited => "RATE_LIMITED",
+            Self::Unsupported => "UNSUPPORTED",
+            Self::Cancelled => "CANCELLED",
+        }
+    }
+
+    /// The documented stable exit-code map.
+    ///
+    /// | Code | Exit | Meaning |
+    /// |---|---|---|
+    /// | RUNTIME | 1 | unexpected runtime failure |
+    /// | USAGE | 2 | bad flag or missing argument |
+    /// | AUTH | 3 | credential or entitlement failure |
+    /// | NOT_FOUND | 4 | the named thing does not exist |
+    /// | TRANSIENT | 5 | network/server failure; a retry may help |
+    /// | CONFLICT | 6 | valid request, state moved underneath it |
+    /// | RATE_LIMITED | 7 | retry after a delay |
+    /// | UNSUPPORTED | 8 | this build lacks the feature |
+    /// | CANCELLED | 130 | interrupted |
+    ///
+    /// The core map the design research asks for is 0 success, 1 runtime,
+    /// 2 usage, 3 auth, 4 not-found, 5 conflict. The shipped [`ExitCode`]
+    /// reserves 5 for transient failures and uses 6 for conflict; this helper
+    /// maps an error kind onto the shipped enum so existing call sites keep
+    /// their codes.
+    pub fn exit_code(self) -> ExitCode {
+        match self {
+            Self::Runtime => ExitCode::Unexpected,
+            Self::Usage => ExitCode::Usage,
+            Self::Auth => ExitCode::Auth,
+            Self::NotFound => ExitCode::NotFound,
+            Self::Transient => ExitCode::Transient,
+            Self::Conflict => ExitCode::Conflict,
+            Self::RateLimited => ExitCode::RateLimited,
+            Self::Unsupported => ExitCode::Unsupported,
+            Self::Cancelled => ExitCode::Cancelled,
+        }
+    }
+
+    /// Whether retrying an operation that produced this error may succeed.
+    pub fn retryable(self) -> bool {
+        matches!(self, Self::Transient | Self::Conflict | Self::RateLimited)
+    }
+
+    /// Derive the stable code from a shipped exit code.
+    pub fn from_exit_code(code: u8) -> Self {
+        match code {
+            2 => Self::Usage,
+            3 => Self::Auth,
+            4 => Self::NotFound,
+            5 => Self::Transient,
+            6 => Self::Conflict,
+            7 => Self::RateLimited,
+            8 => Self::Unsupported,
+            130 => Self::Cancelled,
+            _ => Self::Runtime,
+        }
+    }
+}
+
+/// Map an error kind to the process exit code. See [`ErrorCode::exit_code`].
+pub fn exit_code_for(code: ErrorCode) -> ExitCode {
+    code.exit_code()
+}
+
+/// Optional structured extras for the versioned envelope.
+///
+/// Kept behind one `Box` in [`ErrorOutcome`] so a failure stays a small `Err`
+/// variant: every `Result<_, ErrorOutcome>` in the crate is checked by
+/// `clippy::result_large_err`, and inlining these fields pushed the error past
+/// its 128-byte budget.
+#[derive(Debug, Clone, Default, Serialize)]
+struct ErrorExtras {
+    error_code: Option<ErrorCode>,
+    retryable: Option<bool>,
+    context: Value,
+    run: Option<String>,
+    suggestion: Option<String>,
+}
+
 /// Detailed error outcome with structured fields for JSON envelope.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -175,6 +288,10 @@ pub struct ErrorOutcome {
     /// Documentation URL (optional).
     #[serde(skip_serializing_if = "Option::is_none", rename = "docs")]
     pub docs_url: Option<String>,
+    /// Structured extras for the versioned envelope. Boxed to keep the error
+    /// type small; reach it through the `with_*` builders below.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    extras: Option<Box<ErrorExtras>>,
 }
 
 impl ErrorOutcome {
@@ -186,6 +303,7 @@ impl ErrorOutcome {
             cause: None,
             fix: None,
             docs_url: None,
+            extras: None,
         }
     }
 
@@ -205,6 +323,72 @@ impl ErrorOutcome {
     pub fn with_docs_url(mut self, docs_url: impl Into<String>) -> Self {
         self.docs_url = Some(docs_url.into());
         self
+    }
+
+    /// Pin the stable machine code instead of deriving it from the exit code.
+    pub fn with_error_code(mut self, code: ErrorCode) -> Self {
+        self.extras
+            .get_or_insert_with(Box::<ErrorExtras>::default)
+            .error_code = Some(code);
+        self
+    }
+
+    /// State explicitly whether retrying may succeed.
+    pub fn with_retryable(mut self, retryable: bool) -> Self {
+        self.extras
+            .get_or_insert_with(Box::<ErrorExtras>::default)
+            .retryable = Some(retryable);
+        self
+    }
+
+    /// Attach structured context to the versioned envelope.
+    pub fn with_context(mut self, context: Value) -> Self {
+        self.extras
+            .get_or_insert_with(Box::<ErrorExtras>::default)
+            .context = context;
+        self
+    }
+
+    /// Attach a concrete recovery command, shown as `run:` in human output.
+    pub fn with_run(mut self, run: impl Into<String>) -> Self {
+        self.extras
+            .get_or_insert_with(Box::<ErrorExtras>::default)
+            .run = Some(run.into());
+        self
+    }
+
+    /// Attach an explicit "did you mean 'x'?" hint. Never executed.
+    pub fn with_suggestion(mut self, suggestion: impl Into<String>) -> Self {
+        self.extras
+            .get_or_insert_with(Box::<ErrorExtras>::default)
+            .suggestion = Some(suggestion.into());
+        self
+    }
+
+    /// Add a "did you mean 'x'?" hint from a candidate list when one is close.
+    /// The correction is recorded as text and is never run.
+    pub fn with_typo_suggestion(mut self, input: &str, candidates: &[&str]) -> Self {
+        self.extras
+            .get_or_insert_with(Box::<ErrorExtras>::default)
+            .suggestion = did_you_mean(input, candidates);
+        self
+    }
+
+    /// The explicit machine code, when one was pinned with [`Self::with_error_code`].
+    pub fn error_code(&self) -> Option<ErrorCode> {
+        self.extras.as_ref().and_then(|extra| extra.error_code)
+    }
+
+    /// The explicit recovery command, when one was set with [`Self::with_run`].
+    pub fn run_command(&self) -> Option<&str> {
+        self.extras.as_ref().and_then(|extra| extra.run.as_deref())
+    }
+
+    /// The explicit typo hint, when one was set.
+    pub fn typo_hint(&self) -> Option<&str> {
+        self.extras
+            .as_ref()
+            .and_then(|extra| extra.suggestion.as_deref())
     }
 
     /// Create from anyhow error with default exit code.
@@ -443,6 +627,179 @@ pub fn success_envelope(command: &'static str, data: &Value) -> Value {
         "version": env!("CARGO_PKG_VERSION"),
         "data": data,
     })
+}
+
+/// Error detail inside the versioned envelope.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ErrorDetail {
+    /// Stable code from the one registry; callers branch on this, not on prose.
+    pub code: ErrorCode,
+    /// One sentence a person can read.
+    pub message: String,
+    /// Whether a retry may succeed.
+    pub retryable: bool,
+    /// Structured context. Never a stack trace and never a secret.
+    pub context: Value,
+    /// Concrete recovery command, when one exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run: Option<String>,
+}
+
+/// The versioned JSON error envelope written to stderr for `--json` failures:
+/// `{"schemaVersion":1,"error":{"code":"...","message":"...","retryable":false,"context":{},"run":"..."}}`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ErrorEnvelope {
+    pub schema_version: u8,
+    pub error: ErrorDetail,
+}
+
+impl ErrorEnvelope {
+    /// Render as a `serde_json::Value` for callers that merge it into a larger
+    /// document.
+    pub fn to_value(&self) -> Value {
+        serde_json::to_value(self).unwrap_or_else(|_| {
+            json!({
+                "schemaVersion": ERROR_ENVELOPE_SCHEMA_VERSION,
+                "error": {
+                    "code": "RUNTIME",
+                    "message": "unserializable error",
+                    "retryable": false,
+                    "context": {},
+                },
+            })
+        })
+    }
+
+    /// Render as indented JSON for stderr.
+    pub fn to_string_pretty(&self) -> String {
+        serde_json::to_string_pretty(self).unwrap_or_else(|_| self.to_value().to_string())
+    }
+}
+
+/// Build the versioned envelope from an [`ErrorOutcome`].
+///
+/// This is additive: callers that already build an `ErrorOutcome` need no new
+/// fields to get a stable code, retryability and context — the numeric exit
+/// code, `cause` and `docs_url` are enough. Callers that want a finer code or a
+/// concrete recovery command can set the optional fields.
+pub fn error_envelope(error: &ErrorOutcome) -> ErrorEnvelope {
+    let extras = error.extras.as_deref();
+    let code = error
+        .error_code()
+        .unwrap_or_else(|| ErrorCode::from_exit_code(error.code));
+    let retryable = extras
+        .and_then(|extra| extra.retryable)
+        .unwrap_or_else(|| code.retryable());
+
+    let mut context = serde_json::Map::new();
+    if let Some(cause) = &error.cause {
+        context.insert("cause".into(), json!(cause));
+    }
+    if let Some(docs) = &error.docs_url {
+        context.insert("docs".into(), json!(docs));
+    }
+    if let Some(suggestion) = extras.and_then(|extra| extra.suggestion.as_deref()) {
+        context.insert("suggestion".into(), json!(suggestion));
+    }
+    match extras.map(|extra| &extra.context) {
+        Some(Value::Object(extra)) => {
+            for (key, value) in extra {
+                context.insert(key.clone(), value.clone());
+            }
+        }
+        Some(other) => {
+            context.insert("detail".into(), other.clone());
+        }
+        None => {}
+    }
+
+    ErrorEnvelope {
+        schema_version: ERROR_ENVELOPE_SCHEMA_VERSION,
+        error: ErrorDetail {
+            code,
+            message: error.message.clone(),
+            retryable,
+            context: Value::Object(context),
+            run: error
+                .run_command()
+                .map(str::to_owned)
+                .or_else(|| error.fix.clone()),
+        },
+    }
+}
+
+/// Human error: headline first, then optional `note:` context, then `run:`.
+///
+/// No stack trace is printed and no secret is read from the environment.
+pub fn render_error_human(error: &ErrorOutcome) -> String {
+    let mut lines = vec![format!("memnoth: {}", error.message)];
+    if let Some(cause) = &error.cause {
+        lines.push(format!("  note: {cause}"));
+    }
+    if let Some(suggestion) = error.typo_hint() {
+        lines.push(format!("  note: {suggestion}"));
+    }
+    if let Some(run) = error.run_command().or(error.fix.as_deref()) {
+        lines.push(format!("  run: {run}"));
+    }
+    if let Some(docs) = &error.docs_url {
+        lines.push(format!("  docs: {docs}"));
+    }
+    lines.join("\n")
+}
+
+/// Emit a failure in the versioned shape. Unlike [`emit_error`], the JSON
+/// branch carries `schemaVersion` and a typed `error` object; the human branch
+/// is headline / note / run. Both go to stderr.
+pub fn emit_error_envelope(json: bool, error: &ErrorOutcome) {
+    if json {
+        eprintln!("{}", error_envelope(error).to_string_pretty());
+    } else {
+        eprintln!("{}", render_error_human(error));
+    }
+}
+
+/// Levenshtein edit distance over Unicode characters.
+pub fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut previous: Vec<usize> = (0..=b.len()).collect();
+    let mut current = vec![0usize; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        current[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            current[j + 1] = (current[j] + 1)
+                .min(previous[j + 1] + 1)
+                .min(previous[j] + cost);
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[b.len()]
+}
+
+/// The closest candidate within a small typo tolerance, or `None`.
+///
+/// Ties keep the earliest candidate so suggestions are deterministic.
+pub fn closest<'a>(input: &str, candidates: &'a [&'a str]) -> Option<&'a str> {
+    let mut best: Option<(&'a str, usize)> = None;
+    for &candidate in candidates {
+        let distance = edit_distance(input, candidate);
+        if distance <= 2
+            && distance < candidate.chars().count()
+            && best.is_none_or(|(_, best_distance)| distance < best_distance)
+        {
+            best = Some((candidate, distance));
+        }
+    }
+    best.map(|(candidate, _)| candidate)
+}
+
+/// Build an explicit "did you mean 'x'?" hint. It only returns text; the
+/// correction is never run, so a typo can never trigger a state change.
+pub fn did_you_mean(input: &str, candidates: &[&str]) -> Option<String> {
+    closest(input, candidates).map(|candidate| format!("did you mean '{candidate}'?"))
 }
 
 /// Parse the instants `vault asof --at` accepts.

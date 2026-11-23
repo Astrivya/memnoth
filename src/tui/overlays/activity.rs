@@ -15,6 +15,32 @@ use crate::tui::agents::{self, AgentStatus};
 use crate::tui::app::{App, EntryRole};
 use crate::tui::jobs::JobStatus;
 use crate::tui::overlays::{Overlay, OverlayAction, OverlayKind};
+use crate::tui::theme::{Tokens, tokens};
+
+/// A selected row must still be distinguishable when every token is Reset,
+/// which is what NO_COLOR (and `TERM=dumb`) produce. Reverse video carries the
+/// same meaning without asking the terminal for a colour.
+fn selection(t: Tokens) -> Style {
+    if t.colored() {
+        Style::default().fg(t.selected_fg).bg(t.selected_bg)
+    } else {
+        Style::default().add_modifier(Modifier::REVERSED)
+    }
+}
+
+/// State words are drawn literally, so a reader loses nothing when every
+/// semantic role collapses to Reset under NO_COLOR. The colour only adds a
+/// second, redundant cue: failure is error, completion is success, and a
+/// stranded run is a warning.
+fn state_color(state: &str, t: Tokens) -> Color {
+    match state {
+        "failed" => t.error,
+        "done" | "completed" => t.success,
+        "orphaned" | "parked" => t.warning,
+        "running" => t.text,
+        _ => t.muted, // starting, waiting, stopped, cancelled
+    }
+}
 
 const TABS: [ActivityTab; 3] = [
     ActivityTab::Agents,
@@ -327,12 +353,13 @@ impl Overlay for ActivityOverlay {
     }
 
     fn render(&mut self, frame: &mut Frame, area: Rect, app: &App) {
+        let t = tokens();
         let width = area.width.saturating_sub(2).min(94);
         let height = area.height.saturating_sub(2).min(20);
         if width < 34 || height < 8 {
             frame.render_widget(
                 Paragraph::new("Resize the terminal to open activity")
-                    .style(Style::default().fg(Color::Gray))
+                    .style(Style::default().fg(t.muted))
                     .alignment(Alignment::Center),
                 area,
             );
@@ -342,10 +369,7 @@ impl Overlay for ActivityOverlay {
         let y = area.y + (area.height - height) / 2;
         let rect = Rect::new(x, y, width, height);
         frame.render_widget(Clear, rect);
-        frame.render_widget(
-            Block::default().style(Style::default().bg(Color::Rgb(16, 19, 23))),
-            rect,
-        );
+        frame.render_widget(Block::default().style(Style::default().bg(t.surface)), rect);
         let inner = Rect::new(
             rect.x + 3,
             rect.y + 1,
@@ -368,11 +392,9 @@ impl Overlay for ActivityOverlay {
             .flat_map(|tab| {
                 let selected = self.tab() == *tab;
                 let style = if selected {
-                    Style::default()
-                        .fg(Color::Rgb(233, 241, 241))
-                        .add_modifier(Modifier::BOLD)
+                    selection(t).add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(Color::Rgb(131, 143, 154))
+                    Style::default().fg(t.muted)
                 };
                 [
                     Span::styled(format!(" {} ", tab.label()), style),
@@ -384,7 +406,7 @@ impl Overlay for ActivityOverlay {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 "────────────────────────────────────────────────────────────────────────",
-                Style::default().fg(Color::Rgb(53, 59, 65)),
+                Style::default().fg(t.border),
             ))),
             chunks[1],
         );
@@ -397,21 +419,31 @@ impl Overlay for ActivityOverlay {
             let index = start + offset;
             let selected = index == self.selected;
             let pointer = if selected { "› " } else { "  " };
-            let title_style = if selected {
-                Style::default()
-                    .fg(Color::Rgb(238, 244, 244))
-                    .add_modifier(Modifier::BOLD)
+            let row_style = if selected {
+                selection(t)
             } else {
-                Style::default().fg(Color::Rgb(198, 207, 215))
+                Style::default()
             };
-            let state_style = match row.state.as_str() {
-                "running" => Style::default().fg(Color::Rgb(117, 226, 195)),
-                "failed" => Style::default().fg(Color::Rgb(255, 148, 132)),
-                "done" | "completed" => Style::default().fg(Color::Rgb(133, 160, 137)),
-                _ => Style::default().fg(Color::Rgb(133, 143, 153)),
+            let title_style = if selected {
+                row_style.add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(t.text)
+            };
+            // The pointer is the current actionable marker: accent is reserved
+            // for it, including on the selected row's highlighted background.
+            let pointer_style = if selected {
+                row_style.fg(t.accent)
+            } else {
+                Style::default()
+            };
+            let state_color = state_color(&row.state, t);
+            let state_style = if selected {
+                row_style.patch(Style::default().fg(state_color))
+            } else {
+                Style::default().fg(state_color)
             };
             lines.push(Line::from(vec![
-                Span::styled(pointer, Style::default().fg(Color::Rgb(117, 226, 195))),
+                Span::styled(pointer, pointer_style),
                 Span::styled(
                     ellipsize(
                         &row.title,
@@ -422,18 +454,23 @@ impl Overlay for ActivityOverlay {
                 Span::raw("  "),
                 Span::styled(row.state.clone(), state_style),
             ]));
+            let detail_style = if selected {
+                row_style
+            } else {
+                Style::default().fg(t.muted)
+            };
             lines.push(Line::from(vec![
                 Span::raw("   "),
                 Span::styled(
                     ellipsize(&row.detail, (inner.width as usize).saturating_sub(5)),
-                    Style::default().fg(Color::Rgb(121, 133, 144)),
+                    detail_style,
                 ),
             ]));
         }
         let content = if lines.is_empty() {
             vec![Line::from(Span::styled(
                 "Nothing running here yet.",
-                Style::default().fg(Color::Rgb(124, 136, 146)),
+                Style::default().fg(t.muted),
             ))]
         } else {
             lines
@@ -455,7 +492,7 @@ impl Overlay for ActivityOverlay {
             .map(|notice| format!("{notice}   ·   {help}"))
             .unwrap_or_else(|| help.to_string());
         frame.render_widget(
-            Paragraph::new(footer).style(Style::default().fg(Color::Rgb(137, 148, 157))),
+            Paragraph::new(footer).style(Style::default().fg(t.muted)),
             chunks[3],
         );
     }
@@ -543,5 +580,71 @@ fn open_system_terminal(root: &Path) -> anyhow::Result<()> {
     {
         let _ = root;
         anyhow::bail!("opening a system terminal is not supported on this platform")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::theme::Palette;
+
+    #[test]
+    fn selection_stays_visible_without_colour() {
+        let plain = selection(Tokens::for_palette(Palette::NoColor));
+        assert_eq!(plain.fg, None);
+        assert_eq!(plain.bg, None);
+        assert!(
+            plain.add_modifier.contains(Modifier::REVERSED),
+            "reverse video is the only thing marking the row when colour is gone"
+        );
+
+        let t = Tokens::for_palette(Palette::Dark);
+        let themed = selection(t);
+        assert_eq!(themed.fg, Some(t.selected_fg));
+        assert_eq!(themed.bg, Some(t.selected_bg));
+    }
+
+    #[test]
+    fn state_colours_are_semantic_and_never_the_only_signal() {
+        let plain = Tokens::for_palette(Palette::NoColor);
+        for state in [
+            "starting",
+            "running",
+            "waiting",
+            "done",
+            "completed",
+            "failed",
+            "stopped",
+            "orphaned",
+            "parked",
+            "cancelled",
+        ] {
+            assert_eq!(
+                state_color(state, plain),
+                Color::Reset,
+                "{state} must have no colour under NO_COLOR"
+            );
+        }
+
+        let t = Tokens::for_palette(Palette::Dark);
+        assert_eq!(state_color("failed", t), t.error);
+        assert_eq!(state_color("done", t), t.success);
+        assert_eq!(state_color("completed", t), t.success);
+        assert_eq!(state_color("orphaned", t), t.warning);
+        assert_eq!(state_color("parked", t), t.warning);
+        assert_eq!(state_color("running", t), t.text);
+        assert_eq!(state_color("cancelled", t), t.muted);
+    }
+
+    /// The state word itself is drawn from these literals, never from a colour,
+    /// so stripping every token still leaves the failure readable.
+    #[test]
+    fn status_labels_remain_literal_words() {
+        assert_eq!(agent_status(AgentStatus::Failed), "failed");
+        assert_eq!(agent_status(AgentStatus::Done), "done");
+        assert_eq!(agent_status(AgentStatus::Orphaned), "orphaned");
+        assert_eq!(JobStatus::Running.label(), "running");
+        assert_eq!(JobStatus::Completed.label(), "done");
+        assert_eq!(JobStatus::Failed.label(), "failed");
     }
 }

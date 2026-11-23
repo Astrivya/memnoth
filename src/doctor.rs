@@ -62,31 +62,36 @@ pub fn report(ctx: &AppContext) -> Result<Outcome> {
     text.push('\n');
 
     let next = next_step(&vault, &graph, &provider, &mcp);
-    if !next.is_empty() {
+    // One suggested command, not a menu. Doctor is the `git status` of the
+    // CLI: a status that lists four possible first moves has made no decision
+    // for the reader. The per-check `next_step` fields in JSON carry the rest
+    // for a machine that wants the full set.
+    if let Some(first) = next.first() {
         text.push_str("next\n");
-        for line in next {
-            text.push_str(&format!("  {line}\n"));
-        }
+        text.push_str(&format!("  {first}\n"));
     }
 
-    Ok(Outcome::new(
-        "doctor",
-        text,
-        json!({
-            "version": env!("CARGO_PKG_VERSION"),
-            "workspace": ctx.root.display().to_string(),
-            "state": ctx.home.display().to_string(),
-            "config": ctx.config_path.display().to_string(),
-            "vault": vault.data,
-            "graph": graph.data,
-            "provider": provider.data,
-            "mcp": mcp.data,
-            "profiles": profiles.data,
-            "instructions": instructions.data,
-            "sandbox": sandbox.data,
-            "checks": checks_json(&rows),
-        }),
-    ))
+    let mut data = json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "workspace": ctx.root.display().to_string(),
+        "state": ctx.home.display().to_string(),
+        "config": ctx.config_path.display().to_string(),
+        "vault": vault.data,
+        "graph": graph.data,
+        "provider": provider.data,
+        "mcp": mcp.data,
+        "profiles": profiles.data,
+        "instructions": instructions.data,
+        "sandbox": sandbox.data,
+        "checks": checks_json(&rows),
+    });
+    // Additive, and only present when something is actually missing. A bare
+    // "missing" is a dead end; the command is the way out of it.
+    if let Some(first) = next.first() {
+        data["next_step"] = json!(first);
+    }
+
+    Ok(Outcome::new("doctor", text, data))
 }
 /// `memnoth doctor` with optional `--fix` or `--bundle`.
 pub fn run(ctx: &AppContext, args: &DoctorArgs) -> Result<Outcome> {
@@ -434,15 +439,18 @@ fn keyring_check(_ctx: &AppContext) -> Check {
     if !exists {
         return observed(
             "keyring",
-            "credential store readable (no file store yet)".to_string(),
+            "keyring first, 0600 file fallback (no file store yet)".to_string(),
         );
     }
     if permissions_ok {
-        observed("keyring", "credential store readable".to_string())
+        observed(
+            "keyring",
+            "keyring first, 0600 file fallback (file store present)".to_string(),
+        )
     } else {
         warn(
             "keyring",
-            "credential file permissions are too open".to_string(),
+            "0600 file fallback has permissions that are too open".to_string(),
             true,
         )
     }
@@ -962,16 +970,46 @@ fn backup_if_exists(path: &std::path::Path) -> Result<Option<std::path::PathBuf>
     Ok(Some(candidate))
 }
 
+/// The one local command that unblocks a non-Ok check, when there is one.
+///
+/// Only checks that are missing or fixable get a command; a fact that was
+/// merely observed must not invent a next step, and a failure with no local
+/// remedy must not suggest a command that cannot help. Every command is a real
+/// verb (or a real global flag of one), needs no account, and never claims a
+/// cloud session — first-run work is local work.
+fn next_step_for(check: &Check) -> Option<&'static str> {
+    if check.state == CheckState::Ok {
+        return None;
+    }
+    Some(match check.name {
+        "state" | "config" | "path" | "keyring" | "lock_files" => "mn doctor --fix",
+        "vault" => "mn vault init",
+        "graph" => "mn kg index",
+        "completions" => "mn completion install",
+        "mcp_config" => "mn mcp add --local",
+        "auth" => "mn auth login",
+        // The trust gate is a flag on the same verb, not a new account step.
+        "trust" => "mn doctor --trust-folder",
+        _ => return None,
+    })
+}
+
 fn checks_json(rows: &[Check]) -> Value {
     Value::Array(
         rows.iter()
             .map(|check| {
-                json!({
+                let mut row = json!({
                     "name": check.name,
                     "state": check.state.as_str(),
                     "fixable": check.fixable,
                     "detail": check.detail,
-                })
+                });
+                // Additive: only a non-Ok check that has a concrete next action
+                // carries this field. The four original fields never move.
+                if let Some(step) = next_step_for(check) {
+                    row["next_step"] = json!(step);
+                }
+                row
             })
             .collect(),
     )
@@ -992,6 +1030,11 @@ fn checks_text(rows: &[Check]) -> String {
             check.detail,
             suffix
         ));
+        // The text form gets the same hint as the JSON form: no check ends in
+        // "missing" without naming the command that makes it true.
+        if let Some(step) = next_step_for(check) {
+            text.push_str(&format!("      next: {step}\n"));
+        }
     }
     text
 }
@@ -1053,7 +1096,7 @@ fn vault_section(ctx: &AppContext) -> Section {
             }
         }
     } else {
-        text.push_str("  state      missing — `memnoth vault init`\n");
+        text.push_str("  state      missing — `mn vault init`\n");
     }
     Section { text, data }
 }
@@ -1074,7 +1117,7 @@ fn graph_section(ctx: &AppContext) -> Section {
                     status.stale_files
                 ));
             } else {
-                text.push_str("  state      not indexed — `memnoth kg index`\n");
+                text.push_str("  state      not indexed — `mn kg index`\n");
             }
             data["indexed"] = json!(status.indexed);
             data["files"] = json!(status.files);
@@ -1123,7 +1166,10 @@ fn provider_section(ctx: &AppContext) -> Section {
         if settings.ready() {
             "set".to_string()
         } else {
-            format!("missing — export {}", settings.key_hint())
+            format!(
+                "missing — `mn connect add`; or export {}",
+                settings.key_hint()
+            )
         }
     ));
     Section {
@@ -1350,24 +1396,27 @@ fn sandbox_section(ctx: &AppContext) -> Section {
     }
 }
 
+/// Commands that unblock a half-wired machine, in the order they help.
+///
+/// Each is a real verb the binary parses, and none of them asks for an account
+/// or describes a cloud session: vault, graph and provider are all local. The
+/// first entry is the one `doctor` prints as *the* next step; the rest stay
+/// available in the per-check `next_step` fields for a machine that wants them.
 fn next_step(vault: &Section, graph: &Section, provider: &Section, mcp: &Section) -> Vec<String> {
     let mut lines = Vec::new();
     if vault.data["initialised"] == false {
-        lines.push("memnoth vault init            # create the temporal vault".to_string());
+        lines.push("mn vault init".to_string());
     }
     if graph.data["indexed"] == false {
-        lines.push("memnoth kg index              # build the code graph".to_string());
+        lines.push("mn kg index".to_string());
     }
     if provider.data["ready"] == false {
-        lines.push(
-            "export MEMNOTH_API_KEY        # let the session answer with a model".to_string(),
-        );
+        // A model key is local provider configuration. `connect add` stores it
+        // without an account; an env var is the escape hatch, not the headline.
+        lines.push("mn connect add".to_string());
     }
     if mcp.data["server"].is_null() {
-        lines.push(
-            "memnoth mcp doctor            # registration is still checkable without the server"
-                .to_string(),
-        );
+        lines.push("mn mcp doctor".to_string());
     }
     lines
 }

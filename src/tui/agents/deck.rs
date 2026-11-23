@@ -7,13 +7,14 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 
 use crate::tui::agents::{AgentStatus, ChildInfo, detail_view, steer_composer};
 use crate::tui::app::{App, EntryRole};
 use crate::tui::overlays::{Overlay, OverlayAction, OverlayKind};
+use crate::tui::theme::tokens;
 
 use detail_view::DetailPage;
 use steer_composer::SteerComposer;
@@ -701,6 +702,7 @@ impl AgentDeck {
 
     fn render_detail_panel(&mut self, frame: &mut Frame, area: Rect, app: &App) {
         frame.render_widget(Clear, area);
+        let t = tokens();
         let child = self.detail_child();
         let title = match &child {
             Some(child) => format!("Agent Deck / {} / {}", child.role, child.agent_id),
@@ -733,12 +735,10 @@ impl AgentDeck {
             Paragraph::new(vec![
                 Line::from(Span::styled(
                     title,
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(t.text).add_modifier(Modifier::BOLD),
                 )),
-                Line::from(Span::styled(state, Style::default().fg(Color::DarkGray))),
-                Line::from(Span::styled(tabs, Style::default().fg(Color::Cyan))),
+                Line::from(Span::styled(state, Style::default().fg(t.muted))),
+                Line::from(Span::styled(tabs, Style::default().fg(t.muted))),
             ]),
             vertical[0],
         );
@@ -755,19 +755,20 @@ impl AgentDeck {
             .join("\n");
         frame.render_widget(
             Paragraph::new(window)
-                .style(Style::default().fg(Color::Gray))
+                .style(Style::default().fg(t.muted))
                 .wrap(ratatui::widgets::Wrap { trim: true }),
             vertical[1],
         );
         frame.render_widget(
             Paragraph::new("1-4 / Tab sections  ·  ↑↓ scroll  ·  s steer  ·  Esc deck")
-                .style(Style::default().fg(Color::DarkGray)),
+                .style(Style::default().fg(t.muted)),
             vertical[2],
         );
     }
 
     fn render_steer_panel(&mut self, frame: &mut Frame, area: Rect) {
         frame.render_widget(Clear, area);
+        let t = tokens();
         let wired = self.steer.is_wired();
         let vertical = Layout::default()
             .direction(Direction::Vertical)
@@ -781,9 +782,7 @@ impl AgentDeck {
             Paragraph::new(vec![
                 Line::from(Span::styled(
                     "Agent Deck / Steer",
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(t.text).add_modifier(Modifier::BOLD),
                 )),
                 Line::from(Span::styled(
                     if wired {
@@ -791,7 +790,7 @@ impl AgentDeck {
                     } else {
                         "the runtime cannot accept a steer"
                     },
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(t.muted),
                 )),
             ]),
             vertical[0],
@@ -799,7 +798,7 @@ impl AgentDeck {
         let body = self.steer.lines().join("\n");
         frame.render_widget(
             Paragraph::new(body)
-                .style(Style::default().fg(Color::Gray))
+                .style(Style::default().fg(t.muted))
                 .wrap(ratatui::widgets::Wrap { trim: true }),
             vertical[1],
         );
@@ -809,7 +808,7 @@ impl AgentDeck {
             } else {
                 "Esc back"
             })
-            .style(Style::default().fg(Color::DarkGray)),
+            .style(Style::default().fg(t.muted)),
             vertical[2],
         );
     }
@@ -1216,6 +1215,7 @@ impl Overlay for AgentDeck {
 
     fn render(&mut self, frame: &mut Frame, area: Rect, app: &App) {
         self.refresh_attention_filter(app);
+        let t = tokens();
         if self.steer_open {
             self.render_steer_panel(frame, area);
             return;
@@ -1272,11 +1272,9 @@ impl Overlay for AgentDeck {
             Paragraph::new(vec![
                 Line::from(Span::styled(
                     heading,
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(t.text).add_modifier(Modifier::BOLD),
                 )),
-                Line::from(Span::styled(summary, Style::default().fg(Color::DarkGray))),
+                Line::from(Span::styled(summary, Style::default().fg(t.muted))),
             ]),
             vertical[0],
         );
@@ -1285,9 +1283,7 @@ impl Overlay for AgentDeck {
             let empty = vec![
                 Line::from(Span::styled(
                     "No delegated runs yet",
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(t.text).add_modifier(Modifier::BOLD),
                 )),
                 Line::from(""),
                 Line::from("Delegate a bounded task from chat with /delegate <agent> <task>."),
@@ -1356,17 +1352,15 @@ impl Overlay for AgentDeck {
                             Some(ListItem::new(Line::from(vec![
                                 Span::styled(
                                     if selected { "› " } else { "  " },
-                                    Style::default().fg(Color::Cyan),
+                                    Style::default().fg(t.accent),
                                 ),
                                 Span::styled(
                                     format!("{}  ", request.agent),
-                                    Style::default()
-                                        .fg(Color::White)
-                                        .add_modifier(Modifier::BOLD),
+                                    Style::default().fg(t.text).add_modifier(Modifier::BOLD),
                                 ),
                                 Span::styled(
                                     format!("{} · {}", request.kind, request.summary),
-                                    Style::default().fg(Color::Gray),
+                                    Style::default().fg(t.muted),
                                 ),
                             ])))
                         })
@@ -1377,14 +1371,17 @@ impl Overlay for AgentDeck {
             self.visible_window(roster_window.clone())
                 .map(|(index, child)| {
                     let selected = index == self.selected;
+                    // Colour is decoration only: the run phase is carried by
+                    // `status.glyph()` / `status.label()`, so mapping these to
+                    // semantic roles never changes what a phase means.
                     let status_color = match child.status {
-                        AgentStatus::Running => Color::Cyan,
-                        AgentStatus::Done => Color::Green,
-                        AgentStatus::Failed => Color::Red,
-                        AgentStatus::Waiting => Color::Yellow,
-                        AgentStatus::Orphaned => Color::Yellow,
+                        AgentStatus::Running => t.text,
+                        AgentStatus::Done => t.success,
+                        AgentStatus::Failed => t.error,
+                        AgentStatus::Waiting => t.warning,
+                        AgentStatus::Orphaned => t.warning,
                         AgentStatus::Killed | AgentStatus::Parked | AgentStatus::Starting => {
-                            Color::DarkGray
+                            t.muted
                         }
                     };
                     let indent = if self.tree_view {
@@ -1394,7 +1391,7 @@ impl Overlay for AgentDeck {
                     };
                     let marker = Span::styled(
                         if selected { "› " } else { "  " },
-                        Style::default().fg(Color::Cyan),
+                        Style::default().fg(t.accent),
                     );
                     let glyph = Span::styled(
                         format!("{} ", child.status.glyph()),
@@ -1403,7 +1400,7 @@ impl Overlay for AgentDeck {
                     let role = Span::styled(
                         format!("{indent}{}", child.role),
                         Style::default()
-                            .fg(if selected { Color::White } else { Color::Gray })
+                            .fg(if selected { t.text } else { t.muted })
                             .add_modifier(if selected {
                                 Modifier::BOLD
                             } else {
@@ -1420,7 +1417,7 @@ impl Overlay for AgentDeck {
                                         &child.task,
                                         list_area.width.saturating_sub(5) as usize,
                                     ),
-                                    Style::default().fg(Color::DarkGray),
+                                    Style::default().fg(t.muted),
                                 ),
                             ]),
                         ])
@@ -1440,7 +1437,7 @@ impl Overlay for AgentDeck {
                                             as usize,
                                     )
                                 ),
-                                Style::default().fg(Color::DarkGray),
+                                Style::default().fg(t.muted),
                             ),
                         ]))
                     }
@@ -1454,18 +1451,18 @@ impl Overlay for AgentDeck {
                 } else {
                     "No runs match this search"
                 },
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(t.muted),
             ))));
         }
         if self.mode == Mode::Inbox && rows.is_empty() && !self.inbox_query.is_empty() {
             rows.push(ListItem::new(Line::from(Span::styled(
                 "No requests match this search",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(t.muted),
             ))));
         } else if rows.is_empty() {
             rows.push(ListItem::new(Line::from(Span::styled(
                 "No requests waiting for you",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(t.muted),
             ))));
         }
         let section_title = if self.mode == Mode::Inbox && !self.inbox_query.is_empty() {
@@ -1492,7 +1489,7 @@ impl Overlay for AgentDeck {
             .highlight_symbol("")
             .highlight_style(Style::default());
         frame.render_widget(
-            Paragraph::new(section_title).style(Style::default().fg(Color::DarkGray)),
+            Paragraph::new(section_title).style(Style::default().fg(t.muted)),
             Rect {
                 height: 1,
                 ..list_area
@@ -1526,7 +1523,7 @@ impl Overlay for AgentDeck {
                 frame.render_widget(
                     Block::default()
                         .borders(Borders::LEFT)
-                        .border_style(Style::default().fg(Color::DarkGray)),
+                        .border_style(Style::default().fg(t.border)),
                     detail_area,
                 );
             }
@@ -1545,11 +1542,7 @@ impl Overlay for AgentDeck {
                 } else {
                     "SELECTED RUN"
                 })
-                .style(
-                    Style::default()
-                        .fg(Color::DarkGray)
-                        .add_modifier(Modifier::BOLD),
-                ),
+                .style(Style::default().fg(t.muted).add_modifier(Modifier::BOLD)),
                 detail_title,
             );
             let detail = if self.mode == Mode::Inbox {
@@ -1565,7 +1558,7 @@ impl Overlay for AgentDeck {
             };
             frame.render_widget(
                 Paragraph::new(detail.join("\n"))
-                    .style(Style::default().fg(Color::Gray))
+                    .style(Style::default().fg(t.muted))
                     .wrap(ratatui::widgets::Wrap { trim: true }),
                 detail_content,
             );
@@ -1591,7 +1584,7 @@ impl Overlay for AgentDeck {
                     "↑↓ move  ·  Enter detail  ·  s steer  ·  F5 refresh  ·  r revive  ·  x stop  ·  Tab inbox  ·  Esc close"
                 }
             })
-            .style(Style::default().fg(Color::DarkGray)),
+            .style(Style::default().fg(t.muted)),
             vertical[2],
         );
     }
@@ -1627,6 +1620,30 @@ impl Overlay for AgentDeck {
 mod tests {
     use super::*;
     use crossterm::event::KeyModifiers;
+    use ratatui::style::Color;
+
+    /// Foreground of the first cell drawn with `symbol`, or `None`.
+    fn first_cell_fg(buffer: &ratatui::buffer::Buffer, symbol: &str) -> Option<Color> {
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                if buffer[(x, y)].symbol() == symbol {
+                    return Some(buffer[(x, y)].fg);
+                }
+            }
+        }
+        None
+    }
+
+    fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 
     #[test]
     fn refresh_keeps_the_selected_run_when_a_child_is_added() {
@@ -2609,5 +2626,53 @@ mod tests {
         assert!(text.contains("status: not wired"), "{text}");
         assert!(text.contains("needs:"), "{text}");
         assert!(text.contains("meanwhile:"), "{text}");
+    }
+
+    #[test]
+    fn roster_status_glyphs_and_focus_marker_use_semantic_tokens() {
+        let t = tokens();
+        let child = |id: &str, status: AgentStatus| ChildInfo {
+            agent_id: id.to_string(),
+            parent_id: None,
+            root_id: None,
+            session_id: None,
+            role: "worker".to_string(),
+            task: "task".to_string(),
+            status,
+            spawn_seq: 0,
+            depth: 0,
+            model: None,
+            worktree: None,
+            unread: false,
+        };
+        let mut deck = AgentDeck::new();
+        deck.children = vec![
+            child("running", AgentStatus::Running),
+            child("done", AgentStatus::Done),
+            child("failed", AgentStatus::Failed),
+            child("waiting", AgentStatus::Waiting),
+        ];
+        deck.rebuild_order();
+        deck.rebuild_filter();
+        deck.selected = 0;
+
+        let app = App::new("s", false);
+        let backend = ratatui::backend::TestBackend::new(120, 24);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| deck.render(frame, frame.area(), &app))
+            .expect("draw tokenised roster");
+        let buffer = terminal.backend().buffer();
+
+        // Colour is decoration: the glyphs still name the phase, and only the
+        // focused row's marker reaches for the accent role.
+        assert_eq!(first_cell_fg(buffer, "›"), Some(t.accent));
+        assert_eq!(first_cell_fg(buffer, "✓"), Some(t.success));
+        assert_eq!(first_cell_fg(buffer, "✗"), Some(t.error));
+        assert_eq!(first_cell_fg(buffer, "?"), Some(t.warning));
+        assert_eq!(first_cell_fg(buffer, "│"), Some(t.border));
+        let text = buffer_text(buffer);
+        assert!(text.contains("state: ▌ running"), "{text}");
+        assert!(text.contains("SELECTED RUN"), "{text}");
     }
 }

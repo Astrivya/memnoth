@@ -244,6 +244,11 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
     if let Some(theme) = crate::tui::theme::theme_from_env() {
         app.theme = theme;
     }
+    // Resolve the semantic palette once, before any draw. The first call wins:
+    // every surface then shares one audited set of tokens instead of choosing
+    // colours independently. NO_COLOR / TERM=dumb are already folded into
+    // app.theme above, so this cannot reintroduce colour they disabled.
+    crate::tui::theme::init_palette(crate::tui::theme::Palette::from_env(app.theme));
     app.set_paths(display_path(&ctx.root), display_path(&ctx.vault_path));
     app.seed(&session);
     // The brief is what a launch shows, over whatever the file held. Splitting

@@ -3,13 +3,28 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 
 use crate::tui::app::App;
 use crate::tui::overlays::{Overlay, OverlayAction, OverlayKind};
+use crate::tui::theme::{Tokens, tokens};
 use memnoth_ui::palette::{Palette, PaletteConfig, PaletteItem, PaletteRow};
+
+/// A command name is the row's keycap: raised surface, muted text, and the
+/// accent role only on the active row. The command text is always printed, so
+/// the legend survives NO_COLOR where every token resolves to Reset.
+fn command_keycap(command: &str, active: bool, t: Tokens) -> Span<'static> {
+    let fg = if active { t.accent } else { t.muted };
+    Span::styled(
+        format!(" {:<25} ", command),
+        Style::default()
+            .bg(t.surface)
+            .fg(fg)
+            .add_modifier(Modifier::BOLD),
+    )
+}
 
 #[derive(Debug, Default)]
 pub struct PaletteOverlay {
@@ -232,6 +247,7 @@ impl Overlay for PaletteOverlay {
         if !self.visible {
             return;
         }
+        let t = tokens();
 
         let items = self.palette.filtered_items();
 
@@ -250,13 +266,9 @@ impl Overlay for PaletteOverlay {
                 " {} v{} ",
                 self.palette.config.title, self.palette.config.version
             ))
-            .title_style(
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )
+            .title_style(Style::default().fg(t.text).add_modifier(Modifier::BOLD))
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray));
+            .border_style(Style::default().fg(t.border));
 
         let inner = block.inner(popup_area);
         frame.render_widget(block, popup_area);
@@ -280,13 +292,11 @@ impl Overlay for PaletteOverlay {
         let title_block = Paragraph::new(vec![
             Line::from(Span::styled(
                 self.palette.config.title.as_str(),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(t.text).add_modifier(Modifier::BOLD),
             )),
             Line::from(Span::styled(
                 self.palette.config.subtitle.as_str(),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(t.muted),
             )),
         ]);
         frame.render_widget(title_block, title_area);
@@ -300,11 +310,11 @@ impl Overlay for PaletteOverlay {
             .iter()
             .map(|r| {
                 Line::from(vec![
-                    Span::styled(&r.label, Style::default().fg(Color::Yellow)),
+                    Span::styled(&r.label, Style::default().fg(t.text)),
                     Span::raw(": "),
                     Span::raw(&r.value),
                     Span::raw("  "),
-                    Span::styled(&r.note, Style::default().fg(Color::DarkGray)),
+                    Span::styled(&r.note, Style::default().fg(t.muted)),
                 ])
             })
             .collect::<Vec<_>>();
@@ -321,9 +331,7 @@ impl Overlay for PaletteOverlay {
         let filter_line = Line::from(vec![
             Span::styled(
                 " > ",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 if filter.is_empty() {
@@ -332,12 +340,12 @@ impl Overlay for PaletteOverlay {
                     filter.to_string()
                 },
                 if filter.is_empty() {
-                    Style::default().fg(Color::DarkGray)
+                    Style::default().fg(t.muted)
                 } else {
-                    Style::default().fg(Color::White)
+                    Style::default().fg(t.text)
                 },
             ),
-            Span::styled(format!("   {count}"), Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("   {count}"), Style::default().fg(t.muted)),
         ]);
         frame.render_widget(Paragraph::new(filter_line), chunks[2]);
 
@@ -350,14 +358,14 @@ impl Overlay for PaletteOverlay {
             let empty = Paragraph::new(vec![
                 Line::from(Span::styled(
                     " no matching command",
-                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(t.warning),
                 )),
                 Line::from(Span::styled(
                     format!(
                         " \"{}\" · enter runs it as a slash command",
                         self.palette.filter()
                     ),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(t.muted),
                 )),
             ]);
             frame.render_widget(empty, list_area);
@@ -369,27 +377,22 @@ impl Overlay for PaletteOverlay {
                 let is_selected = i == self.palette.selected_index();
                 let style = if is_selected {
                     Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Cyan)
+                        .fg(t.selected_fg)
+                        .bg(t.selected_bg)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(Color::White)
+                    Style::default().fg(t.text)
                 };
                 ListItem::new(Line::from(vec![
-                    Span::styled(
-                        format!(" {:<25} ", item.command),
-                        Style::default()
-                            .fg(Color::Green)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(item.description.as_str(), Style::default().fg(Color::Gray)),
+                    command_keycap(&item.command, is_selected, t),
+                    Span::styled(item.description.as_str(), Style::default().fg(t.muted)),
                 ]))
                 .style(style)
             })
             .collect();
 
         let list = List::new(list_items)
-            .highlight_style(Style::default().bg(Color::Cyan).fg(Color::Black))
+            .highlight_style(Style::default().bg(t.selected_bg).fg(t.selected_fg))
             .highlight_symbol("> ");
         frame.render_stateful_widget(list, list_area, &mut self.list_state);
 
@@ -397,7 +400,7 @@ impl Overlay for PaletteOverlay {
         let footer_area = chunks[4];
         let footer = Paragraph::new(Line::from(Span::styled(
             self.palette.config.footer_hint.as_str(),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(t.muted),
         )))
         .alignment(ratatui::layout::Alignment::Center);
         frame.render_widget(footer, footer_area);
@@ -527,5 +530,33 @@ mod tests {
             description: "Everything known about an entity".into(),
         };
         assert!(needs_arguments(&required));
+    }
+
+    /// Command keycaps take surface/muted; only the active row's key takes
+    /// accent. The command text is always printed, so it survives NO_COLOR.
+    #[test]
+    fn command_keycaps_use_surface_and_muted_with_accent_for_the_active_row() {
+        let t = tokens();
+        let idle = command_keycap("/help", false, t);
+        assert!(idle.content.contains("/help"));
+        assert_eq!(idle.style.bg, Some(t.surface));
+        assert_eq!(idle.style.fg, Some(t.muted));
+
+        let active = command_keycap("/help", true, t);
+        assert!(active.content.contains("/help"));
+        assert_eq!(active.style.bg, Some(t.surface));
+        assert_eq!(active.style.fg, Some(t.accent));
+    }
+
+    /// The palette keeps no second list of verbs: its items are the one command
+    /// projection shared with the help overlay and the inline dropdown.
+    #[test]
+    fn the_palette_uses_the_single_command_projection() {
+        let overlay = PaletteOverlay::new();
+        let projected = commands();
+        assert_eq!(overlay.palette.config.items.len(), projected.len());
+        for (item, row) in overlay.palette.config.items.iter().zip(projected.iter()) {
+            assert_eq!(item.command, row.command);
+        }
     }
 }

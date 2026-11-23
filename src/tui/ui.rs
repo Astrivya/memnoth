@@ -7,7 +7,7 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
@@ -16,6 +16,7 @@ use ratatui::widgets::{
 use crate::output::ellipsize;
 use crate::tui::app::{App, EntryRole, Home};
 use crate::tui::slash::Row;
+use crate::tui::theme::tokens;
 
 /// Commands a completion list may show at once. Five is the most that can be
 /// read at a glance; past that the eye stops scanning and starts reading, which
@@ -263,22 +264,21 @@ fn draw_signin(frame: &mut Frame, area: Rect, prompt: Rect, app: &App) {
         return;
     }
 
-    let label = Style::default().fg(Color::DarkGray);
+    let t = tokens();
+    let label = Style::default().fg(t.muted);
     let lines = vec![
         Line::from(vec![
             Span::styled("  code ", label),
             Span::styled(
                 signin.user_code.clone(),
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(t.text).add_modifier(Modifier::BOLD),
             ),
         ]),
         Line::from(vec![
             Span::styled("  open ", label),
             Span::styled(
                 ellipsize(&signin.url, (area.width as usize).saturating_sub(7)),
-                Style::default().fg(Color::Cyan),
+                Style::default().fg(t.accent),
             ),
         ]),
     ];
@@ -311,20 +311,21 @@ fn draw_approval(frame: &mut Frame, area: Rect, text: &str) {
         height,
     );
     frame.render_widget(Clear, popup);
+    // A confirmation asks for a decision, so its frame and title carry the
+    // warning role. The two keys are written in the text, not in a colour.
+    let t = tokens();
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow))
+        .border_style(Style::default().fg(t.warning))
         .title(Line::from(Span::styled(
             " confirm ",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(t.warning).add_modifier(Modifier::BOLD),
         )));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
     frame.render_widget(
         Paragraph::new(text.to_string())
-            .style(Style::default().fg(Color::White))
+            .style(Style::default().fg(t.text))
             .wrap(Wrap { trim: false }),
         inner,
     );
@@ -341,24 +342,21 @@ fn draw_approval(frame: &mut Frame, area: Rect, text: &str) {
 /// What is left is the three facts a person asks of a terminal: which
 /// conversation is this, what is wrong, and where am I.
 fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
+    let t = tokens();
     let width = area.width as usize;
     let mut spans = vec![Span::styled(
         format!(" {}", app.name),
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
+        Style::default().fg(t.text).add_modifier(Modifier::BOLD),
     )];
 
     // A state with no action is a riddle, so the only graph fact that earns this
     // line names the verb that resolves it (`mod.rs::graph_state` decides both
     // the wording and whether there is anything to say).
     if let Some(attention) = &app.graph_attention {
-        spans.push(Span::styled(" · ", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(" · ", Style::default().fg(t.muted)));
         spans.push(Span::styled(
             format!("{} · {}", attention.label, attention.fix),
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(t.warning).add_modifier(Modifier::BOLD),
         ));
     }
 
@@ -370,7 +368,7 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
         let path = ellipsize(&short_path(&app.root), room);
         let pad = room.saturating_sub(path.chars().count());
         spans.push(Span::raw(" ".repeat(pad + 1)));
-        spans.push(Span::styled(path, Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(path, Style::default().fg(t.muted)));
     }
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -458,7 +456,7 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &mut App) {
 fn rail_block() -> Block<'static> {
     Block::default()
         .borders(Borders::LEFT)
-        .border_style(Style::default().fg(Color::DarkGray))
+        .border_style(Style::default().fg(tokens().border))
 }
 
 /// The panel's rule, and the rectangle its content may use: one column in from
@@ -482,7 +480,7 @@ fn rail_title(title: &str) -> Line<'static> {
     Line::from(Span::styled(
         title.to_string(),
         Style::default()
-            .fg(Color::DarkGray)
+            .fg(tokens().muted)
             .add_modifier(Modifier::BOLD),
     ))
 }
@@ -493,23 +491,22 @@ fn draw_context_rail(frame: &mut Frame, area: Rect, app: &mut App) {
     if inner.width == 0 || inner.height == 0 {
         return;
     }
+    let t = tokens();
     let mut lines = vec![Line::from(Span::styled(
         "context",
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
+        Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
     ))];
     // Where this machine's sessions are filed, on the rail that already answers
     // "what is this screen". Without it the only way to know is the console.
     if let Some(project) = &app.project {
         lines.push(Line::from(vec![
-            Span::styled("project ", Style::default().fg(Color::DarkGray)),
-            Span::styled(project.clone(), Style::default().fg(Color::Cyan)),
+            Span::styled("project ", Style::default().fg(t.muted)),
+            Span::styled(project.clone(), Style::default().fg(t.text)),
         ]));
     } else {
         lines.push(Line::from(vec![
-            Span::styled("project ", Style::default().fg(Color::DarkGray)),
-            Span::styled("unassigned", Style::default().fg(Color::Yellow)),
+            Span::styled("project ", Style::default().fg(t.muted)),
+            Span::styled("unassigned", Style::default().fg(t.warning)),
         ]));
     }
     for line in app.context.lines() {
@@ -522,15 +519,14 @@ fn draw_context_rail(frame: &mut Frame, area: Rect, app: &mut App) {
             text,
             "vault" | "coordination" | "usage" | "decisions" | "lessons"
         ) {
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD)
+            Style::default().fg(t.muted).add_modifier(Modifier::BOLD)
         } else if text.starts_with('/') {
-            Style::default().fg(Color::Cyan)
+            // A slash command is actionable, the one place accent is earned.
+            Style::default().fg(t.accent)
         } else if text.contains("unavailable") || text == "missing" {
-            Style::default().fg(Color::Yellow)
+            Style::default().fg(t.warning)
         } else {
-            Style::default().fg(Color::Gray)
+            Style::default().fg(t.text)
         };
         lines.push(Line::from(Span::styled(text.to_string(), style)));
     }
@@ -570,7 +566,7 @@ fn cache_rail_selection(frame: &mut Frame, inner: Rect, app: &mut App) {
             };
             for x in inner.x..=row_end {
                 if let Some(cell) = frame.buffer_mut().cell_mut((x, y)) {
-                    cell.set_style(mouse_selection_style(cell.style(), app.theme));
+                    cell.set_style(mouse_selection_style(cell.style(), tokens()));
                 }
             }
         }
@@ -585,34 +581,45 @@ fn draw_tasks_rail(frame: &mut Frame, area: Rect, app: &mut App) {
     if inner.width == 0 || inner.height == 0 {
         return;
     }
+    let t = tokens();
     let mut lines: Vec<Line> = vec![rail_title("tasks")];
     if app.tasks_pane.tasks.is_empty() {
         lines.push(Line::from(Span::styled(
             "no background tasks",
-            Style::default().fg(Color::Gray),
+            Style::default().fg(t.muted),
         )));
         lines.push(Line::from(Span::styled(
             "start one: /tasks run <cmd>",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(t.muted),
         )));
     } else {
         for task in app.tasks_pane.tasks.iter().take(inner.height as usize) {
-            let (glyph, colour) = match task.status {
-                crate::tui::panes::tasks::TaskStatus::Running => ("·", Color::Cyan),
-                crate::tui::panes::tasks::TaskStatus::Completed => ("✓", Color::Green),
-                crate::tui::panes::tasks::TaskStatus::Failed => ("!", Color::Red),
-                crate::tui::panes::tasks::TaskStatus::Cancelled => ("×", Color::DarkGray),
-                crate::tui::panes::tasks::TaskStatus::Pending => ("·", Color::DarkGray),
+            // The glyph is the state; the colour only reinforces it. Running is
+            // the one current/actionable task, so it alone earns the accent.
+            let (glyph, style) = match task.status {
+                crate::tui::panes::tasks::TaskStatus::Running => {
+                    ("·", Style::default().fg(t.accent))
+                }
+                crate::tui::panes::tasks::TaskStatus::Completed => {
+                    ("✓", Style::default().fg(t.success))
+                }
+                crate::tui::panes::tasks::TaskStatus::Failed => ("!", Style::default().fg(t.error)),
+                crate::tui::panes::tasks::TaskStatus::Cancelled => {
+                    ("×", Style::default().fg(t.muted))
+                }
+                crate::tui::panes::tasks::TaskStatus::Pending => {
+                    ("·", Style::default().fg(t.muted))
+                }
             };
             lines.push(Line::from(vec![
-                Span::styled(format!("{glyph} "), Style::default().fg(colour)),
-                Span::styled(task.name.clone(), Style::default().fg(Color::White)),
+                Span::styled(format!("{glyph} "), style),
+                Span::styled(task.name.clone(), Style::default().fg(t.text)),
             ]));
         }
     }
     lines.push(Line::from(Span::styled(
         "enter logs · ctrl-x cancel",
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(t.muted),
     )));
     // The rail wraps at the width it was given: a name that does not fit used
     // to be cut with `…`, which hid exactly which job it was.
@@ -627,28 +634,29 @@ fn draw_diff_rail(frame: &mut Frame, area: Rect, app: &mut App) {
     if inner.width == 0 || inner.height == 0 {
         return;
     }
+    let t = tokens();
     let mut lines: Vec<Line> = vec![rail_title("diff")];
     if app.diff_pane.hunks.is_empty() {
         lines.push(Line::from(Span::styled(
             "no file changes this turn",
-            Style::default().fg(Color::Gray),
+            Style::default().fg(t.muted),
         )));
     } else {
         for hunk in app.diff_pane.hunks.iter().take(inner.height as usize) {
             let state = match hunk.accepted {
-                Some(true) => ("accepted", Color::Green),
-                Some(false) => ("rejected", Color::Red),
-                None => ("pending", Color::Yellow),
+                Some(true) => ("accepted", t.success),
+                Some(false) => ("rejected", t.error),
+                None => ("pending", t.warning),
             };
             lines.push(Line::from(vec![
-                Span::styled(hunk.file_path.clone(), Style::default().fg(Color::White)),
+                Span::styled(hunk.file_path.clone(), Style::default().fg(t.text)),
                 Span::styled(format!("  {}", state.0), Style::default().fg(state.1)),
             ]));
         }
     }
     lines.push(Line::from(Span::styled(
         "/diff opens the full review",
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(t.muted),
     )));
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
     cache_rail_selection(frame, inner, app);
@@ -698,10 +706,9 @@ fn draw_completions(
     let start = app.slash.window_start(rows.len().min(MAX_ROWS));
     let selected = app.slash.selected_index();
     let column = app.slash.name_column();
-    // The dropdown is themed, not hard-coded: the accent for matched letters
-    // and the dim for the rest come from the active scheme, so high-contrast
-    // and no-color change the list with the rest of the screen.
-    let scheme = crate::tui::theme::ColorScheme::for_theme(app.theme);
+    // The dropdown is themed, not hard-coded: every colour comes from the
+    // semantic tokens, so a palette change reaches the list with the rest of
+    // the screen and `NO_COLOR` leaves only glyphs and weight.
 
     // Rows are drawn from the window start until the row cap or the screen runs
     // out. A description takes as many lines as it needs, so the budget is in
@@ -712,7 +719,7 @@ fn draw_completions(
         if offset >= MAX_ROWS || lines.len() >= room {
             break;
         }
-        let mut block = row_lines(row, column, start + offset == selected, width, &scheme);
+        let mut block = row_lines(row, column, start + offset == selected, width, tokens());
         block.truncate(room - lines.len());
         lines.extend(block);
     }
@@ -739,23 +746,23 @@ fn row_lines(
     column: usize,
     selected: bool,
     width: usize,
-    scheme: &crate::tui::theme::ColorScheme,
+    t: crate::tui::theme::Tokens,
 ) -> Vec<Line<'static>> {
     let plain = if selected {
         Style::default()
-            .fg(scheme.selected_fg)
+            .fg(t.selected_fg)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(scheme.dim)
+        Style::default().fg(t.muted)
     };
     // The accent always means "this is what you typed": the prompt glyph, the
-    // marker and the letters the query landed on.
+    // marker and the letters the query landed on. No background is painted
+    // here: in every palette the accent and the selection fill are the same
+    // step, so accent letters on a selection fill would disappear.
     let matched = if selected {
-        Style::default()
-            .fg(scheme.accent)
-            .add_modifier(Modifier::BOLD)
+        Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(scheme.accent)
+        Style::default().fg(t.accent)
     };
     let mut spans = vec![Span::styled(
         if selected { "› " } else { "  " },
@@ -781,11 +788,7 @@ fn row_lines(
         spans.push(Span::styled(run, if run_matched { matched } else { plain }));
     }
 
-    let description_style = Style::default().fg(if selected {
-        scheme.foreground
-    } else {
-        scheme.dim
-    });
+    let description_style = Style::default().fg(if selected { t.text } else { t.muted });
 
     // Beside the name while there is a column's worth of room for it, and under
     // the name when there is not: a three-word-per-line column is not a
@@ -856,7 +859,7 @@ fn draw_home(frame: &mut Frame, area: Rect, home: &Home, app: &mut App) {
             };
             for x in x..=row_end {
                 if let Some(cell) = frame.buffer_mut().cell_mut((x, y)) {
-                    cell.set_style(mouse_selection_style(cell.style(), app.theme));
+                    cell.set_style(mouse_selection_style(cell.style(), tokens()));
                 }
             }
         }
@@ -930,7 +933,7 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
                 ))
             .then_some(index)
         });
-    let scheme = crate::tui::theme::ColorScheme::for_theme(app.theme);
+    let t = tokens();
     let lines: Vec<Line> = visual[start..end]
         .iter()
         .enumerate()
@@ -947,18 +950,18 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
             }
             // The rail is what makes reasoning impossible to mistake for the
             // answer, in a dark theme or a light one. Three marks stack: the
-            // header wears the accent in bold, the body is the scheme's dim
+            // header wears the accent in bold, the body is the muted token
             // in italic faint under an accent gutter, and the body indents
             // one level deeper than any answer text. Any one of the three is
             // subtle; together they are unmistakable.
             let style = if *role == EntryRole::Thinking {
                 if *header {
                     Style::default()
-                        .fg(scheme.accent)
+                        .fg(t.accent)
                         .add_modifier(Modifier::BOLD | Modifier::ITALIC)
                 } else {
                     Style::default()
-                        .fg(scheme.dim)
+                        .fg(t.muted)
                         .add_modifier(Modifier::ITALIC | Modifier::DIM)
                 }
             } else {
@@ -968,15 +971,13 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
                 (EntryRole::Thinking, true) => ("", style),
                 (EntryRole::User, _) => (
                     glyph,
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
                 ),
-                (EntryRole::Thinking, false) => ("┃   ", Style::default().fg(scheme.accent)),
+                (EntryRole::Thinking, false) => ("┃   ", Style::default().fg(t.accent)),
                 _ => (glyph, style.add_modifier(Modifier::BOLD)),
             };
             if selected {
-                glyph_style = mouse_selection_style(glyph_style, app.theme);
+                glyph_style = mouse_selection_style(glyph_style, t);
             }
             let mut spans = vec![Span::styled(glyph, glyph_style)];
             for span in &line.spans {
@@ -987,7 +988,7 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
                     patched = patched.fg(fg);
                 }
                 if selected {
-                    patched = mouse_selection_style(patched, app.theme);
+                    patched = mouse_selection_style(patched, t);
                 }
                 spans.push(Span::styled(span.content.clone(), patched));
             }
@@ -1025,11 +1026,7 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
                 .end_symbol(None)
                 .track_symbol(Some(" "))
                 .thumb_symbol("▏")
-                .thumb_style(
-                    Style::default()
-                        .fg(scheme.accent)
-                        .add_modifier(Modifier::DIM),
-                ),
+                .thumb_style(Style::default().fg(t.accent).add_modifier(Modifier::DIM)),
             track,
             &mut state,
         );
@@ -1053,7 +1050,7 @@ fn draw_footer(
     let counter = position
         .map(|(at, of)| format!("{at}/{of}"))
         .unwrap_or_default();
-    let scheme = crate::tui::theme::ColorScheme::for_theme(app.theme);
+    let t = tokens();
     // The rest of the highlighted command is deliberately not drawn: the
     // dropdown already marks the selection with `›` and picks out the letters
     // the query landed on, and `Tab` completes. Painting the remainder into
@@ -1065,23 +1062,17 @@ fn draw_footer(
     let hint_text = notice
         .map(|(message, _)| ellipsize(message, area.width as usize))
         .unwrap_or_else(|| ellipsize(&footer_hint(app), area.width as usize));
-    let hint = Line::from(Span::styled(
-        hint_text,
-        Style::default().fg(if notice.is_some() {
-            scheme.accent
-        } else {
-            Color::DarkGray
-        }),
-    ));
+    // One hint row, always muted: the keys are stable chrome, and a bright
+    // colour here would pull the eye off the answer above it. A notice borrows
+    // the row for a moment but does not change its weight.
+    let hint = Line::from(Span::styled(hint_text, Style::default().fg(t.muted)));
 
     // The active draft is the only framed surface in the conversation.
     let chips_h = u16::from(!app.attachments.is_empty());
     let surface = Rect::new(area.x, area.y, area.width, area.height.saturating_sub(1));
-    let accent = if app.plan_mode {
-        Color::Yellow
-    } else {
-        scheme.accent
-    };
+    // PLAN is a caution about what a turn will do, so it borrows the warning
+    // role; every other state uses the one accent.
+    let accent = if app.plan_mode { t.warning } else { t.accent };
     let effort = app.reasoning_effort.as_deref().unwrap_or("auto");
     let mode = if app.plan_mode { "PLAN" } else { "BUILD" };
     let home_model = app
@@ -1129,11 +1120,11 @@ fn draw_footer(
     );
     let mut title = vec![Span::styled(
         format!(" {model}"),
-        Style::default().fg(Color::Gray),
+        Style::default().fg(t.muted),
     )];
     title.push(Span::styled(
         format!(" {effort} · "),
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(t.muted),
     ));
     title.extend([
         Span::styled(
@@ -1141,7 +1132,7 @@ fn draw_footer(
             Style::default().fg(accent).add_modifier(Modifier::BOLD),
         ),
         context
-            .map(|value| Span::styled(format!(" · {value}"), Style::default().fg(Color::DarkGray)))
+            .map(|value| Span::styled(format!(" · {value}"), Style::default().fg(t.muted)))
             .unwrap_or_else(|| Span::raw("")),
         Span::raw(" "),
     ]);
@@ -1198,21 +1189,15 @@ fn draw_footer(
         let glyph = if index == 0 {
             Span::styled(
                 "› ",
-                Style::default()
-                    .fg(if app.plan_mode {
-                        Color::Yellow
-                    } else {
-                        scheme.accent
-                    })
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(accent).add_modifier(Modifier::BOLD),
             )
         } else {
             Span::raw("  ")
         };
         let content = if app.input.is_empty() && app.attachments.is_empty() && index == 0 {
-            Span::styled(" Ask Memnoth anything…", Style::default().fg(Color::Gray))
+            Span::styled(" Ask Memnoth anything…", Style::default().fg(t.muted))
         } else {
-            Span::styled(text.clone(), Style::default().fg(Color::White))
+            Span::styled(text.clone(), Style::default().fg(t.text))
         };
         lines.push(Line::from(vec![glyph, content]));
     }
@@ -1225,7 +1210,7 @@ fn draw_footer(
     if !counter.is_empty() && (area.width as usize) > counter.chars().count() + 4 {
         let width = counter.chars().count() as u16;
         frame.render_widget(
-            Paragraph::new(Span::styled(counter, Style::default().fg(Color::DarkGray))),
+            Paragraph::new(Span::styled(counter, Style::default().fg(t.muted))),
             Rect::new(area.x + area.width - width - 2, area.y + 1, width, 1),
         );
     }
@@ -1253,35 +1238,35 @@ fn compact_tokens(tokens: u64) -> String {
     }
 }
 
-/// The glyph is the state: `▌` running, `✓` done. A tool row never says
-/// "thinking", and it is the only row that changes after it is drawn.
-fn mouse_selection_style(style: Style, theme: crate::tui::app::Theme) -> Style {
-    match theme {
-        crate::tui::app::Theme::Default => style
-            .fg(Color::Rgb(220, 255, 243))
-            .bg(Color::Rgb(28, 72, 61)),
-        crate::tui::app::Theme::HighContrast => style.fg(Color::Black).bg(Color::White),
-        crate::tui::app::Theme::NoColor => style.add_modifier(Modifier::REVERSED),
+/// Highlight the cells a person dragged over. The fill and ink are the
+/// selection pair, so they change with the palette instead of being painted
+/// with raw RGB here. With no palette there is no colour to spend, so reversal
+/// keeps the selection visible — the only case that needs a modifier to carry
+/// the meaning.
+fn mouse_selection_style(style: Style, t: crate::tui::theme::Tokens) -> Style {
+    if t.colored() {
+        style.fg(t.selected_fg).bg(t.selected_bg)
+    } else {
+        style.add_modifier(Modifier::REVERSED)
     }
 }
 
 fn style_for(role: EntryRole) -> (Style, &'static str) {
+    let t = tokens();
     match role {
-        EntryRole::User => (Style::default().fg(Color::Yellow), "› "),
-        EntryRole::Answer => (Style::default().fg(Color::White), "  "),
-        EntryRole::Error => (Style::default().fg(Color::Red), "! "),
-        EntryRole::Info => (Style::default().fg(Color::Gray), "· "),
-        EntryRole::Tool => (Style::default().fg(Color::Cyan), "◌ "),
-        EntryRole::ToolDone => (Style::default().fg(Color::DarkGray), "✓ "),
-        EntryRole::ToolFailed => (Style::default().fg(Color::Red), "✗ "),
-        EntryRole::ToolInterrupted => (Style::default().fg(Color::DarkGray), "· "),
-        // Thinking is the one role that is italic: grey italic is how every
+        EntryRole::User => (Style::default().fg(t.accent), "› "),
+        EntryRole::Answer => (Style::default().fg(t.text), "  "),
+        EntryRole::Error => (Style::default().fg(t.error), "! "),
+        EntryRole::Info => (Style::default().fg(t.muted), "· "),
+        EntryRole::Tool => (Style::default().fg(t.accent), "◌ "),
+        EntryRole::ToolDone => (Style::default().fg(t.success), "✓ "),
+        EntryRole::ToolFailed => (Style::default().fg(t.error), "✗ "),
+        EntryRole::ToolInterrupted => (Style::default().fg(t.muted), "· "),
+        // Thinking is the one role that is italic: dim italic is how every
         // coding agent separates reasoning from the answer it produced, and
         // a reader's eye learns the distinction without a legend.
         EntryRole::Thinking => (
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::ITALIC),
+            Style::default().fg(t.muted).add_modifier(Modifier::ITALIC),
             "",
         ),
     }
@@ -1293,6 +1278,7 @@ mod tests {
     use crate::tui::app::{App, Fact, HomeState};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::style::Color;
 
     #[test]
     fn a_verb_on_its_thread_is_named_in_the_footer() {
@@ -1621,7 +1607,9 @@ mod tests {
         app.home = Some(example_home());
         let text = screen(&mut app, 110, 32);
         assert!(text.contains("memnoth"), "{text}");
-        assert!(!text.contains(env!("CARGO_PKG_VERSION")), "{text}");
+        // The masthead is the header while the brief is up: the build version
+        // belongs there, as a muted span, not behind a `/version` to go find.
+        assert!(text.contains(env!("CARGO_PKG_VERSION")), "{text}");
         assert!(text.contains("E:/ws"), "{text}");
         assert!(text.contains("missing"), "{text}");
         assert!(text.contains("next"), "{text}");
@@ -1929,5 +1917,111 @@ mod tests {
         let text = screen(&mut app, 60, 30);
         let tail = long.split_whitespace().last().unwrap();
         assert!(text.contains(tail), "the end of the entry must be visible");
+    }
+
+    #[test]
+    fn selection_uses_tokens_and_keeps_a_reversal_without_colour() {
+        let dark = crate::tui::theme::Tokens::for_palette(crate::tui::theme::Palette::Dark);
+        let styled = mouse_selection_style(Style::default(), dark);
+        assert_eq!(styled.fg, Some(dark.selected_fg));
+        assert_eq!(styled.bg, Some(dark.selected_bg));
+
+        let none = crate::tui::theme::Tokens::for_palette(crate::tui::theme::Palette::NoColor);
+        let plain = mouse_selection_style(Style::default(), none);
+        assert_eq!(plain.fg, None, "NO_COLOR spends no ink on a foreground");
+        assert_eq!(plain.bg, None, "NO_COLOR spends no ink on a background");
+        assert!(plain.add_modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn completion_rows_use_the_selected_and_accent_tokens() {
+        let t = tokens();
+        let row = Row {
+            name: "/vault".into(),
+            description: "search the vault".into(),
+            hits: vec![1],
+        };
+        let selected = row_lines(&row, 20, true, 80, t);
+        let spans = &selected[0].spans;
+        assert_eq!(spans[0].content.as_ref(), "› ");
+        assert_eq!(spans[0].style.fg, Some(t.accent));
+        let prefix = spans
+            .iter()
+            .find(|span| span.content.as_ref() == "/")
+            .expect("the unmatched prefix");
+        assert_eq!(prefix.style.fg, Some(t.selected_fg));
+        let hit = spans
+            .iter()
+            .find(|span| span.content.as_ref() == "v")
+            .expect("the matched letter");
+        assert_eq!(hit.style.fg, Some(t.accent));
+        assert_eq!(
+            hit.style.bg, None,
+            "no fill under accent letters: accent and fill are one step"
+        );
+
+        let plain = row_lines(&row, 20, false, 80, t);
+        let prefix = plain[0]
+            .spans
+            .iter()
+            .find(|span| span.content.as_ref() == "/")
+            .expect("the unmatched prefix");
+        assert_eq!(prefix.style.fg, Some(t.muted));
+    }
+
+    #[test]
+    fn the_footer_hint_stays_muted() {
+        let mut app = App::new("s", false);
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| draw(frame, &mut app))
+            .expect("draw must not fail");
+        let buffer = terminal.backend().buffer();
+        let last = buffer.area.height - 1;
+        let t = tokens();
+        let cells: Vec<_> = (0..buffer.area.width)
+            .map(|x| &buffer[(x, last)])
+            .filter(|cell| !cell.symbol().trim().is_empty())
+            .collect();
+        assert!(!cells.is_empty(), "the hint row is drawn");
+        for cell in cells {
+            assert_eq!(cell.fg, t.muted, "a bright key hint: {cell:?}");
+        }
+    }
+
+    #[test]
+    fn every_colour_on_the_frame_comes_from_the_tokens() {
+        let t = tokens();
+        let allowed = [
+            t.canvas,
+            t.surface,
+            t.text,
+            t.muted,
+            t.border,
+            t.accent,
+            t.success,
+            t.warning,
+            t.error,
+            t.selected_bg,
+            t.selected_fg,
+            Color::Reset,
+        ];
+        let mut app = App::new("s", false);
+        app.home = Some(example_home());
+        app.push(EntryRole::User, "what changed?");
+        app.open_home();
+        app.plan_mode = true;
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| draw(frame, &mut app))
+            .expect("draw must not fail");
+        for cell in terminal.backend().buffer().content() {
+            assert!(
+                allowed.contains(&cell.fg) && allowed.contains(&cell.bg),
+                "a colour outside the token set reached the frame: {cell:?}"
+            );
+        }
     }
 }

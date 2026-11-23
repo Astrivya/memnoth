@@ -33,6 +33,7 @@ pub mod demo;
 pub use context::{AppContext, Config, DEFAULT_MCP_URL, DEFAULT_PROFILE};
 pub mod acp;
 pub mod bench;
+pub mod bench_display;
 pub mod bench_handoff;
 pub mod bench_kg;
 pub mod bench_lme;
@@ -70,6 +71,7 @@ pub mod incremental_index;
 pub mod keys;
 pub mod kg;
 pub mod mcp;
+pub mod motion;
 pub mod net_guard;
 pub mod open;
 pub mod org;
@@ -295,6 +297,19 @@ fn needs_trust(verb: Option<&Verb>) -> bool {
 }
 
 fn fail(json: bool, error: &ErrorOutcome) -> ExitCode {
+    // The versioned envelope is opt-in: changing the default wire shape would
+    // break every script that already parses `error` as a string. Set
+    // MEMNOTH_ERROR_ENVELOPE=v1 to get the stable-code envelope on stderr.
+    let versioned = std::env::var("MEMNOTH_ERROR_ENVELOPE")
+        .ok()
+        .is_some_and(|value| value.eq_ignore_ascii_case("v1"));
+    if versioned {
+        output::emit_error_envelope(json, error);
+        let code = error
+            .error_code()
+            .unwrap_or_else(|| output::ErrorCode::from_exit_code(error.code));
+        return ExitCode::from(output::exit_code_for(code) as u8);
+    }
     output::emit_error(json, error);
     ExitCode::from(error.code)
 }

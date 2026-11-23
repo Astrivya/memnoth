@@ -56,10 +56,11 @@ use crate::output::ellipsize;
 use crate::provider::{Kind, Settings, builtin_price};
 use crate::tui::app::{App, ModelsLoaded};
 use crate::tui::overlays::{Overlay, OverlayAction, OverlayKind};
+use crate::tui::theme::tokens;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Tabs, Wrap,
@@ -831,16 +832,20 @@ impl ModelsOverlay {
 
     /// The status row. Drawn every frame so the table above it never moves.
     fn status(&self, width: u16) -> Line<'static> {
+        let t = tokens();
         let room = (width as usize).saturating_sub(2);
+        // Semantic roles, not decoration: success for a saved note, error for a
+        // refusal, warning for "nothing matched", muted for an idle status row.
+        // The glyphs (✓, ✗, ›) carry the meaning when colour is stripped.
         let (marker, color, text) = match &self.note {
-            Some((true, text)) => ("✓", Color::Green, text.clone()),
-            Some((false, text)) => ("✗", Color::Red, text.clone()),
+            Some((true, text)) => ("✓", t.success, text.clone()),
+            Some((false, text)) => ("✗", t.error, text.clone()),
             None if self.filtered.is_empty() => (
                 "›",
-                Color::Yellow,
+                t.warning,
                 "no model matches — backspace edits the search, esc clears it, alt-0 clears the provider".to_string(),
             ),
-            None => (" ", Color::DarkGray, String::new()),
+            None => (" ", t.muted, String::new()),
         };
         Line::from(vec![
             Span::styled(format!("{marker} "), Style::default().fg(color)),
@@ -960,6 +965,23 @@ fn format_price(price: Option<f64>) -> String {
         Some(price) => format!("{price:.1}"),
         None => "—".to_string(),
     }
+}
+
+/// The `live` marker on a row that came from the provider's own `/models`.
+///
+/// The word stays in the text even when colour is stripped: a green dot alone
+/// would become an unexplained glyph under `NO_COLOR`. The success token is the
+/// meaning at a glance; the word is the meaning that survives. On a filled
+/// selection row the row's own `selected_fg`/`selected_bg` pair takes over —
+/// success green on the accent fill is hard to read — but the word remains.
+fn live_marker(filled: bool) -> Span<'static> {
+    let t = tokens();
+    let style = if filled {
+        Style::default()
+    } else {
+        Style::default().fg(t.success).add_modifier(Modifier::BOLD)
+    };
+    Span::styled(" live", style)
 }
 
 impl Overlay for ModelsOverlay {
@@ -1212,6 +1234,7 @@ impl Overlay for ModelsOverlay {
         if !self.visible {
             return;
         }
+        let t = tokens();
         frame.render_widget(Clear, area);
 
         // Status and hints are two fixed rows at the bottom. They exist whether
@@ -1238,10 +1261,13 @@ impl Overlay for ModelsOverlay {
             .unwrap_or(0);
         // The focused zone carries the bold border: that is what the arrows
         // answer to, and it is also what a click lands on.
+        // The focus ring is the "active" token; the unfocused rule is the
+        // border token. The hint row and the bold highlight say the same thing
+        // when both resolve to Reset under NO_COLOR.
         let tabs_border = if self.focus == FocusZone::Tabs {
-            Style::default().fg(Color::Yellow)
+            Style::default().fg(t.selected_bg)
         } else {
-            Style::default().fg(Color::DarkGray)
+            Style::default().fg(t.border)
         };
         let tabs = Tabs::new(titles)
             .block(
@@ -1251,10 +1277,10 @@ impl Overlay for ModelsOverlay {
                     .border_style(tabs_border),
             )
             .select(active)
-            .style(Style::default().fg(Color::Gray))
+            .style(Style::default().fg(t.muted))
             .highlight_style(
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(t.selected_bg)
                     .add_modifier(Modifier::BOLD),
             );
         self.tabs_area = chunks[0];
@@ -1264,7 +1290,8 @@ impl Overlay for ModelsOverlay {
         // The line still says what it is, with a caret parked after the query,
         // and the active filters beside it so a filtered-out model is
         // explainable rather than missing.
-        let search = format!("search: {}", self.search);
+        // The query is what the person typed — primary text. The label and the
+        // active filters are captions, so they take the muted role.
         let filter = self
             .provider_filter
             .as_ref()
@@ -1277,9 +1304,10 @@ impl Overlay for ModelsOverlay {
         );
         frame.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled(search, Style::default().fg(Color::Cyan)),
-                Span::styled(filter, Style::default().fg(Color::Yellow)),
-                Span::styled(sort, Style::default().fg(Color::DarkGray)),
+                Span::styled("search: ", Style::default().fg(t.muted)),
+                Span::styled(self.search.clone(), Style::default().fg(t.text)),
+                Span::styled(filter, Style::default().fg(t.muted)),
+                Span::styled(sort, Style::default().fg(t.muted)),
             ])),
             chunks[1],
         );
@@ -1321,23 +1349,24 @@ impl Overlay for ModelsOverlay {
             if favorite {
                 name.push_str(" ⭐");
             }
+            let mut name_spans = vec![Span::raw(name)];
             if row.live {
-                name.push_str(" +");
+                name_spans.push(live_marker(selected && self.focus == FocusZone::Table));
             }
 
-            // The cyan fill belongs to the table zone. With the tab bar
+            // The selection fill belongs to the table zone. With the tab bar
             // focused the selected row is only a marker, so the eye can tell
             // which zone the arrows answer to without reading the hint.
             let style = if selected && self.focus == FocusZone::Table {
-                Style::default().bg(Color::Cyan).fg(Color::Black)
+                Style::default().bg(t.selected_bg).fg(t.selected_fg)
             } else if selected {
                 Style::default().add_modifier(Modifier::BOLD)
             } else {
-                Style::default()
+                Style::default().fg(t.text)
             };
             rows.push(
                 Row::new(vec![
-                    Cell::from(name),
+                    Cell::from(Line::from(name_spans)),
                     Cell::from(row.provider.clone()),
                     Cell::from(format_context(row.context)),
                     Cell::from(format_price(row.input_per_mtok)),
@@ -1358,11 +1387,7 @@ impl Overlay for ModelsOverlay {
             Cell::from("reasoning"),
             Cell::from("status"),
         ])
-        .style(
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        );
+        .style(Style::default().fg(t.muted).add_modifier(Modifier::BOLD));
 
         let table = Table::new(
             rows,
@@ -1380,9 +1405,10 @@ impl Overlay for ModelsOverlay {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(format!(" {} models ", self.filtered.len())),
+                .title(format!(" {} models ", self.filtered.len()))
+                .border_style(Style::default().fg(t.border)),
         )
-        .row_highlight_style(Style::default().bg(Color::Cyan).fg(Color::Black))
+        .row_highlight_style(Style::default().bg(t.selected_bg).fg(t.selected_fg))
         .highlight_symbol(" ");
 
         self.table_area = chunks[2];
@@ -1403,7 +1429,7 @@ impl Overlay for ModelsOverlay {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 ellipsize(self.hints(), chunks[4].width as usize),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(t.muted),
             ))),
             chunks[4],
         );
@@ -1508,7 +1534,7 @@ impl ModelsOverlay {
         let block = Block::default()
             .borders(Borders::ALL)
             .title(format!(" {} — details ", row.label))
-            .border_style(Style::default().fg(Color::Cyan));
+            .border_style(Style::default().fg(tokens().border));
         frame.render_widget(
             Paragraph::new(text).wrap(Wrap { trim: false }).block(block),
             popup,
@@ -1516,6 +1542,7 @@ impl ModelsOverlay {
     }
 
     fn render_compare(&self, frame: &mut Frame, area: Rect, row: &ModelRow, default: Option<&str>) {
+        let t = tokens();
         let current = default.unwrap_or("(none)");
         let width = ((area.width as u32 * 3 / 4) as u16).clamp(60, area.width);
         let height = 14.min(area.height);
@@ -1544,22 +1571,16 @@ impl ModelsOverlay {
         let lines = vec![
             Line::from(vec![
                 Span::styled("                  ", Style::default()),
-                Span::styled(
-                    format!("{:>16}", "current"),
-                    Style::default().fg(Color::Gray),
-                ),
-                Span::styled(
-                    format!("{:>18}", "selected"),
-                    Style::default().fg(Color::Cyan),
-                ),
+                Span::styled(format!("{:>16}", "current"), Style::default().fg(t.muted)),
+                Span::styled(format!("{:>18}", "selected"), Style::default().fg(t.accent)),
             ]),
             Line::from(vec![
-                Span::styled("model             ", Style::default().fg(Color::Cyan)),
+                Span::styled("model             ", Style::default().fg(t.muted)),
                 Span::raw(format!("{:>16}", truncate(current, 16))),
                 Span::raw(format!("{:>18}", truncate(&row.id, 18))),
             ]),
             Line::from(vec![
-                Span::styled("provider          ", Style::default().fg(Color::Cyan)),
+                Span::styled("provider          ", Style::default().fg(t.muted)),
                 Span::raw(format!(
                     "{:>16}",
                     truncate(
@@ -1572,7 +1593,7 @@ impl ModelsOverlay {
                 Span::raw(format!("{:>18}", row.provider)),
             ]),
             Line::from(vec![
-                Span::styled("context           ", Style::default().fg(Color::Cyan)),
+                Span::styled("context           ", Style::default().fg(t.muted)),
                 Span::raw(format!(
                     "{:>16}",
                     format_context(current_row.map(|model| model.context).unwrap_or(0))
@@ -1580,7 +1601,7 @@ impl ModelsOverlay {
                 Span::raw(format!("{:>18}", format_context(row.context))),
             ]),
             Line::from(vec![
-                Span::styled("in $/Mtok         ", Style::default().fg(Color::Cyan)),
+                Span::styled("in $/Mtok         ", Style::default().fg(t.muted)),
                 Span::raw(format!(
                     "{:>16}",
                     price(current_row, |model| model.input_per_mtok)
@@ -1588,7 +1609,7 @@ impl ModelsOverlay {
                 Span::raw(format!("{:>18}", format_price(row.input_per_mtok))),
             ]),
             Line::from(vec![
-                Span::styled("out $/Mtok        ", Style::default().fg(Color::Cyan)),
+                Span::styled("out $/Mtok        ", Style::default().fg(t.muted)),
                 Span::raw(format!(
                     "{:>16}",
                     price(current_row, |model| model.output_per_mtok)
@@ -1596,7 +1617,7 @@ impl ModelsOverlay {
                 Span::raw(format!("{:>18}", format_price(row.output_per_mtok))),
             ]),
             Line::from(vec![
-                Span::styled("100k in + 4k out  ", Style::default().fg(Color::Cyan)),
+                Span::styled("100k in + 4k out  ", Style::default().fg(t.muted)),
                 Span::raw(format!(
                     "{:>16}",
                     current_row.map(estimate).unwrap_or_else(|| "—".to_string())
@@ -1606,14 +1627,14 @@ impl ModelsOverlay {
             Line::from(""),
             Line::from(Span::styled(
                 "enter uses the selected model · esc closes",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(t.muted),
             )),
         ];
 
         let block = Block::default()
             .borders(Borders::ALL)
             .title(" compare ")
-            .border_style(Style::default().fg(Color::Cyan));
+            .border_style(Style::default().fg(t.border));
         frame.render_widget(Paragraph::new(lines).block(block), popup);
     }
 }
@@ -1777,5 +1798,53 @@ mod tests {
         assert_eq!(format_context(200_000), "200k");
         assert_eq!(format_context(1_000_000), "1M");
         assert_eq!(format_context(0), "—");
+    }
+
+    /// The live marker carries its meaning twice: the success colour at a
+    /// glance, and the literal word when colour is stripped.
+    #[test]
+    fn the_live_marker_keeps_its_word_and_uses_success() {
+        let t = tokens();
+        let plain = live_marker(false);
+        assert_eq!(plain.content, " live");
+        assert_eq!(plain.style.fg, Some(t.success));
+
+        // On a filled selection the row's selected_fg/selected_bg pair wins —
+        // success green on the accent fill is hard to read — but the word stays.
+        let filled = live_marker(true);
+        assert_eq!(filled.content, " live");
+        assert_eq!(filled.style.fg, None);
+    }
+
+    /// A provider answer keeps the live row on screen and the note line below
+    /// it; the marker is a word in the buffer, not just a colour.
+    #[test]
+    fn a_live_row_renders_the_word_live() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut overlay = opened_overlay();
+        let index = *overlay.filtered.first().expect("a catalogue row is listed");
+        overlay.rows[index].live = true;
+
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let app = App::new("s", false);
+        terminal
+            .draw(|frame| overlay.render(frame, frame.area(), &app))
+            .expect("draw must not fail");
+
+        let buffer = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+        assert!(
+            text.contains(" live"),
+            "the live marker must be a word under NO_COLOR: {text}"
+        );
     }
 }
