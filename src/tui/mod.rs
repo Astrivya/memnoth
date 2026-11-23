@@ -257,7 +257,7 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
     // Initialize the composer model and start metadata discovery before the
     // first frame. The regular refresh path runs after a turn, which used to
     // leave the home composer without a context limit until then.
-    refresh_provider_status(ctx, &mut app, &session);
+    refresh_provider_status(&mut app, &session);
     // Read before the first frame: the account line is part of what the screen
     // opened with, not something that appears a redraw later.
     app.account = crate::auth::signed_in_account();
@@ -908,16 +908,19 @@ fn refresh(ctx: &AppContext, app: &mut App, session: &Session) {
     app.graph_attention = graph.attention.clone();
     app.home_cursor = 0;
     app.context = context_pane(ctx, session);
-    refresh_provider_status(ctx, app, session);
+    refresh_provider_status(app, session);
 }
 
 /// Load the model the next turn will use and initialize its context meter.
 /// Called at startup and after state-changing actions, before the next draw.
-fn refresh_provider_status(ctx: &AppContext, app: &mut App, session: &Session) {
+fn refresh_provider_status(app: &mut App, session: &Session) {
     app.context_window_used = None;
     // The label beside the prompt: the model the next turn will actually use,
     // including the case where it cannot run because no key is configured.
-    app.model = match provider::Settings::load(&ctx.config) {
+    // `app.config`, not `ctx.config`: the /models and /connect screens write the
+    // app's copy and save it. Reading the startup snapshot here made the header
+    // keep naming the old model after a successful switch.
+    app.model = match provider::Settings::load(&app.config) {
         Ok(settings) if settings.ready() => {
             schedule_context_discovery(app, &settings);
             app.reasoning_effort = settings.reasoning_effort.clone();
@@ -941,13 +944,13 @@ fn refresh_provider_status(ctx: &AppContext, app: &mut App, session: &Session) {
                 .then(|| session.model.clone())
                 .or_else(|| std::env::var("MEMNOTH_MODEL").ok())
                 .or_else(|| {
-                    ctx.config
+                    app.config
                         .provider
                         .as_ref()
                         .and_then(|provider| provider.model.clone())
                 })
                 .unwrap_or_else(|| {
-                    let kind = ctx
+                    let kind = app
                         .config
                         .provider
                         .as_ref()
@@ -3958,6 +3961,28 @@ mod tests {
             cost_micros,
             turn_id: None,
         }
+    }
+
+    #[test]
+    fn composer_model_label_follows_the_app_config_after_a_switch() {
+        // /models saves the app's config copy, not the startup snapshot. The
+        // label beside the prompt has to read that same live copy or it keeps
+        // naming the previous model until restart.
+        let mut app = App::new("s", false);
+        let session = Session::new("old-model");
+        app.config.provider = Some(crate::provider::ProviderConfig {
+            kind: Some("kilo".to_string()),
+            name: Some("kilo".to_string()),
+            model: Some("anthropic/claude-sonnet-4.5".to_string()),
+            base_url: Some("https://ai-gateway.kilo.ai/api/v1".to_string()),
+            ..Default::default()
+        });
+        refresh_provider_status(&mut app, &session);
+        assert!(
+            app.model.contains("anthropic/claude-sonnet-4.5"),
+            "composer label must name the switched model, got {:?}",
+            app.model
+        );
     }
 
     #[test]

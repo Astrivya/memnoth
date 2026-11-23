@@ -170,12 +170,20 @@ fn status_row(home: &Home, width: usize) -> Line<'static> {
 // ── the pieces ───────────────────────────────────────────────────────────
 
 fn masthead(_width: usize) -> Vec<Line<'static>> {
-    vec![Line::from(Span::styled(
-        "memnoth",
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    ))]
+    // The release is a fact about this build, so it belongs next to the name
+    // rather than behind a `/version` the person has to know to ask for.
+    vec![Line::from(vec![
+        Span::styled(
+            "memnoth",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(" v{}", env!("CARGO_PKG_VERSION")),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ])]
 }
 
 fn identity_rows(home: &Home, width: usize) -> Vec<Line<'static>> {
