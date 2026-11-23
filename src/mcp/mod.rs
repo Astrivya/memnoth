@@ -2275,6 +2275,7 @@ mod tests {
             config: Default::default(),
             json: false,
             quiet: true,
+            progress_tx: None,
             exe_path: std::path::PathBuf::from("memnoth"),
         };
         let report = add(

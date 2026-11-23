@@ -119,7 +119,9 @@ fn footer_hint(app: &App) -> String {
         } else {
             "enter send · shift-enter newline · ctrl-g fix · shift-tab mode".to_string()
         }
-    } else if !app.input.is_empty() || !app.attachments.is_empty() {
+    } else if !app.attachments.is_empty() {
+        "enter send · ctrl-x remove attachment · shift-tab mode".to_string()
+    } else if !app.input.is_empty() {
         "enter send · shift-enter newline · shift-tab mode".to_string()
     } else {
         "type message · ↓ activity · shift-tab mode · / commands".to_string()
@@ -175,6 +177,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // a broken pointer. An overlay that wants a caret sets its own position.
     let caret = !app.overlay_stack.has_overlay();
     draw_footer(frame, rows[2], app, position, caret);
+
+    // Progress is a transient, dismissible layer over the finished frame —
+    // never text written into the transcript. It is drawn last so no other
+    // widget can overwrite a stage row.
+    draw_progress(frame, area, app);
 
     // A write is waiting on the person. Drawn last, over everything, because a
     // question about changing a file must not be mistaken for transcript text.
@@ -673,6 +680,134 @@ fn draw_diff_rail(frame: &mut Frame, area: Rect, app: &mut App) {
 /// dropdown unreadable.
 ///
 /// Returns the position within the list, for the prompt line to carry.
+/// A bounded, animated progress layer for an in-process verb. Raw progress
+/// lines arrive on a channel and are folded into stages here; nothing is ever
+/// written to stderr while the TUI owns the terminal.
+fn draw_progress(frame: &mut Frame, area: Rect, app: &App) {
+    if app.progress_hidden
+        || app.running_verb.is_none()
+        || app.progress_lines.is_empty()
+        || area.height < 12
+        || area.width < 46
+    {
+        return;
+    }
+    let t = tokens();
+    let lines = &app.progress_lines;
+    let last = lines.back().map(String::as_str).unwrap_or("");
+    let started = app.turn_started_ms.max(1);
+    let elapsed_ms = crate::session::now_ms().saturating_sub(started);
+    let secs = elapsed_ms / 1000;
+
+    // The known kg stages, in order. A line matching a stage marks it done when
+    // a later stage has begun, active while it is the last one seen.
+    const STAGES: [(&str, &str); 5] = [
+        ("walk", "Walk files"),
+        ("extract", "Extract symbols"),
+        ("embed", "Embed"),
+        ("index", "Index"),
+        ("reference", "References"),
+    ];
+    let mut active = 0usize;
+    for (i, (needle, _)) in STAGES.iter().enumerate() {
+        if lines
+            .iter()
+            .any(|line| line.to_ascii_lowercase().contains(needle))
+        {
+            active = i;
+        }
+    }
+    let stage_count = STAGES
+        .iter()
+        .filter(|(needle, _)| {
+            lines
+                .iter()
+                .any(|line| line.to_ascii_lowercase().contains(needle))
+        })
+        .count()
+        .max(1);
+    let fraction = (active + 1) as f64 / (STAGES.len() + 1) as f64;
+    let _ = stage_count;
+
+    // Braille spinner advances on a wall-clock tick: ~80 ms per frame, no SGR
+    // blink, no color-only state.
+    const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    let frame_index = ((elapsed_ms / 80) as usize) % FRAMES.len();
+    let spinner = FRAMES[frame_index];
+
+    let width = area.width.saturating_sub(8).min(66);
+    let height = (STAGES.len() + 4).min(area.height.saturating_sub(4) as usize) as u16;
+    let x = area.x + (area.width - width) / 2;
+    let y = area.y + 2;
+    let rect = Rect::new(x, y, width, height);
+    frame.render_widget(Clear, rect);
+    frame.render_widget(
+        Block::default()
+            .borders(ratatui::widgets::Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .border_style(Style::default().fg(t.border))
+            .style(Style::default().bg(t.surface)),
+        rect,
+    );
+    let inner = Rect::new(
+        rect.x + 2,
+        rect.y + 1,
+        rect.width.saturating_sub(4),
+        rect.height.saturating_sub(2),
+    );
+
+    let title = Line::from(vec![
+        Span::styled(
+            "Indexing code graph",
+            Style::default().fg(t.text).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("  {spinner} {}s", secs),
+            Style::default().fg(t.accent),
+        ),
+    ]);
+    let mut body = vec![title];
+    for (i, (_, label)) in STAGES.iter().enumerate() {
+        let (glyph, style) = if i < active {
+            ("✓", Style::default().fg(t.success))
+        } else if i == active {
+            (spinner, Style::default().fg(t.accent))
+        } else {
+            ("○", Style::default().fg(t.muted))
+        };
+        body.push(Line::from(vec![
+            Span::styled(format!(" {glyph} "), style),
+            Span::styled(
+                (*label).to_string(),
+                if i == active {
+                    Style::default().fg(t.text).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(t.muted)
+                },
+            ),
+        ]));
+    }
+    // Gauge last, then the current item and the honest key hints.
+    let gauge = ratatui::widgets::LineGauge::default()
+        .filled_style(Style::default().fg(t.accent))
+        .unfilled_style(Style::default().fg(t.border))
+        .ratio(fraction.clamp(0.0, 1.0))
+        .label(format!(" {:.0}% ", fraction * 100.0));
+    let gauge_area = Rect::new(inner.x, inner.y + body.len() as u16, inner.width, 1);
+    let detail = Rect::new(inner.x, gauge_area.y + 1, inner.width, 1);
+    if detail.y < rect.y + rect.height {
+        frame.render_widget(
+            Paragraph::new(ellipsize(last, inner.width as usize)),
+            detail,
+        );
+    }
+    if gauge_area.y < rect.y + rect.height {
+        frame.render_widget(gauge, gauge_area);
+    }
+    body.truncate((inner.height).saturating_sub(2) as usize);
+    frame.render_widget(Paragraph::new(body), inner);
+}
+
 fn draw_completions(
     frame: &mut Frame,
     area: Rect,
@@ -777,25 +912,38 @@ fn row_lines(
     width: usize,
     t: crate::tui::theme::Tokens,
 ) -> Vec<Line<'static>> {
-    let plain = if selected {
+    // A selected row must paint its fill. selected_fg/selected_bg are an
+    // intentional contrast pair (near-black on orange in the dark palette);
+    // using selected_fg alone leaves near-black text on a near-black canvas —
+    // the command name vanishes while its description survives in t.text.
+    let fill = if selected {
+        Style::default().bg(t.selected_bg)
+    } else {
         Style::default()
-            .fg(t.selected_fg)
-            .add_modifier(Modifier::BOLD)
+    };
+    let plain = if selected {
+        fill.fg(t.selected_fg).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(t.muted)
     };
-    // The accent always means "this is what you typed": the prompt glyph, the
-    // marker and the letters the query landed on. No background is painted
-    // here: in every palette the accent and the selection fill are the same
-    // step, so accent letters on a selection fill would disappear.
+    // Matched letters stay the accent, but inside the selection fill they need
+    // a contrasting ink: the accent step is the same lightness as the fill in
+    // every palette, so accent-on-fill would also disappear. Use selected_fg
+    // plus bold for matched letters on a selected row; keep the accent for the
+    // unselected rows where there is no fill to hide it.
     let matched = if selected {
-        Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
+        fill.fg(t.selected_fg)
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
     } else {
         Style::default().fg(t.accent)
     };
     let mut spans = vec![Span::styled(
         if selected { "› " } else { "  " },
-        if selected { matched } else { Style::default() },
+        if selected {
+            fill.fg(t.selected_fg).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        },
     )];
 
     // With a fuzzy filter a row can match for a reason that is not obvious, and
@@ -817,7 +965,13 @@ fn row_lines(
         spans.push(Span::styled(run, if run_matched { matched } else { plain }));
     }
 
-    let description_style = Style::default().fg(if selected { t.text } else { t.muted });
+    // The description shares the row's fill; without it the text sits on the
+    // same canvas as the name and the two halves look unrelated.
+    let description_style = if selected {
+        fill.fg(t.selected_fg)
+    } else {
+        Style::default().fg(t.muted)
+    };
 
     // Beside the name while there is a column's worth of room for it, and under
     // the name when there is not: a three-word-per-line column is not a
@@ -1987,6 +2141,27 @@ mod tests {
     }
 
     #[test]
+    fn progress_overlay_derives_stages_from_real_lines_only() {
+        // The overlay must reflect work the verb actually reported, never
+        // invent a stage or a percentage that the operation did not measure.
+        let lines = [
+            "walking E:\\memnoth-prod",
+            "walked 1362 file(s) in 0.09s",
+            "extracting symbols from 560 changed file(s)",
+        ];
+        let lowered: Vec<String> = lines.iter().map(|l| l.to_ascii_lowercase()).collect();
+        let seen = ["walk", "extract", "embed", "index", "reference"]
+            .iter()
+            .map(|needle| lowered.iter().any(|l| l.contains(needle)))
+            .collect::<Vec<_>>();
+        assert_eq!(seen, vec![true, true, false, false, false]);
+        assert!(
+            lines[1].contains("1362"),
+            "counts come from the verb, not a guess"
+        );
+    }
+
+    #[test]
     fn completion_rows_use_the_selected_and_accent_tokens() {
         let t = tokens();
         let row = Row {
@@ -1997,20 +2172,29 @@ mod tests {
         let selected = row_lines(&row, 20, true, 80, t);
         let spans = &selected[0].spans;
         assert_eq!(spans[0].content.as_ref(), "› ");
-        assert_eq!(spans[0].style.fg, Some(t.accent));
+        // The selected row paints its fill; every span must carry it, or the
+        // near-black selected_fg lands on a near-black canvas and disappears.
+        assert_eq!(spans[0].style.bg, Some(t.selected_bg));
+        assert_eq!(spans[0].style.fg, Some(t.selected_fg));
         let prefix = spans
             .iter()
             .find(|span| span.content.as_ref() == "/")
             .expect("the unmatched prefix");
         assert_eq!(prefix.style.fg, Some(t.selected_fg));
+        assert_eq!(prefix.style.bg, Some(t.selected_bg));
         let hit = spans
             .iter()
             .find(|span| span.content.as_ref() == "v")
             .expect("the matched letter");
-        assert_eq!(hit.style.fg, Some(t.accent));
         assert_eq!(
-            hit.style.bg, None,
-            "no fill under accent letters: accent and fill are one step"
+            hit.style.fg,
+            Some(t.selected_fg),
+            "matched ink must contrast with the fill"
+        );
+        assert_eq!(hit.style.bg, Some(t.selected_bg));
+        assert!(
+            hit.style.add_modifier.contains(Modifier::BOLD),
+            "matched letters stay distinct inside the fill"
         );
 
         let plain = row_lines(&row, 20, false, 80, t);

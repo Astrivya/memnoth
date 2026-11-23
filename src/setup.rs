@@ -774,6 +774,7 @@ mod tests {
             config: crate::context::Config::default(),
             json: true,
             quiet: true,
+            progress_tx: None,
             exe_path: std::path::PathBuf::from("mn"),
         };
         let state = SetupState::new(&args(&["auth", "provider"], true));

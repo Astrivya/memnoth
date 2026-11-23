@@ -515,6 +515,14 @@ pub fn run(ctx: &AppContext, name: &str) -> Result<()> {
             finish_verb(&mut app, &store, &mut session, done);
             refresh(ctx, &mut app, &session);
         }
+        // Progress lines arrive off-thread; drain them into a bounded buffer so
+        // the overlay can draw a stable stage list instead of raw stderr bytes.
+        while let Ok(line) = app.progress_rx.try_recv() {
+            if app.progress_lines.len() >= 64 {
+                app.progress_lines.pop_front();
+            }
+            app.progress_lines.push_back(line);
+        }
 
         // The release check answers once, on the first frame after it lands.
         // One entry, filed as information: it is not an error, and it must not
@@ -1377,6 +1385,17 @@ fn handle_key(app: &mut App, key: KeyEvent, workspace_root: &Path) {
         }
     }
 
+    // While a verb is running, Esc hides the progress overlay first; the
+    // operation continues. A second Esc reaches the normal composer behavior.
+    if key.code == KeyCode::Esc
+        && app.running_verb.is_some()
+        && !app.progress_lines.is_empty()
+        && !app.progress_hidden
+    {
+        app.progress_hidden = true;
+        return;
+    }
+
     match key.code {
         KeyCode::Char('c') if ctrl => {
             if app.busy {
@@ -1471,6 +1490,18 @@ fn handle_key(app: &mut App, key: KeyEvent, workspace_root: &Path) {
         // not typed, so requiring its path first made the common case a detour
         // through a file manager.
         KeyCode::Char('v') if ctrl => paste_clipboard(app),
+        // ctrl-x un-attaches the most recent image/PDF. Pasting is one key and
+        // undo must be just as cheap: a mistake should not cost a whole line.
+        KeyCode::Char('x') if ctrl => {
+            if app.attachments.pop().is_some() {
+                app.notify(
+                    "Removed the last attachment",
+                    std::time::Duration::from_secs(2),
+                );
+            } else {
+                app.notify("No attachment to remove", std::time::Duration::from_secs(2));
+            }
+        }
         KeyCode::Char(ch) if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) => {
             app.insert_char(ch);
             app.sync_slash();
@@ -2592,11 +2623,16 @@ fn run_verb(app: &mut App, ctx: &AppContext, prompt: &str, verb: Verb) {
         return;
     }
     app.running_verb = Some(prompt.to_string());
+    app.progress_lines.clear();
+    app.progress_hidden = false;
 
     let ctx = ctx.clone();
     let prompt = prompt.to_string();
     let tx = app.verb_tx.clone();
+    let progress_tx = app.progress_tx.clone();
     std::thread::spawn(move || {
+        let mut ctx = ctx;
+        ctx.progress_tx = Some(progress_tx);
         let result = crate::commands::execute(&ctx, &verb).map_err(|error| format!("{error:#}"));
         let _ = tx.send(crate::tui::app::VerbDone { prompt, result });
     });
@@ -2605,6 +2641,10 @@ fn run_verb(app: &mut App, ctx: &AppContext, prompt: &str, verb: Verb) {
 /// Show a verb's answer, and file it against the line that asked for it.
 fn finish_verb(app: &mut App, store: &SessionStore, session: &mut Session, done: VerbDone) {
     app.running_verb = None;
+    // Progress belongs to the operation, not to history: collapse it and let
+    // the single final answer carry the outcome.
+    app.progress_lines.clear();
+    app.progress_hidden = false;
     match done.result {
         Ok(outcome) => {
             let text = answer_with_next(&outcome.text, &outcome.data);
@@ -4155,6 +4195,7 @@ mod tests {
             config: Config::default(),
             json: false,
             quiet: true,
+            progress_tx: None,
         }
     }
 

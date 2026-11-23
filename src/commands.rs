@@ -255,7 +255,12 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
         Verb::Kg(args) => match &args.action {
             KgCommand::Index { full, no_embed } => {
                 let mut progress = |line: &str| {
-                    if !ctx.quiet && !ctx.json {
+                    // An interactive host owns the terminal: raw lines written
+                    // to stderr interleave with its frames and corrupt the
+                    // screen. Send structured progress there instead.
+                    if let Some(tx) = &ctx.progress_tx {
+                        let _ = tx.send(line.to_string());
+                    } else if !ctx.quiet && !ctx.json {
                         eprintln!("{line}");
                     }
                 };

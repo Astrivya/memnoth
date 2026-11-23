@@ -955,6 +955,7 @@ mod tests {
             config: Config::default(),
             json: false,
             quiet: true,
+            progress_tx: None,
             exe_path: PathBuf::from("memnoth"),
         }
     }

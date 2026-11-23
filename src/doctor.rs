@@ -1437,6 +1437,7 @@ mod bundle_tests {
             config: crate::context::Config::default(),
             json: false,
             quiet: true,
+            progress_tx: None,
             exe_path: std::path::PathBuf::from("memnoth"),
         }
     }

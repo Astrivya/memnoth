@@ -3565,6 +3565,7 @@ mod tests {
             config: crate::context::Config::default(),
             json: false,
             quiet: true,
+            progress_tx: None,
         }
     }
 

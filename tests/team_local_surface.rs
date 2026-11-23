@@ -27,6 +27,7 @@ fn context(dir: &std::path::Path, namespace: &str) -> AppContext {
         config: Config::default(),
         json: false,
         quiet: true,
+        progress_tx: None,
     }
 }
 

@@ -308,6 +308,10 @@ pub struct AppContext {
     pub json: bool,
     /// Suppress progress lines.
     pub quiet: bool,
+    /// When set by an interactive host, progress goes here instead of stderr.
+    /// The CLI door leaves it None and keeps printing; a TUI owns the terminal
+    /// and must not have raw lines interleaved into its frames.
+    pub progress_tx: Option<std::sync::mpsc::Sender<String>>,
     /// Path to the current executable (for PATH fix).
     pub exe_path: PathBuf,
 }
@@ -376,6 +380,7 @@ impl AppContext {
             graph_path,
             json: cli.json,
             quiet: cli.quiet,
+            progress_tx: None,
             exe_path: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("memnoth")),
         })
     }

@@ -46,6 +46,7 @@ fn context(root: &Path, state: &Path) -> AppContext {
         config: Config::default(),
         json: false,
         quiet: true,
+        progress_tx: None,
         exe_path: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("memnoth")),
     }
 }

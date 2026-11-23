@@ -93,6 +93,7 @@ fn context_at(root: &Path) -> AppContext {
         config: Config::default(),
         json: false,
         quiet: true,
+        progress_tx: None,
         exe_path: Path::new("mn").to_path_buf(),
     }
 }

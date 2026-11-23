@@ -685,6 +685,13 @@ pub struct App {
     /// rather than as a slow network.
     pub verb_tx: mpsc::Sender<VerbDone>,
     pub verb_rx: mpsc::Receiver<VerbDone>,
+    /// Progress from an in-process verb (e.g. `kg index`). The host owns the
+    /// terminal, so these never go to stderr: they arrive here and are drawn
+    /// as a bounded overlay instead of corrupting the transcript.
+    pub progress_tx: mpsc::Sender<String>,
+    pub progress_rx: mpsc::Receiver<String>,
+    pub progress_lines: VecDeque<String>,
+    pub progress_hidden: bool,
     /// The line whose verb is still running, so a second one is refused by name
     /// instead of interleaving its answer with the first.
     pub running_verb: Option<String>,
@@ -823,6 +830,7 @@ impl App {
         let (models_tx, models_rx) = mpsc::channel();
         let (login_tx, login_rx) = mpsc::channel();
         let (verb_tx, verb_rx) = mpsc::channel();
+        let (progress_tx, progress_rx) = mpsc::channel();
         Self {
             name: name.to_string(),
             resumed,
@@ -919,6 +927,10 @@ impl App {
             ctx: None,
             verb_tx,
             verb_rx,
+            progress_tx,
+            progress_rx,
+            progress_lines: VecDeque::new(),
+            progress_hidden: false,
             running_verb: None,
             provider_test_tx,
             provider_test_rx,
