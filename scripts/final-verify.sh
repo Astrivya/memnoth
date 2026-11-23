@@ -32,6 +32,11 @@ CLOUD_ROOT="$WORKSPACE_ROOT/memnoth-cloud"
 
 # The configured CLI target, and the hard cap on the whole builds folder.
 export CARGO_TARGET_DIR='D:\memnoth-builds-cache\memnoth-target'
+# Verification is a one-shot build, not an edit loop. Incremental compilation
+# buys nothing here and is the artifact that grew the shared cache to 98 GB
+# during parallel work (50 GB of it in debug/incremental alone). Keep the
+# cache small so the preflight/postflight cap checks stay fast too.
+export CARGO_INCREMENTAL=0
 BUILD_CACHE_WIN='D:\memnoth-builds-cache'
 CAP_BYTES=$((100 * 1024 * 1024 * 1024)) # 100 GB
 
