@@ -306,14 +306,13 @@ mod linux_rss {
             }
             if let Ok(text) = std::fs::read_to_string(&status) {
                 for line in text.lines() {
-                    if let Some(rest) = line.strip_prefix("VmRSS:") {
-                        if let Some(kb) = rest
+                    if let Some(rest) = line.strip_prefix("VmRSS:")
+                        && let Some(kb) = rest
                             .split_whitespace()
                             .next()
                             .and_then(|value| value.parse::<u64>().ok())
-                        {
-                            peak_kb = peak_kb.max(kb);
-                        }
+                    {
+                        peak_kb = peak_kb.max(kb);
                     }
                 }
             }
