@@ -330,7 +330,12 @@ impl SlashMenu {
         };
         let typed = format!("/{rest}");
         let lower = typed.to_lowercase();
-        let previous_subcommand_prefix = self.subcommand_prefix.take();
+        // Capture where the highlight points before the prompt edit rebuilds the
+        // list. A keystroke that merely narrows the results must not drag the
+        // highlight back to the top while the same command is still on offer.
+        let anchor = self.selected_name();
+        let anchor_mode = self.selection_mode();
+        self.subcommand_prefix.take();
         // Navigate the command tree one level at a time. At `/`, only roots
         // are shown. Typing a root (or a child prefix) opens its children;
         // once a complete leaf is followed by a space, normal argument
@@ -339,15 +344,11 @@ impl SlashMenu {
             self.argument = None;
             self.values.clear();
             self.hint = None;
-            if previous_subcommand_prefix.as_deref() != Some(prefix.as_str()) || self.query != query
-            {
-                self.selected = 0;
-            }
             self.subcommand_prefix = Some(prefix);
             self.query = query;
             self.open = true;
             self.ranked_cache = self.compute_ranked();
-            self.clamp();
+            self.restore_selection(anchor, anchor_mode);
             return;
         }
 
@@ -390,13 +391,10 @@ impl SlashMenu {
             self.argument = None;
             self.values.clear();
             self.hint = None;
-            if self.query != rest {
-                self.query = rest.to_string();
-                self.selected = 0;
-            }
+            self.query = rest.to_string();
             self.open = true;
             self.ranked_cache = self.compute_ranked();
-            self.clamp();
+            self.restore_selection(anchor, anchor_mode);
             return;
         };
 
@@ -437,9 +435,6 @@ impl SlashMenu {
             return;
         }
 
-        if self.query != word {
-            self.selected = 0;
-        }
         self.query = word.to_string();
         self.argument = Some(Argument {
             head: format!("{name} {head_tail}"),
@@ -449,12 +444,21 @@ impl SlashMenu {
         self.values = values;
         self.open = true;
         self.ranked_cache.clear();
-        self.clamp();
+        self.restore_selection(anchor, anchor_mode);
     }
 
     /// The filter, without the leading slash.
     pub fn query(&self) -> &str {
         &self.query
+    }
+
+    /// How many trailing prompt characters are the active filter.
+    ///
+    /// `None` when there is nothing to clear. The caller owns the prompt, so it
+    /// is the caller that deletes these characters when Esc is to clear the
+    /// filter before it closes the list.
+    pub fn filter_len(&self) -> Option<usize> {
+        (self.open && !self.query.is_empty()).then(|| self.query.chars().count())
     }
 
     /// The rows that match the query, best first.
@@ -522,20 +526,23 @@ impl SlashMenu {
             // reading.
             return 12;
         }
-        let longest = self
-            .ranked_cache
-            .iter()
-            .map(|(index, _)| {
-                if let Some(parent) = &self.subcommand_prefix {
-                    immediate_child(parent, &self.items[*index].command)
-                        .map(|name| name.chars().count())
-                        .unwrap_or_default()
-                } else {
-                    command_root(&self.items[*index].command).chars().count() + 1
-                }
-            })
-            .max()
-            .unwrap_or(0);
+        // Measure the whole level, not just the rows the filter happens to
+        // leave: a column that tracks the matches shifts the descriptions
+        // sideways with every keystroke, which reads as the list jittering.
+        let longest = if let Some(parent) = &self.subcommand_prefix {
+            self.items
+                .iter()
+                .filter_map(|item| immediate_child(parent, &item.command))
+                .map(|name| name.chars().count())
+                .max()
+                .unwrap_or(0)
+        } else {
+            self.items
+                .iter()
+                .map(|item| command_root(&item.command).chars().count() + 1)
+                .max()
+                .unwrap_or(0)
+        };
         longest.clamp(10, 22)
     }
 
@@ -676,13 +683,24 @@ impl SlashMenu {
         }
     }
 
+    /// One row up, wrapping to the bottom: a list this short has no reason to
+    /// make a person hit End before they can come back down the other side.
     pub fn select_previous(&mut self) {
-        self.selected = self.selected_index().saturating_sub(1);
+        let last = self.total().saturating_sub(1);
+        self.selected = match self.selected_index().checked_sub(1) {
+            Some(index) => index,
+            None => last,
+        };
     }
 
+    /// One row down, wrapping to the top.
     pub fn select_next(&mut self) {
         let last = self.total().saturating_sub(1);
-        self.selected = (self.selected_index() + 1).min(last);
+        self.selected = if self.selected_index() >= last {
+            0
+        } else {
+            self.selected_index() + 1
+        };
     }
 
     pub fn page_up(&mut self) {
@@ -740,7 +758,7 @@ impl SlashMenu {
         }
         let item = self
             .matches()
-            .get(self.selected)
+            .get(self.selected_index())
             .map(|item| (**item).clone())?;
         if let Some(parent) = &self.subcommand_prefix {
             let child = immediate_child(parent, &item.command)?;
@@ -772,6 +790,47 @@ impl SlashMenu {
         if self.selected > last {
             self.selected = last;
         }
+    }
+
+    /// The displayed name of the highlighted row, before a re-filter rebuilds
+    /// the list. Rows are named the same way at every level (`/vault`, `status`,
+    /// or a value), so the name is a stable identity even when the representative
+    /// registry item behind a collapsed root changes with recency.
+    fn selected_name(&self) -> Option<String> {
+        self.rows()
+            .get(self.selected_index())
+            .map(|row| row.name.clone())
+    }
+
+    /// Which list the highlight belongs to. Moving between roots, children and
+    /// argument values is a change of list, not a re-filter: there is nothing
+    /// to preserve across it, so the selection starts at the top.
+    fn selection_mode(&self) -> (bool, Option<String>, Option<String>) {
+        (
+            self.argument.is_some(),
+            self.subcommand_prefix.clone(),
+            self.argument.as_ref().map(|argument| argument.head.clone()),
+        )
+    }
+
+    /// Put the highlight back on the row it was on when the filter still
+    /// matches it; fall back to a clamped index when that row is gone.
+    fn restore_selection(
+        &mut self,
+        anchor: Option<String>,
+        anchor_mode: (bool, Option<String>, Option<String>),
+    ) {
+        if anchor_mode != self.selection_mode() {
+            self.selected = 0;
+            return;
+        }
+        if let Some(name) = anchor
+            && let Some(position) = self.rows().iter().position(|row| row.name == name)
+        {
+            self.selected = position;
+            return;
+        }
+        self.clamp();
     }
 }
 
@@ -1141,16 +1200,28 @@ mod tests {
     }
 
     #[test]
-    fn the_highlight_stops_at_both_ends() {
+    fn the_arrows_wrap_at_both_ends() {
         let mut menu = opened("/vault");
-        let last = menu.total() - 1;
-        for _ in 0..50 {
+        assert!(menu.total() > 2);
+        menu.select_previous();
+        assert_eq!(
+            menu.selected_index(),
+            menu.total() - 1,
+            "up from the first row arrives at the last"
+        );
+        menu.select_next();
+        assert_eq!(
+            menu.selected_index(),
+            0,
+            "and down arrives back at the first"
+        );
+
+        // Repeated presses keep cycling; no press is silently swallowed.
+        for _ in 0..(2 * menu.total() + 1) {
             menu.select_next();
         }
-        assert_eq!(menu.selected_index(), last);
-        for _ in 0..50 {
-            menu.select_previous();
-        }
+        assert_eq!(menu.selected_index(), 1);
+        menu.select_previous();
         assert_eq!(menu.selected_index(), 0);
     }
 
@@ -1222,12 +1293,58 @@ mod tests {
         assert!(menu.is_open(), "the list stays up for a correction");
     }
 
+    /// Roots without children so `sync` stays in the flat command list: these
+    /// assertions are about the highlight, not about drilling into a family.
+    fn flat_menu() -> SlashMenu {
+        let mut menu = SlashMenu::new();
+        menu.items = vec![
+            PaletteItem {
+                command: "/alpha".into(),
+                description: "first".into(),
+            },
+            PaletteItem {
+                command: "/bravo".into(),
+                description: "second".into(),
+            },
+            PaletteItem {
+                command: "/charlie".into(),
+                description: "third".into(),
+            },
+        ];
+        menu.sync("/", 1);
+        menu
+    }
+
     #[test]
-    fn a_new_query_starts_at_the_top() {
-        let mut menu = opened("/");
+    fn a_narrowing_query_keeps_the_highlighted_command() {
+        let mut menu = flat_menu();
+        assert_eq!(menu.total(), 3);
         menu.select_next();
+        assert_eq!(menu.rows()[menu.selected_index()].name, "/bravo");
+
+        menu.sync("/br", 3);
+        assert_eq!(menu.rows()[menu.selected_index()].name, "/bravo");
+        menu.sync("/bra", 4);
+        assert_eq!(menu.rows()[menu.selected_index()].name, "/bravo");
+
+        // Once the highlighted command drops out, a valid row is still selected.
+        menu.sync("/ch", 3);
+        assert!(menu.selected_index() < menu.total());
+        assert_eq!(menu.rows()[menu.selected_index()].name, "/charlie");
+    }
+
+    #[test]
+    fn a_mode_change_starts_at_the_top() {
+        // A child in the subcommand list is not the same row as a value in the
+        // argument list, even if both happen to sit at the same index.
+        let mut menu = opened("/vault rec");
+        assert!(menu.subcommand_prefix.is_some());
         menu.select_next();
-        menu.sync("/va", 3);
+        menu.sync("/vault recall ", 14);
+        assert!(
+            !menu.choosing_command(),
+            "the line is now asking for a value"
+        );
         assert_eq!(menu.selected_index(), 0);
     }
 
@@ -1238,5 +1355,44 @@ mod tests {
         let selected = menu.selected_index();
         menu.sync("/va", 3);
         assert_eq!(menu.selected_index(), selected);
+    }
+
+    #[test]
+    fn the_command_column_does_not_shift_with_the_filter() {
+        let mut menu = flat_menu();
+        let all = menu.name_column();
+        menu.sync("/br", 3);
+        assert_eq!(menu.name_column(), all);
+        menu.sync("/cha", 4);
+        assert_eq!(menu.name_column(), all);
+    }
+
+    #[test]
+    fn the_filter_reports_its_length_for_a_caller_to_clear() {
+        assert_eq!(opened("/").filter_len(), None, "an empty filter is not one");
+        assert_eq!(opened("/vau").filter_len(), Some(3));
+        assert_eq!(
+            opened("/vault recor").filter_len(),
+            Some(5),
+            "the partial subcommand, not the whole line"
+        );
+        let mut closed = opened("/vau");
+        closed.close();
+        assert_eq!(
+            closed.filter_len(),
+            None,
+            "a closed list has nothing to clear"
+        );
+    }
+
+    #[test]
+    fn accepting_uses_the_clamped_highlight() {
+        let mut menu = opened("/help");
+        // A stale index must not pick a different row or refuse the pick: every
+        // other view of the highlight is clamped, and Enter must agree with it.
+        menu.selected = usize::MAX;
+        let (line, submit) = menu.accept().expect("the clamped row is still there");
+        assert_eq!(line, "/help");
+        assert!(submit);
     }
 }

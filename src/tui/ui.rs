@@ -54,6 +54,8 @@ fn footer_hint(app: &App) -> String {
     } else if app.slash.is_open() {
         if app.slash.total() == 0 {
             "no command matches · enter runs the line as typed".to_string()
+        } else if app.slash.filter_len().is_some() {
+            "↑↓ move · enter open/run · tab complete · esc clears filter".to_string()
         } else {
             "↑↓ move · enter open/run · tab complete · esc close".to_string()
         }
@@ -703,25 +705,51 @@ fn draw_completions(
     }
 
     let room = room as usize;
-    let start = app.slash.window_start(rows.len().min(MAX_ROWS));
-    let selected = app.slash.selected_index();
+    let selected = app.slash.selected_index().min(rows.len() - 1);
     let column = app.slash.name_column();
     // The dropdown is themed, not hard-coded: every colour comes from the
     // semantic tokens, so a palette change reaches the list with the rest of
     // the screen and `NO_COLOR` leaves only glyphs and weight.
+    let t = tokens();
+
+    // Measure the rows before drawing them. A wrapped description costs more
+    // than one line, so a window sized only in rows could leave the highlight
+    // off the top of a short screen while the counter still named it as the
+    // selected row. Anchor the window on the highlight and drop rows above it
+    // until the block fits the space that actually exists.
+    let heights: Vec<usize> = rows
+        .iter()
+        .map(|row| row_lines(row, column, false, width, t).len())
+        .collect();
+    let mut start = selected.saturating_sub(MAX_ROWS - 1);
+    while rows.len().saturating_sub(start) > MAX_ROWS {
+        start += 1;
+    }
+    let mut start = start.min(selected);
+    while start < selected
+        && (start..=selected)
+            .map(|index| heights[index])
+            .sum::<usize>()
+            > room
+    {
+        start += 1;
+    }
 
     // Rows are drawn from the window start until the row cap or the screen runs
     // out. A description takes as many lines as it needs, so the budget is in
     // lines, not rows: a long description costs the row below it, never its own
     // tail.
     let mut lines: Vec<Line> = Vec::new();
-    for (offset, row) in rows.iter().skip(start).enumerate() {
-        if offset >= MAX_ROWS || lines.len() >= room {
+    let mut highlight_drawn = false;
+    for (index, row) in rows.iter().enumerate().skip(start) {
+        if index >= start + MAX_ROWS || lines.len() >= room {
             break;
         }
-        let mut block = row_lines(row, column, start + offset == selected, width, tokens());
+        let is_selected = index == selected;
+        let mut block = row_lines(row, column, is_selected, width, t);
         block.truncate(room - lines.len());
         lines.extend(block);
+        highlight_drawn |= is_selected;
     }
     if lines.is_empty() {
         return None;
@@ -731,8 +759,9 @@ fn draw_completions(
     let rect = Rect::new(area.x, prompt.y - height, area.width, height);
     frame.render_widget(Clear, rect);
     frame.render_widget(Paragraph::new(lines), rect);
-    // One row is not a list with a position in it.
-    (rows.len() > 1).then(|| (selected + 1, rows.len()))
+    // One row is not a list with a position in it, and a counter that names a
+    // row the terminal never drew would be a lie.
+    (rows.len() > 1 && highlight_drawn).then(|| (selected + 1, rows.len()))
 }
 
 /// One row: the marker, the command with its matched letters picked out, and
@@ -1733,6 +1762,30 @@ mod tests {
         app.input = line.to_string();
         app.cursor = line.chars().count();
         app.sync_slash();
+    }
+
+    #[test]
+    fn the_highlight_stays_on_screen_when_rows_wrap_and_space_is_short() {
+        let mut app = App::new("s", false);
+        typed(&mut app, "/vault");
+        assert!(app.slash.total() > MAX_ROWS);
+        for _ in 0..4 {
+            app.slash.select_next();
+        }
+        let expected = app.slash.rows()[app.slash.selected_index()].name.clone();
+        // At 60 columns the descriptions wrap to two lines each, so five rows
+        // need more room than a short terminal has above the prompt. The old
+        // row-sized window drew only the first four and hid the highlight.
+        let text = screen(&mut app, 60, 12);
+        let marked: Vec<&str> = text
+            .lines()
+            .filter(|line| line.trim_start().starts_with('›'))
+            .collect();
+        assert!(
+            marked.iter().any(|line| line.contains(&expected)),
+            "highlighted {expected:?} is missing: {marked:?}\n{text}"
+        );
+        assert!(text.contains(&format!("5/{}", app.slash.total())), "{text}");
     }
 
     #[test]

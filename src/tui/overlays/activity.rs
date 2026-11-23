@@ -1,4 +1,10 @@
-//! A compact switcher for work the session started or can start.
+//! Work — one ranked surface for everything this session started or can start.
+//!
+//! Runs and commands share a single list ordered by what needs the person most:
+//! waiting-on-you first, then live work, then history. `1/2/3` narrows the same
+//! surface to runs or commands without changing screens — a filter, not a tab.
+//! The vocabulary is Memnoth's own (`delegate`, `run`, `job`, `worktree`), not
+//! a borrowed category taxonomy.
 
 use std::path::Path;
 use std::process::Command;
@@ -17,9 +23,10 @@ use crate::tui::jobs::JobStatus;
 use crate::tui::overlays::{Overlay, OverlayAction, OverlayKind};
 use crate::tui::theme::{Tokens, tokens};
 
-/// A selected row must still be distinguishable when every token is Reset,
-/// which is what NO_COLOR (and `TERM=dumb`) produce. Reverse video carries the
-/// same meaning without asking the terminal for a colour.
+const FILTERS: [WorkFilter; 3] = [WorkFilter::All, WorkFilter::Runs, WorkFilter::Commands];
+
+/// A selected row must stay distinguishable when every token is Reset (NO_COLOR
+/// / TERM=dumb). Reverse video carries the meaning without asking for colour.
 fn selection(t: Tokens) -> Style {
     if t.colored() {
         Style::default().fg(t.selected_fg).bg(t.selected_bg)
@@ -28,75 +35,102 @@ fn selection(t: Tokens) -> Style {
     }
 }
 
-/// State words are drawn literally, so a reader loses nothing when every
-/// semantic role collapses to Reset under NO_COLOR. The colour only adds a
-/// second, redundant cue: failure is error, completion is success, and a
-/// stranded run is a warning.
+/// State words are drawn literally; colour is a redundant second cue only.
 fn state_color(state: &str, t: Tokens) -> Color {
     match state {
-        "failed" => t.error,
+        "waiting" | "orphaned" | "failed" | "parked" => t.error,
+        "running" | "starting" | "queued" => t.text,
         "done" | "completed" => t.success,
-        "orphaned" | "parked" => t.warning,
-        "running" => t.text,
-        _ => t.muted, // starting, waiting, stopped, cancelled
+        _ => t.muted,
     }
 }
 
-const TABS: [ActivityTab; 3] = [
-    ActivityTab::Agents,
-    ActivityTab::Shell,
-    ActivityTab::Terminals,
-];
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ActivityTab {
-    Agents,
-    Shell,
-    Terminals,
+/// Urgency rank: what needs a person first, then live work, then history.
+/// Lower ranks sort to the top of the Work list.
+fn urgency(rank: &str) -> u8 {
+    match rank {
+        "waiting" => 0, // needs input / approval
+        "orphaned" => 1,
+        "failed" => 2,
+        "running" | "starting" | "queued" => 3,
+        "parked" => 4,
+        "done" | "completed" => 5,
+        _ => 6,
+    }
 }
 
-impl ActivityTab {
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum WorkFilter {
+    #[default]
+    All,
+    Runs,
+    Commands,
+}
+
+impl WorkFilter {
     fn label(self) -> &'static str {
         match self {
-            Self::Agents => "Subagents",
-            Self::Shell => "Shell",
-            Self::Terminals => "Terminals",
+            Self::All => "All",
+            Self::Runs => "Runs",
+            Self::Commands => "Commands",
         }
     }
 
-    fn index(self) -> usize {
-        TABS.iter().position(|tab| *tab == self).unwrap_or(0)
+    fn from_key(key: KeyCode) -> Option<Self> {
+        match key {
+            KeyCode::Char('1') => Some(Self::All),
+            KeyCode::Char('2') => Some(Self::Runs),
+            KeyCode::Char('3') => Some(Self::Commands),
+            _ => None,
+        }
     }
 
     fn next(self, delta: isize) -> Self {
-        let len = TABS.len() as isize;
-        TABS[(self.index() as isize + delta).rem_euclid(len) as usize]
+        let i = FILTERS.iter().position(|f| *f == self).unwrap_or(0) as isize;
+        FILTERS[(i + delta).rem_euclid(FILTERS.len() as isize) as usize]
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkKind {
+    Run,
+    Command,
+    Action,
 }
 
 #[derive(Debug, Clone)]
 enum RowAction {
-    Agent(String),
+    Run(String),
     Job(String),
     Tool(String),
-    NewAgent,
-    NewShellTask,
-    NewTerminal,
+    Delegate,
+    RunCommand,
 }
 
 #[derive(Debug, Clone)]
-struct ActivityRow {
-    title: String,
-    detail: String,
+struct WorkRow {
+    kind: WorkKind,
+    /// The literal state word, always drawn as text.
     state: String,
-    action: Option<RowAction>,
+    /// Primary label (task or command).
+    title: String,
+    /// Supporting detail: model, cwd, exit, tail — drawn muted.
+    detail: String,
+    /// Optional trailing badge (unread mark, exit code).
+    badge: String,
+    /// Urgency key for the single ranked list.
+    rank: String,
+    /// Tree indentation for child runs.
+    depth: usize,
+    action: RowAction,
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct ActivityOverlay {
     visible: bool,
-    tab: Option<ActivityTab>,
+    filter: WorkFilter,
     selected: usize,
+    query: String,
     notice: Option<String>,
 }
 
@@ -105,104 +139,135 @@ impl ActivityOverlay {
         Self::default()
     }
 
-    fn tab(&self) -> ActivityTab {
-        self.tab.unwrap_or(ActivityTab::Shell)
-    }
+    fn rows(&self, app: &App) -> Vec<WorkRow> {
+        let mut rows = Vec::new();
 
-    fn rows(&self, app: &App) -> Vec<ActivityRow> {
-        match self.tab() {
-            ActivityTab::Agents => {
-                let mut rows: Vec<_> = agents::roster(app)
-                    .into_iter()
-                    .filter(|agent| agent.parent_id.is_some())
-                    .map(|agent| ActivityRow {
-                        title: format!("{}  {}", agent.role, ellipsize(&agent.task, 55)),
-                        detail: agent
-                            .worktree
-                            .as_deref()
-                            .or(agent.model.as_deref())
-                            .unwrap_or("subagent run")
-                            .to_string(),
-                        state: agent_status(agent.status).to_string(),
-                        action: Some(RowAction::Agent(agent.agent_id)),
-                    })
-                    .collect();
-                rows.push(ActivityRow {
-                    title: "+ Delegate a task…".to_string(),
-                    detail: "Start a scoped subagent with /delegate".to_string(),
-                    state: String::new(),
-                    action: Some(RowAction::NewAgent),
+        // Runs — delegated child agents, with their own spawn tree.
+        if self.filter != WorkFilter::Commands {
+            for agent in agents::roster(app)
+                .into_iter()
+                .filter(|a| a.parent_id.is_some())
+            {
+                let state = agent_status(agent.status).to_string();
+                rows.push(WorkRow {
+                    kind: WorkKind::Run,
+                    state: state.clone(),
+                    title: agent.role.clone(),
+                    detail: agent.task.clone(),
+                    badge: agent.model.clone().unwrap_or_else(|| "local".to_string()),
+                    rank: state,
+                    depth: agent.depth.min(3),
+                    action: RowAction::Run(agent.agent_id),
                 });
-                rows
-            }
-            ActivityTab::Shell => {
-                let mut rows: Vec<_> = app
-                    .jobs
-                    .newest_first()
-                    .map(|job| ActivityRow {
-                        title: ellipsize(&job.command, 62),
-                        detail: format!("{} · {}", job.id, job.started_at),
-                        state: job.status.label().to_string(),
-                        action: Some(RowAction::Job(job.id.clone())),
-                    })
-                    .collect();
-                rows.extend(
-                    app.entries
-                        .iter()
-                        .rev()
-                        .filter(|entry| {
-                            matches!(
-                                entry.role,
-                                EntryRole::Tool
-                                    | EntryRole::ToolDone
-                                    | EntryRole::ToolFailed
-                                    | EntryRole::ToolInterrupted
-                            )
-                        })
-                        .take(30)
-                        .map(|entry| ActivityRow {
-                            title: ellipsize(&entry.text.replace('\n', " "), 62),
-                            detail: "model tool call".to_string(),
-                            state: if entry.role == EntryRole::Tool {
-                                "running".to_string()
-                            } else {
-                                "done".to_string()
-                            },
-                            action: Some(RowAction::Tool(entry.text.clone())),
-                        }),
-                );
-                rows.push(ActivityRow {
-                    title: "+ Run a shell task…".to_string(),
-                    detail: "Starts a visible background job in the workspace".to_string(),
-                    state: String::new(),
-                    action: Some(RowAction::NewShellTask),
-                });
-                rows
-            }
-            ActivityTab::Terminals => {
-                let root = app
-                    .ctx
-                    .as_ref()
-                    .map(|ctx| ctx.root.display().to_string())
-                    .unwrap_or_else(|| "current directory".to_string());
-                vec![ActivityRow {
-                    title: "+ New terminal".to_string(),
-                    detail: format!("Open your system shell at {}", ellipsize(&root, 52)),
-                    state: String::new(),
-                    action: Some(RowAction::NewTerminal),
-                }]
             }
         }
+
+        // Commands — background jobs plus recent model tool calls.
+        if self.filter != WorkFilter::Runs {
+            for job in app.jobs.newest_first() {
+                let state = job_status(job.status).to_string();
+                let tail = job.tail(1).pop().unwrap_or_default();
+                let detail = format!(
+                    "{} · {}",
+                    ellipsize(&job.command, 34),
+                    ellipsize(tail.trim(), 28)
+                );
+                rows.push(WorkRow {
+                    kind: WorkKind::Command,
+                    state: state.clone(),
+                    title: format!("#{}", job.id),
+                    detail,
+                    badge: job.exit.map(|code| code.to_string()).unwrap_or_default(),
+                    rank: state,
+                    depth: 0,
+                    action: RowAction::Job(job.id.clone()),
+                });
+            }
+            for entry in app
+                .entries
+                .iter()
+                .rev()
+                .filter(|e| {
+                    matches!(
+                        e.role,
+                        EntryRole::Tool
+                            | EntryRole::ToolDone
+                            | EntryRole::ToolFailed
+                            | EntryRole::ToolInterrupted
+                    )
+                })
+                .take(12)
+            {
+                let state = if entry.role == EntryRole::Tool {
+                    "running"
+                } else {
+                    "done"
+                };
+                rows.push(WorkRow {
+                    kind: WorkKind::Command,
+                    state: state.to_string(),
+                    title: "tool".to_string(),
+                    detail: ellipsize(&entry.text.replace('\n', " "), 56),
+                    badge: String::new(),
+                    rank: state.to_string(),
+                    depth: 0,
+                    action: RowAction::Tool(entry.text.clone()),
+                });
+            }
+        }
+
+        // Actions are always available and sort last.
+        rows.push(WorkRow {
+            kind: WorkKind::Action,
+            state: String::new(),
+            title: "delegate a run".to_string(),
+            detail: "Spawn a scoped agent with its own worktree".to_string(),
+            badge: String::new(),
+            rank: "action".to_string(),
+            depth: 0,
+            action: RowAction::Delegate,
+        });
+        rows.push(WorkRow {
+            kind: WorkKind::Action,
+            state: String::new(),
+            title: "open system shell".to_string(),
+            detail: "Keep a shell open at the workspace root while you work".to_string(),
+            badge: String::new(),
+            rank: "action".to_string(),
+            depth: 0,
+            action: RowAction::RunCommand,
+        });
+
+        // One ranked list: needs-you first, then live work, then history.
+        rows.sort_by_key(|row| urgency(&row.rank));
+
+        // Live filter narrows the same list; never a second command source.
+        if !self.query.is_empty() {
+            let q = self.query.to_ascii_lowercase();
+            rows.retain(|row| {
+                row.title.to_ascii_lowercase().contains(&q)
+                    || row.detail.to_ascii_lowercase().contains(&q)
+                    || row.state.contains(&q)
+            });
+        }
+        rows
+    }
+
+    fn clamp(&mut self, len: usize) {
+        self.selected = if len == 0 {
+            0
+        } else {
+            self.selected.min(len - 1)
+        };
     }
 
     fn move_selection(&mut self, app: &App, delta: isize) {
         let len = self.rows(app).len();
+        self.clamp(len);
         if len == 0 {
-            self.selected = 0;
-        } else {
-            self.selected =
-                (self.selected as isize + delta).clamp(0, len.saturating_sub(1) as isize) as usize;
+            return;
         }
+        self.selected = (self.selected as isize + delta).rem_euclid(len as isize) as usize;
     }
 
     fn activate(&mut self, app: &mut App) -> OverlayAction {
@@ -210,11 +275,11 @@ impl ActivityOverlay {
             return OverlayAction::None;
         };
         match row.action {
-            Some(RowAction::Agent(id)) => {
+            RowAction::Run(id) => {
                 app.focus_agent = Some(id);
                 OverlayAction::Push(OverlayKind::Focus)
             }
-            Some(RowAction::Job(id)) => {
+            RowAction::Job(id) => {
                 if let Some(job) = app.jobs.get(&id) {
                     let tail = job.tail(40);
                     let body = if tail.is_empty() {
@@ -226,34 +291,26 @@ impl ActivityOverlay {
                 }
                 OverlayAction::Close
             }
-            Some(RowAction::Tool(text)) => {
+            RowAction::Tool(text) => {
                 app.push(EntryRole::Answer, text);
                 OverlayAction::Close
             }
-            Some(RowAction::NewAgent) => {
+            RowAction::Delegate => {
                 set_prompt(app, "/delegate ");
                 OverlayAction::Close
             }
-            Some(RowAction::NewShellTask) => {
-                set_prompt(app, "/tasks run ");
-                OverlayAction::Close
-            }
-            Some(RowAction::NewTerminal) => {
+            RowAction::RunCommand => {
                 let root = app
                     .ctx
                     .as_ref()
                     .map(|ctx| ctx.root.as_path())
                     .unwrap_or_else(|| Path::new("."));
                 match open_system_terminal(root) {
-                    Ok(()) => {
-                        self.notice =
-                            Some("Opened a new system terminal at the workspace root.".into())
-                    }
-                    Err(error) => self.notice = Some(format!("Could not open a terminal: {error}")),
+                    Ok(()) => self.notice = Some("Opened a shell at the workspace root.".into()),
+                    Err(error) => self.notice = Some(format!("Could not open a shell: {error}")),
                 }
                 OverlayAction::None
             }
-            None => OverlayAction::None,
         }
     }
 }
@@ -269,21 +326,10 @@ impl Overlay for ActivityOverlay {
 
     fn show(&mut self) {
         self.visible = true;
-    }
-
-    fn on_open(&mut self, app: &mut App) {
-        let has_live_agent = agents::roster(app)
-            .iter()
-            .any(|agent| agent.parent_id.is_some() && agent.status == AgentStatus::Running);
-        let has_live_shell = app.jobs.iter().any(|job| job.status == JobStatus::Running);
-        self.tab = Some(if has_live_agent {
-            ActivityTab::Agents
-        } else if has_live_shell {
-            ActivityTab::Shell
-        } else {
-            ActivityTab::Terminals
-        });
+        self.filter = WorkFilter::All;
         self.selected = 0;
+        self.query.clear();
+        self.notice = None;
     }
 
     fn hide(&mut self) {
@@ -291,61 +337,79 @@ impl Overlay for ActivityOverlay {
     }
 
     fn handle_key(&mut self, key: KeyEvent, app: &mut App) -> OverlayAction {
+        if !self.visible {
+            return OverlayAction::None;
+        }
+        if let Some(filter) = WorkFilter::from_key(key.code) {
+            self.filter = filter;
+            self.selected = 0;
+            self.query.clear();
+            self.notice = None;
+            return OverlayAction::None;
+        }
         match key.code {
-            KeyCode::Esc => OverlayAction::Close,
             KeyCode::Tab | KeyCode::Right => {
-                self.tab = Some(self.tab().next(1));
+                self.filter = self.filter.next(1);
                 self.selected = 0;
+                self.query.clear();
                 self.notice = None;
                 OverlayAction::None
             }
             KeyCode::BackTab | KeyCode::Left => {
-                self.tab = Some(self.tab().next(-1));
+                self.filter = self.filter.next(-1);
                 self.selected = 0;
+                self.query.clear();
                 self.notice = None;
                 OverlayAction::None
             }
-            KeyCode::Char('n') => {
-                if let Some(index) = self.rows(app).iter().position(|row| {
-                    row.action.as_ref().is_some_and(|action| {
-                        matches!(
-                            action,
-                            RowAction::NewAgent | RowAction::NewShellTask | RowAction::NewTerminal
-                        )
-                    })
-                }) {
-                    self.selected = index;
-                    self.activate(app)
-                } else {
-                    OverlayAction::None
-                }
-            }
-            KeyCode::Down => {
+            KeyCode::Down | KeyCode::Char('j') => {
                 self.move_selection(app, 1);
                 OverlayAction::None
             }
-            KeyCode::Up => {
+            KeyCode::Up | KeyCode::Char('k') => {
                 self.move_selection(app, -1);
                 OverlayAction::None
             }
-            KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if let Some(ActivityRow {
-                    action: Some(RowAction::Job(id)),
+            // Specific chars with meaning must precede the query-append arm.
+            KeyCode::Char('X') => {
+                if let Some(WorkRow {
+                    action: RowAction::Job(id),
                     ..
                 }) = self.rows(app).get(self.selected)
                 {
                     match app.jobs.cancel(id) {
                         Ok(true) => {
                             app.sync_jobs();
-                            self.notice = Some(format!("Stopped shell job {id}."));
+                            self.notice = Some(format!("Stopped job {id}."));
                         }
-                        Ok(false) => {
-                            self.notice = Some(format!("Shell job {id} already finished."))
-                        }
+                        Ok(false) => self.notice = Some(format!("Job {id} already finished.")),
                         Err(error) => self.notice = Some(format!("Could not stop {id}: {error}")),
                     }
                 }
                 OverlayAction::None
+            }
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if c == '/' && self.query.is_empty() {
+                    return OverlayAction::None;
+                }
+                self.query.push(c);
+                self.clamp(self.rows(app).len());
+                self.selected = 0;
+                OverlayAction::None
+            }
+            KeyCode::Backspace => {
+                self.query.pop();
+                self.clamp(self.rows(app).len());
+                OverlayAction::None
+            }
+            KeyCode::Esc => {
+                if !self.query.is_empty() {
+                    self.query.clear();
+                    self.clamp(self.rows(app).len());
+                    OverlayAction::None
+                } else {
+                    OverlayAction::Close
+                }
             }
             KeyCode::Enter => self.activate(app),
             _ => OverlayAction::None,
@@ -354,11 +418,11 @@ impl Overlay for ActivityOverlay {
 
     fn render(&mut self, frame: &mut Frame, area: Rect, app: &App) {
         let t = tokens();
-        let width = area.width.saturating_sub(2).min(94);
-        let height = area.height.saturating_sub(2).min(20);
-        if width < 34 || height < 8 {
+        let width = area.width.saturating_sub(2).min(96);
+        let height = area.height.saturating_sub(2).min(22);
+        if width < 40 || height < 10 {
             frame.render_widget(
-                Paragraph::new("Resize the terminal to open activity")
+                Paragraph::new("Resize the terminal to open Work")
                     .style(Style::default().fg(t.muted))
                     .alignment(Alignment::Center),
                 area,
@@ -379,118 +443,144 @@ impl Overlay for ActivityOverlay {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(2),
-                Constraint::Length(1),
-                Constraint::Min(2),
-                Constraint::Length(2),
+                Constraint::Length(2), // filter row
+                Constraint::Length(1), // rule
+                Constraint::Min(2),    // list + detail
+                Constraint::Length(2), // footer
             ])
             .split(inner);
 
-        let rows = self.rows(app);
-        let tabs = TABS
+        // Filter row — one surface, three ways to narrow it.
+        let filters = FILTERS
             .iter()
-            .flat_map(|tab| {
-                let selected = self.tab() == *tab;
-                let style = if selected {
+            .flat_map(|filter| {
+                let active = self.filter == *filter;
+                let style = if active {
                     selection(t).add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(t.muted)
                 };
                 [
-                    Span::styled(format!(" {} ", tab.label()), style),
-                    Span::raw("   "),
+                    Span::styled(format!(" {} ", filter.label()), style),
+                    Span::raw("  "),
                 ]
             })
             .collect::<Vec<_>>();
-        frame.render_widget(Paragraph::new(Line::from(tabs)), chunks[0]);
+        frame.render_widget(Paragraph::new(Line::from(filters)), chunks[0]);
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                "────────────────────────────────────────────────────────────────────────",
+                "─".repeat(inner.width as usize),
                 Style::default().fg(t.border),
             ))),
             chunks[1],
         );
 
-        let available = (chunks[2].height as usize / 2).max(1);
+        // List and detail share the body: the list owns the upper portion.
+        let body_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(62), Constraint::Min(3)])
+            .split(chunks[2]);
+
+        let rows = self.rows(app);
+        self.clamp(rows.len());
+        let available = (body_chunks[0].height as usize / 2).max(1);
         let start = self.selected.saturating_sub(available.saturating_sub(1));
-        let visible_rows = rows.iter().skip(start).take(available);
         let mut lines = Vec::new();
-        for (offset, row) in visible_rows.enumerate() {
+        for (offset, row) in rows.iter().skip(start).take(available).enumerate() {
             let index = start + offset;
             let selected = index == self.selected;
-            let pointer = if selected { "› " } else { "  " };
             let row_style = if selected {
                 selection(t)
             } else {
                 Style::default()
             };
-            let title_style = if selected {
-                row_style.add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(t.text)
-            };
-            // The pointer is the current actionable marker: accent is reserved
-            // for it, including on the selected row's highlighted background.
+            let pointer = if selected { "› " } else { "  " };
             let pointer_style = if selected {
                 row_style.fg(t.accent)
             } else {
                 Style::default()
             };
-            let state_color = state_color(&row.state, t);
-            let state_style = if selected {
-                row_style.patch(Style::default().fg(state_color))
+            let indent = "  ".repeat(row.depth);
+            let state_style = Style::default().fg(state_color(&row.state, t));
+            let title_style = if selected {
+                row_style.add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(state_color)
+                Style::default().fg(t.text)
+            };
+            let state_label = if row.state.is_empty() {
+                String::new()
+            } else {
+                format!("{} ", row.state)
             };
             lines.push(Line::from(vec![
                 Span::styled(pointer, pointer_style),
+                Span::styled(indent, Style::default().fg(t.muted)),
+                Span::styled(state_label, state_style),
+                Span::styled(ellipsize(&row.title, 24), title_style),
                 Span::styled(
-                    ellipsize(
-                        &row.title,
-                        (inner.width as usize).saturating_sub(row.state.len() + 7),
-                    ),
-                    title_style,
+                    format!("  {}", ellipsize(&row.detail, 34)),
+                    Style::default().fg(t.muted),
                 ),
-                Span::raw("  "),
-                Span::styled(row.state.clone(), state_style),
-            ]));
-            let detail_style = if selected {
-                row_style
-            } else {
-                Style::default().fg(t.muted)
-            };
-            lines.push(Line::from(vec![
-                Span::raw("   "),
-                Span::styled(
-                    ellipsize(&row.detail, (inner.width as usize).saturating_sub(5)),
-                    detail_style,
-                ),
+                Span::styled(row.badge.clone(), state_style),
             ]));
         }
-        let content = if lines.is_empty() {
-            vec![Line::from(Span::styled(
-                "Nothing running here yet.",
+        if lines.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "No live work yet. Press n to start one.",
                 Style::default().fg(t.muted),
-            ))]
-        } else {
-            lines
-        };
-        frame.render_widget(Paragraph::new(content), chunks[2]);
+            )));
+        }
+        frame.render_widget(Paragraph::new(lines), body_chunks[0]);
 
-        let help = match self.tab() {
-            ActivityTab::Agents => {
-                "↑↓ choose · enter inspect · n delegate · tab switch · esc close"
-            }
-            ActivityTab::Shell => {
-                "↑↓ choose · enter output · ctrl-x stop · n run task · tab switch"
-            }
-            ActivityTab::Terminals => "enter / n new terminal · tab switch · esc close",
+        // Detail drawer for the selected row.
+        let detail = rows
+            .get(self.selected)
+            .map(|row| {
+                let head = match row.kind {
+                    WorkKind::Run => "RUN",
+                    WorkKind::Command => "COMMAND",
+                    WorkKind::Action => "ACTION",
+                };
+                vec![
+                    Line::from(vec![
+                        Span::styled(
+                            head,
+                            Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!("  {}", row.title),
+                            Style::default().fg(t.text).add_modifier(Modifier::BOLD),
+                        ),
+                    ]),
+                    Line::from(Span::styled(
+                        ellipsize(&row.detail, inner.width.saturating_sub(2) as usize),
+                        Style::default().fg(t.muted),
+                    )),
+                ]
+            })
+            .unwrap_or_else(|| {
+                vec![Line::from(Span::styled(
+                    "Nothing selected.",
+                    Style::default().fg(t.muted),
+                ))]
+            });
+        frame.render_widget(Paragraph::new(detail), body_chunks[1]);
+
+        // Contextual footer: the three actions that matter on this surface.
+        let filter_hint = if self.query.is_empty() {
+            self.filter.label().to_string()
+        } else {
+            format!("{} /{}", self.filter.label(), self.query)
         };
+        let help = format!(
+            "⏎ open · n delegate · 1/2/3 {} · / filter · x stop ·  ? help · esc dismiss",
+            filter_hint
+        );
         let footer = self
             .notice
             .as_deref()
             .map(|notice| format!("{notice}   ·   {help}"))
-            .unwrap_or_else(|| help.to_string());
+            .unwrap_or_else(|| help.clone());
         frame.render_widget(
             Paragraph::new(footer).style(Style::default().fg(t.muted)),
             chunks[3],
@@ -511,6 +601,15 @@ fn agent_status(status: AgentStatus) -> &'static str {
     }
 }
 
+fn job_status(status: JobStatus) -> &'static str {
+    match status {
+        JobStatus::Running => "running",
+        JobStatus::Completed => "done",
+        JobStatus::Failed => "failed",
+        JobStatus::Cancelled => "stopped",
+    }
+}
+
 fn set_prompt(app: &mut App, value: &str) {
     app.input = value.to_string();
     app.cursor = app.input.chars().count();
@@ -526,7 +625,7 @@ fn open_system_terminal(root: &Path) -> anyhow::Result<()> {
                 "0",
                 "new-tab",
                 "--title",
-                "Memnoth terminal",
+                "Memnoth shell",
                 "--startingDirectory",
             ])
             .arg(root)
@@ -579,7 +678,7 @@ fn open_system_terminal(root: &Path) -> anyhow::Result<()> {
     #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     {
         let _ = root;
-        anyhow::bail!("opening a system terminal is not supported on this platform")
+        anyhow::bail!("opening a system shell is not supported on this platform")
     }
 }
 
@@ -617,7 +716,7 @@ mod tests {
             "stopped",
             "orphaned",
             "parked",
-            "cancelled",
+            "queued",
         ] {
             assert_eq!(
                 state_color(state, plain),
@@ -628,16 +727,39 @@ mod tests {
 
         let t = Tokens::for_palette(Palette::Dark);
         assert_eq!(state_color("failed", t), t.error);
+        assert_eq!(state_color("orphaned", t), t.error);
         assert_eq!(state_color("done", t), t.success);
-        assert_eq!(state_color("completed", t), t.success);
-        assert_eq!(state_color("orphaned", t), t.warning);
-        assert_eq!(state_color("parked", t), t.warning);
         assert_eq!(state_color("running", t), t.text);
-        assert_eq!(state_color("cancelled", t), t.muted);
     }
 
-    /// The state word itself is drawn from these literals, never from a colour,
-    /// so stripping every token still leaves the failure readable.
+    #[test]
+    fn urgency_puts_needs_you_first_and_history_last() {
+        assert!(urgency("waiting") < urgency("running"));
+        assert!(urgency("running") < urgency("done"));
+        assert!(urgency("failed") < urgency("done"));
+        assert!(urgency("parked") < urgency("done"));
+        assert!(urgency("done") < urgency("action"));
+    }
+
+    #[test]
+    fn filter_keys_and_cycling_are_stable() {
+        assert_eq!(
+            WorkFilter::from_key(KeyCode::Char('1')),
+            Some(WorkFilter::All)
+        );
+        assert_eq!(
+            WorkFilter::from_key(KeyCode::Char('2')),
+            Some(WorkFilter::Runs)
+        );
+        assert_eq!(
+            WorkFilter::from_key(KeyCode::Char('3')),
+            Some(WorkFilter::Commands)
+        );
+        assert_eq!(WorkFilter::All.next(1), WorkFilter::Runs);
+        assert_eq!(WorkFilter::Commands.next(1), WorkFilter::All);
+        assert_eq!(WorkFilter::All.next(-1), WorkFilter::Commands);
+    }
+
     #[test]
     fn status_labels_remain_literal_words() {
         assert_eq!(agent_status(AgentStatus::Failed), "failed");
@@ -646,5 +768,13 @@ mod tests {
         assert_eq!(JobStatus::Running.label(), "running");
         assert_eq!(JobStatus::Completed.label(), "done");
         assert_eq!(JobStatus::Failed.label(), "failed");
+        assert_eq!(job_status(JobStatus::Cancelled), "stopped");
+    }
+
+    #[test]
+    fn filter_row_uses_native_vocabulary() {
+        assert_eq!(WorkFilter::All.label(), "All");
+        assert_eq!(WorkFilter::Runs.label(), "Runs");
+        assert_eq!(WorkFilter::Commands.label(), "Commands");
     }
 }

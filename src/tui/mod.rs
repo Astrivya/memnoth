@@ -1362,7 +1362,15 @@ fn handle_key(app: &mut App, key: KeyEvent, workspace_root: &Path) {
                 // ordinary Enter below runs it.
             }
             KeyCode::Esc => {
-                app.slash.close();
+                // One esc clears the filter and keeps the list; the next closes.
+                if let Some(length) = app.slash.filter_len() {
+                    for _ in 0..length {
+                        app.backspace();
+                    }
+                    app.sync_slash();
+                } else {
+                    app.slash.close();
+                }
                 return;
             }
             _ => {}
@@ -4571,18 +4579,21 @@ mod tests {
     }
 
     #[test]
-    fn esc_closes_the_dropdown_and_leaves_the_line_to_fix() {
+    fn esc_clears_the_filter_before_closing_the_dropdown() {
         let mut app = App::new("s", false);
         for ch in "/vau".chars() {
             press(&mut app, KeyCode::Char(ch));
         }
         assert!(app.slash.is_open());
 
+        // First esc removes the typed filter but keeps the list open.
+        press(&mut app, KeyCode::Esc);
+        assert!(app.slash.is_open(), "the first esc must clear, not close");
+        assert_eq!(app.input, "/", "the filter should be gone, the slash kept");
+
+        // Second esc closes the list and leaves the line alone.
         press(&mut app, KeyCode::Esc);
         assert!(!app.slash.is_open());
-        assert_eq!(
-            app.input, "/vau",
-            "closing the list is not clearing the line"
-        );
+        assert_eq!(app.input, "/", "closing the list must not clear the line");
     }
 }
