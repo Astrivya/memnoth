@@ -186,8 +186,11 @@ fi
 echo "[2/6] sandbox test / enforcement parity"
 SUMMARY="$("$BIN" --root "$WS" sandbox test "git status" 2>&1)"
 DOCTOR="$("$BIN" --root "$WS" doctor 2>&1)"
-FS_TEST="$(printf '%s\n' "$SUMMARY" | sed -n 's/.*filesystem \([a-z-][a-z-]*\).*/\1/p' | head -1)"
-FS_DOC="$(printf '%s\n' "$DOCTOR" | sed -n '/^sandbox$/,/^$/p' | sed -n 's/.*filesystem[[:space:]]*\([a-z-][a-z-]*\).*/\1/p' | head -1)"
+# Take the FIRST `filesystem <mode>` occurrence. A greedy `.*filesystem` sed
+# matches the last one; on Windows `sandbox test` mentions "filesystem and
+# network access" later in the same line, which used to be parsed as mode "and".
+FS_TEST="$(printf '%s\n' "$SUMMARY" | grep -oE 'filesystem[[:space:]]+[a-z-]+' | head -1 | awk '{print $2}')"
+FS_DOC="$(printf '%s\n' "$DOCTOR" | sed -n '/^sandbox$/,/^$/p' | grep -oE 'filesystem[[:space:]]+[a-z-]+' | head -1 | awk '{print $2}')"
 if [ -n "$FS_TEST" ] && [ "$FS_TEST" = "$FS_DOC" ]; then
   record selftest-parity PASS "sandbox test and doctor both report filesystem $FS_TEST on $OS_NAME"
 else
