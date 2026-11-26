@@ -29,6 +29,8 @@ use crate::kg;
 use crate::output::Outcome;
 use crate::provider::{ProviderConfig, Settings};
 
+mod wizard;
+
 /// Step identifier for the setup wizard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Step {
@@ -174,10 +176,18 @@ pub fn run(ctx: &AppContext, args: &crate::cli::SetupArgs) -> Result<Outcome> {
         run_auth_step(ctx, &mut state)?;
     }
 
-    // Step 4: MCP
-    if !state.is_skipped(Step::Mcp) {
-        run_mcp_step(ctx, &mut state)?;
-    }
+    // Step 4: MCP. `--wizard` replaces the plain "start the server?" question
+    // with the host-selection flow; every other step is untouched.
+    let wizard_report = if !state.is_skipped(Step::Mcp) {
+        if args.wizard {
+            Some(run_mcp_wizard_step(ctx, &mut state, args)?)
+        } else {
+            run_mcp_step(ctx, &mut state)?;
+            None
+        }
+    } else {
+        None
+    };
 
     // Step 5: Completions
     if !state.is_skipped(Step::Completions) {
@@ -200,8 +210,8 @@ pub fn run(ctx: &AppContext, args: &crate::cli::SetupArgs) -> Result<Outcome> {
     }
 
     let verdict = build_verdict_text(&state);
-    let text = build_summary_text(&state, ctx, &verdict);
-    let data = json!({
+    let mut text = build_summary_text(&state, ctx, &verdict);
+    let mut data = json!({
         "steps": Step::all().iter().map(|s| {
             json!({
                 "name": s.name(),
@@ -216,6 +226,10 @@ pub fn run(ctx: &AppContext, args: &crate::cli::SetupArgs) -> Result<Outcome> {
         "not_ready": not_ready_steps(&state),
         "verdict": verdict.clone(),
     });
+    if let Some(report) = &wizard_report {
+        text.push_str(&report.summary());
+        data["wizard"] = serde_json::to_value(report)?;
+    }
 
     Ok(Outcome::new("setup", text, data))
 }
@@ -366,6 +380,78 @@ fn run_mcp_step(ctx: &AppContext, state: &mut SetupState) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// `mn setup --wizard`: detect hosts, offer every one of them, apply only the
+/// chosen ones through `mcp::add --local`, then report what was actually
+/// proved. Everything terminal-facing lives in [`wizard`]; this function owns
+/// the setup-state bookkeeping.
+fn run_mcp_wizard_step(
+    ctx: &AppContext,
+    state: &mut SetupState,
+    args: &crate::cli::SetupArgs,
+) -> Result<wizard::WizardReport> {
+    state.print_progress(Step::Mcp, "selecting MCP hosts...");
+
+    let home = crate::mcp::clients::home_dir().context(
+        "cannot find a home directory (set HOME or USERPROFILE); no client config can be written",
+    )?;
+    let detected = crate::mcp::clients::detect(&home);
+    let mut rows = wizard::build_rows(&home, &ctx.root, &detected);
+
+    let selected = if wizard::stdin_is_terminal() {
+        let keys = io::stdin().lines().map_while(Result::ok);
+        match wizard::run_menu(&mut rows, keys, |frame| {
+            if !state.quiet {
+                eprintln!("{frame}");
+            }
+        }) {
+            wizard::MenuOutcome::Confirmed => wizard::selected_rows(&rows),
+            wizard::MenuOutcome::Cancelled => {
+                state.print_progress(Step::Mcp, "wizard cancelled");
+                state.note(Step::Mcp, "wizard cancelled; no host config written");
+                return Ok(wizard::WizardReport {
+                    dry_run: false,
+                    selected: Vec::new(),
+                    results: Vec::new(),
+                    verdict: "not configured".to_string(),
+                    server_detail: "wizard cancelled before any write".to_string(),
+                });
+            }
+        }
+    } else {
+        eprintln!("non-interactive stdin: applying detected hosts only");
+        wizard::non_interactive_selection(&rows)
+    };
+
+    // The plan is printed on both paths so a person can see what was chosen
+    // before anything is written. Stderr keeps `mn setup --json` parseable.
+    eprintln!("{}", wizard::plan_text(&selected, ctx, args.dry_run));
+    if args.dry_run {
+        state.print_progress(Step::Mcp, "dry run: nothing written");
+        state.note(Step::Mcp, "wizard dry run; no host config written");
+        return Ok(wizard::dry_run_report(&selected));
+    }
+
+    let report = wizard::apply_selected(ctx, &selected, false)?;
+    eprintln!("{}", report.summary());
+    state.print_progress(Step::Mcp, &format!("wizard: {}", report.verdict));
+    if report
+        .results
+        .iter()
+        .any(|result| result.verdict == "registered")
+    {
+        state.mark_completed(Step::Mcp);
+    } else {
+        state.note(
+            Step::Mcp,
+            format!(
+                "wizard verdict: {}; restart the selected agents to load tools",
+                report.verdict
+            ),
+        );
+    }
+    Ok(report)
 }
 
 /// The completion decision, kept separate from the install so it can be tested
@@ -606,9 +692,10 @@ fn run_sandbox_step(ctx: &AppContext, state: &mut SetupState) -> Result<()> {
 }
 
 fn confirm_simple(prompt: &str) -> bool {
+    // Shared with the wizard menu: one guard for what "interactive" means.
     // std::io::IsTerminal since Rust 1.70; the atty crate is unmaintained and
     // carries an unfixed unsoundness advisory (RUSTSEC-2021-0145).
-    if !std::io::IsTerminal::is_terminal(&io::stdin()) {
+    if !wizard::stdin_is_terminal() {
         return false; // Non-interactive, default to no
     }
 
@@ -694,10 +781,16 @@ mod tests {
     use super::*;
 
     fn args(skip: &[&str], yes: bool) -> crate::cli::SetupArgs {
+        args_with(skip, yes, false, false)
+    }
+
+    fn args_with(skip: &[&str], yes: bool, wizard: bool, dry_run: bool) -> crate::cli::SetupArgs {
         crate::cli::SetupArgs {
             skip: skip.iter().map(|name| name.to_string()).collect(),
             yes,
             json: true,
+            wizard,
+            dry_run,
         }
     }
 

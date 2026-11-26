@@ -545,6 +545,23 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
                     serde_json::to_value(&report).unwrap_or_default(),
                 ))
             }
+            McpCommand::Manifest { compact } => {
+                // Kept behind a local helper so this is the only place that
+                // depends on the host-manifest implementation.
+                fn host_manifest() -> Vec<serde_json::Value> {
+                    crate::mcp::clients::manifest()
+                }
+                let data = serde_json::to_value(host_manifest())
+                    .context("serialize mcp manifest")
+                    .map_err(|e| ErrorOutcome::from_anyhow(&e))?;
+                let text = if *compact {
+                    serde_json::to_string(&data)
+                } else {
+                    serde_json::to_string_pretty(&data)
+                }
+                .map_err(|e| ErrorOutcome::from_anyhow(&anyhow::Error::from(e)))?;
+                Ok(Outcome::new("mcp.manifest", text, data))
+            }
             McpCommand::Add {
                 clients,
                 profile,

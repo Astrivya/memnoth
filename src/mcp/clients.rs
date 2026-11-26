@@ -1,7 +1,7 @@
 //! Client configs: where each host keeps its server list, and how to merge one
 //! entry into it without touching anything else.
 //!
-//! Five clients, four shapes:
+//! Six clients, five shapes:
 //!
 //! | Client | File | Container |
 //! |---|---|---|
@@ -10,6 +10,7 @@
 //! | Codex | `~/.codex/config.toml` | `[mcp_servers.memnoth]` |
 //! | Zed | `~/.config/zed/settings.json` (`%APPDATA%/Zed/settings.json`) | `context_servers.memnoth` |
 //! | OpenCode | project `opencode.json(c)` | `mcp.servers.memnoth` |
+//! | VS Code | user `mcp.json` or workspace `.vscode/mcp.json` | `servers.memnoth` |
 //!
 //! Two rules make this safe to run against a file somebody else owns:
 //!
@@ -36,7 +37,7 @@ pub const SERVER_NAME: &str = "memnoth";
 /// One client's registration state, for `doctor` and `add`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientStatus {
-    /// Client name (`claude`, `cursor`, `codex`, `zed`).
+    /// Client name (see [`ClientKind::name`]).
     pub client: String,
     /// The config file that was read or written.
     pub path: String,
@@ -67,29 +68,43 @@ pub enum ClientKind {
     Zed,
     /// OpenCode.
     OpenCode,
+    /// Visual Studio Code, via its user or workspace `mcp.json`.
+    VSCode,
 }
 
 impl ClientKind {
     /// Every supported client, in the order `add` reports them.
-    pub const ALL: [ClientKind; 5] = [
+    pub const ALL: [ClientKind; 6] = [
         ClientKind::Claude,
         ClientKind::Cursor,
         ClientKind::Codex,
         ClientKind::Zed,
         ClientKind::OpenCode,
+        ClientKind::VSCode,
     ];
+
+    /// The names `--clients` accepts for this host, canonical name first.
+    ///
+    /// [`Self::from_name`] reads this same list, so the manifest's aliases and
+    /// the parser cannot drift apart.
+    pub fn aliases(self) -> &'static [&'static str] {
+        match self {
+            Self::Claude => &["claude", "claude-code", "claudecode"],
+            Self::Cursor => &["cursor"],
+            Self::Codex => &["codex"],
+            Self::Zed => &["zed"],
+            Self::OpenCode => &["opencode", "open-code"],
+            Self::VSCode => &["vscode", "vs-code", "visual-studio-code"],
+        }
+    }
 
     /// Parse a `--clients` value. Unknown names are refused so a typo cannot
     /// silently register nothing.
     pub fn from_name(name: &str) -> Option<Self> {
-        match name.trim().to_ascii_lowercase().as_str() {
-            "claude" | "claude-code" | "claudecode" => Some(Self::Claude),
-            "cursor" => Some(Self::Cursor),
-            "codex" => Some(Self::Codex),
-            "zed" => Some(Self::Zed),
-            "opencode" | "open-code" => Some(Self::OpenCode),
-            _ => None,
-        }
+        let name = name.trim().to_ascii_lowercase();
+        Self::ALL
+            .into_iter()
+            .find(|kind| kind.aliases().contains(&name.as_str()))
     }
 
     /// The name `--clients` and reports use.
@@ -100,6 +115,7 @@ impl ClientKind {
             Self::Codex => "codex",
             Self::Zed => "zed",
             Self::OpenCode => "opencode",
+            Self::VSCode => "vscode",
         }
     }
 
@@ -111,13 +127,50 @@ impl ClientKind {
             Self::Codex => "codex",
             Self::Zed => "zed",
             Self::OpenCode => "opencode",
+            Self::VSCode => "code",
         }
+    }
+
+    /// The object that holds one server entry in this host's config.
+    ///
+    /// The direct-JSON readers and writers below use this, so the manifest
+    /// cannot describe a container the code does not actually merge into.
+    /// `mcp.servers` is the nested path OpenCode uses; Codex's TOML table is
+    /// named `mcp_servers`.
+    pub fn container_key(self) -> &'static str {
+        match self {
+            Self::Claude | Self::Cursor => "mcpServers",
+            Self::Zed => "context_servers",
+            Self::VSCode => "servers",
+            Self::Codex => "mcp_servers",
+            Self::OpenCode => "mcp.servers",
+        }
+    }
+
+    /// How this build registers a server with the host.
+    ///
+    /// Claude and OpenCode prefer their own CLI when it is installed (with a
+    /// direct-file fallback in this module); the rest are written straight to
+    /// their config. No host in this build uses a deep link for MCP entries —
+    /// `mn open` links to the cloud console, not to a host registration.
+    pub fn registration_strategy(self) -> &'static str {
+        match self {
+            Self::Claude | Self::OpenCode => "host-cli",
+            Self::Cursor | Self::Zed | Self::VSCode => "direct-json",
+            Self::Codex => "direct-toml",
+        }
+    }
+
+    /// Whether a host registration is delivered through a deep link.
+    pub fn supports_deep_link(self) -> bool {
+        self.registration_strategy() == "deep-link"
     }
 
     /// Where this client keeps its config.
     ///
     /// Zed is the only client whose path is not `~/.<name>`: its settings live
     /// under the XDG config directory, and under `%APPDATA%/Zed` on Windows.
+    /// VS Code follows the same home-rooted rule for its user `mcp.json`.
     pub fn config_path(self, home: &Path) -> PathBuf {
         match self {
             Self::Claude => home.join(".claude.json"),
@@ -125,18 +178,18 @@ impl ClientKind {
             Self::Codex => home.join(".codex").join("config.toml"),
             Self::Zed => zed_settings_path(home),
             Self::OpenCode => opencode_global_config_path(home),
+            Self::VSCode => vscode_user_config_path(home),
         }
     }
 
-    /// OpenCode supports project MCP entries; prefer the project file so the
-    /// server's workspace and vault stay aligned with the folder using it.
+    /// Prefer project scope where the host supports it, so the server's
+    /// workspace and vault stay aligned with the folder using it.
     pub fn config_path_for(self, home: &Path, workspace: Option<&Path>) -> PathBuf {
-        if self == Self::OpenCode
-            && let Some(workspace) = workspace
-        {
-            return opencode_project_config_path(workspace);
+        match (self, workspace) {
+            (Self::OpenCode, Some(workspace)) => opencode_project_config_path(workspace),
+            (Self::VSCode, Some(workspace)) => vscode_project_config_path(workspace),
+            _ => self.config_path(home),
         }
-        self.config_path(home)
     }
 
     /// Parse every `--clients` value in one place.
@@ -145,7 +198,7 @@ impl ClientKind {
         for name in names {
             let kind = Self::from_name(name).ok_or_else(|| {
                 anyhow::anyhow!(
-                    "unknown client {name:?}; use claude, cursor, codex, zed or opencode"
+                    "unknown client {name:?}; use claude, cursor, codex, zed, opencode or vscode"
                 )
             })?;
             if !out.contains(&kind) {
@@ -154,6 +207,38 @@ impl ClientKind {
         }
         Ok(out)
     }
+}
+
+/// A machine-readable description of every supported host, in
+/// [`ClientKind::ALL`] order.
+///
+/// The web host list and CLI help can read this instead of keeping a second
+/// hand-maintained list. Paths are rendered against a sentinel home/workspace
+/// so the output is stable across machines and never contains a real user's
+/// directory; the same path functions the read/write paths call produce them.
+pub fn manifest() -> Vec<serde_json::Value> {
+    let home = Path::new("<home>");
+    let workspace = Path::new("<workspace>");
+    ClientKind::ALL
+        .into_iter()
+        .map(|kind| {
+            // Hosts without project scope report the user path here too;
+            // `config_path_for` is the same function `add` and `doctor` use.
+            json!({
+                "name": kind.name(),
+                "aliases": kind.aliases(),
+                "binary": kind.binary(),
+                "user_config_path": kind.config_path(home).display().to_string(),
+                "project_config_path": kind
+                    .config_path_for(home, Some(workspace))
+                    .display()
+                    .to_string(),
+                "container_key": kind.container_key(),
+                "registration_strategy": kind.registration_strategy(),
+                "deep_link_supported": kind.supports_deep_link(),
+            })
+        })
+        .collect()
 }
 
 fn opencode_global_config_path(home: &Path) -> PathBuf {
@@ -211,6 +296,30 @@ fn zed_settings_path(home: &Path) -> PathBuf {
         .into_iter()
         .find(|path| path.exists())
         .unwrap_or(default)
+}
+
+/// VS Code's user-level `mcp.json`.
+///
+/// The documented locations are `%APPDATA%\Code\User\mcp.json` on Windows,
+/// `~/.config/Code/User/mcp.json` on Linux and
+/// `~/Library/Application Support/Code/User/mcp.json` on macOS. As with Zed,
+/// the path is derived from the home the caller supplied instead of reading
+/// `%APPDATA%` directly: an isolated caller must never be pointed at the real
+/// user's editor config. On Windows `%APPDATA%` is `home\AppData\Roaming`.
+fn vscode_user_config_path(home: &Path) -> PathBuf {
+    let user = Path::new("Code").join("User").join("mcp.json");
+    if cfg!(windows) {
+        home.join("AppData").join("Roaming").join(user)
+    } else if cfg!(target_os = "macos") {
+        home.join("Library").join("Application Support").join(user)
+    } else {
+        home.join(".config").join(user)
+    }
+}
+
+/// VS Code's workspace-scoped `mcp.json`, committed beside the project.
+fn vscode_project_config_path(workspace: &Path) -> PathBuf {
+    workspace.join(".vscode").join("mcp.json")
 }
 
 /// The registration to write: either an HTTP endpoint or a local stdio
@@ -341,10 +450,9 @@ pub fn status_for_workspace(
             entry,
             jsonc: false,
         }),
-        ClientKind::Claude | ClientKind::Cursor => {
-            read_json_entry(&text, SERVER_NAME, "mcpServers")
+        ClientKind::Claude | ClientKind::Cursor | ClientKind::Zed | ClientKind::VSCode => {
+            read_json_entry(&text, SERVER_NAME, kind.container_key())
         }
-        ClientKind::Zed => read_json_entry(&text, SERVER_NAME, "context_servers"),
         ClientKind::OpenCode => read_opencode_entry(&text),
     };
 
@@ -359,7 +467,10 @@ pub fn status_for_workspace(
                 present: true,
                 registered: false,
                 found: false,
-                ok: true,
+                // A file we cannot parse is not a healthy config: doctor's
+                // `!status.ok && detail.contains("cannot parse")` check would
+                // otherwise never fire and a broken file went unreported.
+                ok: false,
                 detail: format!("cannot parse: {error}"),
             };
         }
@@ -631,8 +742,9 @@ pub fn write_for_workspace(
 
     match kind {
         ClientKind::Codex => write_codex(&path, entry, dry_run)?,
-        ClientKind::Claude | ClientKind::Cursor => write_json(&path, "mcpServers", entry, dry_run)?,
-        ClientKind::Zed => write_json(&path, "context_servers", entry, dry_run)?,
+        ClientKind::Claude | ClientKind::Cursor | ClientKind::Zed | ClientKind::VSCode => {
+            write_json(&path, kind.container_key(), entry, dry_run)?
+        }
         ClientKind::OpenCode => write_opencode(&path, entry, dry_run)?,
     }
 
@@ -1013,6 +1125,12 @@ pub fn detect(home: &Path) -> Vec<ClientKind> {
 /// (`.cmd`/`.bat`) is returned as-is and the caller wraps it, because
 /// `CreateProcess` cannot start one directly.
 pub fn find_binary(name: &str) -> Option<PathBuf> {
+    // Test isolation: the setup-wizard tests set this so a real `claude` /
+    // `opencode` shim on PATH cannot intercept a write to a temp config. It does
+    // not touch PATH, so unrelated tests (e.g. kg's `git` calls) keep working.
+    if std::env::var_os("MEMNOTH_TEST_NO_HOST_CLI").is_some() {
+        return None;
+    }
     let path = std::env::var_os("PATH")?;
     let candidates = binary_candidates(name, cfg!(windows));
     for dir in std::env::split_paths(&path) {
@@ -1076,7 +1194,7 @@ pub fn run_host_cli_at(
 
 /// The exact line a person can paste, per client.
 ///
-/// `claude` is a command, `cursor`/`zed` are JSON, `codex` is TOML. The token
+/// `claude` is a command, `cursor`/`zed`/`vscode` are JSON, `codex` is TOML. The token
 /// is never rendered: a snippet goes into a transcript, a shell history and
 /// sometimes an issue.
 pub fn snippet(kind: ClientKind, entry: &Entry) -> String {
@@ -1099,6 +1217,10 @@ pub fn snippet(kind: ClientKind, entry: &Entry) -> String {
             ),
             ClientKind::Cursor => format!(
                 "// ~/.cursor/mcp.json\n\"{SERVER_NAME}\": {}",
+                serde_json::to_string_pretty(&entry.json()).unwrap_or_default()
+            ),
+            ClientKind::VSCode => format!(
+                "// .vscode/mcp.json (or the user mcp.json)\n\"{SERVER_NAME}\": {}",
                 serde_json::to_string_pretty(&entry.json()).unwrap_or_default()
             ),
             ClientKind::Codex => {
@@ -1161,6 +1283,11 @@ pub fn snippet(kind: ClientKind, entry: &Entry) -> String {
         ),
         ClientKind::Cursor => format!(
             "// ~/.cursor/mcp.json\n\"{SERVER_NAME}\": {{\n  \"url\": \"{}\",\n  \"headers\": {{ \"Authorization\": \"{}\" }}\n}}",
+            entry.url,
+            mask_token(entry.token.as_deref())
+        ),
+        ClientKind::VSCode => format!(
+            "// .vscode/mcp.json (or the user mcp.json)\n\"{SERVER_NAME}\": {{\n  \"url\": \"{}\",\n  \"headers\": {{ \"Authorization\": \"{}\" }}\n}}",
             entry.url,
             mask_token(entry.token.as_deref())
         ),
@@ -1679,5 +1806,116 @@ mod tests {
             .to_string();
         assert!(error.contains("refusing to rewrite"), "{error}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn all_lists_exactly_the_six_supported_hosts() {
+        assert_eq!(ClientKind::ALL.len(), 6);
+        assert_eq!(
+            ClientKind::ALL,
+            [
+                ClientKind::Claude,
+                ClientKind::Cursor,
+                ClientKind::Codex,
+                ClientKind::Zed,
+                ClientKind::OpenCode,
+                ClientKind::VSCode,
+            ]
+        );
+    }
+
+    #[test]
+    fn every_alias_round_trips_through_from_name() {
+        for kind in ClientKind::ALL {
+            let mut names = kind.aliases().to_vec();
+            names.push(kind.name());
+            for name in names {
+                assert_eq!(
+                    ClientKind::from_name(name),
+                    Some(kind),
+                    "{name} did not resolve to {}",
+                    kind.name()
+                );
+                assert_eq!(
+                    ClientKind::from_name(&name.to_ascii_uppercase()),
+                    Some(kind),
+                    "uppercase {name} did not resolve to {}",
+                    kind.name()
+                );
+            }
+        }
+        assert_eq!(
+            ClientKind::from_name("visual-studio-code"),
+            Some(ClientKind::VSCode)
+        );
+        assert_eq!(ClientKind::from_name(" vs-code "), Some(ClientKind::VSCode));
+        assert_eq!(ClientKind::from_name("code"), None);
+    }
+
+    #[test]
+    fn manifest_has_one_row_per_host_in_all_order() {
+        let rows = manifest();
+        assert_eq!(rows.len(), ClientKind::ALL.len());
+        assert_eq!(rows, manifest(), "the manifest must be deterministic");
+        for (index, kind) in ClientKind::ALL.into_iter().enumerate() {
+            let row = &rows[index];
+            assert_eq!(row["name"], kind.name());
+            assert_eq!(row["aliases"], json!(kind.aliases()));
+            assert_eq!(row["binary"], kind.binary());
+            assert_eq!(row["container_key"], kind.container_key());
+            assert_eq!(row["registration_strategy"], kind.registration_strategy());
+            assert_eq!(row["deep_link_supported"], kind.supports_deep_link());
+            assert!(row["user_config_path"].as_str().is_some());
+            assert!(row["project_config_path"].as_str().is_some());
+        }
+    }
+
+    #[test]
+    fn a_parse_failure_is_reported_as_not_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".cursor").join("mcp.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{ not json").unwrap();
+
+        let status = status(ClientKind::Cursor, dir.path(), "");
+        assert!(!status.ok, "{}", status.detail);
+        assert!(status.detail.contains("cannot parse"), "{}", status.detail);
+        assert!(!status.registered);
+    }
+
+    #[test]
+    fn vscode_uses_the_servers_container_and_project_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("repo");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let project = workspace.join(".vscode").join("mcp.json");
+
+        let status = write_for_workspace(
+            ClientKind::VSCode,
+            dir.path(),
+            Some(&workspace),
+            &entry(),
+            false,
+        )
+        .unwrap();
+        assert!(status.ok, "{}", status.detail);
+        assert_eq!(status.path, project.display().to_string());
+        let root: Value =
+            serde_json::from_str(&std::fs::read_to_string(&project).unwrap()).unwrap();
+        assert_eq!(
+            root["servers"][SERVER_NAME]["url"],
+            "https://memnoth.astrivya.ai/mcp"
+        );
+        assert_eq!(
+            root["servers"][SERVER_NAME]["headers"]["Authorization"],
+            "Bearer secret-token"
+        );
+        assert!(root.get("mcpServers").is_none());
+
+        let user = ClientKind::VSCode.config_path(dir.path());
+        assert!(
+            user.ends_with(Path::new("Code").join("User").join("mcp.json")),
+            "{user:?}"
+        );
     }
 }

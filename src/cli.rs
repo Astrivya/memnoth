@@ -1389,6 +1389,12 @@ pub struct SetupArgs {
     /// Output as JSON.
     #[arg(long, global = true)]
     pub json: bool,
+    /// Interactive host-selection wizard.
+    #[arg(long)]
+    pub wizard: bool,
+    /// Show the plan without writing any config.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 /// Configuration subcommands.
 #[derive(Debug, Subcommand)]
@@ -3025,9 +3031,15 @@ pub enum McpCommand {
     },
     /// What is registered, and where — profile, tool counts, client configs.
     Doctor,
+    /// Print the machine-readable host manifest (one row per supported agent).
+    Manifest {
+        /// Emit compact JSON (default is pretty).
+        #[arg(long)]
+        compact: bool,
+    },
     /// Write a client's MCP config for this server.
     Add {
-        /// Clients to write: claude, cursor, codex, zed, opencode. Comma-separated, or
+        /// Clients to write: claude, cursor, codex, zed, opencode, vscode. Comma-separated, or
         /// repeat the flag. Omit to detect every client on this machine.
         #[arg(long, value_delimiter = ',', value_name = "CLIENT")]
         clients: Vec<String>,
