@@ -345,13 +345,15 @@ fn one_line_install_shape_is_correct_for_both_shells() {
                 site.contains("curl -fsSL ${siteUrl(\"/install\")} | bash"),
                 "the advertised POSIX one-liner drifted"
             );
-            // The marketing site currently advertises only the POSIX one-liner.
-            // If it advertises a PowerShell one-liner, that link must still
-            // resolve to the shipped /install.ps1 installer.
-            if site.contains("iex") || site.contains("install.ps1") {
+            // Two PowerShell one-liners are now advertised: the installer
+            // (/install.ps1) and the setup bootstrap (/setup.ps1). Both are
+            // shipped by the same dist tree; each advertised `iex` link must
+            // resolve to one of them. A third, unknown target is a drift.
+            if site.contains("iex") || site.contains("install.ps1") || site.contains("setup.ps1") {
                 assert!(
-                    site.contains("${siteUrl(\"/install.ps1\")}"),
-                    "a Windows one-liner is advertised but does not target /install.ps1"
+                    site.contains("${siteUrl(\"/install.ps1\")}")
+                        || site.contains("${siteUrl(\"/setup.ps1\")}"),
+                    "a Windows one-liner is advertised but targets neither /install.ps1 nor /setup.ps1"
                 );
             }
         }

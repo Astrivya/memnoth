@@ -29,6 +29,7 @@ use crate::kg;
 use crate::output::Outcome;
 use crate::provider::{ProviderConfig, Settings};
 
+mod web;
 mod wizard;
 
 /// Step identifier for the setup wizard.
@@ -151,6 +152,13 @@ impl SetupState {
 
 /// Run the `mn setup` command.
 pub fn run(ctx: &AppContext, args: &crate::cli::SetupArgs) -> Result<Outcome> {
+    // `--web` is a different front end over the same wizard, not an extra step
+    // in the line-oriented flow: it owns the whole run and returns its own
+    // Outcome. Everything below stays the plain terminal setup command.
+    if args.web {
+        return web::run(ctx, args);
+    }
+
     let mut state = SetupState::new(args);
 
     if !state.quiet {
@@ -791,6 +799,7 @@ mod tests {
             json: true,
             wizard,
             dry_run,
+            web: false,
         }
     }
 

@@ -805,6 +805,7 @@ mod tests {
             json: true,
             wizard: true,
             dry_run: true,
+            web: false,
         };
         let before = std::fs::read(dir.path().join(".claude.json")).expect("read claude");
         let outcome = crate::setup::run(&ctx, &args).expect("run");

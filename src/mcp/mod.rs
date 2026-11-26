@@ -24,6 +24,7 @@
 //! registered server is in read-only mode. The add-on is local only — it talks
 //! to the on-disk graph and never reaches the cloud control plane.
 
+pub mod apps;
 pub(crate) mod clients;
 mod render;
 
@@ -47,6 +48,13 @@ pub use render::{
     render_profile_set, render_profile_show, render_remove, render_restart, render_selftest,
     render_test, render_token,
 };
+
+/// MCP Apps declarations owned by [`apps`]. The live tool catalogue belongs to
+/// `crates/memnoth-mcp`; these rows are the CLI-side registration point and
+/// carry no authority to write anything.
+pub const MCP_APPS_TOOLS: &[&str] = &[apps::TOOL_NAME];
+/// UI resources served by [`apps`].
+pub const MCP_APPS_RESOURCES: &[&str] = &[apps::SETUP_RESOURCE_URI];
 
 /// How long `mcp call` waits for one reply from the server.
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);

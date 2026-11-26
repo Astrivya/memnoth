@@ -1,0 +1,24 @@
+{
+  "name": "memnoth",
+  "displayName": "Memnoth",
+  "version": "0.1.1",
+  "description": "Local-first bi-temporal vault and code graph for coding agents, exposed over a local stdio MCP server.",
+  "author": {
+    "name": "astrivya"
+  },
+  "license": "Apache-2.0",
+  "mcpServers": {
+    "memnoth": {
+      "command": "mn",
+      "args": ["mcp", "serve", "--db", "${user_config.vault_path}"]
+    }
+  },
+  "userConfig": {
+    "vault_path": {
+      "type": "file",
+      "title": "Vault path",
+      "description": "Absolute path to your local Memnoth vault database (for example ~/.memnoth/vault.db). Find it with `mn doctor` if you use a custom location. Required because the local server is launched with --db.",
+      "required": true
+    }
+  }
+}

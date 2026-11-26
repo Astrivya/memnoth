@@ -1,0 +1,82 @@
+{
+  "$schema": "https://raw.githubusercontent.com/modelcontextprotocol/mcpb/main/schemas/mcpb-manifest-v0.1.schema.json",
+  "manifest_version": "0.1",
+  "name": "memnoth",
+  "display_name": "Memnoth Memory Vault",
+  "version": "0.1.2",
+  "description": "Local-first bi-temporal memory vault and code graph, served over MCP by the Memnoth CLI.",
+  "long_description": "Memnoth keeps durable memory in a local SQLite vault and indexes code graphs per workspace. This bundle runs the real Memnoth CLI as a stdio MCP server against the vault you choose at install time. Nothing leaves your machine unless you supply an optional hosted token. Three representative tools are declared below; the server exposes additional mem_* and kg_* tools at runtime.",
+  "author": {
+    "name": "Astrivya"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/astrivya/memnoth"
+  },
+  "license": "Apache-2.0",
+  "server": {
+    "type": "binary",
+    "entry_point": "mn",
+    "mcp_config": {
+      "command": "${__dirname}/mn",
+      "args": [
+        "mcp",
+        "serve",
+        "--db",
+        "${user_config.vault}"
+      ],
+      "env": {
+        "MEMNOTH_MCP_TOKEN": "${user_config.mcp_token}"
+      },
+      "platform_overrides": {
+        "win32": {
+          "command": "${__dirname}/mn.exe"
+        },
+        "darwin": {
+          "command": "${__dirname}/mn"
+        },
+        "linux": {
+          "command": "${__dirname}/mn"
+        }
+      }
+    }
+  },
+  "tools": [
+    {
+      "name": "mem_stats",
+      "description": "Vault counters: current and total entities, relations and observations."
+    },
+    {
+      "name": "kg_status",
+      "description": "Code graph staleness and generation counters for a workspace."
+    },
+    {
+      "name": "mem_search",
+      "description": "Search the memory vault by relevance: ranked entities with the best-matching fact text for each hit."
+    }
+  ],
+  "tools_generated": true,
+  "compatibility": {
+    "platforms": [
+      "darwin",
+      "win32",
+      "linux"
+    ]
+  },
+  "user_config": {
+    "vault": {
+      "type": "string",
+      "title": "Vault file",
+      "description": "Path to the local Memnoth vault SQLite database the server should open. Defaults to the per-machine vault. The parent directory must already exist; Memnoth does not create it.",
+      "required": false,
+      "default": "${HOME}/.memnoth/vault.db"
+    },
+    "mcp_token": {
+      "type": "string",
+      "title": "Hosted MCP token (optional)",
+      "description": "Optional bearer token for hosted Memnoth MCP features. Leave empty for local-only use. The host masks and stores this value securely (OS keychain where available); Memnoth never writes it to its config.",
+      "sensitive": true,
+      "required": false
+    }
+  }
+}

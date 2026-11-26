@@ -3145,6 +3145,7 @@ fn parse_line_inner(raw: &str, suggest: bool) -> Parsed {
                 json: flags.contains_key("json"),
                 wizard: false,
                 dry_run: false,
+                web: false,
             }))
         }
         "demo" => Parsed::Run(Verb::Demo),

@@ -1098,18 +1098,22 @@ pub fn execute(ctx: &AppContext, verb: &Verb) -> Result<Outcome, ErrorOutcome> {
         }
         Verb::Open(args) => open::run(ctx, args),
         Verb::Connect(args) => match &args.action {
-            ConnectCommand::Add(args) => {
+            Some(ConnectCommand::Add(args)) => {
                 connect::connect_add(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e))
             }
-            ConnectCommand::List(args) => {
+            Some(ConnectCommand::List(args)) => {
                 connect::connect_list(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e))
             }
-            ConnectCommand::Remove(args) => {
+            Some(ConnectCommand::Remove(args)) => {
                 connect::connect_remove(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e))
             }
-            ConnectCommand::Test(args) => {
+            Some(ConnectCommand::Test(args)) => {
                 connect::connect_test(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e))
             }
+            // No provider subcommand: the opt-in host watcher (one-shot unless
+            // --watch was given). Errors are mapped the same way as the
+            // provider actions above.
+            None => connect::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
         },
         Verb::Feedback(args) => feedback::run(ctx, args).map_err(|e| ErrorOutcome::from_anyhow(&e)),
         Verb::Agents(args) => agents::run(ctx, args),

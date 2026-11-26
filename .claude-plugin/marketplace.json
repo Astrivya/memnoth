@@ -1,0 +1,15 @@
+{
+  "name": "astrivya",
+  "description": "Memnoth bi-temporal memory and code graph — vault, kg and MCP tools for coding agents.",
+  "owner": {
+    "name": "astrivya"
+  },
+  "plugins": [
+    {
+      "name": "memnoth",
+      "source": "./.claude-plugin/plugins/memnoth",
+      "description": "Remember decisions, reconstruct past states, query the code graph, and run a local MCP memory server (no token required).",
+      "tags": ["memory", "code-graph", "mcp", "bi-temporal"]
+    }
+  ]
+}

@@ -165,7 +165,7 @@ pub enum Verb {
     /// Send feedback to memnoth cloud.
     #[command(hide = true)]
     Feedback(FeedbackArgs),
-    /// Configure model provider: add, list, remove, test connection.
+    /// Configure a model provider, or watch agent hosts and register local MCP.
     #[command(hide = true)]
     Connect(ConnectArgs),
     /// Automation: git hooks, GitHub Actions and CI indexing.
@@ -459,11 +459,29 @@ pub struct RenameArgs {
     pub name: String,
 }
 
-/// `mn connect` — configure model provider with API key.
+/// `mn connect` — configure a model provider, or watch agent hosts.
+///
+/// With no subcommand this verb runs the opt-in host watcher: one detection
+/// pass by default, or a foreground polling loop with `--watch`. The provider
+/// subcommands below keep their original meaning.
 #[derive(Debug, Args)]
 pub struct ConnectArgs {
+    /// Provider action. Omit it to run the host watcher.
     #[command(subcommand)]
-    pub action: ConnectCommand,
+    pub action: Option<ConnectCommand>,
+    /// Run a foreground watcher instead of a single detection pass.
+    /// Opt-in: without this flag nothing runs in the background.
+    #[arg(long)]
+    pub watch: bool,
+    /// Seconds between detection passes while watching (default 300).
+    #[arg(long, value_name = "SECONDS", default_value_t = 300)]
+    pub interval: u64,
+    /// Report what would be registered without writing any config.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Force a single detection pass even when `--watch` is set.
+    #[arg(long)]
+    pub once: bool,
 }
 
 /// Connect subcommands.
@@ -1395,6 +1413,9 @@ pub struct SetupArgs {
     /// Show the plan without writing any config.
     #[arg(long)]
     pub dry_run: bool,
+    /// Serve a browser setup console on 127.0.0.1 instead of using stdin.
+    #[arg(long)]
+    pub web: bool,
 }
 /// Configuration subcommands.
 #[derive(Debug, Subcommand)]

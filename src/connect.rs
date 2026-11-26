@@ -5,11 +5,16 @@
 //! securely using memnoth-auth's credential store (OS keychain with file fallback).
 
 use anyhow::{Context, Result};
-use serde_json::json;
+use serde_json::{Value, json};
 use std::io;
+use std::io::Write as _;
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::runtime::Runtime;
 
 use crate::context::{AppContext, Config};
+use crate::mcp::clients;
 use crate::output::Outcome;
 use crate::provider::Kind;
 use crossterm::{
@@ -896,6 +901,367 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+// ── `mn connect --watch` — opt-in agent-host watcher ────────────────────────
+//
+// Deliberately additive to the provider configuration above. This half never
+// reads, writes, or prints a provider key or a cloud token: every registration
+// it makes is a local stdio entry with `allow_writes = false` and `token = None`.
+//
+// Safety rules, in the order they are applied:
+//   1. opt-in — nothing here runs unless `mn connect` is invoked with no
+//      provider subcommand, and the polling loop only with `--watch`;
+//   2. visible — every action is printed to stderr and appended to
+//      `~/.memnoth/connect.log` before the next host is considered;
+//   3. reversible — the entry is an ordinary `mcp add --local` registration,
+//      removable with the existing `mn mcp remove` path;
+//   4. no silent writes — only hosts with an existing config file or config
+//      *directory* are candidates, and configs we cannot parse are skipped;
+//   5. no token — `mcp::add(local = true)` refuses a URL or token outright.
+
+/// Set by SIGINT/SIGTERM (or a Windows console control event). The handler
+/// only touches an atomic, so it is safe to run at signal time; the loop
+/// checks it between hosts and between sleep slices, never mid-write.
+static STOP: AtomicBool = AtomicBool::new(false);
+
+#[cfg(unix)]
+extern "C" fn note_stop(_signal: i32) {
+    STOP.store(true, Ordering::SeqCst);
+}
+
+#[cfg(unix)]
+unsafe extern "C" {
+    fn signal(signal: i32, handler: extern "C" fn(i32)) -> usize;
+}
+
+/// Install the Unix stop handlers. `SIG_ERR` is `(void (*)(int))-1`, i.e. a
+/// pointer-sized all-ones value; a failure is reported instead of leaving a
+/// watcher that ignores Ctrl-C.
+#[cfg(unix)]
+fn install_stop_handlers() -> Result<()> {
+    const SIGINT: i32 = 2;
+    const SIGTERM: i32 = 15;
+    unsafe {
+        if signal(SIGINT, note_stop) == usize::MAX {
+            anyhow::bail!("cannot install a SIGINT handler");
+        }
+        if signal(SIGTERM, note_stop) == usize::MAX {
+            anyhow::bail!("cannot install a SIGTERM handler");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+extern "system" fn note_console_ctrl(kind: u32) -> i32 {
+    // CTRL_C_EVENT, CTRL_BREAK_EVENT and CTRL_CLOSE_EVENT. Windows has no
+    // SIGTERM; a console close is its nearest equivalent.
+    if matches!(kind, 0..=2) {
+        STOP.store(true, Ordering::SeqCst);
+        1
+    } else {
+        0
+    }
+}
+
+#[cfg(windows)]
+unsafe extern "system" {
+    fn SetConsoleCtrlHandler(handler: Option<extern "system" fn(u32) -> i32>, add: i32) -> i32;
+}
+
+#[cfg(windows)]
+fn install_stop_handlers() -> Result<()> {
+    unsafe {
+        if SetConsoleCtrlHandler(Some(note_console_ctrl), 1) == 0 {
+            anyhow::bail!("cannot install a console control handler");
+        }
+    }
+    Ok(())
+}
+
+/// Sleep in short slices so a stop request is observed without waiting out a
+/// full 300-second interval.
+fn sleep_until_stop(total: Duration) {
+    const SLICE: Duration = Duration::from_millis(250);
+    let mut left = total;
+    while left > Duration::ZERO && !STOP.load(Ordering::SeqCst) {
+        let step = if left < SLICE { left } else { SLICE };
+        std::thread::sleep(step);
+        left -= step;
+    }
+}
+
+/// One redacted, single-line JSON record. `scrub_secrets` is the crate's
+/// generic token redactor; newlines are flattened so one action is one line
+/// in the audit log no matter what a host CLI printed.
+fn connect_log_line(event: &str, client: &str, detail: &str) -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or(0);
+    let clean = |text: &str| crate::provider::scrub_secrets(text, None).replace(['\r', '\n'], " ");
+    json!({
+        "ts": crate::output::rfc3339(now),
+        "event": clean(event),
+        "client": clean(client),
+        "detail": clean(detail),
+    })
+    .to_string()
+}
+
+/// Append one audit line to `~/.memnoth/connect.log`. A log that cannot be
+/// written is an error: a watcher that registrations without a record is the
+// one thing this design must not allow.
+fn append_connect_log(path: &Path, line: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("cannot create {}", parent.display()))?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("cannot open {}", path.display()))?;
+    writeln!(file, "{line}").with_context(|| format!("cannot write {}", path.display()))
+}
+
+/// A host is a candidate only when its own config file or config *directory*
+/// exists. `clients::detect` alone also matches a binary on PATH and, for
+/// Claude, a config path whose parent is the home directory — neither proves
+/// the user configured that host. Refusing those avoids creating a config for
+/// a program the user has never set up.
+fn host_has_config_dir(kind: clients::ClientKind, home: &Path) -> bool {
+    let path = kind.config_path(home);
+    if path.exists() {
+        return true;
+    }
+    match path.parent() {
+        Some(parent) if parent != home => parent.is_dir(),
+        _ => false,
+    }
+}
+
+/// `clients::detect` is still the single source of "known hosts"; the filter
+/// above only narrows what this opt-in daemon is allowed to write.
+fn detect_configured_hosts(home: &Path) -> Vec<clients::ClientKind> {
+    clients::detect(home)
+        .into_iter()
+        .filter(|kind| host_has_config_dir(*kind, home))
+        .collect()
+}
+
+/// What one candidate host needs. `Skip` is used for a config we must not
+/// touch — an unparsable file, or JSONC whose comments our writer would lose.
+#[derive(Debug, PartialEq, Eq)]
+enum HostAction {
+    Already,
+    Register,
+    Skip(String),
+}
+
+fn plan_host(kind: clients::ClientKind, home: &Path) -> (String, String, HostAction) {
+    let path = kind.config_path(home).display().to_string();
+    let status = clients::status_for_workspace(kind, home, None, "");
+    let action = if !status.ok {
+        HostAction::Skip(format!("cannot read config: {}", status.detail))
+    } else if status.detail.contains("JSON with comments") {
+        HostAction::Skip("config is JSONC; register it manually to preserve comments".into())
+    } else if status.registered {
+        HostAction::Already
+    } else {
+        HostAction::Register
+    };
+    (kind.name().to_string(), path, action)
+}
+
+/// The accumulated result of every pass in this process.
+#[derive(Debug, Default)]
+struct PassReport {
+    detected: Vec<String>,
+    registered: Vec<String>,
+    would_register: Vec<String>,
+    already: Vec<String>,
+    skipped: Vec<Value>,
+    failed: Vec<Value>,
+}
+
+impl PassReport {
+    fn merge(&mut self, other: PassReport) {
+        self.detected.extend(other.detected);
+        self.registered.extend(other.registered);
+        self.would_register.extend(other.would_register);
+        self.already.extend(other.already);
+        self.skipped.extend(other.skipped);
+        self.failed.extend(other.failed);
+    }
+}
+
+/// One detection pass. `seen` makes each host an attempt at most once per
+/// process: a refused config is never retried in a loop, and a host the user
+/// later unregisters is not silently added back.
+///
+/// `ctx` is only needed for a real registration; `--dry-run` passes `None`,
+/// which keeps a dry run entirely free of writes.
+fn connect_pass(
+    ctx: Option<&AppContext>,
+    home: &Path,
+    log_path: &Path,
+    dry_run: bool,
+    seen: &mut std::collections::BTreeSet<&'static str>,
+) -> Result<PassReport> {
+    let mut report = PassReport::default();
+    let hosts = detect_configured_hosts(home);
+    report.detected = hosts.iter().map(|kind| kind.name().to_string()).collect();
+
+    for kind in hosts {
+        let name = kind.name();
+        if seen.contains(name) {
+            continue;
+        }
+        let (client, path, action) = plan_host(kind, home);
+        match action {
+            HostAction::Already => {
+                append_connect_log(
+                    log_path,
+                    &connect_log_line("skip", &client, "already registered"),
+                )?;
+                report.already.push(client.clone());
+                seen.insert(name);
+            }
+            HostAction::Skip(reason) => {
+                append_connect_log(log_path, &connect_log_line("skip", &client, &reason))?;
+                report
+                    .skipped
+                    .push(json!({ "client": client, "reason": reason }));
+                seen.insert(name);
+            }
+            HostAction::Register if dry_run => {
+                let detail = format!("would register local read-only entry at {path}");
+                eprintln!("[connect] {detail} (no token)");
+                append_connect_log(log_path, &connect_log_line("dry-run", &client, &detail))?;
+                report.would_register.push(client.clone());
+                seen.insert(name);
+            }
+            HostAction::Register => {
+                let ctx = ctx.context("an AppContext is required to register a host")?;
+                eprintln!("[connect] registering {client} at {path} (local, read-only, no token)");
+                let names = [name.to_string()];
+                let added = crate::mcp::add(
+                    ctx,
+                    crate::mcp::AddOptions {
+                        client_names: &names,
+                        profile: None,
+                        url: None,
+                        token: None,
+                        db: None,
+                        team: None,
+                        local: true,
+                        allow_writes: false,
+                        dry_run: false,
+                    },
+                );
+                match added {
+                    Ok(add_report) => {
+                        let detail = add_report
+                            .results
+                            .first()
+                            .map(|row| row.detail.clone())
+                            .unwrap_or_else(|| "registered".to_string());
+                        append_connect_log(
+                            log_path,
+                            &connect_log_line("register", &client, &detail),
+                        )?;
+                        report.registered.push(client.clone());
+                    }
+                    Err(error) => {
+                        let detail = format!("registration failed: {error:#}");
+                        append_connect_log(log_path, &connect_log_line("error", &client, &detail))?;
+                        eprintln!(
+                            "[connect] {client}: registration failed; see {}",
+                            log_path.display()
+                        );
+                        let clean = crate::provider::scrub_secrets(&detail, None);
+                        report
+                            .failed
+                            .push(json!({ "client": client, "reason": clean }));
+                    }
+                }
+                seen.insert(name);
+            }
+        }
+    }
+    Ok(report)
+}
+
+/// Run `mn connect` with no provider subcommand.
+///
+/// Default is a single pass. `--watch` starts a foreground loop (never a
+/// detached daemon), `--once` forces one pass, and `--dry-run` never writes a
+/// host config. Ctrl-C or SIGTERM sets [`STOP`] and the loop logs a clean stop.
+pub fn run(ctx: &AppContext, args: &crate::cli::ConnectArgs) -> Result<Outcome> {
+    let home = clients::home_dir()
+        .context("cannot find a home directory; connect needs one to inspect host configs")?;
+    let interval = args.interval.max(1);
+    let log_path = ctx.home.join("connect.log");
+    let mut seen = std::collections::BTreeSet::new();
+
+    append_connect_log(
+        &log_path,
+        &connect_log_line(
+            "start",
+            "",
+            &format!(
+                "watch={} once={} interval_s={} dry_run={}",
+                args.watch, args.once, interval, args.dry_run
+            ),
+        ),
+    )?;
+    eprintln!("[connect] audit log: {}", log_path.display());
+
+    let mut total = PassReport::default();
+    if !args.watch || args.once {
+        let pass = connect_pass(Some(ctx), &home, &log_path, args.dry_run, &mut seen)?;
+        total.merge(pass);
+    } else {
+        install_stop_handlers()?;
+        while !STOP.load(Ordering::SeqCst) {
+            let pass = connect_pass(Some(ctx), &home, &log_path, args.dry_run, &mut seen)?;
+            total.merge(pass);
+            if STOP.load(Ordering::SeqCst) {
+                break;
+            }
+            sleep_until_stop(Duration::from_secs(interval));
+        }
+    }
+
+    append_connect_log(&log_path, &connect_log_line("stop", "", "clean stop"))?;
+    eprintln!("[connect] stopped; audit log: {}", log_path.display());
+
+    let summary = format!(
+        "connect: detected {} host(s), registered {}, would register {}, already {}, skipped {}, failed {}; log {}",
+        total.detected.len(),
+        total.registered.len(),
+        total.would_register.len(),
+        total.already.len(),
+        total.skipped.len(),
+        total.failed.len(),
+        log_path.display()
+    );
+    let data = json!({
+        "watch": args.watch && !args.once,
+        "once": !args.watch || args.once,
+        "interval_s": interval,
+        "dry_run": args.dry_run,
+        "detected": total.detected,
+        "registered": total.registered,
+        "would_register": total.would_register,
+        "already_registered": total.already,
+        "skipped": total.skipped,
+        "failed": total.failed,
+        "log": log_path.display().to_string(),
+    });
+    Ok(Outcome::new("connect.watch", summary, data))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -916,5 +1282,101 @@ mod tests {
     fn test_truncate() {
         assert_eq!(truncate("hello", 10), "hello");
         assert_eq!(truncate("hello world", 8), "hello w…");
+    }
+
+    #[test]
+    fn connect_log_line_redacts_tokens_and_stays_on_one_line() {
+        let line = connect_log_line(
+            "register",
+            "cursor",
+            "Bearer sk-abcdefghijklmnop wrote /tmp/x\nsecond line",
+        );
+        assert_eq!(line.lines().count(), 1, "{line}");
+        assert!(!line.contains("sk-abcdefghijklmnop"), "{line}");
+        assert!(line.contains("Bearer ***"), "{line}");
+        let value: Value = serde_json::from_str(&line).expect("one JSON object per action");
+        assert_eq!(value["event"], "register");
+        assert_eq!(value["client"], "cursor");
+        assert!(value["ts"].as_str().is_some(), "{value}");
+    }
+
+    #[test]
+    fn a_bare_home_does_not_make_claude_a_candidate() {
+        let dir = tempfile::tempdir().unwrap();
+        // Claude's config file sits directly in home; the home directory
+        // existing is not evidence that Claude has ever been configured.
+        assert!(!host_has_config_dir(
+            clients::ClientKind::Claude,
+            dir.path()
+        ));
+        std::fs::write(dir.path().join(".claude.json"), "{}").unwrap();
+        assert!(host_has_config_dir(clients::ClientKind::Claude, dir.path()));
+    }
+
+    #[test]
+    fn a_cursor_config_directory_makes_cursor_a_candidate() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".cursor")).unwrap();
+        assert!(host_has_config_dir(clients::ClientKind::Cursor, dir.path()));
+        assert!(detect_configured_hosts(dir.path()).contains(&clients::ClientKind::Cursor));
+    }
+
+    #[test]
+    fn dry_run_reports_a_host_without_touching_its_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let config = home.join(".cursor").join("mcp.json");
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(&config, "{\"mcpServers\":{}}\n").unwrap();
+        let before = std::fs::read(&config).unwrap();
+        let log = home.join("connect.log");
+        let mut seen = std::collections::BTreeSet::new();
+
+        let report = connect_pass(None, home, &log, true, &mut seen).unwrap();
+        assert_eq!(report.would_register, vec!["cursor".to_string()]);
+        assert!(report.registered.is_empty());
+        assert_eq!(
+            std::fs::read(&config).unwrap(),
+            before,
+            "dry run wrote a config"
+        );
+
+        let text = std::fs::read_to_string(&log).unwrap();
+        assert!(text.contains("\"dry-run\""), "{text}");
+        assert!(text.contains("cursor"), "{text}");
+    }
+
+    #[test]
+    fn an_existing_memnoth_entry_is_already_registered() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let config = home.join(".cursor").join("mcp.json");
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(
+            &config,
+            "{\"mcpServers\":{\"memnoth\":{\"command\":\"mn\"}}}\n",
+        )
+        .unwrap();
+        let log = home.join("connect.log");
+        let mut seen = std::collections::BTreeSet::new();
+
+        let report = connect_pass(None, home, &log, true, &mut seen).unwrap();
+        assert_eq!(report.already, vec!["cursor".to_string()]);
+        assert!(report.would_register.is_empty());
+    }
+
+    #[test]
+    fn a_host_is_attempted_at_most_once_per_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        std::fs::create_dir_all(home.join(".cursor")).unwrap();
+        let log = home.join("connect.log");
+        let mut seen = std::collections::BTreeSet::new();
+
+        let first = connect_pass(None, home, &log, true, &mut seen).unwrap();
+        let second = connect_pass(None, home, &log, true, &mut seen).unwrap();
+        assert_eq!(first.would_register, vec!["cursor".to_string()]);
+        assert!(second.would_register.is_empty());
+        assert_eq!(second.detected, vec!["cursor".to_string()]);
     }
 }

@@ -1,0 +1,74 @@
+# memnoth winget manifest (release-template draft).
+#
+# CHANGE_ON_RELEASE: `InstallerSha256` is a deliberately non-hex placeholder.
+# No Windows zip digest is committed in this repository; the release workflow
+# fills it at publish time from the zip it built
+# (`CLI/.github/workflows/release.yml:740-766`) and the source template keeps
+# `PLACEHOLDER_SHA256` (`CLI/packaging/winget/memnoth.yaml:53`). Never invent a
+# digest, and never submit this file as-is: winget-pkgs rejects a non-hex hash.
+#
+# PackageIdentifier is PascalCase here to match the filename; the existing
+# source template uses `Astrivya.memnoth`. Winget identifiers are
+# case-insensitive, but keep one spelling consistently per repository.
+#
+# Publishing: after the GitHub release is public, download
+# `dist/<tag>/winget.yaml` from that release (it has the real digest) and open
+# the PR at manifests/a/Astrivya/Memnoth/<version>/Astrivya.Memnoth.yaml.
+# Validate with `wingettools validate` (or the winget-pkgs pipeline) first.
+
+PackageIdentifier: Astrivya.Memnoth
+PackageVersion: 0.1.1
+PackageName: memnoth
+PackageLocale: en-US
+Publisher: Astrivya
+PublisherUrl: https://astrivya.ai
+PublisherSupportUrl: https://github.com/astrivya/memnoth/issues
+Author: Astrivya
+PackageUrl: https://memnoth.astrivya.ai
+License: Apache-2.0
+LicenseUrl: https://github.com/astrivya/memnoth/blob/main/LICENSE
+Copyright: Copyright (c) 2024 Astrivya
+CopyrightUrl: https://github.com/astrivya/memnoth/blob/main/LICENSE
+ShortDescription: Terminal agent, bi-temporal vault, code graph and MCP server
+Description: |
+  memnoth is a local-first AI development environment that combines:
+  - A terminal agent with session persistence and rewind
+  - A bi-temporal vault for code, notes, and context
+  - A code graph with semantic search and cross-references
+  - An MCP (Model Context Protocol) server for AI tool integration
+
+  All in a single binary with zero external dependencies.
+Moniker: memnoth
+Tags:
+  - cli
+  - terminal
+  - ai
+  - mcp
+  - code-graph
+  - vault
+  - developer-tools
+Commands:
+  - memnoth
+  - mn
+Installers:
+  - Architecture: x64
+    InstallerType: zip
+    InstallerUrl: https://github.com/astrivya/memnoth/releases/download/v0.1.1/memnoth-x86_64-pc-windows-msvc.zip
+    InstallerSha256: CHANGE_ON_RELEASE_WINDOWS_ZIP
+    Commands:
+      - memnoth
+      - mn
+    AppsAndFeaturesEntries:
+      - DisplayName: memnoth
+        DisplayVersion: 0.1.1
+        ProductCode: "{8E0EEFFA-AA06-5286-AC10-17D69C26E0B4}"
+        UpgradeCode: "{821F9114-6745-52E7-8FA9-BC8467DB16E5}"
+    ExpectedReturnCodes:
+      - InstallerReturnCode: 0
+        ReturnResponse: success
+      - InstallerReturnCode: 1641
+        ReturnResponse: successRebootRequired
+      - InstallerReturnCode: 3010
+        ReturnResponse: successRebootRequired
+ManifestType: installer
+ManifestVersion: 1.8.0
