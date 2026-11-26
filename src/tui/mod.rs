@@ -4383,6 +4383,51 @@ mod tests {
         );
     }
 
+    /// `/theme` and `/screen-reader` are answered inline: the verb never reaches
+    /// the worker thread, so they must persist the preference themselves. This is
+    /// the regression for the old gap where the TUI intercepted the verb before
+    /// the config save ran and the choice was lost on the next launch.
+    #[test]
+    fn theme_and_screen_reader_verbs_persist_to_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = context(dir.path());
+        let mut app = App::new("s", false);
+        app.config = ctx.config.clone();
+        app.config_path = ctx.config_path.clone();
+
+        run_verb(
+            &mut app,
+            &ctx,
+            "/theme high-contrast",
+            Verb::SetTheme(crate::tui::app::Theme::HighContrast),
+        );
+        assert_eq!(app.theme, crate::tui::app::Theme::HighContrast);
+        let saved = Config::load(&app.config_path).expect("theme must be saved to disk");
+        assert_eq!(
+            saved.ui.and_then(|ui| ui.theme),
+            Some(crate::tui::app::Theme::HighContrast.as_str().to_string()),
+            "the next launch reads [ui] theme; it must hold what /theme set"
+        );
+
+        run_verb(
+            &mut app,
+            &ctx,
+            "/screen-reader plain",
+            Verb::SetScreenReader(crate::tui::app::ScreenReaderMode::Plain),
+        );
+        assert_eq!(app.screen_reader, crate::tui::app::ScreenReaderMode::Plain);
+        let saved = Config::load(&app.config_path).expect("screen-reader mode must be saved");
+        assert_eq!(
+            saved.ui.and_then(|ui| ui.screen_reader),
+            Some(
+                crate::tui::app::ScreenReaderMode::Plain
+                    .as_str()
+                    .to_string()
+            ),
+            "the next launch reads [ui] screen_reader"
+        );
+    }
+
     fn wait_for_verb(app: &mut App) -> VerbDone {
         for _ in 0..500 {
             if let Some(done) = app.try_recv_verb() {
