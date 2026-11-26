@@ -7,6 +7,9 @@
 mod activity;
 pub(crate) mod command_rows;
 
+// The Work surface docks in the composer band; ui.rs needs its height budget.
+pub(crate) use activity::{DOCKED_HEIGHT, MIN_DOCKED_HEIGHT};
+
 use crossterm::event::{KeyEvent, MouseEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -256,6 +259,28 @@ impl OverlayStack {
         for overlay in &mut self.overlays {
             if overlay.is_visible() {
                 overlay.render(frame, area, app);
+            }
+        }
+    }
+
+    /// Render all overlays, but hand the TOP one a different rectangle.
+    ///
+    /// The Work surface docks into the composer band instead of floating over
+    /// the whole frame; the rest of the stack still owns the full screen. Only
+    /// the top overlay is docked — a modal stacked above Work must still cover
+    /// everything, so it keeps `area`.
+    pub fn render_with_top_area(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        top_area: Rect,
+        app: &App,
+    ) {
+        let count = self.overlays.len();
+        for (index, overlay) in self.overlays.iter_mut().enumerate() {
+            if overlay.is_visible() {
+                let target = if index + 1 == count { top_area } else { area };
+                overlay.render(frame, target, app);
             }
         }
     }

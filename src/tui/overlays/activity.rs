@@ -25,6 +25,13 @@ use crate::tui::theme::{Tokens, tokens};
 
 const FILTERS: [WorkFilter; 3] = [WorkFilter::All, WorkFilter::Runs, WorkFilter::Commands];
 
+/// Rows the Work panel takes when docked in the composer's place. The transcript
+/// above keeps the rest of the frame; Up restores the composer.
+pub const DOCKED_HEIGHT: u16 = 14;
+/// Never dock into fewer rows: the filter row, list, detail and footer all need
+/// room or the panel becomes unreadable.
+pub const MIN_DOCKED_HEIGHT: u16 = 9;
+
 /// A selected row is ink, not a fill: accent foreground plus bold, so no orange
 /// band covers the text. The literal `›` pointer stays its own cue; under
 /// NO_COLOR reverse video carries the meaning without asking for colour.
@@ -367,7 +374,11 @@ impl Overlay for ActivityOverlay {
                 self.move_selection(app, 1);
                 OverlayAction::None
             }
-            KeyCode::Up | KeyCode::Char('k') => {
+            // Up is the symmetric exit: Down on an empty composer opened Work,
+            // so Up closes it and brings the composer back. `k` still walks the
+            // list for anyone who expects vim keys.
+            KeyCode::Up => OverlayAction::Close,
+            KeyCode::Char('k') => {
                 self.move_selection(app, -1);
                 OverlayAction::None
             }
@@ -419,9 +430,19 @@ impl Overlay for ActivityOverlay {
 
     fn render(&mut self, frame: &mut Frame, area: Rect, app: &App) {
         let t = tokens();
-        let width = area.width.saturating_sub(2).min(96);
-        let height = area.height.saturating_sub(2).min(22);
-        if width < 40 || height < 10 {
+        // The Work surface is docked in the composer's band, not floated over
+        // the frame: it fills the rectangle it is given. Callers pass the whole
+        // frame only for the legacy floating case, where we still centre a card.
+        let rect = if area.height > DOCKED_HEIGHT + 4 {
+            let width = area.width.saturating_sub(2).min(96);
+            let height = area.height.saturating_sub(2).min(22);
+            let x = area.x + (area.width - width) / 2;
+            let y = area.y + (area.height - height) / 2;
+            Rect::new(x, y, width, height)
+        } else {
+            area
+        };
+        if rect.width < 40 || rect.height < MIN_DOCKED_HEIGHT {
             frame.render_widget(
                 Paragraph::new("Resize the terminal to open Work")
                     .style(Style::default().fg(t.muted))
@@ -430,16 +451,13 @@ impl Overlay for ActivityOverlay {
             );
             return;
         }
-        let x = area.x + (area.width - width) / 2;
-        let y = area.y + (area.height - height) / 2;
-        let rect = Rect::new(x, y, width, height);
         frame.render_widget(Clear, rect);
         frame.render_widget(Block::default().style(Style::default().bg(t.surface)), rect);
         let inner = Rect::new(
             rect.x + 3,
-            rect.y + 1,
+            rect.y,
             rect.width.saturating_sub(6),
-            rect.height - 2,
+            rect.height,
         );
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -740,6 +758,32 @@ mod tests {
         assert_eq!(state_color("orphaned", t), t.error);
         assert_eq!(state_color("done", t), t.success);
         assert_eq!(state_color("running", t), t.text);
+    }
+
+    #[test]
+    fn up_restores_the_composer_while_k_still_walks_the_list() {
+        let mut overlay = ActivityOverlay::new();
+        // Down on an empty composer opened Work; Up must hand control back.
+        overlay.show();
+        let up = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Up,
+            crossterm::event::KeyModifiers::NONE,
+        );
+        assert_eq!(
+            overlay.handle_key(up, &mut App::new("s", false)),
+            OverlayAction::Close,
+            "Up closes Work so the chatbox comes back"
+        );
+        // Vim navigation stays available for people who expect k to move.
+        let k = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('k'),
+            crossterm::event::KeyModifiers::NONE,
+        );
+        assert_eq!(
+            overlay.handle_key(k, &mut App::new("s", false)),
+            OverlayAction::None,
+            "k must stay a list move, not an exit"
+        );
     }
 
     #[test]

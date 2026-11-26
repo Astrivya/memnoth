@@ -149,15 +149,31 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // saying the same thing twice. The brief's masthead is the header then:
     // while it is up, the one-line transcript header is not drawn at all.
     let splash = app.home_showing();
+    // The Work surface takes the composer's place: while it is up the chatbox is
+    // hidden and its band grows to hold the panel. Up closes it and the composer
+    // returns (symmetric with Down on an empty composer, which opened it).
+    let work_docked = app
+        .overlay_stack
+        .top_is(crate::tui::overlays::OverlayKind::Activity);
     // The composer grows with what is typed into it, up to a cap. A long
     // question used to wrap into one clipped row — the text past the right edge
     // was simply not drawn — and a pasted page must not take the whole frame.
     let composer = composer_rows(&app.input, area.width);
+    let band = if work_docked {
+        // The panel needs room for filters, the list, a detail block and a
+        // footer. Cap it so the transcript above always keeps a few rows.
+        (area.height.saturating_sub(3)).clamp(
+            crate::tui::overlays::MIN_DOCKED_HEIGHT,
+            crate::tui::overlays::DOCKED_HEIGHT,
+        )
+    } else {
+        // Top rule, breathing row, draft, bottom rule, then one hint row.
+        composer + u16::from(!app.attachments.is_empty()) + 3
+    };
     let rows = Layout::vertical([
         Constraint::Length(if splash { 0 } else { 1 }),
         Constraint::Min(3),
-        // Top rule, breathing row, draft, bottom rule, then one hint row.
-        Constraint::Length(composer + u16::from(!app.attachments.is_empty()) + 3),
+        Constraint::Length(band),
     ])
     .split(area);
 
@@ -166,21 +182,24 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
     draw_body(frame, rows[1], app);
 
-    // A pending sign-in keeps its code and link directly above the prompt, on
-    // the same rows a hint list would use: the transcript's copy can be cleared
-    // or scrolled past, and the one thing the wait needs must not be either.
-    draw_signin(frame, area, rows[2], app);
+    if !work_docked {
+        // A pending sign-in keeps its code and link directly above the prompt,
+        // on the same rows a hint list would use: the transcript's copy can be
+        // cleared or scrolled past, and the one thing the wait needs must not be.
+        draw_signin(frame, area, rows[2], app);
 
-    // The list sits directly above the prompt it belongs to and is drawn before
-    // the prompt, so the prompt can carry the position in it. It covers
-    // transcript rows, never the line being typed.
-    let position = draw_completions(frame, area, rows[2], app);
-    // An open overlay owns the frame, and that includes the caret. The prompt
-    // line still exists underneath, so its cursor used to blink on top of the
-    // overlay's footer — a stray block sitting on the status text, looking like
-    // a broken pointer. An overlay that wants a caret sets its own position.
-    let caret = !app.overlay_stack.has_overlay();
-    draw_footer(frame, rows[2], app, position, caret);
+        // The list sits directly above the prompt it belongs to and is drawn
+        // before the prompt, so the prompt can carry the position in it. It
+        // covers transcript rows, never the line being typed.
+        let position = draw_completions(frame, area, rows[2], app);
+        // An open overlay owns the frame, and that includes the caret. The
+        // prompt line still exists underneath, so its cursor used to blink on
+        // top of the overlay's footer — a stray block sitting on the status
+        // text, looking like a broken pointer. An overlay that wants a caret
+        // sets its own position.
+        let caret = !app.overlay_stack.has_overlay();
+        draw_footer(frame, rows[2], app, position, caret);
+    }
 
     // Progress is a transient, dismissible layer over the finished frame —
     // never text written into the transcript. It is drawn last so no other
@@ -201,7 +220,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // overlay renders against the whole app: holding `&mut app.overlay_stack`
     // while the overlay reads `app` is two borrows of one value.
     let mut overlays = std::mem::take(&mut app.overlay_stack);
-    overlays.render(frame, area, app);
+    if work_docked {
+        overlays.render_with_top_area(frame, area, rows[2], app);
+    } else {
+        overlays.render(frame, area, app);
+    }
     app.overlay_stack = overlays;
 }
 
@@ -1864,6 +1887,35 @@ mod tests {
             out.push('\n');
         }
         out
+    }
+
+    #[test]
+    fn work_docks_where_the_composer_was_and_hides_the_prompt() {
+        let mut app = App::new("s", false);
+        app.input = "a draft that must be hidden while Work is up".to_string();
+        app.overlay_stack.push(crate::tui::overlays::create_overlay(
+            crate::tui::overlays::OverlayKind::Activity,
+        ));
+
+        let frame = screen(&mut app, 90, 28);
+        assert!(frame.contains("All"), "Work filters must be on the frame");
+        assert!(frame.contains("Runs") && frame.contains("Commands"));
+        assert!(
+            frame.contains("delegate a run"),
+            "Work rows must be visible"
+        );
+        assert!(
+            !frame.contains("a draft that must be hidden while Work is up"),
+            "the composer is hidden while Work occupies its band"
+        );
+
+        // Up pops the overlay; the next frame brings the draft back.
+        app.overlay_stack.pop();
+        let back = screen(&mut app, 90, 28);
+        assert!(
+            back.contains("a draft that must be hidden while Work is up"),
+            "Up restores the composer and its draft"
+        );
     }
 
     #[test]
