@@ -41,7 +41,7 @@ if ($env:MEMNOTH_INSTALL_BASE) {
     $installerUrl = 'https://memnoth.astrivya.ai/install.ps1'
 }
 
-Write-Host 'memnoth setup: note: this downloads and runs a script from memnoth.astrivya.ai over TLS; there is no script signature.'
+Write-Host 'memnoth setup: note: this downloads and runs a script from the installer origin (memnoth.astrivya.ai by default); there is no script signature.'
 Write-Host 'memnoth setup: note: the release archive is verified by SHA-256 before install.'
 Write-Host 'memnoth setup: note: published 0.1.1 is unsigned, so `mn update` refuses self-update.'
 Write-Host "memnoth setup: downloading installer from $installerUrl"

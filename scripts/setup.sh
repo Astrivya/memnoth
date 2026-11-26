@@ -47,7 +47,7 @@ else
 fi
 
 printf 'memnoth setup: downloading installer from %s\n' "$URL"
-printf 'memnoth setup: note: this downloads and runs a script from memnoth.astrivya.ai over TLS; there is no script signature.\n'
+printf 'memnoth setup: note: this downloads and runs a script from the installer origin (memnoth.astrivya.ai by default); there is no script signature.\n'
 printf 'memnoth setup: note: the release archive is verified by SHA-256 before install.\n'
 printf 'memnoth setup: note: published 0.1.1 is unsigned, so `mn update` refuses self-update.\n'
 
